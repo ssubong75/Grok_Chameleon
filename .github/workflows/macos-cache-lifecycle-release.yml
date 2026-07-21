@@ -1,4 +1,4 @@
-name: macOS cache lifecycle release
+name: macOS i2i result recovery release
 
 on:
   push:
@@ -15,9 +15,9 @@ jobs:
     env:
       RELEASE_TAG: v20260720-042100-mac
       INPUT_ZIP: Mac_Grok_Chameleon_a.zip
-      BACKUP_ZIP: Mac_Grok_Chameleon_a.previous-before-cache-lifecycle.zip
+      BACKUP_ZIP: Mac_Grok_Chameleon_a.previous-before-i2i-result-recovery.zip
       OUTPUT_ZIP: Mac_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: 285da3a1ffb799b9dc768a1c536efc6b266acb322fe65fc2f2efe771ad38accc
+      EXPECTED_INPUT_SHA256: 3e3ace41a8734ecb33f8c3cb8f86a4b26375f4897626a8982f09ade607d79989
 
     steps:
       - name: Check out patch source
@@ -37,7 +37,7 @@ jobs:
           actual_sha256="$(shasum -a 256 "input/$INPUT_ZIP" | awk '{print $1}')"
           test "$actual_sha256" = "$EXPECTED_INPUT_SHA256"
 
-      - name: Extract natively and patch cache lifecycle
+      - name: Extract natively and patch i2i result recovery
         shell: bash
         run: |
           set -euo pipefail
@@ -48,12 +48,10 @@ jobs:
           main_app="$root/Grok Chameleon.app"
           migration_app="$root/Migration.app"
           app_root="$main_app/Contents/Resources/app"
-          main_js="$app_root/electron/main.js"
           server_py="$app_root/runtime/server.py"
 
           test -d "$main_app"
           test -d "$migration_app"
-          test -f "$main_js"
           test -f "$server_py"
           test -x "$main_app/Contents/MacOS/Grok Chameleon"
           test -x "$migration_app/Contents/MacOS/Migration"
@@ -65,15 +63,11 @@ jobs:
             exit 1
           fi
 
-          before_main="$(shasum -a 256 "$main_js" | awk '{print $1}')"
           before_server="$(shasum -a 256 "$server_py" | awk '{print $1}')"
-          python3 tools/patch_macos_cache_lifecycle.py "$main_js" "$server_py"
-          after_main="$(shasum -a 256 "$main_js" | awk '{print $1}')"
+          python3 tools/patch_imagine_i2i_result_recovery.py "$server_py"
           after_server="$(shasum -a 256 "$server_py" | awk '{print $1}')"
-          test "$before_main" != "$after_main"
           test "$before_server" != "$after_server"
 
-          node --check "$main_js"
           PYTHONDONTWRITEBYTECODE=1 python3 - "$server_py" <<'PY'
           import sys
           from pathlib import Path
@@ -95,10 +89,13 @@ jobs:
             printf '%s\n' "$auth_hits" >&2
             exit 1
           fi
-          if grep -E '(/Users/runner|github_pat_|ghp_|gho_)' "$main_js" "$server_py"; then
+          if grep -E '(/Users/runner|github_pat_|ghp_|gho_)' "$server_py"; then
             echo 'Runner path or GitHub token-like literal found in patched source.' >&2
             exit 1
           fi
+          grep -F 'if not item and expected_type == "image" and (post_candidates or action in {"i2i", "aspect"}):' "$server_py"
+          grep -F 'candidate_recheck_seconds = 15 if action in {"i2i", "aspect"} else max_wait' "$server_py"
+          grep -F 'imagine_debug_event("native_bridge_no_media_failed", {' "$server_py"
 
       - name: Test bundled server and cache path handshake
         shell: bash
@@ -110,10 +107,10 @@ jobs:
           bundled_python="$main_app/Contents/Resources/Python/bin/python3"
           test -x "$bundled_python"
 
-          test_home="$PWD/test-home"
           test_library="$PWD/test-library"
-          app_cache="$test_home/Library/Application Support/Grok Chameleon/Cache/card-previews"
-          settings="$test_home/Library/Application Support/Grok Chameleon/settings.json"
+          runner_app_support="$HOME/Library/Application Support/Grok Chameleon"
+          app_cache="$runner_app_support/Cache/card-previews"
+          settings="$runner_app_support/settings.json"
           mkdir -p "$test_library/cache/card-previews" "$(dirname "$settings")"
           printf 'legacy-cache-test\n' > "$test_library/cache/card-previews/old.jpg"
           python3 - "$settings" "$test_library" <<'PY'
@@ -127,7 +124,6 @@ jobs:
           PY
 
           server_log="$PWD/server-test.log"
-          HOME="$test_home" \
           GROK_CHAMELEON_PORT=18797 \
           GROK_CHAMELEON_NO_BROWSER=1 \
           GROK_CHAMELEON_CARD_PREVIEW_CACHE_DIR="$app_cache" \
@@ -260,7 +256,7 @@ jobs:
       - name: Retain verified Mac artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mac-grok-chameleon-cache-lifecycle-verified
+          name: mac-grok-chameleon-i2i-result-recovery-verified
           path: output/Mac_Grok_Chameleon_a.zip
           if-no-files-found: error
           retention-days: 3
