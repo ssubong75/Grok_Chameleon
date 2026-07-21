@@ -1,4 +1,4 @@
-name: macOS deleted remote preview cleanup release
+name: macOS video hook removal and progress sizing release
 
 on:
   push:
@@ -15,9 +15,9 @@ jobs:
     env:
       RELEASE_TAG: v20260720-042100-mac
       INPUT_ZIP: Mac_Grok_Chameleon_a.zip
-      BACKUP_ZIP: Mac_Grok_Chameleon_a.previous-before-deleted-preview-cleanup.zip
+      BACKUP_ZIP: Mac_Grok_Chameleon_a.previous-before-video-hook-progress-update.zip
       OUTPUT_ZIP: Mac_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: 287e516159a7e7b91d806907f3c6bcf20f231fea60dfeaa445fac2736016a66b
+      EXPECTED_INPUT_SHA256: d436b592ea6623d7ecee861c495109b75ab9a58b83399b94ea5088891b1c22bc
 
     steps:
       - name: Check out patch source
@@ -37,7 +37,7 @@ jobs:
           actual_sha256="$(shasum -a 256 "input/$INPUT_ZIP" | awk '{print $1}')"
           test "$actual_sha256" = "$EXPECTED_INPUT_SHA256"
 
-      - name: Extract natively and patch deleted remote previews
+      - name: Extract natively and apply video hook and progress updates
         shell: bash
         run: |
           set -euo pipefail
@@ -49,14 +49,16 @@ jobs:
           migration_app="$root/Migration.app"
           app_root="$main_app/Contents/Resources/app"
           server_py="$app_root/runtime/server.py"
-          detail_media_js="$app_root/web/scripts/detail_media.js"
-          card_render_js="$app_root/web/scripts/card_render.js"
+          preload_bridge_js="$app_root/electron/preload-bridge.js"
+          detail_css="$app_root/web/styles/detail.css"
+          build_main_js="$app_root/web/scripts/build_main.js"
 
           test -d "$main_app"
           test -d "$migration_app"
           test -f "$server_py"
-          test -f "$detail_media_js"
-          test -f "$card_render_js"
+          test -f "$preload_bridge_js"
+          test -f "$detail_css"
+          test -f "$build_main_js"
           test -x "$main_app/Contents/MacOS/Grok Chameleon"
           test -x "$migration_app/Contents/MacOS/Migration"
           test -L "$main_app/Contents/Frameworks/Electron Framework.framework/Versions/Current"
@@ -67,16 +69,20 @@ jobs:
             exit 1
           fi
 
-          before_detail="$(shasum -a 256 "$detail_media_js" | awk '{print $1}')"
-          before_card="$(shasum -a 256 "$card_render_js" | awk '{print $1}')"
-          python3 tools/patch_deleted_remote_card_preview.py "$detail_media_js" "$card_render_js"
-          after_detail="$(shasum -a 256 "$detail_media_js" | awk '{print $1}')"
-          after_card="$(shasum -a 256 "$card_render_js" | awk '{print $1}')"
-          test "$before_detail" != "$after_detail"
-          test "$before_card" != "$after_card"
+          before_preload="$(shasum -a 256 "$preload_bridge_js" | awk '{print $1}')"
+          before_detail_css="$(shasum -a 256 "$detail_css" | awk '{print $1}')"
+          before_build_main="$(shasum -a 256 "$build_main_js" | awk '{print $1}')"
+          python3 tools/remove_final_video_request_hook.py "$preload_bridge_js"
+          python3 tools/patch_detail_progress_width.py "$detail_css" "$build_main_js"
+          after_preload="$(shasum -a 256 "$preload_bridge_js" | awk '{print $1}')"
+          after_detail_css="$(shasum -a 256 "$detail_css" | awk '{print $1}')"
+          after_build_main="$(shasum -a 256 "$build_main_js" | awk '{print $1}')"
+          test "$before_preload" != "$after_preload"
+          test "$before_detail_css" != "$after_detail_css"
+          test "$before_build_main" != "$after_build_main"
 
-          node --check "$detail_media_js"
-          node --check "$card_render_js"
+          node --check "$preload_bridge_js"
+          node --check "$build_main_js"
           PYTHONDONTWRITEBYTECODE=1 python3 - "$server_py" <<'PY'
           import sys
           from pathlib import Path
@@ -98,13 +104,18 @@ jobs:
             printf '%s\n' "$auth_hits" >&2
             exit 1
           fi
-          if grep -E '(/Users/runner|github_pat_|ghp_|gho_)' "$server_py" "$detail_media_js" "$card_render_js"; then
+          if grep -E '(/Users/runner|github_pat_|ghp_|gho_)' "$server_py" "$preload_bridge_js" "$detail_css" "$build_main_js"; then
             echo 'Runner path or GitHub token-like literal found in patched source.' >&2
             exit 1
           fi
-          grep -F 'function handleUnavailableImagineCardPreview(host, url, postPath)' "$detail_media_js"
-          grep -F 'if (![404, 410].includes(Number(response.status))) return false;' "$detail_media_js"
-          grep -F 'card_remote_post_path: String(post.folder_path || "")' "$card_render_js"
+          if grep -E 'finalVideoRequestPatch|installPersistentFinalVideoRequestPatch|armFinalVideoRequestPatch|video_request_final_patch|official_video_duration_arg_applied|Official Imagine final video request was not intercepted' "$preload_bridge_js"; then
+            echo 'Final video request hook marker remains.' >&2
+            exit 1
+          fi
+          grep -F 'const resultEvents = await waitForStoreEvents(' "$preload_bridge_js"
+          grep -F 'startStoreMethodCall("generateVideoForImage"' "$preload_bridge_js"
+          grep -F 'width: 3ch;' "$detail_css"
+          test "$(grep -F 'class="detail_generation_percent"' "$build_main_js" | wc -l | tr -d ' ')" = 2
 
       - name: Test bundled server and cache path handshake
         shell: bash
@@ -220,7 +231,10 @@ jobs:
           verified_migration_app="$verified_root/Migration.app"
           verified_main_exec="$verified_main_app/Contents/MacOS/Grok Chameleon"
           verified_main_js="$verified_main_app/Contents/Resources/app/electron/main.js"
+          verified_preload_bridge_js="$verified_main_app/Contents/Resources/app/electron/preload-bridge.js"
           verified_server_py="$verified_main_app/Contents/Resources/app/runtime/server.py"
+          verified_detail_css="$verified_main_app/Contents/Resources/app/web/styles/detail.css"
+          verified_build_main_js="$verified_main_app/Contents/Resources/app/web/scripts/build_main.js"
           verified_detail_media_js="$verified_main_app/Contents/Resources/app/web/scripts/detail_media.js"
           verified_card_render_js="$verified_main_app/Contents/Resources/app/web/scripts/card_render.js"
           test -x "$verified_main_exec"
@@ -235,8 +249,16 @@ jobs:
           fi
 
           node --check "$verified_main_js"
+          node --check "$verified_preload_bridge_js"
+          node --check "$verified_build_main_js"
           node --check "$verified_detail_media_js"
           node --check "$verified_card_render_js"
+          if grep -E 'finalVideoRequestPatch|installPersistentFinalVideoRequestPatch|armFinalVideoRequestPatch|video_request_final_patch|official_video_duration_arg_applied|Official Imagine final video request was not intercepted' "$verified_preload_bridge_js"; then
+            echo 'Final video request hook marker found after final extraction.' >&2
+            exit 1
+          fi
+          grep -F 'width: 3ch;' "$verified_detail_css"
+          test "$(grep -F 'class="detail_generation_percent"' "$verified_build_main_js" | wc -l | tr -d ' ')" = 2
           PYTHONDONTWRITEBYTECODE=1 python3 - "$verified_server_py" <<'PY'
           import sys
           from pathlib import Path
@@ -269,7 +291,7 @@ jobs:
       - name: Retain verified Mac artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mac-grok-chameleon-deleted-preview-cleanup-verified
+          name: mac-grok-chameleon-video-hook-progress-verified
           path: output/Mac_Grok_Chameleon_a.zip
           if-no-files-found: error
           retention-days: 3
