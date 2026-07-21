@@ -1,4 +1,4 @@
-name: macOS video hook removal and progress sizing release
+name: macOS Imagine generation settings release
 
 on:
   push:
@@ -15,9 +15,9 @@ jobs:
     env:
       RELEASE_TAG: v20260720-042100-mac
       INPUT_ZIP: Mac_Grok_Chameleon_a.zip
-      BACKUP_ZIP: Mac_Grok_Chameleon_a.previous-before-video-hook-progress-update.zip
+      BACKUP_ZIP: Mac_Grok_Chameleon_a.previous-before-generation-settings.zip
       OUTPUT_ZIP: Mac_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: d436b592ea6623d7ecee861c495109b75ab9a58b83399b94ea5088891b1c22bc
+      EXPECTED_INPUT_SHA256: 5bfe2c86e80783a4304a94ebbe721211b494de05e70ba6a49fca93b634c1943e
 
     steps:
       - name: Check out patch source
@@ -37,7 +37,7 @@ jobs:
           actual_sha256="$(shasum -a 256 "input/$INPUT_ZIP" | awk '{print $1}')"
           test "$actual_sha256" = "$EXPECTED_INPUT_SHA256"
 
-      - name: Extract natively and apply video hook and progress updates
+      - name: Extract natively and apply Imagine generation settings updates
         shell: bash
         run: |
           set -euo pipefail
@@ -70,16 +70,12 @@ jobs:
           fi
 
           before_preload="$(shasum -a 256 "$preload_bridge_js" | awk '{print $1}')"
-          before_detail_css="$(shasum -a 256 "$detail_css" | awk '{print $1}')"
-          before_build_main="$(shasum -a 256 "$build_main_js" | awk '{print $1}')"
-          python3 tools/remove_final_video_request_hook.py "$preload_bridge_js"
-          python3 tools/patch_detail_progress_width.py "$detail_css" "$build_main_js"
+          python3 tools/patch_imagine_generation_source_readiness.py "$preload_bridge_js"
+          python3 tools/patch_imagine_official_video_settings.py "$preload_bridge_js"
           after_preload="$(shasum -a 256 "$preload_bridge_js" | awk '{print $1}')"
-          after_detail_css="$(shasum -a 256 "$detail_css" | awk '{print $1}')"
-          after_build_main="$(shasum -a 256 "$build_main_js" | awk '{print $1}')"
-          test "$before_preload" != "$after_preload"
-          test "$before_detail_css" != "$after_detail_css"
-          test "$before_build_main" != "$after_build_main"
+          if [[ "$before_preload" = "$after_preload" ]]; then
+            echo 'Imagine generation settings were already present in the input asset.'
+          fi
 
           node --check "$preload_bridge_js"
           node --check "$build_main_js"
@@ -114,6 +110,12 @@ jobs:
           fi
           grep -F 'const resultEvents = await waitForStoreEvents(' "$preload_bridge_js"
           grep -F 'startStoreMethodCall("generateVideoForImage"' "$preload_bridge_js"
+          grep -F 'store_generation_source_hydration_start' "$preload_bridge_js"
+          grep -F 'store_generation_source_hydration_ready' "$preload_bridge_js"
+          grep -F 'store_generation_official_video_settings_applied' "$preload_bridge_js"
+          grep -F 'state.setResolution(requestedResolution)' "$preload_bridge_js"
+          grep -F 'state.setAspectRatio(requestedAspectRatio)' "$preload_bridge_js"
+          grep -F 'retryRateLimitedStoreCall("generateVideoForImage"' "$preload_bridge_js"
           grep -F 'width: 3ch;' "$detail_css"
           test "$(grep -F 'class="detail_generation_percent"' "$build_main_js" | wc -l | tr -d ' ')" = 2
 
@@ -257,6 +259,12 @@ jobs:
             echo 'Final video request hook marker found after final extraction.' >&2
             exit 1
           fi
+          grep -F 'store_generation_source_hydration_start' "$verified_preload_bridge_js"
+          grep -F 'store_generation_source_hydration_ready' "$verified_preload_bridge_js"
+          grep -F 'store_generation_official_video_settings_applied' "$verified_preload_bridge_js"
+          grep -F 'state.setResolution(requestedResolution)' "$verified_preload_bridge_js"
+          grep -F 'state.setAspectRatio(requestedAspectRatio)' "$verified_preload_bridge_js"
+          grep -F 'retryRateLimitedStoreCall("generateVideoForImage"' "$verified_preload_bridge_js"
           grep -F 'width: 3ch;' "$verified_detail_css"
           test "$(grep -F 'class="detail_generation_percent"' "$verified_build_main_js" | wc -l | tr -d ' ')" = 2
           PYTHONDONTWRITEBYTECODE=1 python3 - "$verified_server_py" <<'PY'
@@ -291,7 +299,7 @@ jobs:
       - name: Retain verified Mac artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mac-grok-chameleon-video-hook-progress-verified
+          name: mac-grok-chameleon-generation-settings-verified
           path: output/Mac_Grok_Chameleon_a.zip
           if-no-files-found: error
           retention-days: 3
