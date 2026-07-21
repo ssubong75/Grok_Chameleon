@@ -1,4 +1,4 @@
-name: macOS i2i result recovery release
+name: macOS deleted remote preview cleanup release
 
 on:
   push:
@@ -15,9 +15,9 @@ jobs:
     env:
       RELEASE_TAG: v20260720-042100-mac
       INPUT_ZIP: Mac_Grok_Chameleon_a.zip
-      BACKUP_ZIP: Mac_Grok_Chameleon_a.previous-before-i2i-result-recovery.zip
+      BACKUP_ZIP: Mac_Grok_Chameleon_a.previous-before-deleted-preview-cleanup.zip
       OUTPUT_ZIP: Mac_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: 3e3ace41a8734ecb33f8c3cb8f86a4b26375f4897626a8982f09ade607d79989
+      EXPECTED_INPUT_SHA256: 287e516159a7e7b91d806907f3c6bcf20f231fea60dfeaa445fac2736016a66b
 
     steps:
       - name: Check out patch source
@@ -37,7 +37,7 @@ jobs:
           actual_sha256="$(shasum -a 256 "input/$INPUT_ZIP" | awk '{print $1}')"
           test "$actual_sha256" = "$EXPECTED_INPUT_SHA256"
 
-      - name: Extract natively and patch i2i result recovery
+      - name: Extract natively and patch deleted remote previews
         shell: bash
         run: |
           set -euo pipefail
@@ -49,10 +49,14 @@ jobs:
           migration_app="$root/Migration.app"
           app_root="$main_app/Contents/Resources/app"
           server_py="$app_root/runtime/server.py"
+          detail_media_js="$app_root/web/scripts/detail_media.js"
+          card_render_js="$app_root/web/scripts/card_render.js"
 
           test -d "$main_app"
           test -d "$migration_app"
           test -f "$server_py"
+          test -f "$detail_media_js"
+          test -f "$card_render_js"
           test -x "$main_app/Contents/MacOS/Grok Chameleon"
           test -x "$migration_app/Contents/MacOS/Migration"
           test -L "$main_app/Contents/Frameworks/Electron Framework.framework/Versions/Current"
@@ -63,11 +67,16 @@ jobs:
             exit 1
           fi
 
-          before_server="$(shasum -a 256 "$server_py" | awk '{print $1}')"
-          python3 tools/patch_imagine_i2i_result_recovery.py "$server_py"
-          after_server="$(shasum -a 256 "$server_py" | awk '{print $1}')"
-          test "$before_server" != "$after_server"
+          before_detail="$(shasum -a 256 "$detail_media_js" | awk '{print $1}')"
+          before_card="$(shasum -a 256 "$card_render_js" | awk '{print $1}')"
+          python3 tools/patch_deleted_remote_card_preview.py "$detail_media_js" "$card_render_js"
+          after_detail="$(shasum -a 256 "$detail_media_js" | awk '{print $1}')"
+          after_card="$(shasum -a 256 "$card_render_js" | awk '{print $1}')"
+          test "$before_detail" != "$after_detail"
+          test "$before_card" != "$after_card"
 
+          node --check "$detail_media_js"
+          node --check "$card_render_js"
           PYTHONDONTWRITEBYTECODE=1 python3 - "$server_py" <<'PY'
           import sys
           from pathlib import Path
@@ -89,13 +98,13 @@ jobs:
             printf '%s\n' "$auth_hits" >&2
             exit 1
           fi
-          if grep -E '(/Users/runner|github_pat_|ghp_|gho_)' "$server_py"; then
+          if grep -E '(/Users/runner|github_pat_|ghp_|gho_)' "$server_py" "$detail_media_js" "$card_render_js"; then
             echo 'Runner path or GitHub token-like literal found in patched source.' >&2
             exit 1
           fi
-          grep -F 'if not item and expected_type == "image" and (post_candidates or action in {"i2i", "aspect"}):' "$server_py"
-          grep -F 'candidate_recheck_seconds = 15 if action in {"i2i", "aspect"} else max_wait' "$server_py"
-          grep -F 'imagine_debug_event("native_bridge_no_media_failed", {' "$server_py"
+          grep -F 'function handleUnavailableImagineCardPreview(host, url, postPath)' "$detail_media_js"
+          grep -F 'if (![404, 410].includes(Number(response.status))) return false;' "$detail_media_js"
+          grep -F 'card_remote_post_path: String(post.folder_path || "")' "$card_render_js"
 
       - name: Test bundled server and cache path handshake
         shell: bash
@@ -212,6 +221,8 @@ jobs:
           verified_main_exec="$verified_main_app/Contents/MacOS/Grok Chameleon"
           verified_main_js="$verified_main_app/Contents/Resources/app/electron/main.js"
           verified_server_py="$verified_main_app/Contents/Resources/app/runtime/server.py"
+          verified_detail_media_js="$verified_main_app/Contents/Resources/app/web/scripts/detail_media.js"
+          verified_card_render_js="$verified_main_app/Contents/Resources/app/web/scripts/card_render.js"
           test -x "$verified_main_exec"
           test -x "$verified_migration_app/Contents/MacOS/Migration"
           test -L "$verified_main_app/Contents/Frameworks/Electron Framework.framework/Versions/Current"
@@ -224,6 +235,8 @@ jobs:
           fi
 
           node --check "$verified_main_js"
+          node --check "$verified_detail_media_js"
+          node --check "$verified_card_render_js"
           PYTHONDONTWRITEBYTECODE=1 python3 - "$verified_server_py" <<'PY'
           import sys
           from pathlib import Path
@@ -256,7 +269,7 @@ jobs:
       - name: Retain verified Mac artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mac-grok-chameleon-i2i-result-recovery-verified
+          name: mac-grok-chameleon-deleted-preview-cleanup-verified
           path: output/Mac_Grok_Chameleon_a.zip
           if-no-files-found: error
           retention-days: 3
