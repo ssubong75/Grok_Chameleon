@@ -15,9 +15,9 @@ jobs:
     env:
       RELEASE_TAG: v20260720-042100-mac
       INPUT_ZIP: Mac_Grok_Chameleon_a.zip
-      BACKUP_ZIP: Mac_Grok_Chameleon_a.previous-before-cumulative-imagine-relations.zip
+      BACKUP_ZIP: Mac_Grok_Chameleon_a.previous-before-electron-debug-off-final.zip
       OUTPUT_ZIP: Mac_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: ad2d8ab49a7f05e0b67281f02e6b9fd6596b2ce9c96d7551097c5b3e32693b7c
+      EXPECTED_INPUT_SHA256: ea2e9c9406a2f03c5c472fe2345ff4b1423efac1b4e767aba7f34cd809934e83
 
     steps:
       - name: Check out patch source
@@ -78,6 +78,7 @@ jobs:
           fi
 
           before_tree="$(find "$app_root/electron" "$app_root/runtime" "$app_root/web" -type f -exec shasum -a 256 {} + | shasum -a 256 | awk '{print $1}')"
+          python3 tools/patch_electron_debug_port_off.py "$main_js"
           python3 tools/patch_card_preview_cache_lifecycle.py "$main_js" "$server_py"
           python3 tools/patch_imagine_generation_source_readiness.py "$preload_bridge_js"
           python3 tools/patch_imagine_official_video_settings.py "$preload_bridge_js"
@@ -140,6 +141,7 @@ jobs:
             exit 1
           fi
           grep -F 'clearCurrentCardPreviewCache("startup")' "$main_js"
+          grep -F 'const CDP_PORT = String(process.env.GROK_CHAMELEON_CDP_PORT || "0");' "$main_js"
           grep -F 'clearCurrentCardPreviewCache("shutdown")' "$main_js"
           grep -F 'clearCurrentCardPreviewCache("will-quit")' "$main_js"
           grep -F 'GROK_CHAMELEON_CARD_PREVIEW_CACHE_DIR' "$main_js" "$server_py"
@@ -319,6 +321,7 @@ jobs:
             exit 1
           fi
           grep -F 'clearCurrentCardPreviewCache("startup")' "$verified_main_js"
+          grep -F 'const CDP_PORT = String(process.env.GROK_CHAMELEON_CDP_PORT || "0");' "$verified_main_js"
           grep -F 'clearCurrentCardPreviewCache("shutdown")' "$verified_main_js"
           grep -F 'clearCurrentCardPreviewCache("will-quit")' "$verified_main_js"
           grep -F 'GROK_CHAMELEON_CARD_PREVIEW_CACHE_DIR' "$verified_main_js" "$verified_server_py"
