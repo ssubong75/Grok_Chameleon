@@ -54,7 +54,7 @@ jobs:
           grep -F 'imagine_apply_generated_relations(post, root, account, library_snapshot)' "$app_root/runtime/server.py"
           grep -F 'saved_keys = imagine_saved_media_keys_cached(account, max_posts=160)' "$app_root/runtime/server.py"
           grep -F 'def is_apple_metadata_file_name(name: str) -> bool:' "$app_root/runtime/server.py"
-          test "$(grep -c 'syncImagineRemotePostsIntoLibrary();' "$app_root/web/scripts/i_source_render.js")" -eq 1
+          test "$(grep -c '^  syncImagineRemotePostsIntoLibrary();$' "$app_root/web/scripts/i_source_render.js")" -eq 1
           grep -F 'image_config["containerPostId"] = root_post_id' "$app_root/runtime/server.py"
           grep -F 'IMAGINE_DIRECT_EXTEND_CANDIDATE_GRACE_SECONDS = 60' "$app_root/runtime/server.py"
           grep -F '("i2v", "1080p", 15): 100' "$app_root/runtime/server.py"
