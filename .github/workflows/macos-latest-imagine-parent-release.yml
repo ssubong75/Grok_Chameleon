@@ -1,0 +1,120 @@
+name: macOS latest Imagine parent release
+
+on:
+  push:
+    branches: [agent/macos-cache-lifecycle-20260721]
+
+permissions:
+  contents: write
+
+jobs:
+  patch-verify-release:
+    runs-on: macos-15
+    timeout-minutes: 35
+    env:
+      RELEASE_TAG: v20260720-042100-mac
+      INPUT_ZIP: Mac_Grok_Chameleon_a.zip
+      OUTPUT_ZIP: Mac_Grok_Chameleon_a.zip
+      BACKUP_ZIP: Mac_Grok_Chameleon_a.previous-before-individual-parent-relations-20260721.zip
+      EXPECTED_INPUT_SHA256: 96bd7174e25a49f707652b7aff3d4cdba27b1fe329fd94cb10b8f23e839f39be
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download exact current Mac release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir input unpack output verify
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$INPUT_ZIP" --dir input
+          test "$(shasum -a 256 "input/$INPUT_ZIP" | awk '{print $1}')" = "$EXPECTED_INPUT_SHA256"
+
+      - name: Patch Mac source in place and verify
+        run: |
+          set -euo pipefail
+          ditto -x -k "input/$INPUT_ZIP" unpack
+          root="$PWD/unpack/Grok Chameleon"
+          main_app="$root/Grok Chameleon.app"
+          migration_app="$root/Migration.app"
+          app_root="$main_app/Contents/Resources/app"
+          test -x "$main_app/Contents/MacOS/Grok Chameleon"
+          test -x "$migration_app/Contents/MacOS/Migration"
+          test -L "$main_app/Contents/Frameworks/Electron Framework.framework/Versions/Current"
+          test -L "$main_app/Contents/Frameworks/Electron Framework.framework/Electron Framework"
+          python3 tools/patch_latest_imagine_parent_account_progress.py "$app_root"
+          node --check "$app_root/electron/main.js"
+          node --check "$app_root/electron/preload-bridge.js"
+          node --check "$app_root/web/scripts/imagine_main.js"
+          node --check "$app_root/web/scripts/prompt_account.js"
+          node --check "$app_root/web/scripts/i_composer_submit.js"
+          node --check "$app_root/web/scripts/i_detail_actions.js"
+          node --check "$app_root/web/scripts/build_main.js"
+          PYTHONDONTWRITEBYTECODE=1 python3 - "$app_root/runtime/server.py" <<'PY'
+          import sys
+          from pathlib import Path
+          p = Path(sys.argv[1])
+          compile(p.read_text(encoding="utf-8"), str(p), "exec")
+          PY
+          grep -F 'image_config["containerPostId"] = root_post_id' "$app_root/runtime/server.py"
+          grep -F 'input_asset_ids = [parent_post_id]' "$app_root/runtime/server.py"
+          grep -F 'IMAGINE_DIRECT_EXTEND_CANDIDATE_GRACE_SECONDS = 60' "$app_root/runtime/server.py"
+          grep -F 'IMAGINE_DIRECT_EXTEND_DISPLAY_MAX_PROGRESS = 99' "$app_root/runtime/server.py"
+          grep -F '("i2v", "1080p", 15): 100' "$app_root/runtime/server.py"
+          grep -F 'containerId = rootContainerId || videoConfig.rootPostId || extendPostId' "$app_root/electron/preload-bridge.js"
+          grep -F 'mediaGenInput: payload.mediaGenInput' "$app_root/electron/preload-bridge.js"
+          grep -F 'onVideoGenerationStart,' "$app_root/electron/preload-bridge.js"
+          grep -F 'const imagineBridgePrepareStates = new Map();' "$app_root/web/scripts/imagine_main.js"
+          grep -F 'phase: "preparing"' "$app_root/web/scripts/i_composer_submit.js"
+          grep -F 'const storePageCommand = ["prepare", "fetch_stream"].includes(command.type);' "$app_root/electron/main.js"
+          grep -F 'const CDP_PORT = String(process.env.GROK_CHAMELEON_CDP_PORT || "0");' "$app_root/electron/main.js"
+          if grep -E 'finalVideoRequestPatch|installPersistentFinalVideoRequestPatch|armFinalVideoRequestPatch' "$app_root/electron/preload-bridge.js"; then exit 1; fi
+          if find "$root" -type f \( -iname '*auth*.json' -o -iname '*credential*.json' -o -iname '*session*.json' -o -iname '*token*.json' -o -iname '.env*' -o -iname '*.log' -o -name 'Cookies' -o -name 'Login Data' -o -name 'Local State' -o -name 'library.json' \) -print | grep -q .; then
+            echo 'Private/user data found in Mac package.' >&2; exit 1
+          fi
+          if grep -R -E 'C:\\Users\\GAEUN|/Users/GAEUN|github_pat_|ghp_|gho_' "$app_root/electron" "$app_root/runtime" "$app_root/web"; then exit 1; fi
+
+      - name: Clean attributes, sign, package, and verify against -47
+        run: |
+          set -euo pipefail
+          root="$PWD/unpack/Grok Chameleon"
+          main_app="$root/Grok Chameleon.app"
+          migration_app="$root/Migration.app"
+          find "$root" -type d -name __pycache__ -prune -exec rm -rf {} +
+          xattr -cr "$root"
+          codesign --force --sign - --timestamp=none "$migration_app"
+          codesign --force --sign - --timestamp=none "$main_app"
+          codesign --verify --deep --strict --verbose=4 "$migration_app"
+          codesign --verify --deep --strict --verbose=4 "$main_app"
+          plutil -lint "$migration_app/Contents/Info.plist"
+          plutil -lint "$main_app/Contents/Info.plist"
+          xattr -cr "$root"
+          ditto -c -k --keepParent --norsrc --noextattr --noacl --noqtn "$root" "output/$OUTPUT_ZIP"
+          if zipinfo -1 "output/$OUTPUT_ZIP" | grep -E '(^|/)(__MACOSX|\._|\.DS_Store)(/|$)'; then exit 1; fi
+          ditto -x -k "output/$OUTPUT_ZIP" verify
+          verified="$PWD/verify/Grok Chameleon"
+          test -x "$verified/Grok Chameleon.app/Contents/MacOS/Grok Chameleon"
+          test -x "$verified/Migration.app/Contents/MacOS/Migration"
+          test -L "$verified/Grok Chameleon.app/Contents/Frameworks/Electron Framework.framework/Versions/Current"
+          test -L "$verified/Grok Chameleon.app/Contents/Frameworks/Electron Framework.framework/Electron Framework"
+          codesign --verify --deep --strict --verbose=4 "$verified/Grok Chameleon.app"
+          codesign --verify --deep --strict --verbose=4 "$verified/Migration.app"
+          if xattr -lr "$verified" 2>/dev/null | grep -q com.apple.quarantine; then exit 1; fi
+          ELECTRON_RUN_AS_NODE=1 "$verified/Grok Chameleon.app/Contents/MacOS/Grok Chameleon" -e 'console.log("ELECTRON_EXECUTABLE_OK")'
+          shasum -a 256 "output/$OUTPUT_ZIP"
+
+      - name: Back up and replace Mac release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -Fxq "$BACKUP_ZIP"; then exit 1; fi
+          cp "input/$INPUT_ZIP" "output/$BACKUP_ZIP"
+          gh release upload "$RELEASE_TAG" "output/$BACKUP_ZIP" --repo "$GITHUB_REPOSITORY"
+          gh release upload "$RELEASE_TAG" "output/$OUTPUT_ZIP" --repo "$GITHUB_REPOSITORY" --clobber
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac-grok-chameleon-latest-imagine-parent-verified
+          path: output/Mac_Grok_Chameleon_a.zip
+          retention-days: 3

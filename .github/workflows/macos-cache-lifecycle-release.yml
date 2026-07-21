@@ -3,7 +3,7 @@ name: macOS cumulative Imagine and cache release
 on:
   push:
     branches:
-      - agent/macos-cache-lifecycle-20260721
+      - disabled/macos-cache-lifecycle-20260721
 
 permissions:
   contents: write
