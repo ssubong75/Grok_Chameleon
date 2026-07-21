@@ -1,0 +1,266 @@
+name: macOS cache lifecycle release
+
+on:
+  push:
+    branches:
+      - agent/macos-cache-lifecycle-20260721
+
+permissions:
+  contents: write
+
+jobs:
+  patch-verify-release:
+    runs-on: macos-15
+    timeout-minutes: 35
+    env:
+      RELEASE_TAG: v20260720-042100-mac
+      INPUT_ZIP: Mac_Grok_Chameleon_a.zip
+      BACKUP_ZIP: Mac_Grok_Chameleon_a.previous-before-cache-lifecycle.zip
+      OUTPUT_ZIP: Mac_Grok_Chameleon_a.zip
+      EXPECTED_INPUT_SHA256: 285da3a1ffb799b9dc768a1c536efc6b266acb322fe65fc2f2efe771ad38accc
+
+    steps:
+      - name: Check out patch source
+        uses: actions/checkout@v4
+
+      - name: Download exact current Mac release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p input
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$INPUT_ZIP" \
+            --dir input
+          actual_sha256="$(shasum -a 256 "input/$INPUT_ZIP" | awk '{print $1}')"
+          test "$actual_sha256" = "$EXPECTED_INPUT_SHA256"
+
+      - name: Extract natively and patch cache lifecycle
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p unpack output verify
+          ditto -x -k "input/$INPUT_ZIP" unpack
+
+          root="$PWD/unpack/Grok Chameleon"
+          main_app="$root/Grok Chameleon.app"
+          migration_app="$root/Migration.app"
+          app_root="$main_app/Contents/Resources/app"
+          main_js="$app_root/electron/main.js"
+          server_py="$app_root/runtime/server.py"
+
+          test -d "$main_app"
+          test -d "$migration_app"
+          test -f "$main_js"
+          test -f "$server_py"
+          test -x "$main_app/Contents/MacOS/Grok Chameleon"
+          test -x "$migration_app/Contents/MacOS/Migration"
+          test -L "$main_app/Contents/Frameworks/Electron Framework.framework/Versions/Current"
+          test -L "$main_app/Contents/Frameworks/Electron Framework.framework/Electron Framework"
+
+          if find "$root" \( -name '__MACOSX' -o -name '._*' -o -name '.DS_Store' \) -print | grep -q .; then
+            echo 'AppleDouble or Finder metadata found in input.' >&2
+            exit 1
+          fi
+
+          before_main="$(shasum -a 256 "$main_js" | awk '{print $1}')"
+          before_server="$(shasum -a 256 "$server_py" | awk '{print $1}')"
+          python3 tools/patch_macos_cache_lifecycle.py "$main_js" "$server_py"
+          after_main="$(shasum -a 256 "$main_js" | awk '{print $1}')"
+          after_server="$(shasum -a 256 "$server_py" | awk '{print $1}')"
+          test "$before_main" != "$after_main"
+          test "$before_server" != "$after_server"
+
+          node --check "$main_js"
+          PYTHONDONTWRITEBYTECODE=1 python3 - "$server_py" <<'PY'
+          import sys
+          from pathlib import Path
+          source = Path(sys.argv[1])
+          compile(source.read_text(encoding="utf-8"), str(source), "exec")
+          print("PYTHON_SYNTAX_OK")
+          PY
+
+          auth_hits="$(find "$root" -type f \( \
+            -iname '*auth*.json' -o \
+            -iname '*account*.json' -o \
+            -iname '*credential*.json' -o \
+            -iname '*session*.json' -o \
+            -iname '*token*.json' -o \
+            -iname '.env*' \
+          \) -print)"
+          if [[ -n "$auth_hits" ]]; then
+            echo 'Account/auth data-like files found:' >&2
+            printf '%s\n' "$auth_hits" >&2
+            exit 1
+          fi
+          if grep -E '(/Users/runner|github_pat_|ghp_|gho_)' "$main_js" "$server_py"; then
+            echo 'Runner path or GitHub token-like literal found in patched source.' >&2
+            exit 1
+          fi
+
+      - name: Test bundled server and cache path handshake
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$PWD/unpack/Grok Chameleon"
+          main_app="$root/Grok Chameleon.app"
+          app_root="$main_app/Contents/Resources/app"
+          bundled_python="$main_app/Contents/Resources/Python/bin/python3"
+          test -x "$bundled_python"
+
+          test_home="$PWD/test-home"
+          test_library="$PWD/test-library"
+          app_cache="$test_home/Library/Application Support/Grok Chameleon/Cache/card-previews"
+          settings="$test_home/Library/Application Support/Grok Chameleon/settings.json"
+          mkdir -p "$test_library/cache/card-previews" "$(dirname "$settings")"
+          printf 'legacy-cache-test\n' > "$test_library/cache/card-previews/old.jpg"
+          python3 - "$settings" "$test_library" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+          settings = Path(sys.argv[1])
+          library = Path(sys.argv[2]).resolve()
+          (library / "library.json").write_text('{"version": 1}\n', encoding="utf-8")
+          settings.write_text(json.dumps({"library_root": str(library)}), encoding="utf-8")
+          PY
+
+          server_log="$PWD/server-test.log"
+          HOME="$test_home" \
+          GROK_CHAMELEON_PORT=18797 \
+          GROK_CHAMELEON_NO_BROWSER=1 \
+          GROK_CHAMELEON_CARD_PREVIEW_CACHE_DIR="$app_cache" \
+          PYTHONDONTWRITEBYTECODE=1 \
+            "$bundled_python" "$app_root/runtime/server.py" >"$server_log" 2>&1 &
+          server_pid=$!
+          cleanup() {
+            if kill -0 "$server_pid" 2>/dev/null; then kill "$server_pid" 2>/dev/null || true; fi
+          }
+          trap cleanup EXIT
+
+          ready=0
+          for _ in $(seq 1 60); do
+            if curl --fail --silent 'http://127.0.0.1:18797/api/health' > health.json; then
+              ready=1
+              break
+            fi
+            sleep 0.25
+          done
+          if [[ "$ready" != 1 ]]; then
+            cat "$server_log" >&2
+            exit 1
+          fi
+          curl --fail --silent 'http://127.0.0.1:18797/api/card-preview/cache-info' > cache-info.json
+          python3 - cache-info.json "$app_cache" "$test_library" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+          data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          expected_cache = str(Path(sys.argv[2]).resolve())
+          library = Path(sys.argv[3]).resolve()
+          assert data["ok"] is True
+          assert data["cache_dir"] == expected_cache
+          assert data["library_root"] == str(library)
+          assert data["legacy_cache_dir"] == str((library / "cache" / "card-previews").resolve())
+          print("CACHE_PATH_HANDSHAKE_OK")
+          PY
+          test ! -e "$app_cache"
+          test -f "$test_library/cache/card-previews/old.jpg"
+          curl --fail --silent \
+            -H 'Content-Type: application/json' \
+            -d '{"event":"integration-test"}' \
+            'http://127.0.0.1:18797/api/shutdown' > shutdown.json
+          wait "$server_pid"
+          trap - EXIT
+
+      - name: Remove metadata, sign, package, and verify against -47 regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$PWD/unpack/Grok Chameleon"
+          main_app="$root/Grok Chameleon.app"
+          migration_app="$root/Migration.app"
+
+          if find "$root" -type d -name '__pycache__' -print | grep -q .; then
+            echo 'Python bytecode cache found in package.' >&2
+            exit 1
+          fi
+
+          xattr -cr "$root"
+          if xattr -lr "$root" 2>/dev/null | grep -q 'com.apple.quarantine'; then
+            echo 'Quarantine attribute remains before signing.' >&2
+            exit 1
+          fi
+
+          codesign --force --sign - --timestamp=none "$migration_app"
+          codesign --force --sign - --timestamp=none "$main_app"
+          codesign --verify --deep --strict --verbose=4 "$migration_app"
+          codesign --verify --deep --strict --verbose=4 "$main_app"
+          plutil -lint "$migration_app/Contents/Info.plist"
+          plutil -lint "$main_app/Contents/Info.plist"
+
+          xattr -cr "$root"
+          ditto -c -k --keepParent --norsrc --noextattr --noacl --noqtn \
+            "$root" "output/$OUTPUT_ZIP"
+
+          if zipinfo -1 "output/$OUTPUT_ZIP" | grep -E '(^|/)(__MACOSX|\._|\.DS_Store)(/|$)' ; then
+            echo 'AppleDouble or Finder metadata found in output ZIP.' >&2
+            exit 1
+          fi
+
+          ditto -x -k "output/$OUTPUT_ZIP" verify
+          verified_root="$PWD/verify/Grok Chameleon"
+          verified_main_app="$verified_root/Grok Chameleon.app"
+          verified_migration_app="$verified_root/Migration.app"
+          verified_main_exec="$verified_main_app/Contents/MacOS/Grok Chameleon"
+          verified_main_js="$verified_main_app/Contents/Resources/app/electron/main.js"
+          verified_server_py="$verified_main_app/Contents/Resources/app/runtime/server.py"
+          test -x "$verified_main_exec"
+          test -x "$verified_migration_app/Contents/MacOS/Migration"
+          test -L "$verified_main_app/Contents/Frameworks/Electron Framework.framework/Versions/Current"
+          test -L "$verified_main_app/Contents/Frameworks/Electron Framework.framework/Electron Framework"
+          codesign --verify --deep --strict --verbose=4 "$verified_migration_app"
+          codesign --verify --deep --strict --verbose=4 "$verified_main_app"
+          if xattr -lr "$verified_root" 2>/dev/null | grep -q 'com.apple.quarantine'; then
+            echo 'Quarantine attribute found after final extraction.' >&2
+            exit 1
+          fi
+
+          node --check "$verified_main_js"
+          PYTHONDONTWRITEBYTECODE=1 python3 - "$verified_server_py" <<'PY'
+          import sys
+          from pathlib import Path
+          source = Path(sys.argv[1])
+          compile(source.read_text(encoding="utf-8"), str(source), "exec")
+          PY
+          ELECTRON_RUN_AS_NODE=1 "$verified_main_exec" -e 'console.log("ELECTRON_EXECUTABLE_OK")'
+          shasum -a 256 "output/$OUTPUT_ZIP"
+
+      - name: Back up and replace exact Mac release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json assets \
+            --jq '.assets[].name' | grep -Fxq "$BACKUP_ZIP"; then
+            echo "Backup asset already exists: $BACKUP_ZIP" >&2
+            exit 1
+          fi
+          cp "input/$INPUT_ZIP" "output/$BACKUP_ZIP"
+          gh release upload "$RELEASE_TAG" "output/$BACKUP_ZIP" \
+            --repo "$GITHUB_REPOSITORY"
+          gh release upload "$RELEASE_TAG" "output/$OUTPUT_ZIP" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+
+      - name: Retain verified Mac artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-grok-chameleon-cache-lifecycle-verified
+          path: output/Mac_Grok_Chameleon_a.zip
+          if-no-files-found: error
+          retention-days: 3
