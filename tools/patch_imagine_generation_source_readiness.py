@@ -10,7 +10,7 @@ from pathlib import Path
 HELPER_ANCHOR = '''  async function ensureContainerFromInput(state, expectedType, prompt, inputIds, urls, mimeType) {
 '''
 
-HELPER_BLOCK = '''  function generationSourceReady(state, sourceId) {
+SOURCE_READY_OLD = '''  function generationSourceReady(state, sourceId) {
     const value = resolvedMediaId(state, sourceId);
     if (!value) return false;
     if (state?.byId?.[value]) return true;
@@ -22,7 +22,23 @@ HELPER_BLOCK = '''  function generationSourceReady(state, sourceId) {
     return false;
   }
 
-  async function hydrateGenerationSource(storeContext, sourceId, requestId, variant, timeoutMs = 8000) {
+'''
+
+SOURCE_READY_NEW = '''  function generationSourceReady(state, sourceId) {
+    const value = String(sourceId || "").trim();
+    if (!value) return false;
+    if (state?.byId?.[value]) return true;
+    for (const collection of [state?.imageByMediaId, state?.videoByMediaId]) {
+      for (const items of Object.values(collection || {})) {
+        if (Array.isArray(items) && items.some((item) => storeItemId(item) === value)) return true;
+      }
+    }
+    return false;
+  }
+
+'''
+
+HELPER_BLOCK = SOURCE_READY_NEW + '''  async function hydrateGenerationSource(storeContext, sourceId, requestId, variant, timeoutMs = 8000) {
     const value = String(sourceId || "").trim();
     let state = storeContext.record ? mediaStoreStateForRecord(storeContext.record) : getMediaStoreState();
     if (!value || generationSourceReady(state, value)) return state;
@@ -195,6 +211,29 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
 def patch_file(path: Path) -> bool:
     text = path.read_text(encoding="utf-8")
     original = text
+    completed_markers = (
+        "store_generation_source_hydration_start",
+        "store_generation_source_hydration_ready",
+        "store_generation_source_hydration_timeout",
+        "retryRateLimitedStoreCall",
+        'retryRateLimitedStoreCall("generateVideoForImage"',
+        'const resultEvents = await waitForStoreEvents(',
+        'startStoreMethodCall("generateVideoForImage"',
+        'const value = String(sourceId || "").trim();',
+    )
+    removed_markers = (
+        "finalVideoRequestPatch",
+        "video_request_final_patch",
+        "official_video_duration_arg_applied",
+        "Official Imagine final video request was not intercepted",
+    )
+    if all(marker in text for marker in completed_markers) and not any(marker in text for marker in removed_markers):
+        print(f"IMAGINE_GENERATION_SOURCE_READINESS_ALREADY_PATCHED {path}")
+        return False
+    if SOURCE_READY_OLD in text:
+        text = replace_once(text, SOURCE_READY_OLD, SOURCE_READY_NEW, "exact generation source readiness")
+    elif "  function generationSourceReady(state, sourceId) {\n" in text and SOURCE_READY_NEW not in text:
+        raise RuntimeError("Unknown generation source readiness implementation.")
     if "  function generationSourceReady(state, sourceId) {\n" not in text:
         if text.count(HELPER_ANCHOR) != 1:
             raise RuntimeError("Generation source helper anchor was not found exactly once.")
@@ -229,13 +268,7 @@ def patch_file(path: Path) -> bool:
     missing = [marker for marker in required if marker not in text]
     if missing:
         raise RuntimeError(f"Required generation markers are missing: {missing}")
-    forbidden = (
-        "finalVideoRequestPatch",
-        "video_request_final_patch",
-        "official_video_duration_arg_applied",
-        "Official Imagine final video request was not intercepted",
-    )
-    remaining = [marker for marker in forbidden if marker in text]
+    remaining = [marker for marker in removed_markers if marker in text]
     if remaining:
         raise RuntimeError(f"Removed final request hook markers returned: {remaining}")
 

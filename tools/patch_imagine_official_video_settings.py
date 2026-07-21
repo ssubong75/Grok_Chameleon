@@ -271,6 +271,24 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
 def patch_file(path: Path) -> bool:
     text = path.read_text(encoding="utf-8")
     original = text
+    completed_markers = (
+        "captureImagineModeStore",
+        "useImagineModeStore",
+        "applyOfficialVideoGenerationSettings",
+        "store_generation_official_video_settings_applied",
+        "state.setResolution(requestedResolution)",
+        "state.setAspectRatio(requestedAspectRatio)",
+        "state.setVideoLength(requestedDuration)",
+        "hasImagineModeStore",
+    )
+    removed_markers = (
+        "finalVideoRequestPatch",
+        "video_request_final_patch",
+        "Official Imagine final video request was not intercepted",
+    )
+    if all(marker in text for marker in completed_markers) and not any(marker in text for marker in removed_markers):
+        print(f"IMAGINE_OFFICIAL_VIDEO_SETTINGS_ALREADY_PATCHED {path}")
+        return False
     text = replace_once(text, GLOBAL_OLD, GLOBAL_NEW, "Imagine mode store globals")
     text = replace_once(text, TRACE_OLD, TRACE_NEW, "Imagine settings trace keys")
     if "  function captureImagineModeStore(value, path, moduleId = \"\") {\n" not in text:
@@ -313,12 +331,7 @@ def patch_file(path: Path) -> bool:
     missing = [marker for marker in required if marker not in text]
     if missing:
         raise RuntimeError(f"Required official video settings markers are missing: {missing}")
-    forbidden = (
-        "finalVideoRequestPatch",
-        "video_request_final_patch",
-        "Official Imagine final video request was not intercepted",
-    )
-    remaining = [marker for marker in forbidden if marker in text]
+    remaining = [marker for marker in removed_markers if marker in text]
     if remaining:
         raise RuntimeError(f"Removed final request hook markers returned: {remaining}")
 

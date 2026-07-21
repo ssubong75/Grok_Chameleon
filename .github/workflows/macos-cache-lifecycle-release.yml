@@ -1,4 +1,4 @@
-name: macOS Imagine generation settings release
+name: macOS cumulative Imagine and cache release
 
 on:
   push:
@@ -15,9 +15,9 @@ jobs:
     env:
       RELEASE_TAG: v20260720-042100-mac
       INPUT_ZIP: Mac_Grok_Chameleon_a.zip
-      BACKUP_ZIP: Mac_Grok_Chameleon_a.previous-before-generation-settings.zip
+      BACKUP_ZIP: Mac_Grok_Chameleon_a.previous-before-cumulative-imagine-relations.zip
       OUTPUT_ZIP: Mac_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: 5bfe2c86e80783a4304a94ebbe721211b494de05e70ba6a49fca93b634c1943e
+      EXPECTED_INPUT_SHA256: ad2d8ab49a7f05e0b67281f02e6b9fd6596b2ce9c96d7551097c5b3e32693b7c
 
     steps:
       - name: Check out patch source
@@ -37,7 +37,7 @@ jobs:
           actual_sha256="$(shasum -a 256 "input/$INPUT_ZIP" | awk '{print $1}')"
           test "$actual_sha256" = "$EXPECTED_INPUT_SHA256"
 
-      - name: Extract natively and apply Imagine generation settings updates
+      - name: Extract natively and apply cumulative updates
         shell: bash
         run: |
           set -euo pipefail
@@ -48,17 +48,25 @@ jobs:
           main_app="$root/Grok Chameleon.app"
           migration_app="$root/Migration.app"
           app_root="$main_app/Contents/Resources/app"
+          main_js="$app_root/electron/main.js"
           server_py="$app_root/runtime/server.py"
           preload_bridge_js="$app_root/electron/preload-bridge.js"
+          composer_js="$app_root/web/scripts/i_composer_submit.js"
+          detail_media_js="$app_root/web/scripts/detail_media.js"
           detail_css="$app_root/web/styles/detail.css"
           build_main_js="$app_root/web/scripts/build_main.js"
+          card_render_js="$app_root/web/scripts/card_render.js"
 
           test -d "$main_app"
           test -d "$migration_app"
+          test -f "$main_js"
           test -f "$server_py"
           test -f "$preload_bridge_js"
+          test -f "$composer_js"
+          test -f "$detail_media_js"
           test -f "$detail_css"
           test -f "$build_main_js"
+          test -f "$card_render_js"
           test -x "$main_app/Contents/MacOS/Grok Chameleon"
           test -x "$migration_app/Contents/MacOS/Migration"
           test -L "$main_app/Contents/Frameworks/Electron Framework.framework/Versions/Current"
@@ -69,16 +77,34 @@ jobs:
             exit 1
           fi
 
-          before_preload="$(shasum -a 256 "$preload_bridge_js" | awk '{print $1}')"
+          before_tree="$(find "$app_root/electron" "$app_root/runtime" "$app_root/web" -type f -exec shasum -a 256 {} + | shasum -a 256 | awk '{print $1}')"
+          python3 tools/patch_card_preview_cache_lifecycle.py "$main_js" "$server_py"
           python3 tools/patch_imagine_generation_source_readiness.py "$preload_bridge_js"
           python3 tools/patch_imagine_official_video_settings.py "$preload_bridge_js"
-          after_preload="$(shasum -a 256 "$preload_bridge_js" | awk '{print $1}')"
-          if [[ "$before_preload" = "$after_preload" ]]; then
-            echo 'Imagine generation settings were already present in the input asset.'
+          python3 tools/patch_imagine_cached_bridge_prepare.py "$composer_js"
+          python3 tools/patch_imagine_reuse_bridge_window.py "$main_js"
+          python3 tools/patch_imagine_source_context_navigation.py "$main_js"
+          python3 tools/patch_imagine_root_source_hydration.py "$preload_bridge_js"
+          python3 tools/patch_imagine_i2i_source_baseline.py "$preload_bridge_js"
+          python3 tools/patch_imagine_video_result_handoff.py "$preload_bridge_js"
+          python3 tools/patch_imagine_t2i_candidate_completion.py "$server_py"
+          python3 tools/patch_imagine_progress_timing.py "$server_py"
+          python3 tools/patch_imagine_persistent_generated_relations.py "$server_py"
+          python3 tools/patch_imagine_persistent_relation_full_image_preview.py "$server_py"
+          python3 tools/patch_imagine_missing_preview_item_fallback.py "$detail_media_js"
+          python3 tools/patch_imagine_missing_relation_cleanup.py "$detail_media_js"
+          python3 tools/patch_detail_progress_width.py "$detail_css" "$build_main_js"
+          after_tree="$(find "$app_root/electron" "$app_root/runtime" "$app_root/web" -type f -exec shasum -a 256 {} + | shasum -a 256 | awk '{print $1}')"
+          if [[ "$before_tree" = "$after_tree" ]]; then
+            echo 'All cumulative fixes were already present in the input asset.'
           fi
 
+          node --check "$main_js"
           node --check "$preload_bridge_js"
+          node --check "$composer_js"
+          node --check "$detail_media_js"
           node --check "$build_main_js"
+          node --check "$card_render_js"
           PYTHONDONTWRITEBYTECODE=1 python3 - "$server_py" <<'PY'
           import sys
           from pathlib import Path
@@ -86,6 +112,7 @@ jobs:
           compile(source.read_text(encoding="utf-8"), str(source), "exec")
           print("PYTHON_SYNTAX_OK")
           PY
+          PYTHONDONTWRITEBYTECODE=1 python3 tools/verify_imagine_relation_safety.py "$server_py"
 
           auth_hits="$(find "$root" -type f \( \
             -iname '*auth*.json' -o \
@@ -100,22 +127,52 @@ jobs:
             printf '%s\n' "$auth_hits" >&2
             exit 1
           fi
-          if grep -E '(/Users/runner|github_pat_|ghp_|gho_)' "$server_py" "$preload_bridge_js" "$detail_css" "$build_main_js"; then
+          if grep -E '(/Users/runner|/Users/GAEUN|C:\\Users\\GAEUN|github_pat_|ghp_|gho_)' "$main_js" "$server_py" "$preload_bridge_js" "$composer_js" "$detail_media_js" "$detail_css" "$build_main_js" "$card_render_js"; then
             echo 'Runner path or GitHub token-like literal found in patched source.' >&2
+            exit 1
+          fi
+          if find "$root" -type f \( -name 'Cookies' -o -name 'Login Data' -o -name 'Local State' -o -iname '*.log' -o -iname 'library.json' \) -print | grep -q .; then
+            echo 'User library, browser profile, or log data found in package.' >&2
             exit 1
           fi
           if grep -E 'finalVideoRequestPatch|installPersistentFinalVideoRequestPatch|armFinalVideoRequestPatch|video_request_final_patch|official_video_duration_arg_applied|Official Imagine final video request was not intercepted' "$preload_bridge_js"; then
             echo 'Final video request hook marker remains.' >&2
             exit 1
           fi
+          grep -F 'clearCurrentCardPreviewCache("startup")' "$main_js"
+          grep -F 'clearCurrentCardPreviewCache("shutdown")' "$main_js"
+          grep -F 'clearCurrentCardPreviewCache("will-quit")' "$main_js"
+          grep -F 'GROK_CHAMELEON_CARD_PREVIEW_CACHE_DIR' "$main_js" "$server_py"
+          grep -F 'function commandSourceContextId(command)' "$main_js"
+          grep -F 'Imagine source card could not be prepared' "$main_js"
+          grep -F 'return ["t2i_ws"].includes' "$main_js"
+          grep -F 'prepareActiveImagineBridgeSession({ force: false, silent: false })' "$composer_js"
           grep -F 'const resultEvents = await waitForStoreEvents(' "$preload_bridge_js"
           grep -F 'startStoreMethodCall("generateVideoForImage"' "$preload_bridge_js"
           grep -F 'store_generation_source_hydration_start' "$preload_bridge_js"
           grep -F 'store_generation_source_hydration_ready' "$preload_bridge_js"
+          grep -F 'const value = String(sourceId || "").trim();' "$preload_bridge_js"
           grep -F 'store_generation_official_video_settings_applied' "$preload_bridge_js"
           grep -F 'state.setResolution(requestedResolution)' "$preload_bridge_js"
           grep -F 'state.setAspectRatio(requestedAspectRatio)' "$preload_bridge_js"
           grep -F 'retryRateLimitedStoreCall("generateVideoForImage"' "$preload_bridge_js"
+          grep -F 'store_generation_candidate_handoff' "$preload_bridge_js"
+          grep -F 'storeObservationMs: 8000' "$preload_bridge_js"
+          grep -F 'rootSourceId = ""' "$preload_bridge_js"
+          grep -F 'addTarget(rootSourceId);' "$preload_bridge_js"
+          grep -F 'for (const sourceId of [containerId, parentPostId, inputIds[0]])' "$preload_bridge_js"
+          grep -F 'IMAGINE_DIRECT_I2V_DISPLAY_MAX_PROGRESS = 94' "$server_py"
+          grep -F 'IMAGINE_DIRECT_VIDEO_DISPLAY_MAX_PROGRESS = 94' "$server_py"
+          grep -F 'IMAGINE_DIRECT_EXTEND_DISPLAY_MAX_PROGRESS = 94' "$server_py"
+          grep -F '("i2v", "480p", 6): 13,' "$server_py"
+          grep -F '("t2v", "480p", 6): 13,' "$server_py"
+          grep -F 'running_progress_limit = {' "$server_py"
+          grep -F 't2i_candidates_url_recovered' "$server_py"
+          grep -F 'def imagine_persist_generated_relation(' "$server_py"
+          grep -F 'def imagine_apply_generated_relations(' "$server_py"
+          grep -F 'if kind == "image"' "$server_py"
+          grep -F 'function removeUnavailableImagineItem(postPath, url, host = null)' "$detail_media_js"
+          grep -F 'qApi("/api/imagine/item/hide"' "$detail_media_js"
           grep -F 'width: 3ch;' "$detail_css"
           test "$(grep -F 'class="detail_generation_percent"' "$build_main_js" | wc -l | tr -d ' ')" = 2
 
@@ -235,6 +292,7 @@ jobs:
           verified_main_js="$verified_main_app/Contents/Resources/app/electron/main.js"
           verified_preload_bridge_js="$verified_main_app/Contents/Resources/app/electron/preload-bridge.js"
           verified_server_py="$verified_main_app/Contents/Resources/app/runtime/server.py"
+          verified_composer_js="$verified_main_app/Contents/Resources/app/web/scripts/i_composer_submit.js"
           verified_detail_css="$verified_main_app/Contents/Resources/app/web/styles/detail.css"
           verified_build_main_js="$verified_main_app/Contents/Resources/app/web/scripts/build_main.js"
           verified_detail_media_js="$verified_main_app/Contents/Resources/app/web/scripts/detail_media.js"
@@ -252,6 +310,7 @@ jobs:
 
           node --check "$verified_main_js"
           node --check "$verified_preload_bridge_js"
+          node --check "$verified_composer_js"
           node --check "$verified_build_main_js"
           node --check "$verified_detail_media_js"
           node --check "$verified_card_render_js"
@@ -259,12 +318,38 @@ jobs:
             echo 'Final video request hook marker found after final extraction.' >&2
             exit 1
           fi
+          grep -F 'clearCurrentCardPreviewCache("startup")' "$verified_main_js"
+          grep -F 'clearCurrentCardPreviewCache("shutdown")' "$verified_main_js"
+          grep -F 'clearCurrentCardPreviewCache("will-quit")' "$verified_main_js"
+          grep -F 'GROK_CHAMELEON_CARD_PREVIEW_CACHE_DIR' "$verified_main_js" "$verified_server_py"
+          grep -F 'function commandSourceContextId(command)' "$verified_main_js"
+          grep -F 'Imagine source card could not be prepared' "$verified_main_js"
+          grep -F 'return ["t2i_ws"].includes' "$verified_main_js"
+          grep -F 'prepareActiveImagineBridgeSession({ force: false, silent: false })' "$verified_composer_js"
           grep -F 'store_generation_source_hydration_start' "$verified_preload_bridge_js"
           grep -F 'store_generation_source_hydration_ready' "$verified_preload_bridge_js"
+          grep -F 'const value = String(sourceId || "").trim();' "$verified_preload_bridge_js"
           grep -F 'store_generation_official_video_settings_applied' "$verified_preload_bridge_js"
           grep -F 'state.setResolution(requestedResolution)' "$verified_preload_bridge_js"
           grep -F 'state.setAspectRatio(requestedAspectRatio)' "$verified_preload_bridge_js"
           grep -F 'retryRateLimitedStoreCall("generateVideoForImage"' "$verified_preload_bridge_js"
+          grep -F 'store_generation_candidate_handoff' "$verified_preload_bridge_js"
+          grep -F 'storeObservationMs: 8000' "$verified_preload_bridge_js"
+          grep -F 'rootSourceId = ""' "$verified_preload_bridge_js"
+          grep -F 'addTarget(rootSourceId);' "$verified_preload_bridge_js"
+          grep -F 'for (const sourceId of [containerId, parentPostId, inputIds[0]])' "$verified_preload_bridge_js"
+          grep -F 'IMAGINE_DIRECT_I2V_DISPLAY_MAX_PROGRESS = 94' "$verified_server_py"
+          grep -F 'IMAGINE_DIRECT_VIDEO_DISPLAY_MAX_PROGRESS = 94' "$verified_server_py"
+          grep -F 'IMAGINE_DIRECT_EXTEND_DISPLAY_MAX_PROGRESS = 94' "$verified_server_py"
+          grep -F '("i2v", "480p", 6): 13,' "$verified_server_py"
+          grep -F '("t2v", "480p", 6): 13,' "$verified_server_py"
+          grep -F 'running_progress_limit = {' "$verified_server_py"
+          grep -F 't2i_candidates_url_recovered' "$verified_server_py"
+          grep -F 'def imagine_persist_generated_relation(' "$verified_server_py"
+          grep -F 'def imagine_apply_generated_relations(' "$verified_server_py"
+          grep -F 'if kind == "image"' "$verified_server_py"
+          grep -F 'function removeUnavailableImagineItem(postPath, url, host = null)' "$verified_detail_media_js"
+          grep -F 'qApi("/api/imagine/item/hide"' "$verified_detail_media_js"
           grep -F 'width: 3ch;' "$verified_detail_css"
           test "$(grep -F 'class="detail_generation_percent"' "$verified_build_main_js" | wc -l | tr -d ' ')" = 2
           PYTHONDONTWRITEBYTECODE=1 python3 - "$verified_server_py" <<'PY'
@@ -273,6 +358,7 @@ jobs:
           source = Path(sys.argv[1])
           compile(source.read_text(encoding="utf-8"), str(source), "exec")
           PY
+          PYTHONDONTWRITEBYTECODE=1 python3 tools/verify_imagine_relation_safety.py "$verified_server_py"
           ELECTRON_RUN_AS_NODE=1 "$verified_main_exec" -e 'console.log("ELECTRON_EXECUTABLE_OK")'
           shasum -a 256 "output/$OUTPUT_ZIP"
 
@@ -299,7 +385,7 @@ jobs:
       - name: Retain verified Mac artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mac-grok-chameleon-generation-settings-verified
+          name: mac-grok-chameleon-cumulative-imagine-relations-verified
           path: output/Mac_Grok_Chameleon_a.zip
           if-no-files-found: error
           retention-days: 3
