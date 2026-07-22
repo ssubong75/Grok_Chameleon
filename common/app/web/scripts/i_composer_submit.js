@@ -223,20 +223,22 @@ function imagineSubmissionSourceContext(post, item) {
   const metadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
   const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
   const postMetadata = post?.metadata && typeof post.metadata === "object" ? post.metadata : {};
+  const sourceIsT2i = typeof composerSourceIsT2i === "function" && composerSourceIsT2i(post, item);
   return {
-    conversation_id: String(
+    conversation_id: sourceIsT2i ? "" : String(
       item?.conversation_id
       || metadata.conversation_id
       || imagine.conversation_id
       || postMetadata.conversation_id
       || ""
     ).trim(),
-    response_id: String(
+    response_id: sourceIsT2i ? "" : String(
       item?.response_id
       || metadata.response_id
       || imagine.response_id
       || ""
     ).trim(),
+    source_is_t2i: sourceIsT2i,
   };
 }
 
@@ -249,9 +251,11 @@ function imaginePrimarySubmissionAttachment(attachments, mode) {
 
 function imagineAttachmentSubmissionContext(attachment) {
   const source = attachment && typeof attachment === "object" ? attachment : {};
+  const sourceIsT2i = source.source_is_t2i === true;
   return {
-    conversation_id: String(source.conversation_id || source.source_conversation_id || "").trim(),
-    response_id: String(source.response_id || source.parent_response_id || "").trim(),
+    conversation_id: sourceIsT2i ? "" : String(source.conversation_id || source.source_conversation_id || "").trim(),
+    response_id: sourceIsT2i ? "" : String(source.response_id || source.parent_response_id || "").trim(),
+    source_is_t2i: sourceIsT2i,
   };
 }
 
@@ -767,6 +771,7 @@ async function submitImagineComposer() {
       source_item_id: sourceItemId,
       source_conversation_id: sourceContext.conversation_id,
       parent_response_id: sourceContext.response_id,
+      source_is_t2i: sourceContext.source_is_t2i === true,
       account_id: submissionAccountId,
     });
     if (data?.job) {

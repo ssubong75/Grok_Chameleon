@@ -438,6 +438,29 @@
       return "";
     }
 
+    function composerSourceIsT2i(post, item) {
+      const metadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
+      const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
+      const postMetadata = post?.metadata && typeof post.metadata === "object" ? post.metadata : {};
+      const normalizeAction = (value) => String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+      const itemActions = [
+        item?.generated_action,
+        metadata.generated_action,
+        imagine.generated_action,
+        item?.action,
+        metadata.action,
+        imagine.action,
+      ].map(normalizeAction).filter(Boolean);
+      if (itemActions.some((value) => value === "t2i" || value === "texttoimage")) return true;
+      if (itemActions.length) return false;
+      const postActions = [
+        post?.mode,
+        postMetadata.generated_action,
+        postMetadata.root_generation_action,
+      ].map(normalizeAction).filter(Boolean);
+      return postActions.some((value) => value === "t2i" || value === "texttoimage");
+    }
+
     function composerAttachmentMetadataForItem(post, item) {
       const metadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
       const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
@@ -467,6 +490,7 @@
         conversation_id: conversationId,
         response_id: responseId,
         parent_response_id: responseId,
+        source_is_t2i: composerSourceIsT2i(post, item),
         account_id: item?.account_id || metadata.account_id || imagine.account_id || post?.account_id || "",
         account_email: item?.account_email || metadata.account_email || imagine.account_email || post?.account_email || "",
       };
