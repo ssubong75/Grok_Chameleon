@@ -13,7 +13,13 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  COMMON_MAIN: common/app/electron/main.js
   COMMON_COMPOSER: common/app/web/scripts/composer_options.js
+  COMMON_ATTACHMENTS: common/app/web/scripts/composer_attachments.js
+  COMMON_I_SUBMIT: common/app/web/scripts/i_composer_submit.js
+  COMMON_LIBRARY_CORE: common/app/web/scripts/library_core.js
+  COMMON_DETAIL_STATE: common/app/web/scripts/detail_state.js
+  COMMON_I_SOURCE: common/app/web/scripts/i_source_render.js
   COMMON_PRELOAD: common/app/electron/preload-bridge.js
   COMMON_SERVER: common/app/runtime/server.py
 
@@ -25,7 +31,7 @@ jobs:
       RELEASE_TAG: v20260720-041036-win
       INPUT_ZIP: Win_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Win_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: adfb69d0048d31f6b7c5f91e983d543ba16e6dbb13cd75fbbcb889554beeac21
+      EXPECTED_INPUT_SHA256: 6ea091e388387aa916afbaf2fca66481b314483f994c2b0bbdb4961bad4ea0ad
 
     steps:
       - name: Check out the shared source commit
@@ -49,18 +55,35 @@ jobs:
           New-Item -ItemType Directory -Force unpack, output, verify | Out-Null
           $inputZip = Join-Path $env:GITHUB_WORKSPACE "input\$env:INPUT_ZIP"
           $outputZip = Join-Path $env:GITHUB_WORKSPACE "output\$env:OUTPUT_ZIP"
-          $common = Join-Path $env:GITHUB_WORKSPACE $env:COMMON_COMPOSER
-          $commonPreload = Join-Path $env:GITHUB_WORKSPACE $env:COMMON_PRELOAD
-          $commonServer = Join-Path $env:GITHUB_WORKSPACE $env:COMMON_SERVER
           $root = Join-Path $env:GITHUB_WORKSPACE "unpack\Grok Chameleon"
           $appRoot = Join-Path $root "Resources\Grok Chameleon\resources\app"
-          $target = Join-Path $appRoot "web\scripts\composer_options.js"
-          $targetPreload = Join-Path $appRoot "electron\preload-bridge.js"
-          $targetServer = Join-Path $appRoot "runtime\server.py"
           $state = Join-Path $appRoot "web\scripts\state.js"
           $outerExe = Join-Path $root "Grok Chameleon.exe"
           $migrationExe = Join-Path $root "Migration.exe"
           $innerExe = Join-Path $root "Resources\Grok Chameleon\Grok Chameleon.exe"
+          $sharedSources = @(
+            @{ Name = "main"; Relative = "electron\main.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_MAIN) },
+            @{ Name = "preload"; Relative = "electron\preload-bridge.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_PRELOAD) },
+            @{ Name = "server"; Relative = "runtime\server.py"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_SERVER) },
+            @{ Name = "composer"; Relative = "web\scripts\composer_options.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_COMPOSER) },
+            @{ Name = "attachments"; Relative = "web\scripts\composer_attachments.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_ATTACHMENTS) },
+            @{ Name = "i_submit"; Relative = "web\scripts\i_composer_submit.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_I_SUBMIT) },
+            @{ Name = "library_core"; Relative = "web\scripts\library_core.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_LIBRARY_CORE) },
+            @{ Name = "detail_state"; Relative = "web\scripts\detail_state.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_STATE) },
+            @{ Name = "i_source"; Relative = "web\scripts\i_source_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_I_SOURCE) }
+          )
+          foreach ($shared in $sharedSources) {
+            $shared.Target = Join-Path $appRoot $shared.Relative
+          }
+          $targetMain = ($sharedSources | Where-Object Name -eq "main").Target
+          $targetPreload = ($sharedSources | Where-Object Name -eq "preload").Target
+          $targetServer = ($sharedSources | Where-Object Name -eq "server").Target
+          $targetComposer = ($sharedSources | Where-Object Name -eq "composer").Target
+          $targetAttachments = ($sharedSources | Where-Object Name -eq "attachments").Target
+          $targetISubmit = ($sharedSources | Where-Object Name -eq "i_submit").Target
+          $targetLibraryCore = ($sharedSources | Where-Object Name -eq "library_core").Target
+          $targetDetailState = ($sharedSources | Where-Object Name -eq "detail_state").Target
+          $targetISource = ($sharedSources | Where-Object Name -eq "i_source").Target
 
           $inputHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $inputZip).Hash.ToLowerInvariant()
           if ($inputHash -ne $env:EXPECTED_INPUT_SHA256) { throw "Windows input digest changed: $inputHash" }
@@ -68,7 +91,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Windows input ZIP CRC check failed." }
           & $sevenZip x -y "-o$env:GITHUB_WORKSPACE\unpack" $inputZip
           if ($LASTEXITCODE -ne 0) { throw "Windows extraction failed." }
-          foreach ($required in @($common, $commonPreload, $commonServer, $target, $targetPreload, $targetServer, $state, $outerExe, $migrationExe, $innerExe)) {
+          foreach ($required in @($sharedSources.Source + $sharedSources.Target + @($state, $outerExe, $migrationExe, $innerExe))) {
             if (-not (Test-Path -LiteralPath $required)) { throw "Missing required file: $required" }
           }
 
@@ -78,29 +101,22 @@ jobs:
             migration = (Get-FileHash -Algorithm SHA256 -LiteralPath $migrationExe).Hash
             inner = (Get-FileHash -Algorithm SHA256 -LiteralPath $innerExe).Hash
           }
-          Copy-Item -Force -LiteralPath $common -Destination $target
-          Copy-Item -Force -LiteralPath $commonPreload -Destination $targetPreload
-          Copy-Item -Force -LiteralPath $commonServer -Destination $targetServer
-          $sharedSources = @(
-            @{ Name = "composer"; Source = $common; Target = $target },
-            @{ Name = "preload"; Source = $commonPreload; Target = $targetPreload },
-            @{ Name = "server"; Source = $commonServer; Target = $targetServer }
-          )
           $sharedHashes = @{}
           foreach ($shared in $sharedSources) {
+            Copy-Item -Force -LiteralPath $shared.Source -Destination $shared.Target
             $sharedHashes[$shared.Name] = (Get-FileHash -Algorithm SHA256 -LiteralPath $shared.Source).Hash
             if ((Get-FileHash -Algorithm SHA256 -LiteralPath $shared.Target).Hash -ne $sharedHashes[$shared.Name]) {
               throw "Windows shared source copy mismatch: $($shared.Name)"
             }
           }
-          node --check $target
-          if ($LASTEXITCODE -ne 0) { throw "Windows composer_options.js syntax check failed." }
-          node --check $targetPreload
-          if ($LASTEXITCODE -ne 0) { throw "Windows preload-bridge.js syntax check failed." }
+          foreach ($javascript in $sharedSources | Where-Object { $_.Relative.EndsWith(".js") }) {
+            node --check $javascript.Target
+            if ($LASTEXITCODE -ne 0) { throw "Windows JavaScript syntax check failed: $($javascript.Relative)" }
+          }
           python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" $targetServer
           if ($LASTEXITCODE -ne 0) { throw "Windows server.py syntax check failed." }
 
-          $composerText = Get-Content -Raw -LiteralPath $target
+          $composerText = Get-Content -Raw -LiteralPath $targetComposer
           foreach ($marker in @(
             'const imageCountOptions = provider === "imagine"',
             '? buildT2iCountOptions.filter((option) => option !== "1")',
@@ -114,17 +130,33 @@ jobs:
             throw "Build count options changed unexpectedly."
           }
           $preloadText = Get-Content -Raw -LiteralPath $targetPreload
-          foreach ($marker in @("resolvedContainerId: containerId", "baselineIds: Array.from(beforeIds)")) {
+          foreach ($marker in @(
+            "const generationResponseCaptures = [];",
+            "conversation_request_route_applied",
+            "canonicalContainerId",
+            "baselineIds: Array.from(beforeIds)"
+          )) {
             if (-not $preloadText.Contains($marker)) { throw "Windows relation bridge marker missing: $marker" }
           }
           $serverText = Get-Content -Raw -LiteralPath $targetServer
           foreach ($marker in @(
             'relation_recovery_action = action in {"i2i", "i2v", "t2v", "extend"}',
-            'events, bridge_parent_ids, bridge_baseline_ids = native_bridge_fetch_events(',
+            'events, bridge_parent_ids, bridge_baseline_ids, canonical_container_id = native_bridge_fetch_events(',
+            'def imagine_conversation_root_generation(responses: list[dict]) -> dict:',
+            '"t2i_group_container": bool(root_generation.get("is_t2i_group_container"))',
             'IMAGINE_DIRECT_I2I_MAX_WAIT_SECONDS = 14'
           )) {
             if (-not $serverText.Contains($marker)) { throw "Windows relation recovery marker missing: $marker" }
           }
+          $mainText = Get-Content -Raw -LiteralPath $targetMain
+          foreach ($marker in @("payload.grokChameleonConversationId", 'process.platform === "darwin"', "process.resourcesPath")) {
+            if (-not $mainText.Contains($marker)) { throw "Cross-platform main marker missing: $marker" }
+          }
+          if (-not (Get-Content -Raw -LiteralPath $targetAttachments).Contains("conversation_id: conversationId")) { throw "Attachment conversation lineage marker missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetISubmit).Contains("source_conversation_id: sourceContext.conversation_id")) { throw "Submit conversation lineage marker missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetLibraryCore).Contains('if (type === "image" || type.startsWith("image/"))')) { throw "Sharp image preview marker missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetDetailState).Contains("function detailItemPrompt(item)")) { throw "Detail prompt lineage marker missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetISource).Contains("function isImagineT2iGroupContainer(post)")) { throw "T2I group filter marker missing." }
           $metadata = Get-ChildItem -LiteralPath $root -Recurse -Force | Where-Object {
             $_.Name -eq "__MACOSX" -or $_.Name -like "._*" -or $_.Name -eq ".DS_Store"
           }
@@ -143,19 +175,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Windows verification extraction failed." }
 
           $verifiedRoot = Join-Path $env:GITHUB_WORKSPACE "verify\Grok Chameleon"
-          $verifiedTarget = Join-Path $verifiedRoot "Resources\Grok Chameleon\resources\app\web\scripts\composer_options.js"
-          $verifiedPreload = Join-Path $verifiedRoot "Resources\Grok Chameleon\resources\app\electron\preload-bridge.js"
-          $verifiedServer = Join-Path $verifiedRoot "Resources\Grok Chameleon\resources\app\runtime\server.py"
+          $verifiedAppRoot = Join-Path $verifiedRoot "Resources\Grok Chameleon\resources\app"
           if ((Get-ChildItem -LiteralPath $verifiedRoot -Recurse -Force -File).Count -ne $fileCount) {
             throw "Windows file count changed during packaging."
           }
-          foreach ($verified in @(
-            @{ Name = "composer"; Path = $verifiedTarget },
-            @{ Name = "preload"; Path = $verifiedPreload },
-            @{ Name = "server"; Path = $verifiedServer }
-          )) {
-            if ((Get-FileHash -Algorithm SHA256 -LiteralPath $verified.Path).Hash -ne $sharedHashes[$verified.Name]) {
-              throw "Windows packaged shared source mismatch: $($verified.Name)"
+          foreach ($shared in $sharedSources) {
+            $verifiedPath = Join-Path $verifiedAppRoot $shared.Relative
+            if ((Get-FileHash -Algorithm SHA256 -LiteralPath $verifiedPath).Hash -ne $sharedHashes[$shared.Name]) {
+              throw "Windows packaged shared source mismatch: $($shared.Name)"
             }
           }
           $verifiedExeHashes = @{
@@ -166,11 +193,11 @@ jobs:
           foreach ($key in @("outer", "migration", "inner")) {
             if ($verifiedExeHashes[$key] -ne $exeHashes[$key]) { throw "Windows executable changed: $key" }
           }
-          node --check $verifiedTarget
-          if ($LASTEXITCODE -ne 0) { throw "Packaged Windows JavaScript syntax check failed." }
-          node --check $verifiedPreload
-          if ($LASTEXITCODE -ne 0) { throw "Packaged Windows preload syntax check failed." }
-          python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" $verifiedServer
+          foreach ($javascript in $sharedSources | Where-Object { $_.Relative.EndsWith(".js") }) {
+            node --check (Join-Path $verifiedAppRoot $javascript.Relative)
+            if ($LASTEXITCODE -ne 0) { throw "Packaged Windows JavaScript syntax check failed: $($javascript.Relative)" }
+          }
+          python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" (Join-Path $verifiedAppRoot "runtime\server.py")
           if ($LASTEXITCODE -ne 0) { throw "Packaged Windows server syntax check failed." }
           "windows-output-sha256=" + (Get-FileHash -Algorithm SHA256 -LiteralPath $outputZip).Hash.ToLowerInvariant()
 
@@ -189,7 +216,7 @@ jobs:
       RELEASE_TAG: v20260720-042100-mac
       INPUT_ZIP: Mac_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Mac_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: c3c7f502620f64a4f8aad7daa0bc769d5fec0b12165abd51793dd58b86054287
+      EXPECTED_INPUT_SHA256: 345c74ec0cbb48d41494844f3b1452ba43b3c27ab302bc4d5becb8a78cb9714e
 
     steps:
       - name: Check out the shared source commit
@@ -217,23 +244,34 @@ jobs:
           main_app="$root/Grok Chameleon.app"
           migration_app="$root/Migration.app"
           app_root="$main_app/Contents/Resources/app"
-          common="$GITHUB_WORKSPACE/$COMMON_COMPOSER"
-          common_preload="$GITHUB_WORKSPACE/$COMMON_PRELOAD"
-          common_server="$GITHUB_WORKSPACE/$COMMON_SERVER"
+          common_root="$GITHUB_WORKSPACE/common/app"
+          shared_relatives=(
+            electron/main.js
+            electron/preload-bridge.js
+            runtime/server.py
+            web/scripts/composer_options.js
+            web/scripts/composer_attachments.js
+            web/scripts/i_composer_submit.js
+            web/scripts/library_core.js
+            web/scripts/detail_state.js
+            web/scripts/i_source_render.js
+          )
           target="$app_root/web/scripts/composer_options.js"
           main_js="$app_root/electron/main.js"
           preload_js="$app_root/electron/preload-bridge.js"
           server_py="$app_root/runtime/server.py"
+          attachments_js="$app_root/web/scripts/composer_attachments.js"
+          i_submit_js="$app_root/web/scripts/i_composer_submit.js"
+          library_core_js="$app_root/web/scripts/library_core.js"
+          detail_state_js="$app_root/web/scripts/detail_state.js"
+          i_source_js="$app_root/web/scripts/i_source_render.js"
           main_exec="$main_app/Contents/MacOS/Grok Chameleon"
           migration_exec="$migration_app/Contents/MacOS/Migration"
 
-          test -f "$common"
-          test -f "$common_preload"
-          test -f "$common_server"
-          test -f "$target"
-          test -f "$main_js"
-          test -f "$preload_js"
-          test -f "$server_py"
+          for relative in "${shared_relatives[@]}"; do
+            test -f "$common_root/$relative"
+            test -f "$app_root/$relative"
+          done
           test -x "$main_exec"
           test -x "$migration_exec"
           test -L "$main_app/Contents/Frameworks/Electron Framework.framework/Versions/Current"
@@ -244,14 +282,13 @@ jobs:
             exit 1
           fi
 
-          cp "$common" "$target"
-          cp "$common_preload" "$preload_js"
-          cp "$common_server" "$server_py"
-          cmp "$common" "$target"
-          cmp "$common_preload" "$preload_js"
-          cmp "$common_server" "$server_py"
-          node --check "$target"
-          node --check "$preload_js"
+          for relative in "${shared_relatives[@]}"; do
+            cp "$common_root/$relative" "$app_root/$relative"
+            cmp "$common_root/$relative" "$app_root/$relative"
+            if [[ "$relative" == *.js ]]; then
+              node --check "$app_root/$relative"
+            fi
+          done
           python3 - "$server_py" <<'PY'
           import ast
           import pathlib
@@ -262,11 +299,20 @@ jobs:
           grep -F 'const imageCountOptions = provider === "imagine"' "$target"
           grep -F '? buildT2iCountOptions.filter((option) => option !== "1")' "$target"
           grep -F 'const imageCountDefault = "5";' "$target"
-          grep -F 'resolvedContainerId: containerId' "$preload_js"
+          grep -F 'const generationResponseCaptures = [];' "$preload_js"
+          grep -F 'conversation_request_route_applied' "$preload_js"
+          grep -F 'canonicalContainerId' "$preload_js"
           grep -F 'baselineIds: Array.from(beforeIds)' "$preload_js"
           grep -F 'relation_recovery_action = action in {"i2i", "i2v", "t2v", "extend"}' "$server_py"
-          grep -F 'events, bridge_parent_ids, bridge_baseline_ids = native_bridge_fetch_events(' "$server_py"
+          grep -F 'events, bridge_parent_ids, bridge_baseline_ids, canonical_container_id = native_bridge_fetch_events(' "$server_py"
+          grep -F 'def imagine_conversation_root_generation(responses: list[dict]) -> dict:' "$server_py"
+          grep -F '"t2i_group_container": bool(root_generation.get("is_t2i_group_container"))' "$server_py"
           grep -F 'IMAGINE_DIRECT_I2I_MAX_WAIT_SECONDS = 14' "$server_py"
+          grep -F 'conversation_id: conversationId' "$attachments_js"
+          grep -F 'source_conversation_id: sourceContext.conversation_id' "$i_submit_js"
+          grep -F 'if (type === "image" || type.startsWith("image/"))' "$library_core_js"
+          grep -F 'function detailItemPrompt(item)' "$detail_state_js"
+          grep -F 'function isImagineT2iGroupContainer(post)' "$i_source_js"
           grep -F 'RUNTIME_ROOT = Path(__file__).resolve().parent' "$server_py"
           grep -F 'APP_ROOT = RUNTIME_ROOT.parent' "$server_py"
           if grep -E 'C:\\|python\.exe' "$server_py"; then
@@ -288,9 +334,18 @@ jobs:
           main_app="$root/Grok Chameleon.app"
           migration_app="$root/Migration.app"
           app_root="$main_app/Contents/Resources/app"
-          common="$GITHUB_WORKSPACE/$COMMON_COMPOSER"
-          common_preload="$GITHUB_WORKSPACE/$COMMON_PRELOAD"
-          common_server="$GITHUB_WORKSPACE/$COMMON_SERVER"
+          common_root="$GITHUB_WORKSPACE/common/app"
+          shared_relatives=(
+            electron/main.js
+            electron/preload-bridge.js
+            runtime/server.py
+            web/scripts/composer_options.js
+            web/scripts/composer_attachments.js
+            web/scripts/i_composer_submit.js
+            web/scripts/library_core.js
+            web/scripts/detail_state.js
+            web/scripts/i_source_render.js
+          )
           if find "$root" -type d -name '__pycache__' -print | grep -q .; then
             echo 'Python cache found before Mac packaging.' >&2
             exit 1
@@ -319,8 +374,6 @@ jobs:
           verified_main="$verified_root/Grok Chameleon.app"
           verified_migration="$verified_root/Migration.app"
           verified_app="$verified_main/Contents/Resources/app"
-          verified_target="$verified_app/web/scripts/composer_options.js"
-          verified_preload="$verified_app/electron/preload-bridge.js"
           verified_server="$verified_app/runtime/server.py"
           test -x "$verified_main/Contents/MacOS/Grok Chameleon"
           test -x "$verified_migration/Contents/MacOS/Migration"
@@ -328,11 +381,12 @@ jobs:
           test -L "$verified_main/Contents/Frameworks/Electron Framework.framework/Electron Framework"
           codesign --verify --deep --strict --verbose=4 "$verified_main"
           codesign --verify --deep --strict --verbose=4 "$verified_migration"
-          cmp "$common" "$verified_target"
-          cmp "$common_preload" "$verified_preload"
-          cmp "$common_server" "$verified_server"
-          node --check "$verified_target"
-          node --check "$verified_preload"
+          for relative in "${shared_relatives[@]}"; do
+            cmp "$common_root/$relative" "$verified_app/$relative"
+            if [[ "$relative" == *.js ]]; then
+              node --check "$verified_app/$relative"
+            fi
+          done
           python3 - "$verified_server" <<'PY'
           import ast
           import pathlib
@@ -386,8 +440,8 @@ jobs:
           MAC_TAG: v20260720-042100-mac
           WIN_ZIP: Win_Grok_Chameleon_a.zip
           MAC_ZIP: Mac_Grok_Chameleon_a.zip
-          WIN_INPUT_SHA256: adfb69d0048d31f6b7c5f91e983d543ba16e6dbb13cd75fbbcb889554beeac21
-          MAC_INPUT_SHA256: c3c7f502620f64a4f8aad7daa0bc769d5fec0b12165abd51793dd58b86054287
+          WIN_INPUT_SHA256: 6ea091e388387aa916afbaf2fca66481b314483f994c2b0bbdb4961bad4ea0ad
+          MAC_INPUT_SHA256: 345c74ec0cbb48d41494844f3b1452ba43b3c27ab302bc4d5becb8a78cb9714e
         run: |
           set -euo pipefail
           mkdir -p current/win current/mac backups
@@ -396,8 +450,8 @@ jobs:
           test "$(sha256sum "current/win/$WIN_ZIP" | awk '{print $1}')" = "$WIN_INPUT_SHA256"
           test "$(sha256sum "current/mac/$MAC_ZIP" | awk '{print $1}')" = "$MAC_INPUT_SHA256"
           short_sha="$(printf '%s' "$GITHUB_SHA" | cut -c1-12)"
-          win_backup="Win_Grok_Chameleon_a.previous-before-group-relation-recovery-$short_sha.zip"
-          mac_backup="Mac_Grok_Chameleon_a.previous-before-group-relation-recovery-$short_sha.zip"
+          win_backup="Win_Grok_Chameleon_a.previous-before-conversation-lineage-$short_sha.zip"
+          mac_backup="Mac_Grok_Chameleon_a.previous-before-conversation-lineage-$short_sha.zip"
           cp "current/win/$WIN_ZIP" "backups/$win_backup"
           cp "current/mac/$MAC_ZIP" "backups/$mac_backup"
           gh release upload "$WIN_TAG" "backups/$win_backup" --repo "$GITHUB_REPOSITORY"

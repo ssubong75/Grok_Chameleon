@@ -60,6 +60,7 @@
         "hasGetStoreV2Methods", "hasV2RedoMethod", "v2MethodSource", "storeV2MethodsPath", "storeV2MethodsModule",
         "methodCount", "methodNames", "stateFunctionNames", "storeFunctionNames",
         "id", "itemId", "parentPostId", "rootPostId", "originalPostId",
+        "conversationId", "responseId", "parentResponseId", "endpoint",
         "mediaUrl", "thumbnailImageUrl", "progress", "prompt", "mediaType",
         "inputPost", "containerPost", "sourcePost", "userId", "mimeType",
         "isGenerated", "fromMediaStoreV2", "isTemporaryVideoGenPlaceholder",
@@ -73,7 +74,8 @@
         "inflightId", "trackedIds", "noCandidateMs", "sourceId", "targetId", "targets", "storeObservationMs",
         "fileAttachments", "resolvedImageReferences", "videoGenModelConfig",
         "imageEditModelConfig", "mediaGenInput", "params", "url", "mimeType",
-        "filename", "fileName",
+        "filename", "fileName", "grokChameleonDirectUpload", "grokChameleonUploadAssetIds", "grokChameleonUploadUrls",
+        "activeContainerIds", "canonicalContainerId", "discoverNewContainers",
       ]) {
         if (Object.prototype.hasOwnProperty.call(value, key)) output[key] = compactValue(value[key], depth + 1);
       }
@@ -92,6 +94,338 @@
     });
     while (storeTrace.length > STORE_TRACE_LIMIT) storeTrace.shift();
   }
+
+  const nativeFetch = window.fetch.bind(window);
+  let activeConversationRequestRoute = null;
+  let activeConversationRequestTimer = null;
+  const generationResponseCaptures = [];
+
+  function armGenerationResponseCapture({ requestId, modelName, expectedType, prompt = "" }) {
+    const capture = {
+      requestId: String(requestId || ""),
+      modelName: String(modelName || ""),
+      expectedType: String(expectedType || ""),
+      prompt: String(prompt || ""),
+      events: [],
+      eventKeys: new Set(),
+      conversationId: "",
+      responseId: "",
+      parentResponseId: "",
+      rootPostId: "",
+      requestCount: 0,
+      status: 0,
+      done: false,
+      error: "",
+      released: false,
+    };
+    generationResponseCaptures.push(capture);
+    while (generationResponseCaptures.length > 8) generationResponseCaptures.shift();
+    pushStoreTrace("generation_response_capture_armed", {
+      requestId: capture.requestId,
+      modelName: capture.modelName,
+      expectedType: capture.expectedType,
+    });
+    return capture;
+  }
+
+  function releaseGenerationResponseCapture(capture) {
+    if (!capture) return;
+    capture.released = true;
+    const index = generationResponseCaptures.indexOf(capture);
+    if (index >= 0) generationResponseCaptures.splice(index, 1);
+  }
+
+  function generationResponseCaptureForBody(body) {
+    if (!body || typeof body !== "object") return null;
+    const modelName = String(body.modelName || "");
+    for (let index = generationResponseCaptures.length - 1; index >= 0; index -= 1) {
+      const capture = generationResponseCaptures[index];
+      if (capture.released) continue;
+      if (capture.modelName && capture.modelName !== modelName) continue;
+      return capture;
+    }
+    return null;
+  }
+
+  function updateGenerationCaptureMetadata(capture, value) {
+    if (!capture || !value || typeof value !== "object") return;
+    const stack = [value];
+    let visited = 0;
+    while (stack.length && visited < 2500) {
+      visited += 1;
+      const current = stack.pop();
+      if (!current || typeof current !== "object") continue;
+      if (Array.isArray(current)) {
+        stack.push(...current);
+        continue;
+      }
+      if (!capture.conversationId) {
+        capture.conversationId = String(current.conversationId || current.conversation_id || "").trim();
+      }
+      if (!capture.responseId) {
+        capture.responseId = String(current.responseId || current.response_id || "").trim();
+      }
+      if (!capture.parentResponseId) {
+        capture.parentResponseId = String(current.parentResponseId || current.parent_response_id || "").trim();
+      }
+      if (!capture.rootPostId) {
+        capture.rootPostId = String(current.rootPostId || current.root_post_id || current.containerPostId || "").trim();
+      }
+      for (const child of Object.values(current)) {
+        if (child && typeof child === "object") stack.push(child);
+      }
+    }
+  }
+
+  function appendGenerationCaptureEvent(capture, expectedType, node) {
+    if (!capture || !node || typeof node !== "object") return;
+    const type = expectedType === "video" ? "video" : "image";
+    const id = String(type === "video"
+      ? (node.videoId || node.video_id || node.postId || node.post_id || "")
+      : (node.imageId || node.image_id || node.assetId || node.asset_id || node.postId || node.post_id || "")
+    ).trim();
+    const rawUrl = type === "video"
+      ? (node.videoUrl || node.video_url || node.mediaUrl || node.media_url || "")
+      : (node.imageUrl || node.image_url || node.mediaUrl || node.media_url || "");
+    const url = assetUrlFromFileUri(rawUrl);
+    const progressValue = Number(node.progress);
+    const progress = Number.isFinite(progressValue) ? progressValue : (url ? 100 : 1);
+    if (!id && !url && !Object.prototype.hasOwnProperty.call(node, "progress")) return;
+    const key = [type, id, progress, url].join("|");
+    if (capture.eventKeys.has(key)) return;
+    capture.eventKeys.add(key);
+    const base = {
+      progress,
+      prompt: node.prompt || capture.prompt || "",
+      modelName: node.modelName || node.model || capture.modelName || "",
+      createdAt: node.createTime || node.createdAt || new Date().toISOString(),
+      rootPostId: node.rootPostId || node.root_post_id || capture.rootPostId || capture.conversationId || "",
+      parentPostId: node.parentPostId || node.parent_post_id || "",
+      originalPostId: node.originalPostId || node.original_post_id || "",
+      originalRefType: node.originalRefType || node.original_ref_type || "",
+      conversationId: node.conversationId || node.conversation_id || capture.conversationId || "",
+      responseId: node.responseId || node.response_id || capture.responseId || "",
+      parentResponseId: node.parentResponseId || node.parent_response_id || capture.parentResponseId || "",
+      moderated: Boolean(node.moderated),
+    };
+    if (type === "video") {
+      capture.events.push({
+        ...base,
+        videoId: id,
+        videoPostId: id,
+        videoUrl: url,
+        thumbnailImageUrl: assetUrlFromFileUri(node.thumbnailImageUrl || node.thumbnail_image_url || ""),
+        resolutionName: node.resolutionName || node.resolution_name || "",
+        videoDuration: node.duration || node.videoDuration || node.video_duration || "",
+      });
+    } else {
+      capture.events.push({
+        ...base,
+        imageId: id,
+        assetId: id,
+        imageUrl: url,
+        mediaUrl: url,
+        temporaryDataUrl: isTemporaryImageUrl(url),
+        resolutionName: node.resolutionName || node.resolution_name || node.resolution || "",
+      });
+    }
+    while (capture.events.length > 300) capture.events.shift();
+  }
+
+  function collectGenerationCapturePayload(capture, value) {
+    if (!capture || !value || typeof value !== "object") return;
+    updateGenerationCaptureMetadata(capture, value);
+    const stack = [value];
+    let visited = 0;
+    while (stack.length && visited < 2500) {
+      visited += 1;
+      const current = stack.pop();
+      if (!current || typeof current !== "object") continue;
+      if (Array.isArray(current)) {
+        stack.push(...current);
+        continue;
+      }
+      for (const [key, child] of Object.entries(current)) {
+        if (key === "streamingImageGenerationResponse" && child && typeof child === "object") {
+          appendGenerationCaptureEvent(capture, "image", child);
+        } else if (key === "streamingVideoGenerationResponse" && child && typeof child === "object") {
+          appendGenerationCaptureEvent(capture, "video", child);
+        }
+        if (child && typeof child === "object") stack.push(child);
+      }
+    }
+  }
+
+  function parseGenerationCaptureLine(capture, rawLine) {
+    let text = String(rawLine || "").trim();
+    if (!text || text.startsWith("event:") || text.startsWith(":")) return;
+    if (text.startsWith("data:")) text = text.slice(5).trim();
+    if (!text || text === "[DONE]") return;
+    try {
+      collectGenerationCapturePayload(capture, JSON.parse(text));
+    } catch (_) {}
+  }
+
+  async function observeGenerationResponse(response, capture, endpoint) {
+    if (!capture || !response) return;
+    capture.requestCount += 1;
+    capture.status = Number(response.status || 0);
+    pushStoreTrace("generation_response_capture_start", {
+      requestId: capture.requestId,
+      endpoint,
+      status: capture.status,
+      requestCount: capture.requestCount,
+    });
+    try {
+      const clone = response.clone();
+      if (!clone.body) {
+        parseGenerationCaptureLine(capture, await clone.text());
+      } else {
+        const reader = clone.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (true) {
+          const { value, done } = await reader.read();
+          if (value) buffer += decoder.decode(value, { stream: !done });
+          const lines = buffer.split(/\r?\n/);
+          buffer = lines.pop() || "";
+          for (const line of lines) parseGenerationCaptureLine(capture, line);
+          if (done) break;
+        }
+        if (buffer.trim()) parseGenerationCaptureLine(capture, buffer);
+      }
+    } catch (error) {
+      capture.error = error?.message || String(error);
+    } finally {
+      capture.done = true;
+      pushStoreTrace("generation_response_capture_done", {
+        requestId: capture.requestId,
+        status: capture.status,
+        eventCount: capture.events.length,
+        conversationId: capture.conversationId,
+        rootPostId: capture.rootPostId,
+        error: capture.error,
+      });
+    }
+  }
+
+  function generationCaptureEvents(capture, expectedType, conversationId = "", parentResponseId = "") {
+    if (!capture) return [];
+    return capture.events
+      .filter((event) => expectedType === "video" ? (event.videoId || event.videoUrl) : (event.imageId || event.imageUrl))
+      .map((event) => ({
+        ...event,
+        rootPostId: event.rootPostId || capture.rootPostId || capture.conversationId || conversationId || "",
+        conversationId: event.conversationId || capture.conversationId || conversationId || "",
+        responseId: event.responseId || capture.responseId || "",
+        parentResponseId: event.parentResponseId || capture.parentResponseId || parentResponseId || "",
+      }));
+  }
+
+  function generationCaptureCanonicalId(capture, events, expectedType, sourceIds = []) {
+    if (!capture || !(events || []).some((event) => hasFinalStoreMediaEvent(event, expectedType))) return "";
+    const excluded = new Set((sourceIds || []).map((value) => String(value || "").trim()).filter(Boolean));
+    for (const value of [capture.conversationId, capture.rootPostId]) {
+      const id = String(value || "").trim();
+      if (id && !excluded.has(id)) return id;
+    }
+    return "";
+  }
+
+  function clearConversationRequestRoute(route = null) {
+    if (route && activeConversationRequestRoute !== route) return;
+    activeConversationRequestRoute = null;
+    if (activeConversationRequestTimer) clearTimeout(activeConversationRequestTimer);
+    activeConversationRequestTimer = null;
+  }
+
+  function armConversationRequestRoute({ requestId, modelName, conversationId, parentResponseId }) {
+    const conversation = String(conversationId || "").trim();
+    if (!conversation) return null;
+    clearConversationRequestRoute();
+    const route = {
+      requestId: String(requestId || ""),
+      modelName: String(modelName || ""),
+      conversationId: conversation,
+      parentResponseId: String(parentResponseId || "").trim(),
+    };
+    activeConversationRequestRoute = route;
+    activeConversationRequestTimer = setTimeout(() => clearConversationRequestRoute(route), 60000);
+    pushStoreTrace("conversation_request_route_armed", route);
+    return route;
+  }
+
+  async function fetchBodyText(input, init) {
+    if (typeof init?.body === "string") return init.body;
+    if (input instanceof Request) {
+      try {
+        return await input.clone().text();
+      } catch (_) {}
+    }
+    return "";
+  }
+
+  function requestInitForReroute(input, init, body) {
+    const next = { ...(init || {}), body: JSON.stringify(body) };
+    if (!(input instanceof Request)) return next;
+    next.method = init?.method || input.method;
+    next.headers = init?.headers || input.headers;
+    next.credentials = init?.credentials || input.credentials;
+    next.cache = init?.cache || input.cache;
+    next.redirect = init?.redirect || input.redirect;
+    next.referrer = init?.referrer || input.referrer;
+    next.referrerPolicy = init?.referrerPolicy || input.referrerPolicy;
+    next.integrity = init?.integrity || input.integrity;
+    next.keepalive = init?.keepalive ?? input.keepalive;
+    next.signal = init?.signal || input.signal;
+    return next;
+  }
+
+  window.fetch = async function grokChameleonConversationFetch(input, init = undefined) {
+    const route = activeConversationRequestRoute;
+    const rawUrl = typeof input === "string" || input instanceof URL ? String(input) : String(input?.url || "");
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(rawUrl, location.origin);
+    } catch (_) {
+      return nativeFetch(input, init);
+    }
+    const conversationRequest = /^\/rest\/app-chat\/conversations\/(?:new|[^/]+\/responses)$/.test(parsedUrl.pathname);
+    const method = String(init?.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
+    if (!conversationRequest || method !== "POST") return nativeFetch(input, init);
+    const bodyText = await fetchBodyText(input, init);
+    let body;
+    try {
+      body = bodyText ? JSON.parse(bodyText) : null;
+    } catch (_) {
+      body = null;
+    }
+    if (!body || typeof body !== "object") return nativeFetch(input, init);
+    let targetInput = input;
+    let targetInit = init;
+    let endpoint = parsedUrl.pathname;
+    if (route && (!route.modelName || body.modelName === route.modelName)) {
+      endpoint = `/rest/app-chat/conversations/${encodeURIComponent(route.conversationId)}/responses`;
+      targetInput = new URL(endpoint, parsedUrl.origin).toString();
+      targetInit = requestInitForReroute(input, init, {
+        ...body,
+        ...(route.parentResponseId ? { parentResponseId: route.parentResponseId } : {}),
+        skipCancelCurrentInflightRequests: true,
+      });
+      clearConversationRequestRoute(route);
+      pushStoreTrace("conversation_request_route_applied", {
+        requestId: route.requestId,
+        modelName: route.modelName,
+        conversationId: route.conversationId,
+        parentResponseId: route.parentResponseId,
+        endpoint,
+      });
+    }
+    const capture = generationResponseCaptureForBody(body);
+    const response = await nativeFetch(targetInput, targetInit);
+    if (capture) observeGenerationResponse(response, capture, endpoint);
+    return response;
+  };
 
 
   function officialElementVisible(element) {
@@ -891,6 +1225,7 @@
     for (const value of [
       ...(Array.isArray(imageConfig.imageReferences) ? imageConfig.imageReferences : []),
       ...(Array.isArray(videoConfig.imageReferences) ? videoConfig.imageReferences : []),
+      ...(Array.isArray(payload?.grokChameleonUploadUrls) ? payload.grokChameleonUploadUrls : []),
     ]) {
       if (typeof value === "string" && value && !urls.includes(value)) urls.push(value);
     }
@@ -1200,7 +1535,7 @@
     return expectedType !== "image" || !isTemporaryImageUrl(url);
   }
 
-  function collectStoreEvents(state, containerId, expectedType, requestId, prompt, beforeIds, tracking = null) {
+  function collectStoreEvents(state, containerId, expectedType, requestId, prompt, beforeIds, tracking = null, conversationId = "", parentResponseId = "", sourceIds = []) {
     const events = [];
     const items = storeItemsForContainer(state, containerId, expectedType);
     for (const item of items) {
@@ -1217,6 +1552,12 @@
         parentPostId: item?.parentPostId || containerId || "",
         originalPostId: item?.originalPostId || "",
         originalRefType: item?.originalRefType || "",
+        conversationId: item?.conversationId
+          || item?.conversation_id
+          || conversationId
+          || (containerId && !sourceIds.map(String).includes(String(containerId)) ? containerId : ""),
+        responseId: item?.responseId || item?.response_id || "",
+        parentResponseId: item?.parentResponseId || item?.parent_response_id || parentResponseId || "",
       };
       if (expectedType === "video") {
         events.push({
@@ -1251,6 +1592,108 @@
       if (id) ids.add(id);
     }
     return ids;
+  }
+
+  function storeContainerIds(state, expectedType) {
+    const byContainer = expectedType === "video" ? state?.videoByMediaId : state?.imageByMediaId;
+    return Object.keys(byContainer || {}).map(String).filter(Boolean);
+  }
+
+  function allCurrentIds(state, expectedType) {
+    const ids = new Set();
+    const byContainer = expectedType === "video" ? state?.videoByMediaId : state?.imageByMediaId;
+    for (const items of Object.values(byContainer || {})) {
+      for (const item of Array.isArray(items) ? items : []) {
+        const id = storeItemId(item);
+        if (id) ids.add(id);
+      }
+    }
+    return ids;
+  }
+
+  function generationContainerIds(state, primaryContainerId, tracking = null, expectedType = "image", sourceIds = []) {
+    const ids = [];
+    const add = (value) => {
+      const id = String(value?.id || value || "").trim();
+      if (id && !ids.includes(id)) ids.push(id);
+    };
+    add(primaryContainerId);
+    add(resolvedMediaId(state, primaryContainerId));
+    add(state?.currentRootContainerId);
+    add(state?.currentRootContainer);
+    add(state?.selectedRootContainerId);
+    for (const value of tracking?.containerSeedIds || []) add(value);
+    for (const sourceId of sourceIds || []) {
+      add(state?.directLoadRootContainerByChildId?.[sourceId]);
+      add(containerPostIdFor(state, sourceId));
+    }
+    for (const value of [tracking?.sourceId, tracking?.assetId, ...(tracking?.containerSeedIds || [])]) {
+      const seed = String(value || "").trim();
+      if (!seed) continue;
+      add(resolvedMediaId(state, seed));
+      add(state?.directLoadRootContainerByChildId?.[seed]);
+      add(containerPostIdFor(state, seed));
+    }
+    if (tracking?.discoverNewContainers) {
+      const beforeContainers = tracking.beforeContainerIds instanceof Set
+        ? tracking.beforeContainerIds
+        : new Set(tracking.beforeContainerIds || []);
+      const beforeItemIds = tracking.beforeItemIds instanceof Set
+        ? tracking.beforeItemIds
+        : new Set(tracking.beforeItemIds || []);
+      const byContainer = expectedType === "video" ? state?.videoByMediaId : state?.imageByMediaId;
+      for (const [candidateId, items] of Object.entries(byContainer || {})) {
+        const list = Array.isArray(items) ? items : [];
+        const hasNewItem = list.some((item) => {
+          const itemId = storeItemId(item);
+          return itemId && !beforeItemIds.has(itemId);
+        });
+        if (!beforeContainers.has(candidateId) || hasNewItem) {
+          add(candidateId);
+          add(resolvedMediaId(state, candidateId));
+          add(containerPostIdFor(state, candidateId));
+          for (const item of list) {
+            const itemId = storeItemId(item);
+            if (itemId && !beforeItemIds.has(itemId)) add(containerPostIdFor(state, itemId));
+          }
+        }
+      }
+    }
+    return ids;
+  }
+
+  function canonicalGenerationContainerId(state, containerId, tracking, events, expectedType, sourceIds = []) {
+    const excludedSourceIds = new Set([
+      tracking?.sourceId,
+      tracking?.assetId,
+      ...(tracking?.sourceContainerIds || []),
+      ...(sourceIds || []),
+    ].map((value) => String(value || "").trim()).filter(Boolean));
+    const candidates = generationContainerIds(state, containerId, tracking, expectedType, sourceIds);
+    const beforeContainerIds = tracking?.beforeContainerIds instanceof Set
+      ? tracking.beforeContainerIds
+      : new Set(tracking?.beforeContainerIds || []);
+    for (const event of events || []) {
+      const eventRoot = String(event?.containerPostId || event?.rootPostId || event?.conversationId || "").trim();
+      if (eventRoot && !candidates.includes(eventRoot)) candidates.push(eventRoot);
+      const eventId = String(event?.videoPostId || event?.videoId || event?.imageId || event?.assetId || "").trim();
+      const eventContainerId = eventId ? containerPostIdFor(state, eventId) : "";
+      if (eventContainerId && !candidates.includes(eventContainerId)) candidates.push(eventContainerId);
+    }
+    const preferred = candidates.slice().reverse().find((candidateId) => (
+      candidateId
+      && !excludedSourceIds.has(candidateId)
+      && (!tracking?.discoverNewContainers || !beforeContainerIds.has(candidateId))
+      && storeItemsForContainer(state, candidateId, expectedType).some((item) => {
+        const itemId = storeItemId(item);
+        return itemId && !(tracking?.beforeItemIds instanceof Set && tracking.beforeItemIds.has(itemId));
+      })
+    ));
+    if (preferred) return resolvedMediaId(state, preferred);
+    if (tracking?.discoverNewContainers) return "";
+    const mapped = candidates.slice().reverse().find((candidateId) => candidateId && !excludedSourceIds.has(candidateId));
+    if (mapped) return resolvedMediaId(state, mapped);
+    return resolvedMediaId(state, containerId || "");
   }
 
   function startStoreMethodCall(name, fn, args) {
@@ -1311,7 +1754,7 @@
     return Boolean(info && ["rejected", "threw"].includes(info.state) && /rate\s*limited/i.test(String(info.error || "")));
   }
 
-  async function retryRateLimitedStoreCall(name, fn, args, requestId, callState, maxRetries = 2) {
+  async function retryRateLimitedStoreCall(name, fn, args, requestId, callState, maxRetries = 2, conversationRoute = null) {
     let current = callState;
     for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
       const checkDeadline = Date.now() + 3000;
@@ -1332,12 +1775,13 @@
         error: info?.error || "",
       });
       await sleep(delayMs);
+      if (conversationRoute?.conversationId) armConversationRequestRoute(conversationRoute);
       current = startStoreMethodCall(name, fn, args);
     }
     return current;
   }
 
-  async function waitForStoreEvents(containerId, expectedType, requestId, prompt, beforeIds, timeoutMs, callState = null, record = null, tracking = null) {
+  async function waitForStoreEvents(containerId, expectedType, requestId, prompt, beforeIds, timeoutMs, callState = null, record = null, tracking = null, conversationId = "", parentResponseId = "", sourceIds = [], responseCapture = null) {
     let deadline = Number(tracking?.baseDeadlineAt || 0) || (Date.now() + timeoutMs);
     const absoluteDeadline = Number(tracking?.absoluteDeadlineAt || 0) || deadline;
     let lastEvents = [];
@@ -1347,8 +1791,11 @@
     let lastSnapshotKey = "";
     while (Date.now() < deadline) {
       const state = record ? mediaStoreStateForRecord(record) : getMediaStoreState();
+      const activeContainerIds = generationContainerIds(state, containerId, tracking, expectedType, sourceIds);
       if (expectedType === "video" && tracking) {
-        refreshTrackedVideoIds(state, containerId, beforeIds, tracking);
+        for (const activeContainerId of activeContainerIds) {
+          refreshTrackedVideoIds(state, activeContainerId, beforeIds, tracking);
+        }
         for (const trackedId of tracking.ids || []) {
           if (!trackedId || beforeIds.has(trackedId) || rememberedEvents.has(trackedId)) continue;
           rememberedEvents.set(trackedId, {
@@ -1363,9 +1810,13 @@
           });
         }
       }
-      const snapshot = storeSnapshot(state, containerId, expectedType);
+      const snapshotContainerId = activeContainerIds.slice().reverse().find((id) => (
+        storeItemsForContainer(state, id, expectedType).length > 0
+      )) || containerId;
+      const snapshot = storeSnapshot(state, snapshotContainerId, expectedType);
       const stateInfo = callState ? callState.state() : null;
       const snapshotKey = [
+        activeContainerIds.join(","),
         snapshot.itemCount,
         snapshot.lastId,
         snapshot.lastProgress,
@@ -1379,13 +1830,26 @@
           requestId,
           snapshot,
           callState: stateInfo,
+          activeContainerIds,
           trackedIds: tracking?.ids ? Array.from(tracking.ids).slice(0, 20) : [],
           pollCount,
         });
         lastSnapshotLogAt = Date.now();
         lastSnapshotKey = snapshotKey;
       }
-      lastEvents = collectStoreEvents(state, containerId, expectedType, requestId, prompt, beforeIds, tracking);
+      lastEvents = activeContainerIds.flatMap((activeContainerId) => collectStoreEvents(
+        state,
+        activeContainerId,
+        expectedType,
+        requestId,
+        prompt,
+        beforeIds,
+        tracking,
+        conversationId,
+        parentResponseId,
+        sourceIds,
+      ));
+      lastEvents.push(...generationCaptureEvents(responseCapture, expectedType, conversationId, parentResponseId));
       for (const event of lastEvents) {
         const eventId = String(event?.videoPostId || event?.videoId || event?.imageId || event?.assetId || "").trim();
         if (eventId) rememberedEvents.set(eventId, event);
@@ -1475,7 +1939,9 @@
       if (expectedType === "video" && tracking) {
         const stateName = String(stateInfo?.state || "");
         const canStopWithoutCandidate = tracking.ids?.size > 0 || ["resolved", "returned", "rejected", "threw"].includes(stateName);
-        const hasVisibleCandidate = hasVisibleVideoGenerationCandidate(state, containerId, beforeIds, tracking);
+        const hasVisibleCandidate = activeContainerIds.some((activeContainerId) => (
+          hasVisibleVideoGenerationCandidate(state, activeContainerId, beforeIds, tracking)
+        ));
         if (tracking.retainTrackedCandidateUntilDeadline && tracking.ids?.size > 0 && deadline < absoluteDeadline) {
           deadline = absoluteDeadline;
           pushStoreTrace("store_generation_tracked_candidate_deadline_retained", {
@@ -1526,9 +1992,14 @@
       await sleep(500);
     }
     const finalState = record ? mediaStoreStateForRecord(record) : getMediaStoreState();
+    const finalContainerIds = generationContainerIds(finalState, containerId, tracking, expectedType, sourceIds);
+    const finalSnapshotContainerId = finalContainerIds.slice().reverse().find((id) => (
+      storeItemsForContainer(finalState, id, expectedType).length > 0
+    )) || containerId;
     pushStoreTrace("store_generation_poll_timeout", {
       requestId,
-      snapshot: storeSnapshot(finalState, containerId, expectedType),
+      snapshot: storeSnapshot(finalState, finalSnapshotContainerId, expectedType),
+      activeContainerIds: finalContainerIds,
       callState: callState ? callState.state() : null,
       timeoutMs,
       deadline,
@@ -1544,7 +2015,7 @@
   function assetUrlFromFileUri(value) {
     const text = String(value || "").trim();
     if (!text) return "";
-    if (/^https?:\/\//.test(text)) return text;
+    if (/^(?:https?:\/\/|data:|blob:)/.test(text)) return text;
     return `https://assets.grok.com/${text.replace(/^\/+/, "")}`;
   }
 
@@ -1774,9 +2245,15 @@
     return after;
   }
 
-  function generationSourceReady(state, sourceId) {
+  function generationSourceReady(state, sourceId, rootSourceId = "") {
     const value = resolvedMediaId(state, sourceId);
     if (!value) return false;
+    const rootId = resolvedMediaId(state, rootSourceId);
+    if (rootId) {
+      if (value === rootId && state?.byId?.[rootId]) return true;
+      return hasChildItem(state?.imageByMediaId?.[rootId], value)
+        || hasChildItem(state?.videoByMediaId?.[rootId], value);
+    }
     if (state?.byId?.[value]) return true;
     for (const collection of [state?.imageByMediaId, state?.videoByMediaId]) {
       for (const items of Object.values(collection || {})) {
@@ -1789,7 +2266,7 @@
   async function hydrateGenerationSource(storeContext, sourceId, requestId, variant, rootSourceId = "", timeoutMs = 8000) {
     const value = String(sourceId || "").trim();
     let state = storeContext.record ? mediaStoreStateForRecord(storeContext.record) : getMediaStoreState();
-    if (!value || generationSourceReady(state, value)) return state;
+    if (!value || generationSourceReady(state, value, rootSourceId)) return state;
     const startedAt = Date.now();
     const deadline = startedAt + Math.max(1000, Number(timeoutMs) || 8000);
     const targets = [];
@@ -1816,7 +2293,7 @@
         sleep(Math.max(250, Math.min(4000, deadline - Date.now()))),
       ]);
       state = storeContext.record ? mediaStoreStateForRecord(storeContext.record) : getMediaStoreState();
-      if (generationSourceReady(state, value)) {
+      if (generationSourceReady(state, value, rootSourceId)) {
         pushStoreTrace("store_generation_source_hydration_ready", {
           requestId,
           variant,
@@ -1830,7 +2307,7 @@
     }
     while (Date.now() < deadline) {
       state = storeContext.record ? mediaStoreStateForRecord(storeContext.record) : getMediaStoreState();
-      if (generationSourceReady(state, value)) {
+      if (generationSourceReady(state, value, rootSourceId)) {
         pushStoreTrace("store_generation_source_hydration_ready", {
           requestId,
           variant,
@@ -1853,14 +2330,11 @@
   async function ensureContainerFromInput(state, expectedType, prompt, inputIds, urls, mimeType) {
     const existingId = firstExistingPostId(state, inputIds);
     if (existingId) return containerPostIdFor(state, existingId);
-    if (inputIds[0]) return containerPostIdFor(state, inputIds[0]);
     if (urls.length > 0 && typeof state.createMediaPostFromUrl === "function") {
       const post = await state.createMediaPostFromUrl(urls[0], mimeType || (expectedType === "video" ? "video/mp4" : "image/png"));
-      if (post?.id) {
-        if (typeof state.like === "function") state.like(post.id).catch(() => {});
-        return post.id;
-      }
+      if (post?.id) return post.id;
     }
+    if (inputIds[0]) return containerPostIdFor(state, inputIds[0]);
     if (typeof state.createMediaPostFromPrompt === "function") {
       const post = await state.createMediaPostFromPrompt(mediaTypeValue(expectedType), prompt || "");
       if (post?.id) {
@@ -1884,7 +2358,20 @@
     const rawInputAssets = Array.isArray(params.inputAssets) ? params.inputAssets.filter(Boolean) : [];
     const inputIds = rawInputAssets.map(String);
     const urls = imageReferenceUrls(payload);
-    const storeContext = preferredMediaStoreContext(inputIds);
+    const conversationId = String(payload.grokChameleonConversationId || "").trim();
+    const parentResponseId = String(payload.grokChameleonParentResponseId || "").trim();
+    const directUpload = Boolean(payload.grokChameleonDirectUpload);
+    const directUploadAssetIds = Array.isArray(payload.grokChameleonUploadAssetIds)
+      ? payload.grokChameleonUploadAssetIds.map((value) => String(value || "").trim()).filter(Boolean)
+      : [];
+    const conversationRoute = {
+      requestId,
+      modelName: payload.modelName,
+      conversationId,
+      parentResponseId,
+      directUpload,
+    };
+    const storeContext = preferredMediaStoreContext([conversationId, parentResponseId].concat(inputIds));
     let state = storeContext.state;
     const events = [{ progress: 1, requestId, nativeStore: true, variant: variant.kind }];
     pushStoreTrace("store_generation_start", {
@@ -1893,6 +2380,8 @@
       variant: variant.kind,
       inputIds,
       urls,
+      conversationId,
+      parentResponseId,
       mediaStorePath: capturedMediaStorePath,
       mediaStoreModule: capturedMediaStoreModule,
       storeId: storeContext.record?.id,
@@ -1903,7 +2392,8 @@
 
     if (payload.modelName === "imagine-image-edit" || variant.kind === "imageToImage") {
       const explicitImageContainerSeedId = String(
-        imageConfig.containerPostId
+        conversationId
+        || imageConfig.containerPostId
         || imageConfig.parentPostId
         || imageConfig.rootPostId
         || imageConfig.originalPostId
@@ -1913,7 +2403,7 @@
         || payload.originalPostId
         || ""
       ).trim();
-      if (explicitImageContainerSeedId && typeof state.resolveRootContainerForDirectLoad === "function") {
+      if (!directUpload && explicitImageContainerSeedId && typeof state.resolveRootContainerForDirectLoad === "function") {
         try {
           const userId = state?.currentUserId || state?.byId?.[explicitImageContainerSeedId]?.userId || "";
           await state.resolveRootContainerForDirectLoad(explicitImageContainerSeedId, userId);
@@ -1931,40 +2421,65 @@
         : "";
       const containerId = explicitImageContainerId || await ensureContainerFromInput(state, "image", prompt, inputIds, urls, "image/png");
       if (!containerId) throw new Error("Official image edit container could not be resolved.");
-      const parentPostId = imageConfig.parentPostId || inputIds[0] || containerId;
-      state = await hydrateGenerationSource(
-        storeContext,
-        parentPostId || inputIds[0] || containerId,
+      const parentPostId = directUpload ? undefined : (imageConfig.parentPostId || inputIds[0] || containerId);
+      if (!directUpload) {
+        state = await hydrateGenerationSource(
+          storeContext,
+          parentPostId || inputIds[0] || containerId,
+          requestId,
+          variant.kind,
+          containerId,
+        );
+        syncCurrentRootContainer(state, requestId, variant.kind, containerId);
+      }
+      state = ensureStoreLoginState(
+        state,
+        storeContext.record,
         requestId,
-        variant.kind,
-        containerId,
+        "fetchGenerateImageEdits",
+        [containerId].concat(inputIds, directUploadAssetIds),
       );
-      syncCurrentRootContainer(state, requestId, variant.kind, containerId);
-      state = ensureStoreLoginState(state, storeContext.record, requestId, "fetchGenerateImageEdits", [containerId].concat(inputIds));
-      syncCurrentRootContainer(state, requestId, variant.kind, containerId);
-      const beforeIds = currentIds(state, containerId, "image");
+      if (!directUpload) syncCurrentRootContainer(state, requestId, variant.kind, containerId);
+      const beforeIds = directUpload ? allCurrentIds(state, "image") : currentIds(state, containerId, "image");
       for (const sourceId of [containerId, parentPostId, inputIds[0]]) {
         const value = String(sourceId || "").trim();
         if (value) beforeIds.add(value);
       }
       if (typeof state.fetchGenerateImageEdits !== "function") throw new Error("Official fetchGenerateImageEdits is missing.");
-      const args = [{
+      const imageArgs = {
         imageUrls: urls,
         prompt: prompt || " ",
-        containerPostId: containerId,
-        parentPostId,
         source: "imagine_feed_query_bar",
         isRedo: false,
-        numOfImages: params.numOfImages,
-        aspectRatio: params.aspectRatio || imageConfig.aspectRatio,
-        resolutionName: params.resolutionName || imageConfig.resolutionName,
-        mediaGenInput: payload.mediaGenInput,
-      }];
+      };
+      if (!directUpload) {
+        imageArgs.containerPostId = containerId;
+        imageArgs.parentPostId = parentPostId;
+        imageArgs.conversationId = conversationId || undefined;
+        imageArgs.parentResponseId = parentResponseId || undefined;
+        imageArgs.numOfImages = params.numOfImages;
+        imageArgs.mediaGenInput = payload.mediaGenInput;
+      }
+      const requestedAspectRatio = params.aspectRatio || imageConfig.aspectRatio;
+      const requestedResolution = params.resolutionName || imageConfig.resolutionName;
+      if (requestedAspectRatio) imageArgs.aspectRatio = requestedAspectRatio;
+      if (requestedResolution) imageArgs.resolutionName = requestedResolution;
+      const args = [imageArgs];
+      const imageTracking = {
+        sourceId: directUploadAssetIds[0] || inputIds[0] || containerId,
+        assetId: directUploadAssetIds[0] || inputIds[0] || "",
+        sourceContainerIds: directUpload ? [containerId] : [],
+        containerSeedIds: [containerId, explicitImageContainerSeedId].filter(Boolean),
+        beforeContainerIds: new Set(storeContainerIds(state, "image")),
+        beforeItemIds: beforeIds,
+        discoverNewContainers: directUpload,
+      };
       pushStoreTrace("store_generation_image_args", {
         requestId,
         containerId,
         parentPostId,
         explicitImageContainerSeedId,
+        directUpload,
         beforeIds: Array.from(beforeIds),
         snapshot: storeSnapshot(mediaStoreStateForRecord(storeContext.record), containerId, "image"),
         storeId: storeContext.record?.id,
@@ -1973,16 +2488,62 @@
         matchedBy: storeContext.matchedBy,
         args,
       });
+      const imageResponseCapture = armGenerationResponseCapture({
+        requestId,
+        modelName: payload.modelName,
+        expectedType: "image",
+        prompt,
+      });
+      if (conversationId) armConversationRequestRoute(conversationRoute);
       const callState = startStoreMethodCall("fetchGenerateImageEdits", state.fetchGenerateImageEdits.bind(state), args);
-      const resultEvents = await waitForStoreEvents(containerId, "image", requestId, prompt, beforeIds, Math.max(3000, maxWaitMs || 30000), callState, storeContext.record);
+      let resultEvents = await waitForStoreEvents(
+        containerId,
+        "image",
+        requestId,
+        prompt,
+        beforeIds,
+        Math.max(3000, maxWaitMs || 30000),
+        callState,
+        storeContext.record,
+        imageTracking,
+        conversationId,
+        parentResponseId,
+        inputIds,
+        imageResponseCapture,
+      );
+      const finalState = storeContext.record ? mediaStoreStateForRecord(storeContext.record) : getMediaStoreState();
+      const captureCanonicalContainerId = directUpload
+        ? generationCaptureCanonicalId(
+          imageResponseCapture,
+          resultEvents,
+          "image",
+          [containerId, ...inputIds, ...directUploadAssetIds],
+        )
+        : "";
+      const canonicalContainerId = directUpload
+        ? (
+          captureCanonicalContainerId
+          || canonicalGenerationContainerId(finalState, containerId, imageTracking, resultEvents, "image", inputIds)
+        )
+        : "";
+      if (directUpload && canonicalContainerId) {
+        resultEvents = resultEvents.map((event) => ({
+          ...event,
+          containerPostId: canonicalContainerId,
+          rootPostId: canonicalContainerId,
+          conversationId: event?.conversationId || canonicalContainerId,
+        }));
+      }
+      releaseGenerationResponseCapture(imageResponseCapture);
       return {
         ok: true,
         status: 200,
         text: "",
         events: events.concat(resultEvents),
-        resolvedContainerId: containerId,
-        resolvedParentPostId: parentPostId,
-        sourceContainerId: explicitImageContainerSeedId,
+        canonicalContainerId,
+        resolvedContainerId: canonicalContainerId || containerId,
+        resolvedParentPostId: parentPostId || "",
+        sourceContainerId: directUpload ? containerId : explicitImageContainerSeedId,
         baselineIds: Array.from(beforeIds),
         elapsedMs: Date.now() - startedAt,
         bridgeStatus: this.status(),
@@ -2035,12 +2596,16 @@
         ? (inputIds[0] || videoConfig.extendPostId || videoConfig.parentPostId || "")
         : (inputIds[0] || videoConfig.parentPostId || "");
       const explicitRootSeedId = (variant.kind === "imageToVideo" || variant.kind === "referenceToVideo")
-        ? (videoConfig.rootPostId || videoConfig.originalPostId || fileAttachmentIds[0] || "")
-        : (variant.kind === "videoExtension" ? (videoConfig.rootPostId || "") : "");
+        ? (conversationId || videoConfig.rootPostId || videoConfig.originalPostId || fileAttachmentIds[0] || "")
+        : (variant.kind === "videoExtension" ? (conversationId || videoConfig.rootPostId || "") : "");
       const rootSeedId = (variant.kind === "imageToVideo" || variant.kind === "referenceToVideo")
         ? (explicitRootSeedId || videoSeedId)
         : (videoConfig.rootPostId || videoConfig.originalPostId || videoSeedId);
-      if (videoSeedId && typeof state.resolveRootContainerForDirectLoad === "function") {
+      if (directUpload && !conversationId && videoSeedId && !generationSourceReady(state, videoSeedId) && urls.length > 0) {
+        await ensureContainerFromInput(state, "image", prompt, inputIds, urls, "image/png");
+        state = storeContext.record ? mediaStoreStateForRecord(storeContext.record) : getMediaStoreState();
+      }
+      if (!directUpload && videoSeedId && typeof state.resolveRootContainerForDirectLoad === "function") {
         try {
           const userId = state?.currentUserId || state?.byId?.[videoSeedId]?.userId || "";
           await state.resolveRootContainerForDirectLoad(videoSeedId, userId);
@@ -2085,8 +2650,8 @@
           ? videoConfig.imageReferences.map((value) => String(value || "").trim()).filter(Boolean)
           : [];
         const existingParentId = firstExistingPostId(state, inputIds);
-        parentPostId = videoConfig.parentPostId || existingParentId || inputIds[0] || undefined;
-        videoInputAsset = parentPostId || rawInputAssets[0] || inputIds[0] || undefined;
+        parentPostId = directUpload ? undefined : (videoConfig.parentPostId || existingParentId || inputIds[0] || undefined);
+        videoInputAsset = directUploadAssetIds[0] || parentPostId || rawInputAssets[0] || inputIds[0] || undefined;
         containerId = rootContainerId || videoConfig.rootPostId || videoConfig.originalPostId || parentPostId || videoInputAsset || await ensureContainerFromInput(state, "video", prompt, inputIds, urls, "video/mp4");
         const extraReferenceUrls = explicitReferenceUrls.length > 1
           ? explicitReferenceUrls.slice(1)
@@ -2101,8 +2666,8 @@
         imageReferences = undefined;
       } else {
         const existingParentId = firstExistingPostId(state, inputIds);
-        parentPostId = existingParentId || videoConfig.parentPostId || inputIds[0] || undefined;
-        videoInputAsset = rawInputAssets[0] || parentPostId;
+        parentPostId = directUpload ? undefined : (existingParentId || videoConfig.parentPostId || inputIds[0] || undefined);
+        videoInputAsset = directUploadAssetIds[0] || rawInputAssets[0] || parentPostId;
         containerId = rootContainerId || videoConfig.rootPostId || videoConfig.originalPostId || videoInputAsset || parentPostId || await ensureContainerFromInput(state, "image", prompt, inputIds, urls, "image/png");
         if (containerId && videoInputAsset && containerId !== videoInputAsset) {
           pushStoreTrace("store_generation_source_link_skipped", {
@@ -2133,21 +2698,28 @@
         aspectRatio: params.aspectRatio || videoConfig.aspectRatio,
         durationSeconds,
       });
-      if (variant.kind === "imageToVideo" || variant.kind === "referenceToVideo" || variant.kind === "videoExtension") {
+      if (!directUpload && (variant.kind === "imageToVideo" || variant.kind === "referenceToVideo" || variant.kind === "videoExtension")) {
         syncCurrentRootContainer(state, requestId, variant.kind, containerId);
       }
-      state = ensureStoreLoginState(state, storeContext.record, requestId, "generateVideoForImage", [containerId, videoInputAsset, parentPostId, extendPostId].concat(inputIds));
-      if (variant.kind === "imageToVideo" || variant.kind === "referenceToVideo" || variant.kind === "videoExtension") {
+      state = ensureStoreLoginState(state, storeContext.record, requestId, "generateVideoForImage", [containerId, videoInputAsset, parentPostId, extendPostId].concat(inputIds, directUploadAssetIds));
+      if (!directUpload && (variant.kind === "imageToVideo" || variant.kind === "referenceToVideo" || variant.kind === "videoExtension")) {
         syncCurrentRootContainer(state, requestId, variant.kind, containerId);
       }
       generateVideoMethod = resolveStoreMethod(state, storeContext.record, "generateVideoForImage");
       if (!generateVideoMethod.fn && !useOfficialUiAction) throw new Error("Official generateVideoForImage is missing.");
-      const beforeIds = currentIds(state, containerId, "video");
+      const beforeIds = directUpload ? allCurrentIds(state, "video") : currentIds(state, containerId, "video");
       const baseDeadlineAt = startedAt + (tieredI2vWait
         ? officialVideoWaitMs
         : Math.max(3000, Number(maxWaitMs || 90000)));
       const videoTracking = {
         ids: new Set(),
+        sourceId: videoInputAsset || parentPostId || extendPostId || "",
+        assetId: directUploadAssetIds[0] || "",
+        sourceContainerIds: directUpload ? [containerId] : [],
+        containerSeedIds: [containerId, rootContainerId, explicitRootSeedId].filter(Boolean),
+        beforeContainerIds: new Set(storeContainerIds(state, "video")),
+        beforeItemIds: beforeIds,
+        discoverNewContainers: directUpload,
         startedAt: Date.now(),
         waitTier: videoWaitTier,
         retainTrackedCandidateUntilDeadline: tieredI2vWait,
@@ -2239,17 +2811,65 @@
       if (useOfficialUiAction) {
         callState = await clickOfficialVideoAction({ requestId, variant: variant.kind, prompt });
       } else {
+        const videoResponseCapture = armGenerationResponseCapture({
+          requestId,
+          modelName: payload.modelName,
+          expectedType: "video",
+          prompt,
+        });
+        if (conversationId) armConversationRequestRoute(conversationRoute);
         callState = startStoreMethodCall("generateVideoForImage", generateVideoMethod.fn, args);
-        callState = await retryRateLimitedStoreCall("generateVideoForImage", generateVideoMethod.fn, args, requestId, callState, 2);
+        callState = await retryRateLimitedStoreCall("generateVideoForImage", generateVideoMethod.fn, args, requestId, callState, 2, conversationRoute);
+        videoTracking.responseCapture = videoResponseCapture;
       }
+      const videoResponseCapture = videoTracking.responseCapture || null;
       const remainingWaitMs = Math.max(1000, videoTracking.baseDeadlineAt - Date.now());
-      const resultEvents = await waitForStoreEvents(containerId, "video", requestId, prompt, beforeIds, remainingWaitMs, callState, storeContext.record, videoTracking);
+      let resultEvents = await waitForStoreEvents(
+        containerId,
+        "video",
+        requestId,
+        prompt,
+        beforeIds,
+        remainingWaitMs,
+        callState,
+        storeContext.record,
+        videoTracking,
+        conversationId,
+        parentResponseId,
+        inputIds,
+        videoResponseCapture,
+      );
+      const finalState = storeContext.record ? mediaStoreStateForRecord(storeContext.record) : getMediaStoreState();
+      const captureCanonicalContainerId = directUpload
+        ? generationCaptureCanonicalId(
+          videoResponseCapture,
+          resultEvents,
+          "video",
+          [containerId, ...inputIds, ...directUploadAssetIds],
+        )
+        : "";
+      const canonicalContainerId = directUpload
+        ? (
+          captureCanonicalContainerId
+          || canonicalGenerationContainerId(finalState, containerId, videoTracking, resultEvents, "video", inputIds)
+        )
+        : "";
+      if (directUpload && canonicalContainerId) {
+        resultEvents = resultEvents.map((event) => ({
+          ...event,
+          containerPostId: canonicalContainerId,
+          rootPostId: canonicalContainerId,
+          conversationId: event?.conversationId || canonicalContainerId,
+        }));
+      }
+      releaseGenerationResponseCapture(videoResponseCapture);
       return {
         ok: true,
         status: 200,
         text: "",
         events: events.concat(resultEvents),
-        resolvedContainerId: containerId,
+        canonicalContainerId,
+        resolvedContainerId: canonicalContainerId || containerId,
         resolvedParentPostId: parentPostId || videoInputAsset || extendPostId || "",
         sourceContainerId: rootContainerId || videoConfig.rootPostId || videoConfig.originalPostId || "",
         baselineIds: Array.from(beforeIds),

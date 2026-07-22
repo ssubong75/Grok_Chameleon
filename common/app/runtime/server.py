@@ -662,6 +662,8 @@ def imagine_debug_attachment_summary(payload: dict) -> list[dict]:
             "parent_post_id": extract_imagine_post_id_from_text(attachment.get("parent_post_id")),
             "original_post_id": extract_imagine_post_id_from_text(attachment.get("original_post_id")),
             "root_post_id": extract_imagine_post_id_from_text(attachment.get("root_post_id")),
+            "conversation_id": str(attachment.get("conversation_id") or "")[:80],
+            "response_id": str(attachment.get("response_id") or attachment.get("parent_response_id") or "")[:80],
             "raw_url": imagine_debug_compact_url(attachment.get("raw_url")),
             "source_url": imagine_debug_compact_url(attachment.get("source_url")),
             "remote_url": imagine_debug_compact_url(attachment.get("remote_url")),
@@ -1389,16 +1391,11 @@ def imagine_post_json(path: str, payload: dict, account: dict, timeout: int = 12
 
 def verify_imagine_saved_access(account: dict) -> None:
     try:
-        imagine_post_json(
-            "/rest/media/post/list",
-            {
-                "limit": 1,
-                "includeCanvas": False,
-                "filter": {
-                    "source": "MEDIA_POST_SOURCE_LIKED",
-                    "safeForWork": False,
-                },
-            },
+        imagine_get_json(
+            "/rest/app-chat/conversations?" + urlencode({
+                "pageSize": "1",
+                "kind": "CONVERSATION_KIND_IMAGINE",
+            }),
             account,
             timeout=12,
         )
@@ -2390,6 +2387,363 @@ def imagine_discover_post_from_root(root_post: dict, account: dict) -> dict | No
     return post
 
 
+def imagine_conversation_media_gen(asset: dict) -> dict:
+    media_gen_input = asset.get("mediaGenInput") if isinstance(asset.get("mediaGenInput"), dict) else {}
+    for action, value in media_gen_input.items():
+        if not isinstance(value, dict):
+            continue
+        input_assets = value.get("inputAssets") if isinstance(value.get("inputAssets"), list) else []
+        return {
+            "action": str(action or ""),
+            "prompt": imagine_text_value(value.get("prompt")),
+            "input_assets": [str(item) for item in input_assets if str(item or "").strip()],
+            "model": str(value.get("modelName") or ""),
+            "resolution_name": str(value.get("resolutionName") or ""),
+            "video_duration": value.get("duration") or "",
+            "video_extension_start_time": value.get("videoExtensionStartTime") or "",
+        }
+    return {
+        "action": "",
+        "prompt": "",
+        "input_assets": [],
+        "model": "",
+        "resolution_name": "",
+        "video_duration": "",
+        "video_extension_start_time": "",
+    }
+
+
+def imagine_conversation_request_prompt(value) -> str:
+    text = imagine_text_value(value).strip()
+    if not text:
+        return ""
+    text = re.sub(r"\s+--mode(?:=|\s+)\S+\s*$", "", text, flags=re.IGNORECASE).strip()
+    for pattern in (
+        r"^I edited the image with the prompt:\s*(['\"])(.*)\1\s*$",
+        r"^I generated (?:an image|a video) with the prompt:\s*(['\"])(.*)\1\s*$",
+    ):
+        match = re.match(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+        if match:
+            return match.group(2).strip()
+    return text
+
+
+def imagine_conversation_asset_item(
+    asset: dict,
+    conversation_id: str,
+    response: dict,
+    parent_asset_ids: list[str],
+    parent_response: dict,
+    account: dict,
+) -> dict | None:
+    if not isinstance(asset, dict):
+        return None
+    asset_id = str(asset.get("assetId") or asset.get("id") or "").strip()
+    raw_url = imagine_asset_url(str(asset.get("key") or asset.get("mediaUrl") or asset.get("url") or ""))
+    mime_type = str(asset.get("mimeType") or asset.get("mime_type") or "").lower()
+    kind = "video" if mime_type.startswith("video/") else "image" if mime_type.startswith("image/") else ""
+    if not kind:
+        kind = imagine_node_media_type(asset, raw_url)
+    if not asset_id or not raw_url or kind not in {"image", "video"}:
+        return None
+
+    aux_keys = asset.get("auxKeys") if isinstance(asset.get("auxKeys"), dict) else {}
+    raw_thumbnail = imagine_asset_url(str(
+        asset.get("previewImageKey")
+        or aux_keys.get("preview-image")
+        or aux_keys.get("preview_image")
+        or ""
+    ))
+    media_gen = imagine_conversation_media_gen(asset)
+    input_assets = list(media_gen.get("input_assets") or [])
+    if not input_assets and str(response.get("sender") or "").upper() == "ASSISTANT":
+        input_assets = [str(item) for item in parent_asset_ids if str(item or "").strip()]
+    source_item_id = next((item for item in input_assets if item != asset_id), "")
+    created_at = imagine_post_time(asset)
+    response_id = str(response.get("responseId") or response.get("id") or asset.get("responseId") or "").strip()
+    is_model_generated = bool(asset.get("isModelGenerated"))
+    file_source = str(asset.get("fileSource") or "")
+    is_upload = not is_model_generated or "UPLOAD" in file_source.upper()
+    prompt = "" if is_upload else (
+        imagine_conversation_request_prompt(media_gen.get("prompt"))
+        or imagine_conversation_request_prompt(parent_response.get("message") if isinstance(parent_response, dict) else "")
+        or imagine_conversation_request_prompt(response.get("message"))
+        or imagine_conversation_request_prompt(asset.get("summary"))
+    )
+    role = "source" if is_upload else "result"
+    relation = "upload" if is_upload else str(media_gen.get("action") or "generated")
+    try:
+        width = int(asset.get("width") or 0)
+        height = int(asset.get("height") or 0)
+    except (TypeError, ValueError):
+        width = 0
+        height = 0
+    account_id_value = str(account.get("id") or "")
+    account_email = str(account.get("email") or "")
+    proxied_url = imagine_saved_proxy_url(raw_url, kind, account_id_value)
+    proxied_thumbnail = (
+        imagine_saved_proxy_url(raw_thumbnail, "image", account_id_value)
+        if raw_thumbnail
+        else (proxied_url if kind == "image" else "")
+    )
+    imagine_metadata = {
+        "post_id": asset_id,
+        "asset_id": asset_id,
+        "root_post_id": conversation_id,
+        "conversation_id": conversation_id,
+        "response_id": response_id,
+        "media_url": raw_url,
+        "media_type": kind,
+        "source_item_id": source_item_id,
+        "original_post_id": source_item_id,
+        "parent_post_id": source_item_id,
+        "account_id": account_id_value,
+        "account_email": account_email,
+        "remote_view": "saved",
+        "liked": True,
+        "generated_action": str(media_gen.get("action") or ""),
+    }
+    metadata = {
+        "asset_id": asset_id,
+        "response_id": response_id,
+        "conversation_id": conversation_id,
+        "remote_url": raw_url,
+        "media_url": raw_url,
+        "thumbnail_url": raw_thumbnail,
+        "remote_view": "saved",
+        "liked": True,
+        "imagine": imagine_metadata,
+    }
+    return {
+        "item_id": asset_id,
+        "post_id": asset_id,
+        "asset_id": asset_id,
+        "type": kind,
+        "file": "",
+        "url": raw_url,
+        "remote_url": raw_url,
+        "object_url": proxied_url,
+        "thumbnail_url": proxied_thumbnail,
+        "mime_type": mime_type or ("video/mp4" if kind == "video" else "image/*"),
+        "role": role,
+        "relation": relation,
+        "source_item_id": source_item_id,
+        "original_post_id": source_item_id,
+        "parent_post_id": source_item_id,
+        "root_post_id": conversation_id,
+        "prompt": prompt,
+        "created_at": created_at,
+        "width": width,
+        "height": height,
+        "aspect_ratio": f"{width}:{height}" if width > 0 and height > 0 else "",
+        "model": str(media_gen.get("model") or ""),
+        "resolution_name": str(media_gen.get("resolution_name") or ""),
+        "video_duration": media_gen.get("video_duration") or "",
+        "video_extension_start_time": media_gen.get("video_extension_start_time") or "",
+        "metadata": metadata,
+        "liked": True,
+        "favorite": True,
+    }
+
+
+def imagine_conversation_root_generation(responses: list[dict]) -> dict:
+    response_by_id = {
+        str(response.get("responseId") or response.get("id") or ""): response
+        for response in responses
+        if isinstance(response, dict)
+    }
+    for response in responses:
+        if not isinstance(response, dict):
+            continue
+        attachments = response.get("fileAttachmentAssetMetadata") if isinstance(response.get("fileAttachmentAssetMetadata"), list) else []
+        generated_assets = [
+            asset for asset in attachments
+            if isinstance(asset, dict) and bool(asset.get("isModelGenerated"))
+        ]
+        for asset in generated_assets:
+            parent_response = response_by_id.get(str(response.get("parentResponseId") or ""), {})
+            parent_attachments = (
+                parent_response.get("fileAttachmentAssetMetadata")
+                if isinstance(parent_response, dict) and isinstance(parent_response.get("fileAttachmentAssetMetadata"), list)
+                else []
+            )
+            media_gen_sources = [
+                source for source in (asset, response, parent_response)
+                if isinstance(source, dict)
+            ]
+            media_gen = next(
+                (value for value in (imagine_conversation_media_gen(source) for source in media_gen_sources) if value.get("action")),
+                imagine_conversation_media_gen(asset),
+            )
+            action = str(media_gen.get("action") or "").strip()
+            requested_count = 0
+            for source in media_gen_sources:
+                media_gen_input = source.get("mediaGenInput") if isinstance(source.get("mediaGenInput"), dict) else {}
+                for config in media_gen_input.values():
+                    if not isinstance(config, dict):
+                        continue
+                    try:
+                        requested_count = max(requested_count, int(config.get("numOfImages") or config.get("num_images") or 0))
+                    except (TypeError, ValueError):
+                        pass
+            mime_type = str(asset.get("mimeType") or asset.get("mime_type") or "").lower()
+            kind = "video" if mime_type.startswith("video/") else "image" if mime_type.startswith("image/") else ""
+            if not kind:
+                raw_url = imagine_asset_url(str(asset.get("key") or asset.get("mediaUrl") or asset.get("url") or ""))
+                kind = imagine_node_media_type(asset, raw_url)
+            normalized_action = re.sub(r"[^a-z0-9]", "", action.lower())
+            is_t2i_root = kind == "image" and (
+                normalized_action == "texttoimage"
+                or (not normalized_action and not parent_attachments)
+            )
+            is_t2i_group_container = is_t2i_root and max(len(generated_assets), requested_count) > 1
+            return {
+                "action": action,
+                "type": kind,
+                "asset_id": str(asset.get("assetId") or asset.get("id") or "").strip(),
+                "has_input_assets": bool(parent_attachments),
+                "generated_asset_count": len(generated_assets),
+                "requested_count": requested_count,
+                "is_t2i_group_container": is_t2i_group_container,
+            }
+    return {
+        "action": "",
+        "type": "",
+        "asset_id": "",
+        "has_input_assets": False,
+        "generated_asset_count": 0,
+        "requested_count": 0,
+        "is_t2i_group_container": False,
+    }
+
+
+def imagine_saved_post_from_conversation(conversation: dict, detail: dict, account: dict) -> dict | None:
+    if not isinstance(conversation, dict):
+        return None
+    conversation_id = str(conversation.get("conversationId") or conversation.get("id") or "").strip()
+    latest_asset = conversation.get("latestAssetMetadata") if isinstance(conversation.get("latestAssetMetadata"), dict) else {}
+    if not conversation_id or not latest_asset:
+        return None
+
+    responses = detail.get("responses") if isinstance(detail, dict) and isinstance(detail.get("responses"), list) else []
+    root_generation = imagine_conversation_root_generation(responses)
+    response_by_id = {
+        str(response.get("responseId") or response.get("id") or ""): response
+        for response in responses
+        if isinstance(response, dict)
+    }
+    items_by_id: dict[str, dict] = {}
+    for response in responses:
+        if not isinstance(response, dict):
+            continue
+        parent_response = response_by_id.get(str(response.get("parentResponseId") or ""), {})
+        parent_attachments = (
+            parent_response.get("fileAttachmentAssetMetadata")
+            if isinstance(parent_response, dict) and isinstance(parent_response.get("fileAttachmentAssetMetadata"), list)
+            else []
+        )
+        parent_asset_ids = [
+            str(asset.get("assetId") or asset.get("id") or "")
+            for asset in parent_attachments
+            if isinstance(asset, dict)
+        ]
+        attachments = response.get("fileAttachmentAssetMetadata") if isinstance(response.get("fileAttachmentAssetMetadata"), list) else []
+        for asset in attachments:
+            item = imagine_conversation_asset_item(
+                asset,
+                conversation_id,
+                response,
+                parent_asset_ids,
+                parent_response,
+                account,
+            )
+            if not item:
+                continue
+            item_id = str(item.get("item_id") or "")
+            if item_id and item_id not in items_by_id:
+                items_by_id[item_id] = item
+
+    latest_response = response_by_id.get(str(latest_asset.get("responseId") or ""), {})
+    latest_parent_response = response_by_id.get(str(latest_response.get("parentResponseId") or ""), {})
+    latest_parent_attachments = (
+        latest_parent_response.get("fileAttachmentAssetMetadata")
+        if isinstance(latest_parent_response, dict) and isinstance(latest_parent_response.get("fileAttachmentAssetMetadata"), list)
+        else []
+    )
+    latest_parent_asset_ids = [
+        str(asset.get("assetId") or asset.get("id") or "")
+        for asset in latest_parent_attachments
+        if isinstance(asset, dict)
+    ]
+    latest_item = imagine_conversation_asset_item(
+        latest_asset,
+        conversation_id,
+        latest_response,
+        latest_parent_asset_ids,
+        latest_parent_response,
+        account,
+    )
+    if latest_item:
+        items_by_id.setdefault(str(latest_item.get("item_id") or ""), latest_item)
+    items = list(items_by_id.values())
+    if not items:
+        return None
+    items.sort(key=lambda item: str(item.get("created_at") or ""))
+
+    latest_asset_id = str(latest_asset.get("assetId") or latest_asset.get("id") or "").strip()
+    representative = items_by_id.get(latest_asset_id) or items[-1]
+    title = str(conversation.get("title") or representative.get("prompt") or "Imagine").strip().splitlines()[0][:80]
+    prompt = str(representative.get("prompt") or conversation.get("title") or "").strip()
+    account_id_value = str(account.get("id") or "")
+    account_email = str(account.get("email") or "")
+    return {
+        "post_id": conversation_id,
+        "source": "imagine",
+        "mode": "saved",
+        "area": "imagine_remote",
+        "remote": True,
+        "liked": True,
+        "favorite": True,
+        "t2i_group_container": bool(root_generation.get("is_t2i_group_container")),
+        "title": title or "Imagine",
+        "prompt": prompt,
+        "created_at": imagine_post_time(conversation),
+        "folder_path": f"imagine_saved/{conversation_id}",
+        "folderName": title or conversation_id,
+        "representative": representative.get("url") or representative.get("item_id") or "",
+        "representative_item": representative,
+        "items": items,
+        "account_id": account_id_value,
+        "account_email": account_email,
+        "metadata": {
+            "imagine_root_post_id": conversation_id,
+            "raw_root_post_id": conversation_id,
+            "conversation_id": conversation_id,
+            "latest_asset_id": latest_asset_id,
+            "remote_view": "saved",
+            "saved_content_view": "conversations",
+            "grouped": True,
+            "root_generation_action": root_generation.get("action") or "",
+            "root_generation_type": root_generation.get("type") or "",
+            "root_generation_asset_id": root_generation.get("asset_id") or "",
+            "root_generation_has_input_assets": bool(root_generation.get("has_input_assets")),
+            "root_generation_asset_count": int(root_generation.get("generated_asset_count") or 0),
+            "root_generation_requested_count": int(root_generation.get("requested_count") or 0),
+            "t2i_group_container": bool(root_generation.get("is_t2i_group_container")),
+            "liked": True,
+        },
+    }
+
+
+def imagine_conversation_detail(conversation_id: str, account: dict) -> dict:
+    query = urlencode({"conversationKind": "CONVERSATION_KIND_IMAGINE"})
+    return imagine_get_json(
+        f"/rest/app-chat/conversations/{quote(conversation_id, safe='')}/responses?{query}",
+        account,
+        timeout=20,
+    )
+
+
 def list_imagine_saved(payload: dict) -> dict:
     root = library_root()
     if not root:
@@ -2401,20 +2755,20 @@ def list_imagine_saved(payload: dict) -> dict:
         limit = int((payload or {}).get("limit") or 20)
     except (TypeError, ValueError):
         limit = 20
-    limit = max(1, limit)
+    limit = min(40, max(1, limit))
     cursor = str((payload or {}).get("cursor") or "").strip()
-    request_payload = {
-        "limit": limit,
-        "includeCanvas": False,
-        "filter": {
-            "source": "MEDIA_POST_SOURCE_LIKED",
-            "safeForWork": False,
-        },
+    query_params = {
+        "pageSize": str(limit),
+        "kind": "CONVERSATION_KIND_IMAGINE",
     }
     if cursor:
-        request_payload["cursor"] = cursor
+        query_params["pageToken"] = cursor
     try:
-        data = imagine_post_json("/rest/media/post/list", request_payload, account)
+        data = imagine_get_json(
+            "/rest/app-chat/conversations?" + urlencode(query_params),
+            account,
+            timeout=20,
+        )
     except RuntimeError as exc:
         message = str(exc)
         if "Imagine HTTP 401" in message or "not authorized" in message.lower():
@@ -2431,13 +2785,36 @@ def list_imagine_saved(payload: dict) -> dict:
                 write_imagine_auth(root, files["imagine"])
             raise RuntimeError("Imagine login expired. Register the account again.") from exc
         raise
-    root_posts = data.get("posts") if isinstance(data.get("posts"), list) else []
-    library_snapshot = merge_library_json(read_json(root / "library.json", {}))
-    posts = [
-        imagine_apply_generated_relations(post, root, account, library_snapshot)
-        for post in (imagine_saved_post_from_root(item, account) for item in root_posts)
-        if post
+    conversations = data.get("conversations") if isinstance(data.get("conversations"), list) else []
+    conversations = [
+        conversation
+        for conversation in conversations
+        if isinstance(conversation, dict) and isinstance(conversation.get("latestAssetMetadata"), dict)
     ]
+    details: dict[str, dict] = {}
+    if conversations:
+        with ThreadPoolExecutor(max_workers=min(8, len(conversations))) as executor:
+            futures = {
+                executor.submit(imagine_conversation_detail, str(conversation.get("conversationId") or ""), account): str(conversation.get("conversationId") or "")
+                for conversation in conversations
+                if str(conversation.get("conversationId") or "").strip()
+            }
+            for future in as_completed(futures):
+                conversation_id = futures[future]
+                try:
+                    details[conversation_id] = future.result()
+                except Exception as exc:
+                    details[conversation_id] = {}
+                    imagine_debug_event("saved_conversation_detail_failed", {
+                        "conversation_id": conversation_id,
+                        "error": str(exc)[:400],
+                    })
+    posts = []
+    for conversation in conversations:
+        conversation_id = str(conversation.get("conversationId") or "")
+        post = imagine_saved_post_from_conversation(conversation, details.get(conversation_id, {}), account)
+        if post:
+            posts.append(post)
     return {
         "ok": True,
         "source": "saved",
@@ -2445,8 +2822,8 @@ def list_imagine_saved(payload: dict) -> dict:
         "posts": posts,
         "items": posts,
         "cursor": cursor,
-        "next_cursor": str(data.get("nextCursor") or ""),
-        "has_more": bool(data.get("nextCursor")),
+        "next_cursor": str(data.get("nextPageToken") or ""),
+        "has_more": bool(data.get("nextPageToken")),
         "imagine": {
             "id": account.get("id") or "",
             "email": account.get("email") or "",
@@ -3809,6 +4186,37 @@ def imagine_attachment_id(attachment: dict, *keys: str) -> str:
     return ""
 
 
+def imagine_source_conversation_context(payload: dict, attachment: dict | None) -> tuple[str, str]:
+    source = attachment if isinstance(attachment, dict) else {}
+    if source.get("_imagine_uploaded_direct") or imagine_attachment_upload_like(source):
+        return "", ""
+    conversation_id = str(
+        source.get("conversation_id")
+        or source.get("source_conversation_id")
+        or payload.get("source_conversation_id")
+        or payload.get("conversation_id")
+        or ""
+    ).strip()
+    parent_response_id = str(
+        source.get("parent_response_id")
+        or source.get("response_id")
+        or payload.get("parent_response_id")
+        or ""
+    ).strip()
+    return conversation_id, parent_response_id
+
+
+def imagine_detail_referer(post_id: str, conversation_id: str = "") -> str:
+    post_value = str(post_id or "").strip()
+    conversation_value = str(conversation_id or "").strip()
+    if not post_value:
+        return IMAGINE_BASE + "/imagine"
+    path = IMAGINE_BASE + "/imagine/post/" + quote(post_value, safe="")
+    if conversation_value:
+        path += "?" + urlencode({"conversation": conversation_value})
+    return path
+
+
 def imagine_attachment_upload_file_name(attachment: dict, mime_type: str) -> str:
     raw_name = str(attachment.get("name") or attachment.get("file") or attachment.get("title") or "").strip()
     name = safe_name(Path(raw_name).name, "") if raw_name else ""
@@ -4420,6 +4828,8 @@ def imagine_direct_job_context(payload: dict) -> dict:
         "preview_type": str(payload.get("preview_type") or imagine_direct_job_kind(payload)),
         "source_post_path": str(payload.get("source_post_path") or ""),
         "source_item_id": str(payload.get("source_item_id") or ""),
+        "source_conversation_id": str(payload.get("source_conversation_id") or ""),
+        "parent_response_id": str(payload.get("parent_response_id") or ""),
         "aspect_ratio": aspect_ratio,
         "resolution": str(options.get("resolution") or ""),
         "duration": str(options.get("duration") or ""),
@@ -5464,6 +5874,9 @@ def imagine_collect_media_candidates(events: list, expected_type: str, ignored_u
             "type": kind_value,
             "key": key,
             "post_id": imagine_media_node_post_id(node or {}, raw_url if not is_data_url else "", file_stem(path_name)),
+            "conversation_id": str((node or {}).get("conversationId") or (node or {}).get("conversation_id") or "").strip(),
+            "response_id": str((node or {}).get("responseId") or (node or {}).get("response_id") or "").strip(),
+            "parent_response_id": str((node or {}).get("parentResponseId") or (node or {}).get("parent_response_id") or "").strip(),
             "root_post_id": imagine_node_relation_id(node or {}, "rootPostId", "root_post_id"),
             "parent_post_id": imagine_node_relation_id(node or {}, "parentPostId", "parent_post_id"),
             "original_post_id": imagine_node_relation_id(node or {}, "originalPostId", "original_post_id"),
@@ -5577,6 +5990,9 @@ def imagine_event_video_post_candidates(events: list) -> list[dict]:
         seen.add(post_id)
         candidates.append({
             "post_id": post_id,
+            "conversation_id": str(node.get("conversationId") or node.get("conversation_id") or "").strip(),
+            "response_id": str(node.get("responseId") or node.get("response_id") or "").strip(),
+            "parent_response_id": str(node.get("parentResponseId") or node.get("parent_response_id") or "").strip(),
             "root_post_id": imagine_node_relation_id(node, "rootPostId", "root_post_id"),
             "parent_post_id": imagine_node_relation_id(node, "parentPostId", "parent_post_id"),
             "original_post_id": imagine_node_relation_id(node, "originalPostId", "original_post_id"),
@@ -5630,6 +6046,9 @@ def imagine_event_image_post_candidates(events: list) -> list[dict]:
         candidates.append({
             "url": raw_url,
             "post_id": post_id,
+            "conversation_id": str(node.get("conversationId") or node.get("conversation_id") or "").strip(),
+            "response_id": str(node.get("responseId") or node.get("response_id") or "").strip(),
+            "parent_response_id": str(node.get("parentResponseId") or node.get("parent_response_id") or "").strip(),
             "root_post_id": imagine_node_relation_id(node, "rootPostId", "root_post_id"),
             "parent_post_id": imagine_node_relation_id(node, "parentPostId", "parent_post_id"),
             "original_post_id": imagine_node_relation_id(node, "originalPostId", "original_post_id"),
@@ -5794,6 +6213,9 @@ def imagine_direct_item_from_post_candidate(
                 "url": entry.get("url") or "",
                 "type": expected_type,
                 "post_id": entry.get("item_id") or post_id,
+                "conversation_id": candidate.get("conversation_id") or source_info.get("conversation_id") or "",
+                "response_id": candidate.get("response_id") or "",
+                "parent_response_id": candidate.get("parent_response_id") or source_info.get("parent_response_id") or "",
                 "root_post_id": entry.get("root_post_id") or candidate.get("root_post_id") or "",
                 "parent_post_id": entry.get("parent_post_id") or candidate.get("parent_post_id") or "",
                 "original_post_id": entry.get("original_post_id") or candidate.get("original_post_id") or "",
@@ -5827,6 +6249,9 @@ def imagine_direct_item_from_post_candidate(
                     "url": image_url,
                     "type": expected_type,
                     "post_id": post_id,
+                    "conversation_id": candidate.get("conversation_id") or source_info.get("conversation_id") or "",
+                    "response_id": candidate.get("response_id") or "",
+                    "parent_response_id": candidate.get("parent_response_id") or source_info.get("parent_response_id") or "",
                     "root_post_id": candidate.get("root_post_id") or source_info.get("root_post_id") or "",
                     "parent_post_id": candidate.get("parent_post_id") or source_info.get("parent_post_id") or "",
                     "original_post_id": candidate.get("original_post_id") or source_info.get("original_post_id") or "",
@@ -5894,6 +6319,9 @@ def imagine_direct_item_from_post_candidate(
             "url": video_url,
             "type": expected_type,
             "post_id": post_id,
+            "conversation_id": candidate.get("conversation_id") or source_info.get("conversation_id") or "",
+            "response_id": candidate.get("response_id") or "",
+            "parent_response_id": candidate.get("parent_response_id") or source_info.get("parent_response_id") or "",
             "root_post_id": candidate.get("root_post_id") or source_info.get("root_post_id") or "",
             "parent_post_id": candidate.get("parent_post_id") or source_info.get("parent_post_id") or "",
             "original_post_id": candidate.get("original_post_id") or source_info.get("original_post_id") or "",
@@ -5931,7 +6359,10 @@ def imagine_direct_item_from_candidate(
         item_id = f"{stem or expected_type}-{request_id[:8]}"
     parent_post_id = str(candidate.get("parent_post_id") or source_info.get("parent_post_id") or "").strip()
     original_post_id = str(candidate.get("original_post_id") or source_info.get("original_post_id") or parent_post_id).strip()
-    root_post_id = str(candidate.get("root_post_id") or source_info.get("root_post_id") or parent_post_id or item_id).strip()
+    conversation_id = str(candidate.get("conversation_id") or source_info.get("conversation_id") or "").strip()
+    response_id = str(candidate.get("response_id") or "").strip()
+    parent_response_id = str(candidate.get("parent_response_id") or source_info.get("parent_response_id") or "").strip()
+    root_post_id = str(candidate.get("root_post_id") or conversation_id or source_info.get("root_post_id") or parent_post_id or item_id).strip()
     source_item_id = str(source_info.get("source_item_id") or parent_post_id or original_post_id or "").strip()
     raw_thumb = str(candidate.get("thumbnail_url") or (thumbnail or {}).get("url") or "").strip()
     proxied_url = raw_url if is_data_url else imagine_saved_proxy_url(raw_url, expected_type, account_id_value)
@@ -5941,7 +6372,11 @@ def imagine_direct_item_from_candidate(
         proxied_thumb = imagine_saved_proxy_url(raw_thumb, "image", account_id_value) if raw_thumb else (proxied_url if expected_type == "image" else "")
     imagine_metadata = {
         "post_id": item_id,
+        "asset_id": item_id,
         "root_post_id": root_post_id,
+        "conversation_id": conversation_id,
+        "response_id": response_id,
+        "parent_response_id": parent_response_id,
         "media_url": raw_url,
         "media_type": expected_type,
         "source_item_id": source_item_id,
@@ -5957,6 +6392,10 @@ def imagine_direct_item_from_candidate(
     if aspect_ratio:
         imagine_metadata["aspect_ratio"] = aspect_ratio
     metadata = {
+        "asset_id": item_id,
+        "conversation_id": conversation_id,
+        "response_id": response_id,
+        "parent_response_id": parent_response_id,
         "remote_url": raw_url,
         "media_url": raw_url,
         "thumbnail_url": raw_thumb,
@@ -5966,6 +6405,8 @@ def imagine_direct_item_from_candidate(
         metadata["aspect_ratio"] = aspect_ratio
     return {
         "item_id": item_id,
+        "post_id": item_id,
+        "asset_id": item_id,
         "type": expected_type,
         "file": "",
         "url": raw_url,
@@ -5979,6 +6420,9 @@ def imagine_direct_item_from_candidate(
         "original_post_id": original_post_id,
         "parent_post_id": parent_post_id,
         "root_post_id": root_post_id,
+        "conversation_id": conversation_id,
+        "response_id": response_id,
+        "parent_response_id": parent_response_id,
         "original_ref_type": imagine_metadata["original_ref_type"],
         "prompt": str(candidate.get("prompt") or prompt or ""),
         "created_at": str(candidate.get("created_at") or now_iso()),
@@ -6609,8 +7053,18 @@ def imagine_i2i_request(payload: dict, prompt: str, request_id: str, account: di
         raise RuntimeError("Imagine i2i needs one source image.")
     imagine_prepare_direct_image_attachments(image_attachments, account, request_id, "i2i")
     source = image_attachments[0]
-    parent_post_id = imagine_attachment_real_post_id(source, "post_id", "parent_post_id", "original_post_id", "detail_item_id")
+    conversation_id, parent_response_id = imagine_source_conversation_context(payload, source)
+    direct_upload = bool(source.get("_imagine_uploaded_direct") or imagine_attachment_upload_like(source))
+    parent_post_id = "" if direct_upload else imagine_attachment_real_post_id(
+        source,
+        "post_id",
+        "parent_post_id",
+        "original_post_id",
+        "detail_item_id",
+    )
     root_post_id = imagine_attachment_real_post_id(source, "root_post_id", "detail_root_post_id") or parent_post_id
+    if direct_upload:
+        root_post_id = ""
     demoted_upload_references: list[dict] = []
     for index, attachment in enumerate(image_attachments[1:], start=1):
         if not imagine_attachment_upload_like(attachment):
@@ -6619,7 +7073,9 @@ def imagine_i2i_request(payload: dict, prompt: str, request_id: str, account: di
         if removed:
             demoted_upload_references.append({"index": index, "removed": removed})
     references = imagine_direct_reference_urls(image_attachments, 5)
-    input_asset_ids = [parent_post_id] if parent_post_id else imagine_direct_input_asset_ids([source], 1)
+    input_asset_ids = imagine_direct_input_asset_ids([source], 1) if direct_upload else (
+        [parent_post_id] if parent_post_id else imagine_direct_input_asset_ids([source], 1)
+    )
     if not input_asset_ids:
         raise RuntimeError("Image edit input asset ids could not be resolved.")
     try:
@@ -6635,10 +7091,11 @@ def imagine_i2i_request(payload: dict, prompt: str, request_id: str, account: di
         image_config["containerPostId"] = root_post_id
     elif parent_post_id:
         image_config["containerPostId"] = parent_post_id
-    original_post_id = imagine_attachment_real_post_id(source, "original_post_id")
+    original_post_id = "" if direct_upload else imagine_attachment_real_post_id(source, "original_post_id")
     if original_post_id:
         image_config["originalPostId"] = original_post_id
-    aspect_ratio = str(options.get("aspect_ratio") or "").strip()
+    requested_aspect_ratio = normalize_aspect_ratio_value(options.get("aspect_ratio"))
+    aspect_ratio = requested_aspect_ratio or (attachment_aspect_ratio(source) if direct_upload else "")
     if aspect_ratio:
         image_config["aspectRatio"] = aspect_ratio
     media_gen_image = {
@@ -6666,15 +7123,28 @@ def imagine_i2i_request(payload: dict, prompt: str, request_id: str, account: di
             }
         },
     }
+    if direct_upload:
+        request["grokChameleonDirectUpload"] = True
+        request["grokChameleonUploadAssetIds"] = input_asset_ids
+        request["grokChameleonUploadUrls"] = references
+    if conversation_id:
+        request["grokChameleonConversationId"] = conversation_id
+    if parent_response_id:
+        request["grokChameleonParentResponseId"] = parent_response_id
     source_info = {
         "parent_post_id": parent_post_id,
         "root_post_id": root_post_id,
         "original_post_id": original_post_id,
-        "source_item_id": imagine_attachment_real_post_id(source, "item_id", "detail_item_id", "source_item_id"),
-        "attachment_source_ids": sorted(imagine_attachment_candidate_source_ids(image_attachments)),
+        "source_item_id": "" if direct_upload else imagine_attachment_real_post_id(source, "item_id", "detail_item_id", "source_item_id"),
+        "conversation_id": conversation_id,
+        "parent_response_id": parent_response_id,
+        "direct_upload": direct_upload,
+        "attachment_source_ids": sorted(set([*input_asset_ids, *references])) if direct_upload else sorted(
+            imagine_attachment_candidate_source_ids(image_attachments)
+        ),
     }
     ignored = set(references)
-    referer = IMAGINE_BASE + ("/imagine/post/" + quote(parent_post_id) if parent_post_id else "/imagine")
+    referer = IMAGINE_BASE + "/imagine" if direct_upload and not conversation_id else imagine_detail_referer(parent_post_id, conversation_id)
     imagine_debug_event("i2i_request", {
         "request_id": request_id,
         "reference_count": len(references),
@@ -6696,6 +7166,7 @@ def imagine_aspect_ratio_request(payload: dict, request_id: str, account: dict) 
     imagine_prepare_direct_image_attachments(image_attachments, account, request_id, "aspect")
     imagine_ensure_upload_image_posts(image_attachments[:1], account, request_id, "aspect")
     source = image_attachments[0]
+    conversation_id, parent_response_id = imagine_source_conversation_context(payload, source)
     references = imagine_direct_reference_urls([source], 1)
     input_asset_ids = imagine_direct_input_asset_ids([source], 1)
     parent_post_id = imagine_attachment_real_post_id(source, "post_id", "parent_post_id", "original_post_id", "detail_item_id", "asset_id")
@@ -6740,17 +7211,23 @@ def imagine_aspect_ratio_request(payload: dict, request_id: str, account: dict) 
         "disableMemory": False,
         "forceSideBySide": False,
     }
+    if conversation_id:
+        request["grokChameleonConversationId"] = conversation_id
+    if parent_response_id:
+        request["grokChameleonParentResponseId"] = parent_response_id
     root_post_id = imagine_attachment_real_post_id(source, "root_post_id", "detail_root_post_id") or parent_post_id
     source_info = {
         "parent_post_id": parent_post_id,
         "root_post_id": root_post_id,
         "original_post_id": imagine_attachment_real_post_id(source, "original_post_id") or parent_post_id,
         "source_item_id": imagine_attachment_real_post_id(source, "item_id", "detail_item_id", "source_item_id") or parent_post_id,
+        "conversation_id": conversation_id,
+        "parent_response_id": parent_response_id,
         "aspect_ratio": aspect_ratio,
         "attachment_source_ids": sorted(imagine_attachment_candidate_source_ids([source])),
     }
     ignored = set(references)
-    referer = IMAGINE_BASE + "/imagine/post/" + quote(parent_post_id)
+    referer = imagine_detail_referer(parent_post_id, conversation_id)
     imagine_debug_event("aspect_ratio_request", {
         "request_id": request_id,
         "aspect_ratio": aspect_ratio,
@@ -6770,6 +7247,13 @@ def imagine_video_request(payload: dict, prompt: str, request_id: str, action: s
         image_attachments = []
     if image_attachments:
         imagine_prepare_direct_image_attachments(image_attachments, account or {}, request_id, action)
+    context_attachment = video_attachment if action == "extend" else (image_attachments[0] if image_attachments else None)
+    conversation_id, parent_response_id = imagine_source_conversation_context(payload, context_attachment)
+    direct_upload = bool(
+        isinstance(context_attachment, dict)
+        and (context_attachment.get("_imagine_uploaded_direct") or imagine_attachment_upload_like(context_attachment))
+    )
+    direct_upload_urls: list[str] = []
     demoted_upload_references: list[dict] = []
     if action != "extend" and image_attachments:
         for index, attachment in enumerate(image_attachments[1:], start=1):
@@ -6846,6 +7330,8 @@ def imagine_video_request(payload: dict, prompt: str, request_id: str, action: s
             "original_post_id": original_post_id,
             "original_ref_type": original_ref_type,
             "source_item_id": imagine_attachment_id(video_attachment, "item_id", "detail_item_id", "source_item_id"),
+            "conversation_id": conversation_id,
+            "parent_response_id": parent_response_id,
             "attachment_source_ids": sorted(imagine_attachment_candidate_source_ids([video_attachment, *image_attachments])),
         }
         parent_ids = {value for value in {extend_post_id, source_info["root_post_id"], source_info["original_post_id"]} if value}
@@ -6861,7 +7347,7 @@ def imagine_video_request(payload: dict, prompt: str, request_id: str, action: s
             raw_reference = imagine_attachment_raw_url(image_attachment)
             if raw_reference:
                 ignored.add(raw_reference)
-        referer = IMAGINE_BASE + "/imagine/post/" + quote(extend_post_id)
+        referer = imagine_detail_referer(extend_post_id, conversation_id)
         media_gen_video = {
             "prompt": prompt,
             "inputAssets": input_asset_ids,
@@ -6871,23 +7357,32 @@ def imagine_video_request(payload: dict, prompt: str, request_id: str, action: s
         media_gen_input = {"videoExtension": media_gen_video}
     else:
         references = imagine_direct_reference_urls(image_attachments, 7) if image_attachments else []
+        direct_upload_urls = list(references)
         extra_references = imagine_direct_reference_urls(image_attachments[1:], 6) if len(image_attachments) > 1 else []
         input_asset_ids = imagine_direct_input_asset_ids(image_attachments[:1], 1) if image_attachments else []
         if references:
             source = image_attachments[0]
-            parent_post_id = imagine_attachment_real_post_id(source, "post_id", "parent_post_id", "original_post_id", "detail_item_id")
-            original_post_id = imagine_attachment_real_post_id(source, "original_post_id")
-            if not parent_post_id and input_asset_ids:
-                parent_post_id = input_asset_ids[0]
-            if parent_post_id:
-                input_asset_ids = [parent_post_id]
-            if not original_post_id:
-                original_post_id = parent_post_id
-            root_post_id = imagine_attachment_real_post_id(source, "root_post_id", "detail_root_post_id") or parent_post_id
-            if original_post_id and (not root_post_id or root_post_id == parent_post_id):
+            parent_post_id = "" if direct_upload else imagine_attachment_real_post_id(
+                source,
+                "post_id",
+                "parent_post_id",
+                "original_post_id",
+                "detail_item_id",
+            )
+            original_post_id = "" if direct_upload else imagine_attachment_real_post_id(source, "original_post_id")
+            if not direct_upload:
+                if not parent_post_id and input_asset_ids:
+                    parent_post_id = input_asset_ids[0]
+                if parent_post_id:
+                    input_asset_ids = [parent_post_id]
+                if not original_post_id:
+                    original_post_id = parent_post_id
+            root_post_id = "" if direct_upload else (
+                imagine_attachment_real_post_id(source, "root_post_id", "detail_root_post_id") or parent_post_id
+            )
+            if not direct_upload and original_post_id and (not root_post_id or root_post_id == parent_post_id):
                 root_post_id = original_post_id
-            root_attachment_id = root_post_id or parent_post_id
-            file_attachment_ids = [root_attachment_id] if root_attachment_id else []
+            file_attachment_ids = [parent_post_id] if parent_post_id else []
             if parent_post_id:
                 model_config["parentPostId"] = parent_post_id
             if root_post_id:
@@ -6905,15 +7400,22 @@ def imagine_video_request(payload: dict, prompt: str, request_id: str, action: s
                 "parent_post_id": parent_post_id,
                 "root_post_id": root_post_id,
                 "original_post_id": original_post_id,
-                "source_item_id": imagine_attachment_real_post_id(source, "item_id", "detail_item_id", "source_item_id") or parent_post_id,
-                "attachment_source_ids": sorted(imagine_attachment_candidate_source_ids(image_attachments)),
+                "source_item_id": "" if direct_upload else (
+                    imagine_attachment_real_post_id(source, "item_id", "detail_item_id", "source_item_id") or parent_post_id
+                ),
+                "conversation_id": conversation_id,
+                "parent_response_id": parent_response_id,
+                "direct_upload": direct_upload,
+                "attachment_source_ids": sorted(set([*input_asset_ids, *references])) if direct_upload else sorted(
+                    imagine_attachment_candidate_source_ids(image_attachments)
+                ),
             }
             parent_id_candidates = {parent_post_id, source_info["source_item_id"]}
             if not any(parent_id_candidates) or parent_post_id == root_post_id:
                 parent_id_candidates.update({root_post_id, source_info["original_post_id"]})
             parent_ids = {value for value in parent_id_candidates if value}
             ignored.update(references)
-            referer = IMAGINE_BASE + ("/imagine/post/" + quote(parent_post_id) if parent_post_id else "/imagine")
+            referer = IMAGINE_BASE + "/imagine" if direct_upload and not conversation_id else imagine_detail_referer(parent_post_id, conversation_id)
             media_gen_video = {
                 "prompt": prompt,
                 "inputAssets": input_asset_ids,
@@ -6956,6 +7458,14 @@ def imagine_video_request(payload: dict, prompt: str, request_id: str, action: s
     }
     if file_attachment_ids:
         request["fileAttachments"] = file_attachment_ids
+    if direct_upload:
+        request["grokChameleonDirectUpload"] = True
+        request["grokChameleonUploadAssetIds"] = input_asset_ids
+        request["grokChameleonUploadUrls"] = direct_upload_urls
+    if conversation_id:
+        request["grokChameleonConversationId"] = conversation_id
+    if parent_response_id:
+        request["grokChameleonParentResponseId"] = parent_response_id
     imagine_debug_event("video_request", {
         "request_id": request_id,
         "action": action,
@@ -7026,7 +7536,9 @@ def imagine_direct_post_from_items(items: list[dict], prompt: str, account: dict
             imagine_mark_result_item_liked(item, True)
     video_items = [item for item in kept_items if item.get("type") == "video"]
     representative_item = video_items[-1] if video_items else kept_items[-1]
-    root_seed = representative_item.get("root_post_id") or representative_item.get("item_id") or uuid.uuid4().hex
+    conversation_id = str(representative_item.get("conversation_id") or "").strip()
+    response_id = str(representative_item.get("response_id") or "").strip()
+    root_seed = conversation_id or representative_item.get("root_post_id") or representative_item.get("item_id") or uuid.uuid4().hex
     post_id = str(root_seed or uuid.uuid4().hex)
     representative = representative_item.get("url") or representative_item.get("item_id") or ""
     return {
@@ -7050,6 +7562,8 @@ def imagine_direct_post_from_items(items: list[dict], prompt: str, account: dict
         "account_email": account.get("email") or "",
         "metadata": {
             "imagine_root_post_id": post_id,
+            "conversation_id": conversation_id,
+            "response_id": response_id,
             "generated_action": action,
             "liked": liked,
         },
@@ -7278,7 +7792,7 @@ def imagine_native_bridge_generate(
         imagine_debug_event("native_bridge_baseline_failed", {"request_id": request_id, "action": action, "error": str(exc)[:500]})
 
     stream_wait = remaining_seconds_until(video_deadline, max_wait) if expected_type == "video" else max_wait
-    events, bridge_parent_ids, bridge_baseline_ids = native_bridge_fetch_events(
+    events, bridge_parent_ids, bridge_baseline_ids, canonical_container_id = native_bridge_fetch_events(
         root,
         account,
         request_payload,
@@ -7293,7 +7807,12 @@ def imagine_native_bridge_generate(
         parent_ids.update(bridge_parent_ids)
     if relation_recovery_action and bridge_baseline_ids:
         baseline_ids.update(bridge_baseline_ids)
-    if relation_recovery_action and (bridge_parent_ids or bridge_baseline_ids):
+    if canonical_container_id:
+        parent_ids.add(canonical_container_id)
+        source_info["generation_root_post_id"] = canonical_container_id
+        if source_info.get("direct_upload"):
+            source_info["root_post_id"] = canonical_container_id
+    if relation_recovery_action and (bridge_parent_ids or bridge_baseline_ids or canonical_container_id):
         imagine_debug_event("native_bridge_relation_ids", {
             "request_id": request_id,
             "action": action,
@@ -7301,6 +7820,7 @@ def imagine_native_bridge_generate(
             "bridge_parent_ids": sorted(bridge_parent_ids),
             "bridge_baseline_count": len(bridge_baseline_ids),
             "baseline_count": len(baseline_ids),
+            "canonical_container_id": canonical_container_id,
         })
     result_events = imagine_filter_source_only_events(events, expected_type, source_info, ignored_urls, request_id, action)
     max_progress = max([imagine_event_numeric_progress(event) or 0 for event in result_events] or [0])
@@ -7544,6 +8064,8 @@ def imagine_direct_generate(payload: dict, progress_callback=None, cancel_checke
         "attachments": imagine_debug_attachment_summary(payload),
         "source_post_path": payload.get("source_post_path") or "",
         "source_item_id": payload.get("source_item_id") or "",
+        "source_conversation_id": payload.get("source_conversation_id") or "",
+        "parent_response_id": payload.get("parent_response_id") or "",
         "account_id": account.get("id") or "",
         "account_tier": account.get("tier") or "",
     })
@@ -9736,7 +10258,7 @@ def native_bridge_fetch_events(
     max_wait_seconds: int,
     progress_callback=None,
     cancel_checker=None,
-) -> tuple[list, set[str], set[str]]:
+) -> tuple[list, set[str], set[str], str]:
     if not native_bridge_wait_available(timeout_seconds=8, max_age_seconds=60):
         raise RuntimeError("Native WebView bridge is not running. Launch Grok Chameleon.app.")
     if progress_callback:
@@ -9758,6 +10280,10 @@ def native_bridge_fetch_events(
     events = value.get("events") if isinstance(value.get("events"), list) else []
     bridge_parent_ids: set[str] = set()
     bridge_baseline_ids: set[str] = set()
+    canonical_container_id = (
+        extract_imagine_post_id_from_text(value.get("canonicalContainerId"))
+        or str(value.get("canonicalContainerId") or "").strip()
+    )
 
     def add_bridge_id(target: set[str], raw_value) -> None:
         text = str(raw_value or "").strip()
@@ -9765,7 +10291,7 @@ def native_bridge_fetch_events(
             return
         target.add(extract_imagine_post_id_from_text(text) or text)
 
-    for key in ("resolvedContainerId", "resolvedParentPostId", "sourceContainerId"):
+    for key in ("canonicalContainerId", "resolvedContainerId", "resolvedParentPostId", "sourceContainerId"):
         add_bridge_id(bridge_parent_ids, value.get(key))
     for raw_id in value.get("baselineIds") if isinstance(value.get("baselineIds"), list) else []:
         add_bridge_id(bridge_baseline_ids, raw_id)
@@ -9781,6 +10307,7 @@ def native_bridge_fetch_events(
         "status_code": status_code,
         "ok": bool(value.get("ok", status_code < 400)),
         "event_count": len(events),
+        "canonical_container_id": canonical_container_id,
         "elapsed_ms": value.get("elapsedMs"),
         "text": str(value.get("text") or "")[:500] if not value.get("ok", True) else "",
         "bridge_status": {
@@ -9829,7 +10356,7 @@ def native_bridge_fetch_events(
         log_imagine_stream_event_if_needed(request_id, event, progress, terminal, "native_bridge")
     if not events:
         raise RuntimeError("Imagine native bridge response did not contain stream events.")
-    return events, bridge_parent_ids, bridge_baseline_ids
+    return events, bridge_parent_ids, bridge_baseline_ids, canonical_container_id
 
 
 def native_bridge_t2i_events(
