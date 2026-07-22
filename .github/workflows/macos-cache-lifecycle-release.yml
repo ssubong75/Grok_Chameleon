@@ -1,394 +1,343 @@
-name: macOS cumulative Imagine and cache release
+name: Cross-platform common source release
 
 on:
   push:
     branches:
-      - disabled/macos-cache-lifecycle-20260721
+      - agent/macos-cache-lifecycle-20260721
 
 permissions:
   contents: write
 
+concurrency:
+  group: cross-platform-common-source-release
+  cancel-in-progress: false
+
+env:
+  COMMON_COMPOSER: common/app/web/scripts/composer_options.js
+
 jobs:
-  patch-verify-release:
+  build-windows:
+    runs-on: windows-2025
+    timeout-minutes: 35
+    env:
+      RELEASE_TAG: v20260720-041036-win
+      INPUT_ZIP: Win_Grok_Chameleon_a.zip
+      OUTPUT_ZIP: Win_Grok_Chameleon_a.zip
+      EXPECTED_INPUT_SHA256: d55301c90d6bf07d3d709ea8fe63a778e0b7da2fd1cf992f32e570f7a597cc36
+
+    steps:
+      - name: Check out the shared source commit
+        uses: actions/checkout@v4
+
+      - name: Download the exact Windows runtime package
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force input | Out-Null
+          gh release download $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --pattern $env:INPUT_ZIP --dir input
+          if ($LASTEXITCODE -ne 0) { throw "Windows release download failed." }
+
+      - name: Assemble and verify Windows from the shared source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $sevenZip = (Get-Command 7z.exe -ErrorAction Stop).Source
+          New-Item -ItemType Directory -Force unpack, output, verify | Out-Null
+          $inputZip = Join-Path $env:GITHUB_WORKSPACE "input\$env:INPUT_ZIP"
+          $outputZip = Join-Path $env:GITHUB_WORKSPACE "output\$env:OUTPUT_ZIP"
+          $common = Join-Path $env:GITHUB_WORKSPACE $env:COMMON_COMPOSER
+          $root = Join-Path $env:GITHUB_WORKSPACE "unpack\Grok Chameleon"
+          $appRoot = Join-Path $root "Resources\Grok Chameleon\resources\app"
+          $target = Join-Path $appRoot "web\scripts\composer_options.js"
+          $state = Join-Path $appRoot "web\scripts\state.js"
+          $outerExe = Join-Path $root "Grok Chameleon.exe"
+          $migrationExe = Join-Path $root "Migration.exe"
+          $innerExe = Join-Path $root "Resources\Grok Chameleon\Grok Chameleon.exe"
+
+          $inputHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $inputZip).Hash.ToLowerInvariant()
+          if ($inputHash -ne $env:EXPECTED_INPUT_SHA256) { throw "Windows input digest changed: $inputHash" }
+          & $sevenZip t $inputZip
+          if ($LASTEXITCODE -ne 0) { throw "Windows input ZIP CRC check failed." }
+          & $sevenZip x -y "-o$env:GITHUB_WORKSPACE\unpack" $inputZip
+          if ($LASTEXITCODE -ne 0) { throw "Windows extraction failed." }
+          foreach ($required in @($common, $target, $state, $outerExe, $migrationExe, $innerExe)) {
+            if (-not (Test-Path -LiteralPath $required)) { throw "Missing required file: $required" }
+          }
+
+          $fileCount = (Get-ChildItem -LiteralPath $root -Recurse -Force -File).Count
+          $exeHashes = @{
+            outer = (Get-FileHash -Algorithm SHA256 -LiteralPath $outerExe).Hash
+            migration = (Get-FileHash -Algorithm SHA256 -LiteralPath $migrationExe).Hash
+            inner = (Get-FileHash -Algorithm SHA256 -LiteralPath $innerExe).Hash
+          }
+          Copy-Item -Force -LiteralPath $common -Destination $target
+          $commonHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $common).Hash
+          if ((Get-FileHash -Algorithm SHA256 -LiteralPath $target).Hash -ne $commonHash) {
+            throw "Windows shared source copy mismatch."
+          }
+          node --check $target
+          if ($LASTEXITCODE -ne 0) { throw "Windows composer_options.js syntax check failed." }
+
+          $composerText = Get-Content -Raw -LiteralPath $target
+          foreach ($marker in @(
+            'const imageCountOptions = provider === "imagine"',
+            '? buildT2iCountOptions.filter((option) => option !== "1")',
+            'const imageCountDefault = "5";',
+            'setControlVisible(composerControls.count, !isImageToImage'
+          )) {
+            if (-not $composerText.Contains($marker)) { throw "Windows composer marker missing: $marker" }
+          }
+          $stateText = Get-Content -Raw -LiteralPath $state
+          if (-not $stateText.Contains('const buildT2iCountOptions = ["10", "8", "5", "4", "1"];')) {
+            throw "Build count options changed unexpectedly."
+          }
+          $metadata = Get-ChildItem -LiteralPath $root -Recurse -Force | Where-Object {
+            $_.Name -eq "__MACOSX" -or $_.Name -like "._*" -or $_.Name -eq ".DS_Store"
+          }
+          if ($metadata) { throw "macOS metadata exists in the Windows package." }
+
+          Push-Location (Join-Path $env:GITHUB_WORKSPACE "unpack")
+          try {
+            & $sevenZip a -tzip -mx=7 $outputZip ".\Grok Chameleon"
+            if ($LASTEXITCODE -ne 0) { throw "Windows ZIP creation failed." }
+          } finally {
+            Pop-Location
+          }
+          & $sevenZip t $outputZip
+          if ($LASTEXITCODE -ne 0) { throw "Windows output ZIP CRC check failed." }
+          & $sevenZip x -y "-o$env:GITHUB_WORKSPACE\verify" $outputZip
+          if ($LASTEXITCODE -ne 0) { throw "Windows verification extraction failed." }
+
+          $verifiedRoot = Join-Path $env:GITHUB_WORKSPACE "verify\Grok Chameleon"
+          $verifiedTarget = Join-Path $verifiedRoot "Resources\Grok Chameleon\resources\app\web\scripts\composer_options.js"
+          if ((Get-ChildItem -LiteralPath $verifiedRoot -Recurse -Force -File).Count -ne $fileCount) {
+            throw "Windows file count changed during packaging."
+          }
+          if ((Get-FileHash -Algorithm SHA256 -LiteralPath $verifiedTarget).Hash -ne $commonHash) {
+            throw "Windows packaged shared source mismatch."
+          }
+          $verifiedExeHashes = @{
+            outer = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $verifiedRoot "Grok Chameleon.exe")).Hash
+            migration = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $verifiedRoot "Migration.exe")).Hash
+            inner = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $verifiedRoot "Resources\Grok Chameleon\Grok Chameleon.exe")).Hash
+          }
+          foreach ($key in @("outer", "migration", "inner")) {
+            if ($verifiedExeHashes[$key] -ne $exeHashes[$key]) { throw "Windows executable changed: $key" }
+          }
+          node --check $verifiedTarget
+          if ($LASTEXITCODE -ne 0) { throw "Packaged Windows JavaScript syntax check failed." }
+          "windows-output-sha256=" + (Get-FileHash -Algorithm SHA256 -LiteralPath $outputZip).Hash.ToLowerInvariant()
+
+      - name: Retain the verified Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-common-source-build
+          path: output/Win_Grok_Chameleon_a.zip
+          if-no-files-found: error
+          retention-days: 3
+
+  build-macos:
     runs-on: macos-15
     timeout-minutes: 35
     env:
       RELEASE_TAG: v20260720-042100-mac
       INPUT_ZIP: Mac_Grok_Chameleon_a.zip
-      BACKUP_ZIP: Mac_Grok_Chameleon_a.previous-before-electron-debug-off-final.zip
       OUTPUT_ZIP: Mac_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: ea2e9c9406a2f03c5c472fe2345ff4b1423efac1b4e767aba7f34cd809934e83
+      EXPECTED_INPUT_SHA256: 401d0947f092cded02d2d6a2bdbdd76b3a8254fdfdcd15ee870e8d72e6c83d59
 
     steps:
-      - name: Check out patch source
+      - name: Check out the shared source commit
         uses: actions/checkout@v4
 
-      - name: Download exact current Mac release
+      - name: Download the exact Mac runtime package
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
         run: |
           set -euo pipefail
           mkdir -p input
-          gh release download "$RELEASE_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --pattern "$INPUT_ZIP" \
-            --dir input
-          actual_sha256="$(shasum -a 256 "input/$INPUT_ZIP" | awk '{print $1}')"
-          test "$actual_sha256" = "$EXPECTED_INPUT_SHA256"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$INPUT_ZIP" --dir input
+          actual="$(shasum -a 256 "input/$INPUT_ZIP" | awk '{print $1}')"
+          test "$actual" = "$EXPECTED_INPUT_SHA256"
 
-      - name: Extract natively and apply cumulative updates
+      - name: Assemble Mac from the shared source
         shell: bash
         run: |
           set -euo pipefail
+          export COPYFILE_DISABLE=1
           mkdir -p unpack output verify
           ditto -x -k "input/$INPUT_ZIP" unpack
-
           root="$PWD/unpack/Grok Chameleon"
           main_app="$root/Grok Chameleon.app"
           migration_app="$root/Migration.app"
           app_root="$main_app/Contents/Resources/app"
+          common="$GITHUB_WORKSPACE/$COMMON_COMPOSER"
+          target="$app_root/web/scripts/composer_options.js"
           main_js="$app_root/electron/main.js"
+          preload_js="$app_root/electron/preload-bridge.js"
           server_py="$app_root/runtime/server.py"
-          preload_bridge_js="$app_root/electron/preload-bridge.js"
-          composer_js="$app_root/web/scripts/i_composer_submit.js"
-          detail_media_js="$app_root/web/scripts/detail_media.js"
-          detail_css="$app_root/web/styles/detail.css"
-          build_main_js="$app_root/web/scripts/build_main.js"
-          card_render_js="$app_root/web/scripts/card_render.js"
+          main_exec="$main_app/Contents/MacOS/Grok Chameleon"
+          migration_exec="$migration_app/Contents/MacOS/Migration"
 
-          test -d "$main_app"
-          test -d "$migration_app"
+          test -f "$common"
+          test -f "$target"
           test -f "$main_js"
+          test -f "$preload_js"
           test -f "$server_py"
-          test -f "$preload_bridge_js"
-          test -f "$composer_js"
-          test -f "$detail_media_js"
-          test -f "$detail_css"
-          test -f "$build_main_js"
-          test -f "$card_render_js"
-          test -x "$main_app/Contents/MacOS/Grok Chameleon"
-          test -x "$migration_app/Contents/MacOS/Migration"
+          test -x "$main_exec"
+          test -x "$migration_exec"
           test -L "$main_app/Contents/Frameworks/Electron Framework.framework/Versions/Current"
           test -L "$main_app/Contents/Frameworks/Electron Framework.framework/Electron Framework"
-
+          find "$app_root/vendor/python" -type f -name '*darwin.so' -print -quit | grep -q .
           if find "$root" \( -name '__MACOSX' -o -name '._*' -o -name '.DS_Store' \) -print | grep -q .; then
-            echo 'AppleDouble or Finder metadata found in input.' >&2
+            echo 'AppleDouble or Finder metadata found in Mac input.' >&2
             exit 1
           fi
 
-          before_tree="$(find "$app_root/electron" "$app_root/runtime" "$app_root/web" -type f -exec shasum -a 256 {} + | shasum -a 256 | awk '{print $1}')"
-          python3 tools/patch_electron_debug_port_off.py "$main_js"
-          python3 tools/patch_card_preview_cache_lifecycle.py "$main_js" "$server_py"
-          python3 tools/patch_imagine_generation_source_readiness.py "$preload_bridge_js"
-          python3 tools/patch_imagine_official_video_settings.py "$preload_bridge_js"
-          python3 tools/patch_imagine_cached_bridge_prepare.py "$composer_js"
-          python3 tools/patch_imagine_reuse_bridge_window.py "$main_js"
-          python3 tools/patch_imagine_source_context_navigation.py "$main_js"
-          python3 tools/patch_imagine_root_source_hydration.py "$preload_bridge_js"
-          python3 tools/patch_imagine_i2i_source_baseline.py "$preload_bridge_js"
-          python3 tools/patch_imagine_video_result_handoff.py "$preload_bridge_js"
-          python3 tools/patch_imagine_t2i_candidate_completion.py "$server_py"
-          python3 tools/patch_imagine_progress_timing.py "$server_py"
-          python3 tools/patch_imagine_persistent_generated_relations.py "$server_py"
-          python3 tools/patch_imagine_persistent_relation_full_image_preview.py "$server_py"
-          python3 tools/patch_imagine_missing_preview_item_fallback.py "$detail_media_js"
-          python3 tools/patch_imagine_missing_relation_cleanup.py "$detail_media_js"
-          python3 tools/patch_detail_progress_width.py "$detail_css" "$build_main_js"
-          after_tree="$(find "$app_root/electron" "$app_root/runtime" "$app_root/web" -type f -exec shasum -a 256 {} + | shasum -a 256 | awk '{print $1}')"
-          if [[ "$before_tree" = "$after_tree" ]]; then
-            echo 'All cumulative fixes were already present in the input asset.'
+          cp "$common" "$target"
+          cmp "$common" "$target"
+          node --check "$target"
+          grep -F 'const imageCountOptions = provider === "imagine"' "$target"
+          grep -F '? buildT2iCountOptions.filter((option) => option !== "1")' "$target"
+          grep -F 'const imageCountDefault = "5";' "$target"
+          grep -F 'RUNTIME_ROOT = Path(__file__).resolve().parent' "$server_py"
+          grep -F 'APP_ROOT = RUNTIME_ROOT.parent' "$server_py"
+          if grep -E 'C:\\|python\.exe' "$server_py"; then
+            echo 'Windows-only path leaked into Mac server.py.' >&2
+            exit 1
           fi
+          grep -F 'process.platform === "darwin"' "$main_js"
+          grep -F 'process.resourcesPath' "$main_js"
+          grep -F 'path.join(resourceRoot, "Python", "bin", "python3")' "$main_js"
+          grep -F 'app.on("activate"' "$main_js"
+          grep -F 'app.on("window-all-closed"' "$main_js"
 
-          node --check "$main_js"
-          node --check "$preload_bridge_js"
-          node --check "$composer_js"
-          node --check "$detail_media_js"
-          node --check "$build_main_js"
-          node --check "$card_render_js"
-          PYTHONDONTWRITEBYTECODE=1 python3 - "$server_py" <<'PY'
-          import sys
-          from pathlib import Path
-          source = Path(sys.argv[1])
-          compile(source.read_text(encoding="utf-8"), str(source), "exec")
-          print("PYTHON_SYNTAX_OK")
-          PY
-          PYTHONDONTWRITEBYTECODE=1 python3 tools/verify_imagine_relation_safety.py "$server_py"
-
-          auth_hits="$(find "$root" -type f \( \
-            -iname '*auth*.json' -o \
-            -iname '*account*.json' -o \
-            -iname '*credential*.json' -o \
-            -iname '*session*.json' -o \
-            -iname '*token*.json' -o \
-            -iname '.env*' \
-          \) -print)"
-          if [[ -n "$auth_hits" ]]; then
-            echo 'Account/auth data-like files found:' >&2
-            printf '%s\n' "$auth_hits" >&2
-            exit 1
-          fi
-          if grep -E '(/Users/runner|/Users/GAEUN|C:\\Users\\GAEUN|github_pat_|ghp_|gho_)' "$main_js" "$server_py" "$preload_bridge_js" "$composer_js" "$detail_media_js" "$detail_css" "$build_main_js" "$card_render_js"; then
-            echo 'Runner path or GitHub token-like literal found in patched source.' >&2
-            exit 1
-          fi
-          if find "$root" -type f \( -name 'Cookies' -o -name 'Login Data' -o -name 'Local State' -o -iname '*.log' -o -iname 'library.json' \) -print | grep -q .; then
-            echo 'User library, browser profile, or log data found in package.' >&2
-            exit 1
-          fi
-          if grep -E 'finalVideoRequestPatch|installPersistentFinalVideoRequestPatch|armFinalVideoRequestPatch|video_request_final_patch|official_video_duration_arg_applied|Official Imagine final video request was not intercepted' "$preload_bridge_js"; then
-            echo 'Final video request hook marker remains.' >&2
-            exit 1
-          fi
-          grep -F 'clearCurrentCardPreviewCache("startup")' "$main_js"
-          grep -F 'const CDP_PORT = String(process.env.GROK_CHAMELEON_CDP_PORT || "0");' "$main_js"
-          grep -F 'clearCurrentCardPreviewCache("shutdown")' "$main_js"
-          grep -F 'clearCurrentCardPreviewCache("will-quit")' "$main_js"
-          grep -F 'GROK_CHAMELEON_CARD_PREVIEW_CACHE_DIR' "$main_js" "$server_py"
-          grep -F 'function commandSourceContextId(command)' "$main_js"
-          grep -F 'Imagine source card could not be prepared' "$main_js"
-          grep -F 'return ["t2i_ws"].includes' "$main_js"
-          grep -F 'prepareActiveImagineBridgeSession({ force: false, silent: false })' "$composer_js"
-          grep -F 'const resultEvents = await waitForStoreEvents(' "$preload_bridge_js"
-          grep -F 'startStoreMethodCall("generateVideoForImage"' "$preload_bridge_js"
-          grep -F 'store_generation_source_hydration_start' "$preload_bridge_js"
-          grep -F 'store_generation_source_hydration_ready' "$preload_bridge_js"
-          grep -F 'const value = String(sourceId || "").trim();' "$preload_bridge_js"
-          grep -F 'store_generation_official_video_settings_applied' "$preload_bridge_js"
-          grep -F 'state.setResolution(requestedResolution)' "$preload_bridge_js"
-          grep -F 'state.setAspectRatio(requestedAspectRatio)' "$preload_bridge_js"
-          grep -F 'retryRateLimitedStoreCall("generateVideoForImage"' "$preload_bridge_js"
-          grep -F 'store_generation_candidate_handoff' "$preload_bridge_js"
-          grep -F 'storeObservationMs: 8000' "$preload_bridge_js"
-          grep -F 'rootSourceId = ""' "$preload_bridge_js"
-          grep -F 'addTarget(rootSourceId);' "$preload_bridge_js"
-          grep -F 'for (const sourceId of [containerId, parentPostId, inputIds[0]])' "$preload_bridge_js"
-          grep -F 'IMAGINE_DIRECT_I2V_DISPLAY_MAX_PROGRESS = 94' "$server_py"
-          grep -F 'IMAGINE_DIRECT_VIDEO_DISPLAY_MAX_PROGRESS = 94' "$server_py"
-          grep -F 'IMAGINE_DIRECT_EXTEND_DISPLAY_MAX_PROGRESS = 94' "$server_py"
-          grep -F '("i2v", "480p", 6): 13,' "$server_py"
-          grep -F '("t2v", "480p", 6): 13,' "$server_py"
-          grep -F 'running_progress_limit = {' "$server_py"
-          grep -F 't2i_candidates_url_recovered' "$server_py"
-          grep -F 'def imagine_persist_generated_relation(' "$server_py"
-          grep -F 'def imagine_apply_generated_relations(' "$server_py"
-          grep -F 'if kind == "image"' "$server_py"
-          grep -F 'function removeUnavailableImagineItem(postPath, url, host = null)' "$detail_media_js"
-          grep -F 'qApi("/api/imagine/item/hide"' "$detail_media_js"
-          grep -F 'width: 3ch;' "$detail_css"
-          test "$(grep -F 'class="detail_generation_percent"' "$build_main_js" | wc -l | tr -d ' ')" = 2
-
-      - name: Test bundled server and cache path handshake
+      - name: Sign, package, and verify Mac without ZIP -47 regressions
         shell: bash
         run: |
           set -euo pipefail
-          root="$PWD/unpack/Grok Chameleon"
-          main_app="$root/Grok Chameleon.app"
-          app_root="$main_app/Contents/Resources/app"
-          bundled_python="$main_app/Contents/Resources/Python/bin/python3"
-          test -x "$bundled_python"
-
-          test_library="$PWD/test-library"
-          runner_app_support="$HOME/Library/Application Support/Grok Chameleon"
-          app_cache="$runner_app_support/Cache/card-previews"
-          settings="$runner_app_support/settings.json"
-          mkdir -p "$test_library/cache/card-previews" "$(dirname "$settings")"
-          printf 'legacy-cache-test\n' > "$test_library/cache/card-previews/old.jpg"
-          python3 - "$settings" "$test_library" <<'PY'
-          import json
-          import sys
-          from pathlib import Path
-          settings = Path(sys.argv[1])
-          library = Path(sys.argv[2]).resolve()
-          (library / "library.json").write_text('{"version": 1}\n', encoding="utf-8")
-          settings.write_text(json.dumps({"library_root": str(library)}), encoding="utf-8")
-          PY
-
-          server_log="$PWD/server-test.log"
-          GROK_CHAMELEON_PORT=18797 \
-          GROK_CHAMELEON_NO_BROWSER=1 \
-          GROK_CHAMELEON_CARD_PREVIEW_CACHE_DIR="$app_cache" \
-          PYTHONDONTWRITEBYTECODE=1 \
-            "$bundled_python" "$app_root/runtime/server.py" >"$server_log" 2>&1 &
-          server_pid=$!
-          cleanup() {
-            if kill -0 "$server_pid" 2>/dev/null; then kill "$server_pid" 2>/dev/null || true; fi
-          }
-          trap cleanup EXIT
-
-          ready=0
-          for _ in $(seq 1 60); do
-            if curl --fail --silent 'http://127.0.0.1:18797/api/health' > health.json; then
-              ready=1
-              break
-            fi
-            sleep 0.25
-          done
-          if [[ "$ready" != 1 ]]; then
-            cat "$server_log" >&2
-            exit 1
-          fi
-          curl --fail --silent 'http://127.0.0.1:18797/api/card-preview/cache-info' > cache-info.json
-          python3 - cache-info.json "$app_cache" "$test_library" <<'PY'
-          import json
-          import sys
-          from pathlib import Path
-          data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-          expected_cache = str(Path(sys.argv[2]).resolve())
-          library = Path(sys.argv[3]).resolve()
-          assert data["ok"] is True
-          assert data["cache_dir"] == expected_cache
-          assert data["library_root"] == str(library)
-          assert data["legacy_cache_dir"] == str((library / "cache" / "card-previews").resolve())
-          print("CACHE_PATH_HANDSHAKE_OK")
-          PY
-          test ! -e "$app_cache"
-          test -f "$test_library/cache/card-previews/old.jpg"
-          curl --fail --silent \
-            -H 'Content-Type: application/json' \
-            -d '{"event":"integration-test"}' \
-            'http://127.0.0.1:18797/api/shutdown' > shutdown.json
-          wait "$server_pid"
-          trap - EXIT
-
-      - name: Remove metadata, sign, package, and verify against -47 regressions
-        shell: bash
-        run: |
-          set -euo pipefail
+          export COPYFILE_DISABLE=1
           root="$PWD/unpack/Grok Chameleon"
           main_app="$root/Grok Chameleon.app"
           migration_app="$root/Migration.app"
-
+          app_root="$main_app/Contents/Resources/app"
+          common="$GITHUB_WORKSPACE/$COMMON_COMPOSER"
           if find "$root" -type d -name '__pycache__' -print | grep -q .; then
-            echo 'Python bytecode cache found in package.' >&2
+            echo 'Python cache found before Mac packaging.' >&2
             exit 1
           fi
-
           xattr -cr "$root"
           if xattr -lr "$root" 2>/dev/null | grep -q 'com.apple.quarantine'; then
-            echo 'Quarantine attribute remains before signing.' >&2
+            echo 'Quarantine attribute remains before Mac signing.' >&2
             exit 1
           fi
-
           codesign --force --sign - --timestamp=none "$migration_app"
           codesign --force --sign - --timestamp=none "$main_app"
           codesign --verify --deep --strict --verbose=4 "$migration_app"
           codesign --verify --deep --strict --verbose=4 "$main_app"
           plutil -lint "$migration_app/Contents/Info.plist"
           plutil -lint "$main_app/Contents/Info.plist"
-
           xattr -cr "$root"
-          ditto -c -k --keepParent --norsrc --noextattr --noacl --noqtn \
-            "$root" "output/$OUTPUT_ZIP"
-
-          if zipinfo -1 "output/$OUTPUT_ZIP" | grep -E '(^|/)(__MACOSX|\._|\.DS_Store)(/|$)' ; then
-            echo 'AppleDouble or Finder metadata found in output ZIP.' >&2
+          ditto -c -k --keepParent --norsrc --noextattr --noacl --noqtn "$root" "output/$OUTPUT_ZIP"
+          unzip -t "output/$OUTPUT_ZIP"
+          if zipinfo -1 "output/$OUTPUT_ZIP" | grep -E '(^|/)(__MACOSX|\._|\.DS_Store)(/|$)'; then
+            echo 'AppleDouble or Finder metadata found in Mac output.' >&2
             exit 1
           fi
 
           ditto -x -k "output/$OUTPUT_ZIP" verify
           verified_root="$PWD/verify/Grok Chameleon"
-          verified_main_app="$verified_root/Grok Chameleon.app"
-          verified_migration_app="$verified_root/Migration.app"
-          verified_main_exec="$verified_main_app/Contents/MacOS/Grok Chameleon"
-          verified_main_js="$verified_main_app/Contents/Resources/app/electron/main.js"
-          verified_preload_bridge_js="$verified_main_app/Contents/Resources/app/electron/preload-bridge.js"
-          verified_server_py="$verified_main_app/Contents/Resources/app/runtime/server.py"
-          verified_composer_js="$verified_main_app/Contents/Resources/app/web/scripts/i_composer_submit.js"
-          verified_detail_css="$verified_main_app/Contents/Resources/app/web/styles/detail.css"
-          verified_build_main_js="$verified_main_app/Contents/Resources/app/web/scripts/build_main.js"
-          verified_detail_media_js="$verified_main_app/Contents/Resources/app/web/scripts/detail_media.js"
-          verified_card_render_js="$verified_main_app/Contents/Resources/app/web/scripts/card_render.js"
-          test -x "$verified_main_exec"
-          test -x "$verified_migration_app/Contents/MacOS/Migration"
-          test -L "$verified_main_app/Contents/Frameworks/Electron Framework.framework/Versions/Current"
-          test -L "$verified_main_app/Contents/Frameworks/Electron Framework.framework/Electron Framework"
-          codesign --verify --deep --strict --verbose=4 "$verified_migration_app"
-          codesign --verify --deep --strict --verbose=4 "$verified_main_app"
+          verified_main="$verified_root/Grok Chameleon.app"
+          verified_migration="$verified_root/Migration.app"
+          verified_app="$verified_main/Contents/Resources/app"
+          verified_target="$verified_app/web/scripts/composer_options.js"
+          test -x "$verified_main/Contents/MacOS/Grok Chameleon"
+          test -x "$verified_migration/Contents/MacOS/Migration"
+          test -L "$verified_main/Contents/Frameworks/Electron Framework.framework/Versions/Current"
+          test -L "$verified_main/Contents/Frameworks/Electron Framework.framework/Electron Framework"
+          codesign --verify --deep --strict --verbose=4 "$verified_main"
+          codesign --verify --deep --strict --verbose=4 "$verified_migration"
+          cmp "$common" "$verified_target"
+          node --check "$verified_target"
+          if find "$verified_root" \( -name '__MACOSX' -o -name '._*' -o -name '.DS_Store' -o -name '__pycache__' \) -print | grep -q .; then
+            echo 'Forbidden metadata found after final Mac extraction.' >&2
+            exit 1
+          fi
           if xattr -lr "$verified_root" 2>/dev/null | grep -q 'com.apple.quarantine'; then
-            echo 'Quarantine attribute found after final extraction.' >&2
+            echo 'Quarantine attribute found after final Mac extraction.' >&2
             exit 1
           fi
-
-          node --check "$verified_main_js"
-          node --check "$verified_preload_bridge_js"
-          node --check "$verified_composer_js"
-          node --check "$verified_build_main_js"
-          node --check "$verified_detail_media_js"
-          node --check "$verified_card_render_js"
-          if grep -E 'finalVideoRequestPatch|installPersistentFinalVideoRequestPatch|armFinalVideoRequestPatch|video_request_final_patch|official_video_duration_arg_applied|Official Imagine final video request was not intercepted' "$verified_preload_bridge_js"; then
-            echo 'Final video request hook marker found after final extraction.' >&2
-            exit 1
-          fi
-          grep -F 'clearCurrentCardPreviewCache("startup")' "$verified_main_js"
-          grep -F 'const CDP_PORT = String(process.env.GROK_CHAMELEON_CDP_PORT || "0");' "$verified_main_js"
-          grep -F 'clearCurrentCardPreviewCache("shutdown")' "$verified_main_js"
-          grep -F 'clearCurrentCardPreviewCache("will-quit")' "$verified_main_js"
-          grep -F 'GROK_CHAMELEON_CARD_PREVIEW_CACHE_DIR' "$verified_main_js" "$verified_server_py"
-          grep -F 'function commandSourceContextId(command)' "$verified_main_js"
-          grep -F 'Imagine source card could not be prepared' "$verified_main_js"
-          grep -F 'return ["t2i_ws"].includes' "$verified_main_js"
-          grep -F 'prepareActiveImagineBridgeSession({ force: false, silent: false })' "$verified_composer_js"
-          grep -F 'store_generation_source_hydration_start' "$verified_preload_bridge_js"
-          grep -F 'store_generation_source_hydration_ready' "$verified_preload_bridge_js"
-          grep -F 'const value = String(sourceId || "").trim();' "$verified_preload_bridge_js"
-          grep -F 'store_generation_official_video_settings_applied' "$verified_preload_bridge_js"
-          grep -F 'state.setResolution(requestedResolution)' "$verified_preload_bridge_js"
-          grep -F 'state.setAspectRatio(requestedAspectRatio)' "$verified_preload_bridge_js"
-          grep -F 'retryRateLimitedStoreCall("generateVideoForImage"' "$verified_preload_bridge_js"
-          grep -F 'store_generation_candidate_handoff' "$verified_preload_bridge_js"
-          grep -F 'storeObservationMs: 8000' "$verified_preload_bridge_js"
-          grep -F 'rootSourceId = ""' "$verified_preload_bridge_js"
-          grep -F 'addTarget(rootSourceId);' "$verified_preload_bridge_js"
-          grep -F 'for (const sourceId of [containerId, parentPostId, inputIds[0]])' "$verified_preload_bridge_js"
-          grep -F 'IMAGINE_DIRECT_I2V_DISPLAY_MAX_PROGRESS = 94' "$verified_server_py"
-          grep -F 'IMAGINE_DIRECT_VIDEO_DISPLAY_MAX_PROGRESS = 94' "$verified_server_py"
-          grep -F 'IMAGINE_DIRECT_EXTEND_DISPLAY_MAX_PROGRESS = 94' "$verified_server_py"
-          grep -F '("i2v", "480p", 6): 13,' "$verified_server_py"
-          grep -F '("t2v", "480p", 6): 13,' "$verified_server_py"
-          grep -F 'running_progress_limit = {' "$verified_server_py"
-          grep -F 't2i_candidates_url_recovered' "$verified_server_py"
-          grep -F 'def imagine_persist_generated_relation(' "$verified_server_py"
-          grep -F 'def imagine_apply_generated_relations(' "$verified_server_py"
-          grep -F 'if kind == "image"' "$verified_server_py"
-          grep -F 'function removeUnavailableImagineItem(postPath, url, host = null)' "$verified_detail_media_js"
-          grep -F 'qApi("/api/imagine/item/hide"' "$verified_detail_media_js"
-          grep -F 'width: 3ch;' "$verified_detail_css"
-          test "$(grep -F 'class="detail_generation_percent"' "$verified_build_main_js" | wc -l | tr -d ' ')" = 2
-          PYTHONDONTWRITEBYTECODE=1 python3 - "$verified_server_py" <<'PY'
-          import sys
-          from pathlib import Path
-          source = Path(sys.argv[1])
-          compile(source.read_text(encoding="utf-8"), str(source), "exec")
-          PY
-          PYTHONDONTWRITEBYTECODE=1 python3 tools/verify_imagine_relation_safety.py "$verified_server_py"
-          ELECTRON_RUN_AS_NODE=1 "$verified_main_exec" -e 'console.log("ELECTRON_EXECUTABLE_OK")'
+          ELECTRON_RUN_AS_NODE=1 "$verified_main/Contents/MacOS/Grok Chameleon" -e 'console.log("MAC_ELECTRON_OK")'
           shasum -a 256 "output/$OUTPUT_ZIP"
 
-      - name: Back up and replace exact Mac release asset
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if gh release view "$RELEASE_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --json assets \
-            --jq '.assets[].name' | grep -Fxq "$BACKUP_ZIP"; then
-            echo "Backup asset already exists: $BACKUP_ZIP" >&2
-            exit 1
-          fi
-          cp "input/$INPUT_ZIP" "output/$BACKUP_ZIP"
-          gh release upload "$RELEASE_TAG" "output/$BACKUP_ZIP" \
-            --repo "$GITHUB_REPOSITORY"
-          gh release upload "$RELEASE_TAG" "output/$OUTPUT_ZIP" \
-            --repo "$GITHUB_REPOSITORY" \
-            --clobber
-
-      - name: Retain verified Mac artifact
+      - name: Retain the verified Mac build
         uses: actions/upload-artifact@v4
         with:
-          name: mac-grok-chameleon-cumulative-imagine-relations-verified
+          name: mac-common-source-build
           path: output/Mac_Grok_Chameleon_a.zip
           if-no-files-found: error
           retention-days: 3
+
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs:
+      - build-windows
+      - build-macos
+    steps:
+      - name: Download the verified Windows build
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-common-source-build
+          path: release/windows
+
+      - name: Download the verified Mac build
+        uses: actions/download-artifact@v4
+        with:
+          name: mac-common-source-build
+          path: release/macos
+
+      - name: Preserve and replace both release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WIN_TAG: v20260720-041036-win
+          MAC_TAG: v20260720-042100-mac
+          WIN_ZIP: Win_Grok_Chameleon_a.zip
+          MAC_ZIP: Mac_Grok_Chameleon_a.zip
+          WIN_INPUT_SHA256: d55301c90d6bf07d3d709ea8fe63a778e0b7da2fd1cf992f32e570f7a597cc36
+          MAC_INPUT_SHA256: 401d0947f092cded02d2d6a2bdbdd76b3a8254fdfdcd15ee870e8d72e6c83d59
+        run: |
+          set -euo pipefail
+          mkdir -p current/win current/mac backups
+          gh release download "$WIN_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$WIN_ZIP" --dir current/win
+          gh release download "$MAC_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$MAC_ZIP" --dir current/mac
+          test "$(sha256sum "current/win/$WIN_ZIP" | awk '{print $1}')" = "$WIN_INPUT_SHA256"
+          test "$(sha256sum "current/mac/$MAC_ZIP" | awk '{print $1}')" = "$MAC_INPUT_SHA256"
+          short_sha="$(printf '%s' "$GITHUB_SHA" | cut -c1-12)"
+          win_backup="Win_Grok_Chameleon_a.previous-before-t2i-count-no-1-$short_sha.zip"
+          mac_backup="Mac_Grok_Chameleon_a.previous-before-t2i-count-no-1-$short_sha.zip"
+          cp "current/win/$WIN_ZIP" "backups/$win_backup"
+          cp "current/mac/$MAC_ZIP" "backups/$mac_backup"
+          gh release upload "$WIN_TAG" "backups/$win_backup" --repo "$GITHUB_REPOSITORY"
+          gh release upload "$MAC_TAG" "backups/$mac_backup" --repo "$GITHUB_REPOSITORY"
+
+          rollback() {
+            echo 'Rolling back both production assets.' >&2
+            gh release upload "$WIN_TAG" "current/win/$WIN_ZIP" --repo "$GITHUB_REPOSITORY" --clobber || true
+            gh release upload "$MAC_TAG" "current/mac/$MAC_ZIP" --repo "$GITHUB_REPOSITORY" --clobber || true
+          }
+          trap rollback ERR
+          gh release upload "$WIN_TAG" "release/windows/$WIN_ZIP" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$MAC_TAG" "release/macos/$MAC_ZIP" --repo "$GITHUB_REPOSITORY" --clobber
+          win_local="sha256:$(sha256sum "release/windows/$WIN_ZIP" | awk '{print $1}')"
+          mac_local="sha256:$(sha256sum "release/macos/$MAC_ZIP" | awk '{print $1}')"
+          win_remote="$(gh release view "$WIN_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | select(.name == "'"$WIN_ZIP"'") | .digest')"
+          mac_remote="$(gh release view "$MAC_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | select(.name == "'"$MAC_ZIP"'") | .digest')"
+          test "$win_local" = "$win_remote"
+          test "$mac_local" = "$mac_remote"
+          trap - ERR
+          echo "windows-production-digest=$win_remote"
+          echo "mac-production-digest=$mac_remote"
