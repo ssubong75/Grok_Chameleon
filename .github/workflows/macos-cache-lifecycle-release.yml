@@ -22,6 +22,7 @@ env:
   COMMON_DETAIL_RENDER: common/app/web/scripts/detail_render.js
   COMMON_I_SOURCE: common/app/web/scripts/i_source_render.js
   COMMON_COLLECTION_ACTIONS: common/app/web/scripts/collection_actions.js
+  COMMON_PROMPT_EVENTS: common/app/web/scripts/prompt_events.js
   COMMON_UI_FEEDBACK: common/app/web/scripts/ui_feedback.js
   COMMON_ACCOUNT_STYLE: common/app/web/styles/account.css
   COMMON_PRELOAD: common/app/electron/preload-bridge.js
@@ -38,7 +39,7 @@ jobs:
       RELEASE_TAG: v20260720-041036-win
       INPUT_ZIP: Win_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Win_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: 3079456d7ba9da1ed62245afd752fc3961d4700f145768d5a76307d5af5bd188
+      EXPECTED_INPUT_SHA256: bb5cbcbc61875a06dcb27a97662d16ee60b5f77033aec716faf3d166f15c43e4
 
     steps:
       - name: Check out the shared source commit
@@ -85,6 +86,7 @@ jobs:
             @{ Name = "detail_render"; Relative = "web\scripts\detail_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_RENDER) },
             @{ Name = "i_source"; Relative = "web\scripts\i_source_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_I_SOURCE) },
             @{ Name = "collection_actions"; Relative = "web\scripts\collection_actions.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_COLLECTION_ACTIONS) },
+            @{ Name = "prompt_events"; Relative = "web\scripts\prompt_events.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_PROMPT_EVENTS) },
             @{ Name = "ui_feedback"; Relative = "web\scripts\ui_feedback.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_UI_FEEDBACK) },
             @{ Name = "account_style"; Relative = "web\styles\account.css"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_ACCOUNT_STYLE) }
           )
@@ -102,6 +104,7 @@ jobs:
           $targetDetailRender = ($sharedSources | Where-Object Name -eq "detail_render").Target
           $targetISource = ($sharedSources | Where-Object Name -eq "i_source").Target
           $targetCollectionActions = ($sharedSources | Where-Object Name -eq "collection_actions").Target
+          $targetPromptEvents = ($sharedSources | Where-Object Name -eq "prompt_events").Target
           $targetUiFeedback = ($sharedSources | Where-Object Name -eq "ui_feedback").Target
           $targetAccountStyle = ($sharedSources | Where-Object Name -eq "account_style").Target
 
@@ -265,6 +268,9 @@ jobs:
           )) {
             if (-not $collectionActionsText.Contains($marker)) { throw "Collection move guard marker missing: $marker" }
           }
+          $promptEventsText = Get-Content -Raw -LiteralPath $targetPromptEvents
+          $promptWritePattern = '(?s)document\.querySelector\("\.prompt_write_btn"\)\?\.addEventListener\("click", \(\) => \{\s*openPromptSave\(\);\s*\}\);'
+          if ($promptEventsText -notmatch $promptWritePattern) { throw "Prompt Write does not open the shared prompt save dialog." }
           if (-not (Get-Content -Raw -LiteralPath $targetUiFeedback).Contains('".workspace.i_detail_open .i_detail_media, .workspace.b_detail_open .b_detail_media"')) { throw "Lucky media center marker missing." }
           if (-not (Get-Content -Raw -LiteralPath $targetAccountStyle).Contains(".lucky_notice.in_detail_media")) { throw "Lucky media position marker missing." }
           if (-not $mainText.Contains("const CARD_PREVIEW_MAX_EDGE = 960;")) { throw "Card preview size dropped below the 512x288 requirement." }
@@ -335,7 +341,7 @@ jobs:
       RELEASE_TAG: v20260720-042100-mac
       INPUT_ZIP: Mac_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Mac_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: 786d16b91ced962661ef031c02193b9e63698da029af5fe40c36843ab60fdd25
+      EXPECTED_INPUT_SHA256: 9f20fa989a887d9d8b04b028ea81e448418628a77eabf8e0d8a1c3cce4a3ee12
 
     steps:
       - name: Check out the shared source commit
@@ -379,6 +385,7 @@ jobs:
             web/scripts/detail_render.js
             web/scripts/i_source_render.js
             web/scripts/collection_actions.js
+            web/scripts/prompt_events.js
             web/scripts/ui_feedback.js
             web/styles/account.css
           )
@@ -393,6 +400,7 @@ jobs:
           detail_render_js="$app_root/web/scripts/detail_render.js"
           i_source_js="$app_root/web/scripts/i_source_render.js"
           collection_actions_js="$app_root/web/scripts/collection_actions.js"
+          prompt_events_js="$app_root/web/scripts/prompt_events.js"
           ui_feedback_js="$app_root/web/scripts/ui_feedback.js"
           account_css="$app_root/web/styles/account.css"
           main_exec="$main_app/Contents/MacOS/Grok Chameleon"
@@ -480,6 +488,15 @@ jobs:
           grep -F 'if (moveToCollectionRequestPending) return;' "$collection_actions_js"
           grep -F 'moveToCollectionRequestPending = true;' "$collection_actions_js"
           grep -F 'moveToCollectionRequestPending = false;' "$collection_actions_js"
+          python3 - "$prompt_events_js" <<'PY'
+          import pathlib
+          import re
+          import sys
+          text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+          pattern = r'document\.querySelector\("\.prompt_write_btn"\)\?\.addEventListener\("click", \(\) => \{\s*openPromptSave\(\);\s*\}\);'
+          if not re.search(pattern, text, re.S):
+              raise SystemExit("Prompt Write does not open the shared prompt save dialog.")
+          PY
           grep -F '".workspace.i_detail_open .i_detail_media, .workspace.b_detail_open .b_detail_media"' "$ui_feedback_js"
           grep -F '.lucky_notice.in_detail_media' "$account_css"
           grep -F 'const CARD_PREVIEW_MAX_EDGE = 960;' "$main_js"
@@ -545,6 +562,7 @@ jobs:
             web/scripts/detail_render.js
             web/scripts/i_source_render.js
             web/scripts/collection_actions.js
+            web/scripts/prompt_events.js
           )
           if find "$root" -type d -name '__pycache__' -print | grep -q .; then
             echo 'Python cache found before Mac packaging.' >&2
@@ -644,8 +662,8 @@ jobs:
           MAC_TAG: v20260720-042100-mac
           WIN_ZIP: Win_Grok_Chameleon_a.zip
           MAC_ZIP: Mac_Grok_Chameleon_a.zip
-          WIN_INPUT_SHA256: 3079456d7ba9da1ed62245afd752fc3961d4700f145768d5a76307d5af5bd188
-          MAC_INPUT_SHA256: 786d16b91ced962661ef031c02193b9e63698da029af5fe40c36843ab60fdd25
+          WIN_INPUT_SHA256: bb5cbcbc61875a06dcb27a97662d16ee60b5f77033aec716faf3d166f15c43e4
+          MAC_INPUT_SHA256: 9f20fa989a887d9d8b04b028ea81e448418628a77eabf8e0d8a1c3cce4a3ee12
         run: |
           set -euo pipefail
           mkdir -p current/win current/mac backups
@@ -654,8 +672,8 @@ jobs:
           test "$(sha256sum "current/win/$WIN_ZIP" | awk '{print $1}')" = "$WIN_INPUT_SHA256"
           test "$(sha256sum "current/mac/$MAC_ZIP" | awk '{print $1}')" = "$MAC_INPUT_SHA256"
           short_sha="$(printf '%s' "$GITHUB_SHA" | cut -c1-12)"
-          win_backup="Win_Grok_Chameleon_a.previous-before-collection-preview-fix-$short_sha.zip"
-          mac_backup="Mac_Grok_Chameleon_a.previous-before-collection-preview-fix-$short_sha.zip"
+          win_backup="Win_Grok_Chameleon_a.previous-before-prompt-write-fix-$short_sha.zip"
+          mac_backup="Mac_Grok_Chameleon_a.previous-before-prompt-write-fix-$short_sha.zip"
           cp "current/win/$WIN_ZIP" "backups/$win_backup"
           cp "current/mac/$MAC_ZIP" "backups/$mac_backup"
           gh release upload "$WIN_TAG" "backups/$win_backup" --repo "$GITHUB_REPOSITORY"
