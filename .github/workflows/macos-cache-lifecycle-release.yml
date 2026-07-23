@@ -210,10 +210,14 @@ jobs:
             "conversation_request_route_applied",
             "canonicalContainerId",
             "baselineIds: Array.from(beforeIds)",
-            "if (hasInProgressCandidate && now - tracking.firstCandidateSeenAt >= storeObservationMs)",
-            "retainTrackedCandidateUntilDeadline: tieredI2vWait,"
+            "!tracking.retainTrackedCandidateUntilDeadline",
+            'retainTrackedCandidateUntilDeadline: tieredI2vWait || variant.kind === "textToVideo",',
+            "const finalEvents = finalContainerIds.flatMap((finalContainerId) => collectStoreEvents("
           )) {
             if (-not $preloadText.Contains($marker)) { throw "Windows relation bridge marker missing: $marker" }
+          }
+          if ($preloadText.Contains("if (hasInProgressCandidate && now - tracking.firstCandidateSeenAt >= storeObservationMs)")) {
+            throw "Windows eight-second video handoff guard is missing."
           }
           $serverText = Get-Content -Raw -LiteralPath $targetServer
           foreach ($marker in @(
@@ -411,8 +415,13 @@ jobs:
           grep -F 'conversation_request_route_applied' "$preload_js"
           grep -F 'canonicalContainerId' "$preload_js"
           grep -F 'baselineIds: Array.from(beforeIds)' "$preload_js"
-          grep -F 'if (hasInProgressCandidate && now - tracking.firstCandidateSeenAt >= storeObservationMs)' "$preload_js"
-          grep -F 'retainTrackedCandidateUntilDeadline: tieredI2vWait,' "$preload_js"
+          grep -F '!tracking.retainTrackedCandidateUntilDeadline' "$preload_js"
+          grep -F 'retainTrackedCandidateUntilDeadline: tieredI2vWait || variant.kind === "textToVideo",' "$preload_js"
+          grep -F 'const finalEvents = finalContainerIds.flatMap((finalContainerId) => collectStoreEvents(' "$preload_js"
+          if grep -F 'if (hasInProgressCandidate && now - tracking.firstCandidateSeenAt >= storeObservationMs)' "$preload_js"; then
+            echo 'Mac eight-second video handoff guard is missing.' >&2
+            exit 1
+          fi
           grep -F 'relation_recovery_action = action in {"i2i", "i2v", "t2v", "extend"}' "$server_py"
           grep -F 'events, bridge_parent_ids, bridge_baseline_ids, canonical_container_id = native_bridge_fetch_events(' "$server_py"
           grep -F 'def imagine_conversation_root_generation(responses: list[dict]) -> dict:' "$server_py"
@@ -598,8 +607,8 @@ jobs:
           test "$(sha256sum "current/win/$WIN_ZIP" | awk '{print $1}')" = "$WIN_INPUT_SHA256"
           test "$(sha256sum "current/mac/$MAC_ZIP" | awk '{print $1}')" = "$MAC_INPUT_SHA256"
           short_sha="$(printf '%s' "$GITHUB_SHA" | cut -c1-12)"
-          win_backup="Win_Grok_Chameleon_a.previous-before-video-8s-revert-$short_sha.zip"
-          mac_backup="Mac_Grok_Chameleon_a.previous-before-video-8s-revert-$short_sha.zip"
+          win_backup="Win_Grok_Chameleon_a.previous-before-video-retention-restore-$short_sha.zip"
+          mac_backup="Mac_Grok_Chameleon_a.previous-before-video-retention-restore-$short_sha.zip"
           cp "current/win/$WIN_ZIP" "backups/$win_backup"
           cp "current/mac/$MAC_ZIP" "backups/$mac_backup"
           gh release upload "$WIN_TAG" "backups/$win_backup" --repo "$GITHUB_REPOSITORY"

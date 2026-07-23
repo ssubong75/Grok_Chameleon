@@ -1908,7 +1908,11 @@
           });
         }
         const storeObservationMs = Number(tracking.storeObservationMs || 8000);
-        if (hasInProgressCandidate && now - tracking.firstCandidateSeenAt >= storeObservationMs) {
+        if (
+          !tracking.retainTrackedCandidateUntilDeadline
+          && hasInProgressCandidate
+          && now - tracking.firstCandidateSeenAt >= storeObservationMs
+        ) {
           pushStoreTrace("store_generation_candidate_handoff", {
             requestId,
             containerId,
@@ -2755,7 +2759,7 @@
         discoverNewContainers: startNewConversation,
         startedAt: Date.now(),
         waitTier: videoWaitTier,
-        retainTrackedCandidateUntilDeadline: tieredI2vWait,
+        retainTrackedCandidateUntilDeadline: tieredI2vWait || variant.kind === "textToVideo",
         noCandidateMaxMs: tieredI2vWait ? 0 : 10000,
         noCandidateSince: 0,
         baseDeadlineAt,
