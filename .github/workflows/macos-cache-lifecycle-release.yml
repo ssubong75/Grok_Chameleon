@@ -21,6 +21,8 @@ env:
   COMMON_DETAIL_STATE: common/app/web/scripts/detail_state.js
   COMMON_DETAIL_RENDER: common/app/web/scripts/detail_render.js
   COMMON_I_SOURCE: common/app/web/scripts/i_source_render.js
+  COMMON_UI_FEEDBACK: common/app/web/scripts/ui_feedback.js
+  COMMON_ACCOUNT_STYLE: common/app/web/styles/account.css
   COMMON_PRELOAD: common/app/electron/preload-bridge.js
   COMMON_SERVER: common/app/runtime/server.py
   COMMON_MIGRATION: common/migration/migration.py
@@ -80,7 +82,9 @@ jobs:
             @{ Name = "library_core"; Relative = "web\scripts\library_core.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_LIBRARY_CORE) },
             @{ Name = "detail_state"; Relative = "web\scripts\detail_state.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_STATE) },
             @{ Name = "detail_render"; Relative = "web\scripts\detail_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_RENDER) },
-            @{ Name = "i_source"; Relative = "web\scripts\i_source_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_I_SOURCE) }
+            @{ Name = "i_source"; Relative = "web\scripts\i_source_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_I_SOURCE) },
+            @{ Name = "ui_feedback"; Relative = "web\scripts\ui_feedback.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_UI_FEEDBACK) },
+            @{ Name = "account_style"; Relative = "web\styles\account.css"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_ACCOUNT_STYLE) }
           )
           foreach ($shared in $sharedSources) {
             $shared.Target = Join-Path $appRoot $shared.Relative
@@ -95,6 +99,8 @@ jobs:
           $targetDetailState = ($sharedSources | Where-Object Name -eq "detail_state").Target
           $targetDetailRender = ($sharedSources | Where-Object Name -eq "detail_render").Target
           $targetISource = ($sharedSources | Where-Object Name -eq "i_source").Target
+          $targetUiFeedback = ($sharedSources | Where-Object Name -eq "ui_feedback").Target
+          $targetAccountStyle = ($sharedSources | Where-Object Name -eq "account_style").Target
 
           $inputHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $inputZip).Hash.ToLowerInvariant()
           if ($inputHash -ne $env:EXPECTED_INPUT_SHA256) { throw "Windows input digest changed: $inputHash" }
@@ -210,6 +216,7 @@ jobs:
             "conversation_request_route_applied",
             "canonicalContainerId",
             "baselineIds: Array.from(beforeIds)",
+            'const beforeIds = allCurrentIds(state, "video");',
             "!tracking.retainTrackedCandidateUntilDeadline",
             'retainTrackedCandidateUntilDeadline: tieredI2vWait || variant.kind === "textToVideo",',
             "const finalEvents = finalContainerIds.flatMap((finalContainerId) => collectStoreEvents("
@@ -223,6 +230,8 @@ jobs:
           foreach ($marker in @(
             'relation_recovery_action = action in {"i2i", "i2v", "t2v", "extend"}',
             'events, bridge_parent_ids, bridge_baseline_ids, canonical_container_id = native_bridge_fetch_events(',
+            'def imagine_generated_relation_baseline_ids(root: Path, source_post_path: str, expected_type: str) -> set[str]:',
+            '"relation_count": relation_baseline_count',
             'def imagine_conversation_root_generation(responses: list[dict]) -> dict:',
             '"t2i_group_container": bool(root_generation.get("is_t2i_group_container"))',
             'IMAGINE_DIRECT_I2I_MAX_WAIT_SECONDS = 14'
@@ -241,6 +250,8 @@ jobs:
           if (-not $detailRenderText.Contains("const visible = !post?.is_job_post")) { throw "Build detail heart visibility marker missing." }
           if ($detailRenderText.Contains("Boolean(post?.is_job_post)")) { throw "Build job heart visibility regression found." }
           if (-not (Get-Content -Raw -LiteralPath $targetISource).Contains("function isImagineT2iGroupContainer(post)")) { throw "T2I group filter marker missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetUiFeedback).Contains('".workspace.i_detail_open .i_detail_media, .workspace.b_detail_open .b_detail_media"')) { throw "Lucky media center marker missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetAccountStyle).Contains(".lucky_notice.in_detail_media")) { throw "Lucky media position marker missing." }
           $metadata = Get-ChildItem -LiteralPath $root -Recurse -Force | Where-Object {
             $_.Name -eq "__MACOSX" -or $_.Name -like "._*" -or $_.Name -eq ".DS_Store"
           }
@@ -351,6 +362,8 @@ jobs:
             web/scripts/detail_state.js
             web/scripts/detail_render.js
             web/scripts/i_source_render.js
+            web/scripts/ui_feedback.js
+            web/styles/account.css
           )
           target="$app_root/web/scripts/composer_options.js"
           main_js="$app_root/electron/main.js"
@@ -362,6 +375,8 @@ jobs:
           detail_state_js="$app_root/web/scripts/detail_state.js"
           detail_render_js="$app_root/web/scripts/detail_render.js"
           i_source_js="$app_root/web/scripts/i_source_render.js"
+          ui_feedback_js="$app_root/web/scripts/ui_feedback.js"
+          account_css="$app_root/web/styles/account.css"
           main_exec="$main_app/Contents/MacOS/Grok Chameleon"
           migration_exec="$migration_app/Contents/MacOS/Migration"
 
@@ -415,6 +430,7 @@ jobs:
           grep -F 'conversation_request_route_applied' "$preload_js"
           grep -F 'canonicalContainerId' "$preload_js"
           grep -F 'baselineIds: Array.from(beforeIds)' "$preload_js"
+          grep -F 'const beforeIds = allCurrentIds(state, "video");' "$preload_js"
           grep -F '!tracking.retainTrackedCandidateUntilDeadline' "$preload_js"
           grep -F 'retainTrackedCandidateUntilDeadline: tieredI2vWait || variant.kind === "textToVideo",' "$preload_js"
           grep -F 'const finalEvents = finalContainerIds.flatMap((finalContainerId) => collectStoreEvents(' "$preload_js"
@@ -424,6 +440,8 @@ jobs:
           fi
           grep -F 'relation_recovery_action = action in {"i2i", "i2v", "t2v", "extend"}' "$server_py"
           grep -F 'events, bridge_parent_ids, bridge_baseline_ids, canonical_container_id = native_bridge_fetch_events(' "$server_py"
+          grep -F 'def imagine_generated_relation_baseline_ids(root: Path, source_post_path: str, expected_type: str) -> set[str]:' "$server_py"
+          grep -F '"relation_count": relation_baseline_count' "$server_py"
           grep -F 'def imagine_conversation_root_generation(responses: list[dict]) -> dict:' "$server_py"
           grep -F '"t2i_group_container": bool(root_generation.get("is_t2i_group_container"))' "$server_py"
           grep -F 'IMAGINE_DIRECT_I2I_MAX_WAIT_SECONDS = 14' "$server_py"
@@ -437,6 +455,8 @@ jobs:
             exit 1
           fi
           grep -F 'function isImagineT2iGroupContainer(post)' "$i_source_js"
+          grep -F '".workspace.i_detail_open .i_detail_media, .workspace.b_detail_open .b_detail_media"' "$ui_feedback_js"
+          grep -F '.lucky_notice.in_detail_media' "$account_css"
           grep -F 'RUNTIME_ROOT = Path(__file__).resolve().parent' "$server_py"
           grep -F 'APP_ROOT = RUNTIME_ROOT.parent' "$server_py"
           if grep -E 'C:\\|python\.exe' "$server_py"; then

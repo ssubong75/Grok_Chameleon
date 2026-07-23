@@ -6812,6 +6812,28 @@ def imagine_saved_candidate_ids(account: dict, expected_type: str, parent_ids: s
     return {value for value in ids if value}
 
 
+def imagine_generated_relation_baseline_ids(root: Path, source_post_path: str, expected_type: str) -> set[str]:
+    source_id = imagine_relation_source_id(source_post_path)
+    if not source_id:
+        return set()
+    library = merge_library_json(read_json(root / "library.json", {}))
+    settings = library.get("settings") if isinstance(library.get("settings"), dict) else {}
+    relations = settings.get("imagine_generated_relations") if isinstance(settings.get("imagine_generated_relations"), dict) else {}
+    record = relations.get(source_id) if isinstance(relations.get(source_id), dict) else {}
+    ids: set[str] = set()
+    for item in record.get("items") if isinstance(record.get("items"), list) else []:
+        if not isinstance(item, dict) or str(item.get("type") or "").lower() != expected_type:
+            continue
+        entry_id = imagine_relation_item_key(item)
+        media_url = str(item.get("remote_url") or item.get("url") or "")
+        media_key = imagine_media_candidate_key(media_url)
+        if entry_id:
+            ids.add(entry_id)
+        if media_key:
+            ids.add(media_key)
+    return ids
+
+
 def imagine_wait_for_saved_direct_result(
     account: dict,
     expected_type: str,
@@ -7939,13 +7961,16 @@ def imagine_native_bridge_generate(
         if video_deadline
         else None
     )
-    baseline_ids = set()
+    source_post_path = str(payload.get("source_post_path") or "")
+    baseline_ids = imagine_generated_relation_baseline_ids(root, source_post_path, expected_type)
+    relation_baseline_count = len(baseline_ids)
     try:
-        baseline_ids = imagine_saved_candidate_ids(account, expected_type, parent_ids, ignored_urls)
+        baseline_ids.update(imagine_saved_candidate_ids(account, expected_type, parent_ids, ignored_urls))
         imagine_debug_event("native_bridge_baseline_ids", {
             "request_id": request_id,
             "action": action,
             "count": len(baseline_ids),
+            "relation_count": relation_baseline_count,
             "parent_ids": sorted(parent_ids),
         })
     except Exception as exc:
@@ -8140,7 +8165,6 @@ def imagine_native_bridge_generate(
         })
         raise RuntimeError("Imagine did not return a final image.")
 
-    source_post_path = str(payload.get("source_post_path") or "")
     skip_generated_like = bool(source_post_path and action in {"i2i", "i2v", "extend"})
     if skip_generated_like:
         imagine_debug_event("generated_result_like_skipped", {

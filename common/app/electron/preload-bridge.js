@@ -2739,12 +2739,7 @@
       }
       generateVideoMethod = resolveStoreMethod(state, storeContext.record, "generateVideoForImage");
       if (!generateVideoMethod.fn && !useOfficialUiAction) throw new Error("Official generateVideoForImage is missing.");
-      const beforeIds = startNewConversation
-        ? allCurrentIds(state, "video")
-        : new Set([
-          ...currentIds(state, containerId, "video"),
-          ...currentIds(state, rootContainerId, "video"),
-        ]);
+      const beforeIds = allCurrentIds(state, "video");
       const baseDeadlineAt = startedAt + (tieredI2vWait
         ? officialVideoWaitMs
         : Math.max(3000, Number(maxWaitMs || 90000)));
