@@ -35,7 +35,7 @@ jobs:
       RELEASE_TAG: v20260720-041036-win
       INPUT_ZIP: Win_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Win_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: 0da36fb486ec9a5e98c8d83f34365873e6b5070f01c1e0042aca2d48305b5a8b
+      EXPECTED_INPUT_SHA256: f4799a687810490cb6b5d009cf3e43902231952fe9d4bbf6ebb5cf8df0c7d465
 
     steps:
       - name: Check out the shared source commit
@@ -209,7 +209,9 @@ jobs:
             "const generationResponseCaptures = [];",
             "conversation_request_route_applied",
             "canonicalContainerId",
-            "baselineIds: Array.from(beforeIds)"
+            "baselineIds: Array.from(beforeIds)",
+            "if (hasInProgressCandidate && now - tracking.firstCandidateSeenAt >= storeObservationMs)",
+            "retainTrackedCandidateUntilDeadline: tieredI2vWait,"
           )) {
             if (-not $preloadText.Contains($marker)) { throw "Windows relation bridge marker missing: $marker" }
           }
@@ -302,7 +304,7 @@ jobs:
       RELEASE_TAG: v20260720-042100-mac
       INPUT_ZIP: Mac_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Mac_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: 88128d626e6f783488162f9b5d4d41468b741f947a31f0673d40d72d8391e824
+      EXPECTED_INPUT_SHA256: 0227b5e8d0dc4a81222291c8fa992f84281f4eeda74f552eb0bc6f8a51cccf88
 
     steps:
       - name: Check out the shared source commit
@@ -409,6 +411,8 @@ jobs:
           grep -F 'conversation_request_route_applied' "$preload_js"
           grep -F 'canonicalContainerId' "$preload_js"
           grep -F 'baselineIds: Array.from(beforeIds)' "$preload_js"
+          grep -F 'if (hasInProgressCandidate && now - tracking.firstCandidateSeenAt >= storeObservationMs)' "$preload_js"
+          grep -F 'retainTrackedCandidateUntilDeadline: tieredI2vWait,' "$preload_js"
           grep -F 'relation_recovery_action = action in {"i2i", "i2v", "t2v", "extend"}' "$server_py"
           grep -F 'events, bridge_parent_ids, bridge_baseline_ids, canonical_container_id = native_bridge_fetch_events(' "$server_py"
           grep -F 'def imagine_conversation_root_generation(responses: list[dict]) -> dict:' "$server_py"
@@ -584,8 +588,8 @@ jobs:
           MAC_TAG: v20260720-042100-mac
           WIN_ZIP: Win_Grok_Chameleon_a.zip
           MAC_ZIP: Mac_Grok_Chameleon_a.zip
-          WIN_INPUT_SHA256: 0da36fb486ec9a5e98c8d83f34365873e6b5070f01c1e0042aca2d48305b5a8b
-          MAC_INPUT_SHA256: 88128d626e6f783488162f9b5d4d41468b741f947a31f0673d40d72d8391e824
+          WIN_INPUT_SHA256: f4799a687810490cb6b5d009cf3e43902231952fe9d4bbf6ebb5cf8df0c7d465
+          MAC_INPUT_SHA256: 0227b5e8d0dc4a81222291c8fa992f84281f4eeda74f552eb0bc6f8a51cccf88
         run: |
           set -euo pipefail
           mkdir -p current/win current/mac backups
@@ -594,8 +598,8 @@ jobs:
           test "$(sha256sum "current/win/$WIN_ZIP" | awk '{print $1}')" = "$WIN_INPUT_SHA256"
           test "$(sha256sum "current/mac/$MAC_ZIP" | awk '{print $1}')" = "$MAC_INPUT_SHA256"
           short_sha="$(printf '%s' "$GITHUB_SHA" | cut -c1-12)"
-          win_backup="Win_Grok_Chameleon_a.previous-before-build-heart-visibility-$short_sha.zip"
-          mac_backup="Mac_Grok_Chameleon_a.previous-before-build-heart-visibility-$short_sha.zip"
+          win_backup="Win_Grok_Chameleon_a.previous-before-video-8s-revert-$short_sha.zip"
+          mac_backup="Mac_Grok_Chameleon_a.previous-before-video-8s-revert-$short_sha.zip"
           cp "current/win/$WIN_ZIP" "backups/$win_backup"
           cp "current/mac/$MAC_ZIP" "backups/$mac_backup"
           gh release upload "$WIN_TAG" "backups/$win_backup" --repo "$GITHUB_REPOSITORY"
