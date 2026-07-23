@@ -516,6 +516,9 @@ function renderImagineSourceCards() {
     ? visibleJobs.reduce((total, job) => total + (typeof visibleGenerationJobSlots === "function" ? visibleGenerationJobSlots(job).length : buildJobT2iSlotCount(job)), 0)
     : visibleJobs.length;
   if (count) count.textContent = `${posts.length + jobSlots} items`;
+  if (library_state.iMainView === imagineViewValue("IMAGINE", "imagine")) {
+    requestAnimationFrame(maybeLoadMoreImagineSavedCards);
+  }
 }
 
 function maybeLoadMoreImagineDiscoverCards() {

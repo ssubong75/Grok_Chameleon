@@ -39,7 +39,7 @@ jobs:
       RELEASE_TAG: v20260720-041036-win
       INPUT_ZIP: Win_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Win_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: bb5cbcbc61875a06dcb27a97662d16ee60b5f77033aec716faf3d166f15c43e4
+      EXPECTED_INPUT_SHA256: d50ad16969975590c597dd5de8424fd5be48b6368568277823389c9c97c49773
 
     steps:
       - name: Check out the shared source commit
@@ -341,7 +341,7 @@ jobs:
       RELEASE_TAG: v20260720-042100-mac
       INPUT_ZIP: Mac_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Mac_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: 9f20fa989a887d9d8b04b028ea81e448418628a77eabf8e0d8a1c3cce4a3ee12
+      EXPECTED_INPUT_SHA256: c464ecb8bd3577c11da027d40cf499b2ef843eca0aa13dd69f2310ad7db2b32e
 
     steps:
       - name: Check out the shared source commit
@@ -662,8 +662,8 @@ jobs:
           MAC_TAG: v20260720-042100-mac
           WIN_ZIP: Win_Grok_Chameleon_a.zip
           MAC_ZIP: Mac_Grok_Chameleon_a.zip
-          WIN_INPUT_SHA256: bb5cbcbc61875a06dcb27a97662d16ee60b5f77033aec716faf3d166f15c43e4
-          MAC_INPUT_SHA256: 9f20fa989a887d9d8b04b028ea81e448418628a77eabf8e0d8a1c3cce4a3ee12
+          WIN_INPUT_SHA256: d50ad16969975590c597dd5de8424fd5be48b6368568277823389c9c97c49773
+          MAC_INPUT_SHA256: c464ecb8bd3577c11da027d40cf499b2ef843eca0aa13dd69f2310ad7db2b32e
         run: |
           set -euo pipefail
           mkdir -p current/win current/mac backups
@@ -672,8 +672,8 @@ jobs:
           test "$(sha256sum "current/win/$WIN_ZIP" | awk '{print $1}')" = "$WIN_INPUT_SHA256"
           test "$(sha256sum "current/mac/$MAC_ZIP" | awk '{print $1}')" = "$MAC_INPUT_SHA256"
           short_sha="$(printf '%s' "$GITHUB_SHA" | cut -c1-12)"
-          win_backup="Win_Grok_Chameleon_a.previous-before-prompt-write-fix-$short_sha.zip"
-          mac_backup="Mac_Grok_Chameleon_a.previous-before-prompt-write-fix-$short_sha.zip"
+          win_backup="Win_Grok_Chameleon_a.previous-before-imagine-pagination-autofill-$short_sha.zip"
+          mac_backup="Mac_Grok_Chameleon_a.previous-before-imagine-pagination-autofill-$short_sha.zip"
           cp "current/win/$WIN_ZIP" "backups/$win_backup"
           cp "current/mac/$MAC_ZIP" "backups/$mac_backup"
           gh release upload "$WIN_TAG" "backups/$win_backup" --repo "$GITHUB_REPOSITORY"
