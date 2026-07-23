@@ -22,6 +22,9 @@ env:
   COMMON_I_SOURCE: common/app/web/scripts/i_source_render.js
   COMMON_PRELOAD: common/app/electron/preload-bridge.js
   COMMON_SERVER: common/app/runtime/server.py
+  COMMON_MIGRATION: common/migration/migration.py
+  WINDOWS_MIGRATION_UI: platform/windows/migration/migration_windows.ps1
+  MACOS_MIGRATION_UI: platform/macos/migration/Migration.swift
 
 jobs:
   build-windows:
@@ -31,7 +34,7 @@ jobs:
       RELEASE_TAG: v20260720-041036-win
       INPUT_ZIP: Win_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Win_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: 8e6de110541c3edaff988f62954bd518d1d54ee7ca0d2422ebeab7be8518ca4a
+      EXPECTED_INPUT_SHA256: af5ff1ac44ec52379d2a6f22666ab162ef6bf6bb3f507d6f0a7b014c1744185e
 
     steps:
       - name: Check out the shared source commit
@@ -57,10 +60,15 @@ jobs:
           $outputZip = Join-Path $env:GITHUB_WORKSPACE "output\$env:OUTPUT_ZIP"
           $root = Join-Path $env:GITHUB_WORKSPACE "unpack\Grok Chameleon"
           $appRoot = Join-Path $root "Resources\Grok Chameleon\resources\app"
+          $migrationRoot = Join-Path $root "Resources\Migration"
           $state = Join-Path $appRoot "web\scripts\state.js"
           $outerExe = Join-Path $root "Grok Chameleon.exe"
           $migrationExe = Join-Path $root "Migration.exe"
           $innerExe = Join-Path $root "Resources\Grok Chameleon\Grok Chameleon.exe"
+          $sourceMigration = Join-Path $env:GITHUB_WORKSPACE $env:COMMON_MIGRATION
+          $sourceMigrationUi = Join-Path $env:GITHUB_WORKSPACE $env:WINDOWS_MIGRATION_UI
+          $targetMigration = Join-Path $migrationRoot "migration.py"
+          $targetMigrationUi = Join-Path $migrationRoot "migration_windows.ps1"
           $sharedSources = @(
             @{ Name = "main"; Relative = "electron\main.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_MAIN) },
             @{ Name = "preload"; Relative = "electron\preload-bridge.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_PRELOAD) },
@@ -91,7 +99,16 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Windows input ZIP CRC check failed." }
           & $sevenZip x -y "-o$env:GITHUB_WORKSPACE\unpack" $inputZip
           if ($LASTEXITCODE -ne 0) { throw "Windows extraction failed." }
-          foreach ($required in @($sharedSources.Source + $sharedSources.Target + @($state, $outerExe, $migrationExe, $innerExe))) {
+          foreach ($required in @($sharedSources.Source + $sharedSources.Target + @(
+            $state,
+            $outerExe,
+            $migrationExe,
+            $innerExe,
+            $sourceMigration,
+            $sourceMigrationUi,
+            $targetMigration,
+            $targetMigrationUi
+          ))) {
             if (-not (Test-Path -LiteralPath $required)) { throw "Missing required file: $required" }
           }
 
@@ -109,12 +126,67 @@ jobs:
               throw "Windows shared source copy mismatch: $($shared.Name)"
             }
           }
+          Copy-Item -Force -LiteralPath $sourceMigration -Destination $targetMigration
+          Copy-Item -Force -LiteralPath $sourceMigrationUi -Destination $targetMigrationUi
+          $migrationHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $sourceMigration).Hash
+          $migrationUiHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $sourceMigrationUi).Hash
+          if ((Get-FileHash -Algorithm SHA256 -LiteralPath $targetMigration).Hash -ne $migrationHash) {
+            throw "Windows migration.py copy mismatch."
+          }
+          if ((Get-FileHash -Algorithm SHA256 -LiteralPath $targetMigrationUi).Hash -ne $migrationUiHash) {
+            throw "Windows migration UI copy mismatch."
+          }
           foreach ($javascript in $sharedSources | Where-Object { $_.Relative.EndsWith(".js") }) {
             node --check $javascript.Target
             if ($LASTEXITCODE -ne 0) { throw "Windows JavaScript syntax check failed: $($javascript.Relative)" }
           }
           python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" $targetServer
           if ($LASTEXITCODE -ne 0) { throw "Windows server.py syntax check failed." }
+          python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" $targetMigration
+          if ($LASTEXITCODE -ne 0) { throw "Windows migration.py syntax check failed." }
+          $tokens = $null
+          $parseErrors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            $targetMigrationUi,
+            [ref]$tokens,
+            [ref]$parseErrors
+          ) | Out-Null
+          if ($parseErrors.Count) {
+            throw "Windows migration UI syntax check failed: $($parseErrors[0].Message)"
+          }
+          $migrationUiText = Get-Content -Raw -LiteralPath $targetMigrationUi
+          foreach ($marker in @(
+            '$title.Text = "Migration"',
+            '$accent = [System.Drawing.Color]::FromArgb(251, 173, 46)',
+            '$importLabel.Text = "+ Import other media"',
+            '$importBtn.Text = "Import"',
+            '"--import-media"',
+            'Select-Folder "Select a folder containing media to import"'
+          )) {
+            if (-not $migrationUiText.Contains($marker)) { throw "Windows migration UI marker missing: $marker" }
+          }
+          $migrationText = Get-Content -Raw -LiteralPath $targetMigration
+          foreach ($marker in @(
+            'def media_files_recursive(path: Path) -> list[Path]:',
+            'def import_external_media(self, media_root: Path) -> dict[str, Any]:',
+            'parser.add_argument("--import-media", action="store_true")'
+          )) {
+            if (-not $migrationText.Contains($marker)) { throw "Windows migration marker missing: $marker" }
+          }
+
+          $migrationTestRoot = Join-Path $env:GITHUB_WORKSPACE "migration-test"
+          $migrationTestSource = Join-Path $migrationTestRoot "source"
+          $migrationTestNested = Join-Path $migrationTestSource "nested"
+          $migrationTestTarget = Join-Path $migrationTestRoot "library"
+          New-Item -ItemType Directory -Force $migrationTestNested, $migrationTestTarget | Out-Null
+          Set-Content -LiteralPath (Join-Path $migrationTestSource "first.png") -Value "first" -NoNewline
+          Set-Content -LiteralPath (Join-Path $migrationTestNested "second.mp4") -Value "second" -NoNewline
+          python $targetMigration --import-media --source $migrationTestSource --target $migrationTestTarget
+          if ($LASTEXITCODE -ne 0) { throw "Windows migration import smoke test failed." }
+          $importedPosts = @(Get-ChildItem -LiteralPath (Join-Path $migrationTestTarget "created") -Recurse -File -Filter "post.json")
+          if ($importedPosts.Count -ne 2) { throw "Windows migration imported post count mismatch." }
+          $migrationLibrary = Get-Content -Raw -LiteralPath (Join-Path $migrationTestTarget "library.json") | ConvertFrom-Json
+          if (@($migrationLibrary.posts).Count -ne 2) { throw "Windows migration library post count mismatch." }
 
           $composerText = Get-Content -Raw -LiteralPath $targetComposer
           foreach ($marker in @(
@@ -176,6 +248,8 @@ jobs:
 
           $verifiedRoot = Join-Path $env:GITHUB_WORKSPACE "verify\Grok Chameleon"
           $verifiedAppRoot = Join-Path $verifiedRoot "Resources\Grok Chameleon\resources\app"
+          $verifiedMigration = Join-Path $verifiedRoot "Resources\Migration\migration.py"
+          $verifiedMigrationUi = Join-Path $verifiedRoot "Resources\Migration\migration_windows.ps1"
           if ((Get-ChildItem -LiteralPath $verifiedRoot -Recurse -Force -File).Count -ne $fileCount) {
             throw "Windows file count changed during packaging."
           }
@@ -192,6 +266,12 @@ jobs:
           }
           foreach ($key in @("outer", "migration", "inner")) {
             if ($verifiedExeHashes[$key] -ne $exeHashes[$key]) { throw "Windows executable changed: $key" }
+          }
+          if ((Get-FileHash -Algorithm SHA256 -LiteralPath $verifiedMigration).Hash -ne $migrationHash) {
+            throw "Packaged Windows migration.py mismatch."
+          }
+          if ((Get-FileHash -Algorithm SHA256 -LiteralPath $verifiedMigrationUi).Hash -ne $migrationUiHash) {
+            throw "Packaged Windows migration UI mismatch."
           }
           foreach ($javascript in $sharedSources | Where-Object { $_.Relative.EndsWith(".js") }) {
             node --check (Join-Path $verifiedAppRoot $javascript.Relative)
@@ -216,7 +296,7 @@ jobs:
       RELEASE_TAG: v20260720-042100-mac
       INPUT_ZIP: Mac_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Mac_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: c9734c26c2f308c8a12036f5c73ac9b76f09201c4bea249bebe59014dfcf2267
+      EXPECTED_INPUT_SHA256: 96df61a55f94851987535ea6cb77756502ac03ec630ddbe3208f11c1dccd2aa8
 
     steps:
       - name: Check out the shared source commit
@@ -245,6 +325,9 @@ jobs:
           migration_app="$root/Migration.app"
           app_root="$main_app/Contents/Resources/app"
           common_root="$GITHUB_WORKSPACE/common/app"
+          common_migration="$GITHUB_WORKSPACE/$COMMON_MIGRATION"
+          migration_swift="$GITHUB_WORKSPACE/$MACOS_MIGRATION_UI"
+          migration_py="$migration_app/Contents/Resources/migration.py"
           shared_relatives=(
             electron/main.js
             electron/preload-bridge.js
@@ -274,6 +357,9 @@ jobs:
           done
           test -x "$main_exec"
           test -x "$migration_exec"
+          test -f "$common_migration"
+          test -f "$migration_swift"
+          test -f "$migration_py"
           test -L "$main_app/Contents/Frameworks/Electron Framework.framework/Versions/Current"
           test -L "$main_app/Contents/Frameworks/Electron Framework.framework/Electron Framework"
           find "$app_root/vendor/python" -type f -name '*darwin.so' -print -quit | grep -q .
@@ -289,6 +375,18 @@ jobs:
               node --check "$app_root/$relative"
             fi
           done
+          cp "$common_migration" "$migration_py"
+          cmp "$common_migration" "$migration_py"
+          xcrun swiftc \
+            -parse-as-library \
+            -O \
+            -target arm64-apple-macos13.0 \
+            "$migration_swift" \
+            -o "$migration_exec"
+          chmod 755 "$migration_exec"
+          file "$migration_exec" | grep -F 'arm64'
+          strings "$migration_exec" | grep -Fx 'Migration'
+          strings "$migration_exec" | grep -Fx '+ Import other media'
           python3 - "$server_py" <<'PY'
           import ast
           import pathlib
@@ -324,6 +422,34 @@ jobs:
           grep -F 'path.join(resourceRoot, "Python", "bin", "python3")' "$main_js"
           grep -F 'app.on("activate"' "$main_js"
           grep -F 'app.on("window-all-closed"' "$main_js"
+          python3 - "$migration_py" <<'PY'
+          import ast
+          import pathlib
+          import sys
+          path = pathlib.Path(sys.argv[1])
+          ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+          PY
+          grep -F 'def media_files_recursive(path: Path) -> list[Path]:' "$migration_py"
+          grep -F 'def import_external_media(self, media_root: Path) -> dict[str, Any]:' "$migration_py"
+          grep -F 'parser.add_argument("--import-media", action="store_true")' "$migration_py"
+
+          migration_test="$(mktemp -d)"
+          mkdir -p "$migration_test/source/nested" "$migration_test/library"
+          printf first > "$migration_test/source/first.png"
+          printf second > "$migration_test/source/nested/second.mp4"
+          PYTHONDONTWRITEBYTECODE=1 python3 "$migration_py" \
+            --import-media \
+            --source "$migration_test/source" \
+            --target "$migration_test/library"
+          test "$(find "$migration_test/library/created" -type f -name post.json | wc -l | tr -d ' ')" = 2
+          python3 - "$migration_test/library/library.json" <<'PY'
+          import json
+          import pathlib
+          import sys
+          library = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if len(library.get("posts") or []) != 2:
+              raise SystemExit("Mac migration library post count mismatch.")
+          PY
 
       - name: Sign, package, and verify Mac without ZIP -47 regressions
         shell: bash
@@ -375,8 +501,11 @@ jobs:
           verified_migration="$verified_root/Migration.app"
           verified_app="$verified_main/Contents/Resources/app"
           verified_server="$verified_app/runtime/server.py"
+          verified_migration_py="$verified_migration/Contents/Resources/migration.py"
           test -x "$verified_main/Contents/MacOS/Grok Chameleon"
           test -x "$verified_migration/Contents/MacOS/Migration"
+          file "$verified_migration/Contents/MacOS/Migration" | grep -F 'arm64'
+          cmp "$GITHUB_WORKSPACE/$COMMON_MIGRATION" "$verified_migration_py"
           test -L "$verified_main/Contents/Frameworks/Electron Framework.framework/Versions/Current"
           test -L "$verified_main/Contents/Frameworks/Electron Framework.framework/Electron Framework"
           codesign --verify --deep --strict --verbose=4 "$verified_main"
@@ -441,8 +570,8 @@ jobs:
           MAC_TAG: v20260720-042100-mac
           WIN_ZIP: Win_Grok_Chameleon_a.zip
           MAC_ZIP: Mac_Grok_Chameleon_a.zip
-          WIN_INPUT_SHA256: 8e6de110541c3edaff988f62954bd518d1d54ee7ca0d2422ebeab7be8518ca4a
-          MAC_INPUT_SHA256: c9734c26c2f308c8a12036f5c73ac9b76f09201c4bea249bebe59014dfcf2267
+          WIN_INPUT_SHA256: af5ff1ac44ec52379d2a6f22666ab162ef6bf6bb3f507d6f0a7b014c1744185e
+          MAC_INPUT_SHA256: 96df61a55f94851987535ea6cb77756502ac03ec630ddbe3208f11c1dccd2aa8
         run: |
           set -euo pipefail
           mkdir -p current/win current/mac backups
@@ -451,8 +580,8 @@ jobs:
           test "$(sha256sum "current/win/$WIN_ZIP" | awk '{print $1}')" = "$WIN_INPUT_SHA256"
           test "$(sha256sum "current/mac/$MAC_ZIP" | awk '{print $1}')" = "$MAC_INPUT_SHA256"
           short_sha="$(printf '%s' "$GITHUB_SHA" | cut -c1-12)"
-          win_backup="Win_Grok_Chameleon_a.previous-before-conversation-lineage-$short_sha.zip"
-          mac_backup="Mac_Grok_Chameleon_a.previous-before-conversation-lineage-$short_sha.zip"
+          win_backup="Win_Grok_Chameleon_a.previous-before-migration-import-$short_sha.zip"
+          mac_backup="Mac_Grok_Chameleon_a.previous-before-migration-import-$short_sha.zip"
           cp "current/win/$WIN_ZIP" "backups/$win_backup"
           cp "current/mac/$MAC_ZIP" "backups/$mac_backup"
           gh release upload "$WIN_TAG" "backups/$win_backup" --repo "$GITHUB_REPOSITORY"
