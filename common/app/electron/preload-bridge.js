@@ -1908,7 +1908,11 @@
           });
         }
         const storeObservationMs = Number(tracking.storeObservationMs || 8000);
-        if (hasInProgressCandidate && now - tracking.firstCandidateSeenAt >= storeObservationMs) {
+        if (
+          !tracking.retainTrackedCandidateUntilDeadline
+          && hasInProgressCandidate
+          && now - tracking.firstCandidateSeenAt >= storeObservationMs
+        ) {
           pushStoreTrace("store_generation_candidate_handoff", {
             requestId,
             containerId,
@@ -1996,16 +2000,36 @@
     const finalSnapshotContainerId = finalContainerIds.slice().reverse().find((id) => (
       storeItemsForContainer(finalState, id, expectedType).length > 0
     )) || containerId;
+    const finalEvents = finalContainerIds.flatMap((finalContainerId) => collectStoreEvents(
+      finalState,
+      finalContainerId,
+      expectedType,
+      requestId,
+      prompt,
+      beforeIds,
+      tracking,
+      conversationId,
+      parentResponseId,
+      sourceIds,
+    ));
+    finalEvents.push(...generationCaptureEvents(responseCapture, expectedType, conversationId, parentResponseId));
+    for (const event of finalEvents) {
+      const eventId = String(event?.videoPostId || event?.videoId || event?.imageId || event?.assetId || "").trim();
+      if (eventId) rememberedEvents.set(eventId, event);
+    }
+    const finalRetainedEvents = Array.from(rememberedEvents.values());
     pushStoreTrace("store_generation_poll_timeout", {
       requestId,
       snapshot: storeSnapshot(finalState, finalSnapshotContainerId, expectedType),
       activeContainerIds: finalContainerIds,
       callState: callState ? callState.state() : null,
+      finalEventCount: finalEvents.length,
+      finalMediaFound: finalRetainedEvents.some((event) => hasFinalStoreMediaEvent(event, expectedType)),
       timeoutMs,
       deadline,
       absoluteDeadline,
     });
-    return Array.from(rememberedEvents.values());
+    return finalRetainedEvents;
   }
 
   function mediaTypeValue(expectedType) {
@@ -2735,7 +2759,7 @@
         discoverNewContainers: startNewConversation,
         startedAt: Date.now(),
         waitTier: videoWaitTier,
-        retainTrackedCandidateUntilDeadline: tieredI2vWait,
+        retainTrackedCandidateUntilDeadline: tieredI2vWait || variant.kind === "textToVideo",
         noCandidateMaxMs: tieredI2vWait ? 0 : 10000,
         noCandidateSince: 0,
         baseDeadlineAt,
