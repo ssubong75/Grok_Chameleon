@@ -21,6 +21,7 @@ env:
   COMMON_DETAIL_STATE: common/app/web/scripts/detail_state.js
   COMMON_DETAIL_RENDER: common/app/web/scripts/detail_render.js
   COMMON_I_SOURCE: common/app/web/scripts/i_source_render.js
+  COMMON_COLLECTION_ACTIONS: common/app/web/scripts/collection_actions.js
   COMMON_UI_FEEDBACK: common/app/web/scripts/ui_feedback.js
   COMMON_ACCOUNT_STYLE: common/app/web/styles/account.css
   COMMON_PRELOAD: common/app/electron/preload-bridge.js
@@ -37,7 +38,7 @@ jobs:
       RELEASE_TAG: v20260720-041036-win
       INPUT_ZIP: Win_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Win_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: f4799a687810490cb6b5d009cf3e43902231952fe9d4bbf6ebb5cf8df0c7d465
+      EXPECTED_INPUT_SHA256: 3079456d7ba9da1ed62245afd752fc3961d4700f145768d5a76307d5af5bd188
 
     steps:
       - name: Check out the shared source commit
@@ -83,6 +84,7 @@ jobs:
             @{ Name = "detail_state"; Relative = "web\scripts\detail_state.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_STATE) },
             @{ Name = "detail_render"; Relative = "web\scripts\detail_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_RENDER) },
             @{ Name = "i_source"; Relative = "web\scripts\i_source_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_I_SOURCE) },
+            @{ Name = "collection_actions"; Relative = "web\scripts\collection_actions.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_COLLECTION_ACTIONS) },
             @{ Name = "ui_feedback"; Relative = "web\scripts\ui_feedback.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_UI_FEEDBACK) },
             @{ Name = "account_style"; Relative = "web\styles\account.css"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_ACCOUNT_STYLE) }
           )
@@ -99,6 +101,7 @@ jobs:
           $targetDetailState = ($sharedSources | Where-Object Name -eq "detail_state").Target
           $targetDetailRender = ($sharedSources | Where-Object Name -eq "detail_render").Target
           $targetISource = ($sharedSources | Where-Object Name -eq "i_source").Target
+          $targetCollectionActions = ($sharedSources | Where-Object Name -eq "collection_actions").Target
           $targetUiFeedback = ($sharedSources | Where-Object Name -eq "ui_feedback").Target
           $targetAccountStyle = ($sharedSources | Where-Object Name -eq "account_style").Target
 
@@ -234,7 +237,10 @@ jobs:
             '"relation_count": relation_baseline_count',
             'def imagine_conversation_root_generation(responses: list[dict]) -> dict:',
             '"t2i_group_container": bool(root_generation.get("is_t2i_group_container"))',
-            'IMAGINE_DIRECT_I2I_MAX_WAIT_SECONDS = 14'
+            'IMAGINE_DIRECT_I2I_MAX_WAIT_SECONDS = 14',
+            'COLLECTION_MOVE_LOCK = threading.Lock()',
+            'def thumbnail_file_names(folder: Path, meta: dict | None = None) -> set[str]:',
+            'existing = existing_remote_collection_post(target_parent, source_post, items)'
           )) {
             if (-not $serverText.Contains($marker)) { throw "Windows relation recovery marker missing: $marker" }
           }
@@ -250,8 +256,18 @@ jobs:
           if (-not $detailRenderText.Contains("const visible = !post?.is_job_post")) { throw "Build detail heart visibility marker missing." }
           if ($detailRenderText.Contains("Boolean(post?.is_job_post)")) { throw "Build job heart visibility regression found." }
           if (-not (Get-Content -Raw -LiteralPath $targetISource).Contains("function isImagineT2iGroupContainer(post)")) { throw "T2I group filter marker missing." }
+          $collectionActionsText = Get-Content -Raw -LiteralPath $targetCollectionActions
+          foreach ($marker in @(
+            'let moveToCollectionRequestPending = false;',
+            'if (moveToCollectionRequestPending) return;',
+            'moveToCollectionRequestPending = true;',
+            'moveToCollectionRequestPending = false;'
+          )) {
+            if (-not $collectionActionsText.Contains($marker)) { throw "Collection move guard marker missing: $marker" }
+          }
           if (-not (Get-Content -Raw -LiteralPath $targetUiFeedback).Contains('".workspace.i_detail_open .i_detail_media, .workspace.b_detail_open .b_detail_media"')) { throw "Lucky media center marker missing." }
           if (-not (Get-Content -Raw -LiteralPath $targetAccountStyle).Contains(".lucky_notice.in_detail_media")) { throw "Lucky media position marker missing." }
+          if (-not $mainText.Contains("const CARD_PREVIEW_MAX_EDGE = 960;")) { throw "Card preview size dropped below the 512x288 requirement." }
           $metadata = Get-ChildItem -LiteralPath $root -Recurse -Force | Where-Object {
             $_.Name -eq "__MACOSX" -or $_.Name -like "._*" -or $_.Name -eq ".DS_Store"
           }
@@ -319,7 +335,7 @@ jobs:
       RELEASE_TAG: v20260720-042100-mac
       INPUT_ZIP: Mac_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Mac_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: 0227b5e8d0dc4a81222291c8fa992f84281f4eeda74f552eb0bc6f8a51cccf88
+      EXPECTED_INPUT_SHA256: 786d16b91ced962661ef031c02193b9e63698da029af5fe40c36843ab60fdd25
 
     steps:
       - name: Check out the shared source commit
@@ -362,6 +378,7 @@ jobs:
             web/scripts/detail_state.js
             web/scripts/detail_render.js
             web/scripts/i_source_render.js
+            web/scripts/collection_actions.js
             web/scripts/ui_feedback.js
             web/styles/account.css
           )
@@ -375,6 +392,7 @@ jobs:
           detail_state_js="$app_root/web/scripts/detail_state.js"
           detail_render_js="$app_root/web/scripts/detail_render.js"
           i_source_js="$app_root/web/scripts/i_source_render.js"
+          collection_actions_js="$app_root/web/scripts/collection_actions.js"
           ui_feedback_js="$app_root/web/scripts/ui_feedback.js"
           account_css="$app_root/web/styles/account.css"
           main_exec="$main_app/Contents/MacOS/Grok Chameleon"
@@ -445,6 +463,9 @@ jobs:
           grep -F 'def imagine_conversation_root_generation(responses: list[dict]) -> dict:' "$server_py"
           grep -F '"t2i_group_container": bool(root_generation.get("is_t2i_group_container"))' "$server_py"
           grep -F 'IMAGINE_DIRECT_I2I_MAX_WAIT_SECONDS = 14' "$server_py"
+          grep -F 'COLLECTION_MOVE_LOCK = threading.Lock()' "$server_py"
+          grep -F 'def thumbnail_file_names(folder: Path, meta: dict | None = None) -> set[str]:' "$server_py"
+          grep -F 'existing = existing_remote_collection_post(target_parent, source_post, items)' "$server_py"
           grep -F 'conversation_id: conversationId' "$attachments_js"
           grep -F 'source_conversation_id: sourceContext.conversation_id' "$i_submit_js"
           grep -F 'if (type === "image" || type.startsWith("image/"))' "$library_core_js"
@@ -455,8 +476,13 @@ jobs:
             exit 1
           fi
           grep -F 'function isImagineT2iGroupContainer(post)' "$i_source_js"
+          grep -F 'let moveToCollectionRequestPending = false;' "$collection_actions_js"
+          grep -F 'if (moveToCollectionRequestPending) return;' "$collection_actions_js"
+          grep -F 'moveToCollectionRequestPending = true;' "$collection_actions_js"
+          grep -F 'moveToCollectionRequestPending = false;' "$collection_actions_js"
           grep -F '".workspace.i_detail_open .i_detail_media, .workspace.b_detail_open .b_detail_media"' "$ui_feedback_js"
           grep -F '.lucky_notice.in_detail_media' "$account_css"
+          grep -F 'const CARD_PREVIEW_MAX_EDGE = 960;' "$main_js"
           grep -F 'RUNTIME_ROOT = Path(__file__).resolve().parent' "$server_py"
           grep -F 'APP_ROOT = RUNTIME_ROOT.parent' "$server_py"
           if grep -E 'C:\\|python\.exe' "$server_py"; then
@@ -518,6 +544,7 @@ jobs:
             web/scripts/detail_state.js
             web/scripts/detail_render.js
             web/scripts/i_source_render.js
+            web/scripts/collection_actions.js
           )
           if find "$root" -type d -name '__pycache__' -print | grep -q .; then
             echo 'Python cache found before Mac packaging.' >&2
@@ -617,8 +644,8 @@ jobs:
           MAC_TAG: v20260720-042100-mac
           WIN_ZIP: Win_Grok_Chameleon_a.zip
           MAC_ZIP: Mac_Grok_Chameleon_a.zip
-          WIN_INPUT_SHA256: f4799a687810490cb6b5d009cf3e43902231952fe9d4bbf6ebb5cf8df0c7d465
-          MAC_INPUT_SHA256: 0227b5e8d0dc4a81222291c8fa992f84281f4eeda74f552eb0bc6f8a51cccf88
+          WIN_INPUT_SHA256: 3079456d7ba9da1ed62245afd752fc3961d4700f145768d5a76307d5af5bd188
+          MAC_INPUT_SHA256: 786d16b91ced962661ef031c02193b9e63698da029af5fe40c36843ab60fdd25
         run: |
           set -euo pipefail
           mkdir -p current/win current/mac backups
@@ -627,8 +654,8 @@ jobs:
           test "$(sha256sum "current/win/$WIN_ZIP" | awk '{print $1}')" = "$WIN_INPUT_SHA256"
           test "$(sha256sum "current/mac/$MAC_ZIP" | awk '{print $1}')" = "$MAC_INPUT_SHA256"
           short_sha="$(printf '%s' "$GITHUB_SHA" | cut -c1-12)"
-          win_backup="Win_Grok_Chameleon_a.previous-before-video-retention-restore-$short_sha.zip"
-          mac_backup="Mac_Grok_Chameleon_a.previous-before-video-retention-restore-$short_sha.zip"
+          win_backup="Win_Grok_Chameleon_a.previous-before-collection-preview-fix-$short_sha.zip"
+          mac_backup="Mac_Grok_Chameleon_a.previous-before-collection-preview-fix-$short_sha.zip"
           cp "current/win/$WIN_ZIP" "backups/$win_backup"
           cp "current/mac/$MAC_ZIP" "backups/$mac_backup"
           gh release upload "$WIN_TAG" "backups/$win_backup" --repo "$GITHUB_REPOSITORY"

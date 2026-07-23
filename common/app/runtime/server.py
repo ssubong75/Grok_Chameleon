@@ -175,6 +175,7 @@ SHUTDOWN_LOCK = threading.Lock()
 BUILD_JOBS: dict[str, dict] = {}
 BUILD_JOB_LOCK = threading.Lock()
 BUILD_T2I_FILE_LOCK = threading.Lock()
+COLLECTION_MOVE_LOCK = threading.Lock()
 IMAGINE_JOBS: dict[str, dict] = {}
 IMAGINE_JOB_LOCK = threading.Lock()
 NATIVE_BRIDGE_COMMANDS: list[dict] = []
@@ -9097,7 +9098,7 @@ def thumbnail_for_video(folder: Path, rel_folder: str, video_name: str) -> dict:
     return {}
 
 
-def thumbnail_file_names(folder: Path) -> set[str]:
+def thumbnail_file_names(folder: Path, meta: dict | None = None) -> set[str]:
     video_names = [
         entry.name
         for entry in sorted_entries(folder)
@@ -9110,13 +9111,25 @@ def thumbnail_file_names(folder: Path) -> set[str]:
         for candidate in thumbnail_candidates_for_video(video_name):
             if (folder / candidate).is_file():
                 names.add(candidate)
+    raw_items = meta.get("items") if isinstance(meta, dict) else []
+    if isinstance(raw_items, list):
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            for key in ("thumbnail", "poster"):
+                raw_name = str(item.get(key) or "").strip()
+                if not raw_name:
+                    continue
+                candidate_name = Path(raw_name).name
+                if candidate_name == raw_name and (folder / candidate_name).is_file():
+                    names.add(candidate_name)
     return names
 
 
-def media_items_in_folder(root: Path, folder: Path, rel_folder: str) -> list[dict]:
+def media_items_in_folder(root: Path, folder: Path, rel_folder: str, meta: dict | None = None) -> list[dict]:
     items = []
     used_item_ids: set[str] = set()
-    thumb_names = thumbnail_file_names(folder)
+    thumb_names = thumbnail_file_names(folder, meta)
     for entry in sorted_entries(folder):
         if not entry.is_file():
             continue
@@ -9339,7 +9352,7 @@ def representative_item(items: list[dict], meta) -> dict | None:
 def post_from_folder(root: Path, folder: Path, context: dict) -> dict | None:
     rel_folder = context["path"]
     meta = read_json(folder / "post.json", None)
-    media_items = media_items_in_folder(root, folder, rel_folder)
+    media_items = media_items_in_folder(root, folder, rel_folder, meta or {})
     meta_items = media_items_from_meta(root, folder, rel_folder, meta or {})
     remote_item = remote_item_from_meta(meta) if meta else None
     items = merge_media_items(media_items, meta_items) if media_items else (meta_items or ([remote_item] if remote_item else []))
@@ -13991,6 +14004,41 @@ def copy_imagine_remote_item_to_directory(root: Path, item: dict, target_dir: Pa
     })
 
 
+def remote_collection_source_ids(post: dict) -> set[str]:
+    return {
+        str(post.get(key) or "").strip()
+        for key in ("post_id", "source_post_id", "original_post_id", "group_id", "root_post_id")
+        if str(post.get(key) or "").strip()
+    }
+
+
+def remote_collection_item_ids(items: list[dict]) -> set[str]:
+    return {
+        str(item.get("item_id") or item.get("id") or "").strip()
+        for item in items
+        if isinstance(item, dict) and str(item.get("item_id") or item.get("id") or "").strip()
+    }
+
+
+def existing_remote_collection_post(target_parent: Path, source_post: dict, items: list[dict]) -> tuple[Path, dict] | None:
+    requested_source_ids = remote_collection_source_ids(source_post)
+    requested_item_ids = remote_collection_item_ids(items)
+    if not requested_source_ids or not requested_item_ids:
+        return None
+    for child in sorted_entries(target_parent):
+        if not child.is_dir():
+            continue
+        existing = read_json(child / "post.json", None)
+        if not isinstance(existing, dict):
+            continue
+        if requested_source_ids.isdisjoint(remote_collection_source_ids(existing)):
+            continue
+        existing_items = existing.get("items") if isinstance(existing.get("items"), list) else []
+        if requested_item_ids.issubset(remote_collection_item_ids(existing_items)):
+            return child, existing
+    return None
+
+
 def copy_imagine_remote_post_to_collection(payload: dict, item_only: bool = False) -> dict:
     root = library_root()
     if not root:
@@ -14010,46 +14058,59 @@ def copy_imagine_remote_post_to_collection(payload: dict, item_only: bool = Fals
     if not items:
         raise RuntimeError("Remote media item was not found.")
 
-    account = active_imagine_account(root, str(source_post.get("account_id") or ""))
-    base_name = source_post.get("title") or source_post.get("post_id") or source_post.get("folderName") or "imagine"
-    suffix = "-item" if item_only else ""
-    target_dir = target_parent / unique_directory_name(target_parent, safe_name(f"{base_name}{suffix}", "imagine"))
-    target_dir.mkdir(parents=True, exist_ok=True)
-    copied_items = []
-    try:
-        for index, item in enumerate(items):
-            copied_items.append(copy_imagine_remote_item_to_directory(root, item, target_dir, account, index))
-        target_path = target_dir.relative_to(root).as_posix()
-        collection_id = Path(collection_path).name
-        post_json = post_json_from_post(
-            source_post,
-            post_id=target_dir.name,
-            source="imagine",
-            mode=source_post.get("mode") or "imagine",
-            title=source_post.get("title") or readable_name(target_dir.name),
-            folder_path=target_path,
-            collection=collection_id,
-            items=copied_items,
-            representative=representative_for_merged_items(copied_items),
-            source_post_id=source_post.get("post_id") or source_post.get("source_post_id") or "",
-            original_post_id=source_post.get("original_post_id") or source_post.get("post_id") or "",
-            group_id=source_post.get("group_id") or source_post.get("root_post_id") or source_post.get("post_id") or "",
-            account_id=source_post.get("account_id") or "",
-            account_email=source_post.get("account_email") or "",
-            favorite=False,
-            build_favorite=False,
-        )
-        write_json(target_dir / "post.json", post_json)
-    except Exception:
-        shutil.rmtree(target_dir, ignore_errors=True)
-        raise
+    with COLLECTION_MOVE_LOCK:
+        existing = existing_remote_collection_post(target_parent, source_post, items)
+        if existing:
+            existing_dir, existing_post = existing
+            existing_path = existing_dir.relative_to(root).as_posix()
+            existing_items = existing_post.get("items") if isinstance(existing_post.get("items"), list) else []
+            data = scan_library(root)
+            data["selected_path"] = existing_path
+            data["selected_item_id"] = media_item_key(existing_items[-1] if existing_items else {})
+            data["selected_collection_path"] = collection_path
+            data["selected_collection_post_path"] = target_parent_path or existing_path
+            return data
 
-    data = scan_library(root)
-    data["selected_path"] = post_json["folder_path"]
-    data["selected_item_id"] = media_item_key(copied_items[-1] if copied_items else {})
-    data["selected_collection_path"] = collection_path
-    data["selected_collection_post_path"] = target_parent_path or post_json["folder_path"]
-    return data
+        account = active_imagine_account(root, str(source_post.get("account_id") or ""))
+        base_name = source_post.get("title") or source_post.get("post_id") or source_post.get("folderName") or "imagine"
+        suffix = "-item" if item_only else ""
+        target_dir = target_parent / unique_directory_name(target_parent, safe_name(f"{base_name}{suffix}", "imagine"))
+        target_dir.mkdir(parents=True, exist_ok=True)
+        copied_items = []
+        try:
+            for index, item in enumerate(items):
+                copied_items.append(copy_imagine_remote_item_to_directory(root, item, target_dir, account, index))
+            target_path = target_dir.relative_to(root).as_posix()
+            collection_id = Path(collection_path).name
+            post_json = post_json_from_post(
+                source_post,
+                post_id=target_dir.name,
+                source="imagine",
+                mode=source_post.get("mode") or "imagine",
+                title=source_post.get("title") or readable_name(target_dir.name),
+                folder_path=target_path,
+                collection=collection_id,
+                items=copied_items,
+                representative=representative_for_merged_items(copied_items),
+                source_post_id=source_post.get("post_id") or source_post.get("source_post_id") or "",
+                original_post_id=source_post.get("original_post_id") or source_post.get("post_id") or "",
+                group_id=source_post.get("group_id") or source_post.get("root_post_id") or source_post.get("post_id") or "",
+                account_id=source_post.get("account_id") or "",
+                account_email=source_post.get("account_email") or "",
+                favorite=False,
+                build_favorite=False,
+            )
+            write_json(target_dir / "post.json", post_json)
+        except Exception:
+            shutil.rmtree(target_dir, ignore_errors=True)
+            raise
+
+        data = scan_library(root)
+        data["selected_path"] = post_json["folder_path"]
+        data["selected_item_id"] = media_item_key(copied_items[-1] if copied_items else {})
+        data["selected_collection_path"] = collection_path
+        data["selected_collection_post_path"] = target_parent_path or post_json["folder_path"]
+        return data
 
 
 def media_item_merge_keys(post: dict, item: dict) -> set[tuple[str, str]]:
