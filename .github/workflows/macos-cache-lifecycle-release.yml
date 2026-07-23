@@ -19,6 +19,7 @@ env:
   COMMON_I_SUBMIT: common/app/web/scripts/i_composer_submit.js
   COMMON_LIBRARY_CORE: common/app/web/scripts/library_core.js
   COMMON_DETAIL_STATE: common/app/web/scripts/detail_state.js
+  COMMON_DETAIL_RENDER: common/app/web/scripts/detail_render.js
   COMMON_I_SOURCE: common/app/web/scripts/i_source_render.js
   COMMON_PRELOAD: common/app/electron/preload-bridge.js
   COMMON_SERVER: common/app/runtime/server.py
@@ -34,7 +35,7 @@ jobs:
       RELEASE_TAG: v20260720-041036-win
       INPUT_ZIP: Win_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Win_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: af5ff1ac44ec52379d2a6f22666ab162ef6bf6bb3f507d6f0a7b014c1744185e
+      EXPECTED_INPUT_SHA256: 0da36fb486ec9a5e98c8d83f34365873e6b5070f01c1e0042aca2d48305b5a8b
 
     steps:
       - name: Check out the shared source commit
@@ -78,6 +79,7 @@ jobs:
             @{ Name = "i_submit"; Relative = "web\scripts\i_composer_submit.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_I_SUBMIT) },
             @{ Name = "library_core"; Relative = "web\scripts\library_core.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_LIBRARY_CORE) },
             @{ Name = "detail_state"; Relative = "web\scripts\detail_state.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_STATE) },
+            @{ Name = "detail_render"; Relative = "web\scripts\detail_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_RENDER) },
             @{ Name = "i_source"; Relative = "web\scripts\i_source_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_I_SOURCE) }
           )
           foreach ($shared in $sharedSources) {
@@ -91,6 +93,7 @@ jobs:
           $targetISubmit = ($sharedSources | Where-Object Name -eq "i_submit").Target
           $targetLibraryCore = ($sharedSources | Where-Object Name -eq "library_core").Target
           $targetDetailState = ($sharedSources | Where-Object Name -eq "detail_state").Target
+          $targetDetailRender = ($sharedSources | Where-Object Name -eq "detail_render").Target
           $targetISource = ($sharedSources | Where-Object Name -eq "i_source").Target
 
           $inputHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $inputZip).Hash.ToLowerInvariant()
@@ -228,6 +231,9 @@ jobs:
           if (-not (Get-Content -Raw -LiteralPath $targetISubmit).Contains("source_conversation_id: sourceContext.conversation_id")) { throw "Submit conversation lineage marker missing." }
           if (-not (Get-Content -Raw -LiteralPath $targetLibraryCore).Contains('if (type === "image" || type.startsWith("image/"))')) { throw "Sharp image preview marker missing." }
           if (-not (Get-Content -Raw -LiteralPath $targetDetailState).Contains("function detailItemPrompt(item)")) { throw "Detail prompt lineage marker missing." }
+          $detailRenderText = Get-Content -Raw -LiteralPath $targetDetailRender
+          if (-not $detailRenderText.Contains("const visible = !post?.is_job_post")) { throw "Build detail heart visibility marker missing." }
+          if ($detailRenderText.Contains("Boolean(post?.is_job_post)")) { throw "Build job heart visibility regression found." }
           if (-not (Get-Content -Raw -LiteralPath $targetISource).Contains("function isImagineT2iGroupContainer(post)")) { throw "T2I group filter marker missing." }
           $metadata = Get-ChildItem -LiteralPath $root -Recurse -Force | Where-Object {
             $_.Name -eq "__MACOSX" -or $_.Name -like "._*" -or $_.Name -eq ".DS_Store"
@@ -296,7 +302,7 @@ jobs:
       RELEASE_TAG: v20260720-042100-mac
       INPUT_ZIP: Mac_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Mac_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: 96df61a55f94851987535ea6cb77756502ac03ec630ddbe3208f11c1dccd2aa8
+      EXPECTED_INPUT_SHA256: 88128d626e6f783488162f9b5d4d41468b741f947a31f0673d40d72d8391e824
 
     steps:
       - name: Check out the shared source commit
@@ -337,6 +343,7 @@ jobs:
             web/scripts/i_composer_submit.js
             web/scripts/library_core.js
             web/scripts/detail_state.js
+            web/scripts/detail_render.js
             web/scripts/i_source_render.js
           )
           target="$app_root/web/scripts/composer_options.js"
@@ -347,6 +354,7 @@ jobs:
           i_submit_js="$app_root/web/scripts/i_composer_submit.js"
           library_core_js="$app_root/web/scripts/library_core.js"
           detail_state_js="$app_root/web/scripts/detail_state.js"
+          detail_render_js="$app_root/web/scripts/detail_render.js"
           i_source_js="$app_root/web/scripts/i_source_render.js"
           main_exec="$main_app/Contents/MacOS/Grok Chameleon"
           migration_exec="$migration_app/Contents/MacOS/Migration"
@@ -410,6 +418,11 @@ jobs:
           grep -F 'source_conversation_id: sourceContext.conversation_id' "$i_submit_js"
           grep -F 'if (type === "image" || type.startsWith("image/"))' "$library_core_js"
           grep -F 'function detailItemPrompt(item)' "$detail_state_js"
+          grep -F 'const visible = !post?.is_job_post' "$detail_render_js"
+          if grep -F 'Boolean(post?.is_job_post)' "$detail_render_js"; then
+            echo 'Build job heart visibility regression found.' >&2
+            exit 1
+          fi
           grep -F 'function isImagineT2iGroupContainer(post)' "$i_source_js"
           grep -F 'RUNTIME_ROOT = Path(__file__).resolve().parent' "$server_py"
           grep -F 'APP_ROOT = RUNTIME_ROOT.parent' "$server_py"
@@ -470,6 +483,7 @@ jobs:
             web/scripts/i_composer_submit.js
             web/scripts/library_core.js
             web/scripts/detail_state.js
+            web/scripts/detail_render.js
             web/scripts/i_source_render.js
           )
           if find "$root" -type d -name '__pycache__' -print | grep -q .; then
@@ -570,8 +584,8 @@ jobs:
           MAC_TAG: v20260720-042100-mac
           WIN_ZIP: Win_Grok_Chameleon_a.zip
           MAC_ZIP: Mac_Grok_Chameleon_a.zip
-          WIN_INPUT_SHA256: af5ff1ac44ec52379d2a6f22666ab162ef6bf6bb3f507d6f0a7b014c1744185e
-          MAC_INPUT_SHA256: 96df61a55f94851987535ea6cb77756502ac03ec630ddbe3208f11c1dccd2aa8
+          WIN_INPUT_SHA256: 0da36fb486ec9a5e98c8d83f34365873e6b5070f01c1e0042aca2d48305b5a8b
+          MAC_INPUT_SHA256: 88128d626e6f783488162f9b5d4d41468b741f947a31f0673d40d72d8391e824
         run: |
           set -euo pipefail
           mkdir -p current/win current/mac backups
@@ -580,8 +594,8 @@ jobs:
           test "$(sha256sum "current/win/$WIN_ZIP" | awk '{print $1}')" = "$WIN_INPUT_SHA256"
           test "$(sha256sum "current/mac/$MAC_ZIP" | awk '{print $1}')" = "$MAC_INPUT_SHA256"
           short_sha="$(printf '%s' "$GITHUB_SHA" | cut -c1-12)"
-          win_backup="Win_Grok_Chameleon_a.previous-before-migration-import-$short_sha.zip"
-          mac_backup="Mac_Grok_Chameleon_a.previous-before-migration-import-$short_sha.zip"
+          win_backup="Win_Grok_Chameleon_a.previous-before-build-heart-visibility-$short_sha.zip"
+          mac_backup="Mac_Grok_Chameleon_a.previous-before-build-heart-visibility-$short_sha.zip"
           cp "current/win/$WIN_ZIP" "backups/$win_backup"
           cp "current/mac/$MAC_ZIP" "backups/$mac_backup"
           gh release upload "$WIN_TAG" "backups/$win_backup" --repo "$GITHUB_REPOSITORY"
