@@ -1,0 +1,620 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Grok Chameleon</title>
+    <link rel="stylesheet" href="./styles/app.css" />
+    <link rel="stylesheet" href="./styles/composer.css" />
+    <script src="./scripts/state.js" defer></script>
+    <script src="./scripts/library_utils.js" defer></script>
+    <script src="./scripts/ui_feedback.js" defer></script>
+    <script src="./scripts/dialog.js" defer></script>
+    <script src="./scripts/library_core.js" defer></script>
+    <script src="./scripts/prompt_translate.js" defer></script>
+    <script src="./scripts/account_core.js" defer></script>
+    <script src="./scripts/composer_options.js" defer></script>
+    <script src="./scripts/composer_provider.js" defer></script>
+    <script src="./scripts/detail_media.js" defer></script>
+    <script src="./scripts/b_detail_media.js" defer></script>
+    <script src="./scripts/i_detail_media.js" defer></script>
+    <script src="./scripts/detail_video_player.js" defer></script>
+    <script src="./scripts/detail_common_actions.js" defer></script>
+    <script src="./scripts/b_detail_actions.js" defer></script>
+    <script src="./scripts/i_detail_actions.js" defer></script>
+    <script src="./scripts/detail_state.js" defer></script>
+    <script src="./scripts/detail_navigation.js" defer></script>
+    <script src="./scripts/detail_render.js" defer></script>
+    <script src="./scripts/library_scan.js" defer></script>
+    <script src="./scripts/render.js" defer></script>
+    <script src="./scripts/build_main.js" defer></script>
+    <script src="./scripts/b_composer_submit.js" defer></script>
+    <script src="./scripts/i_composer_submit.js" defer></script>
+    <script src="./scripts/composer_submit.js" defer></script>
+    <script src="./scripts/card_render.js" defer></script>
+    <script src="./scripts/source_filter.js" defer></script>
+    <script src="./scripts/b_source_render.js" defer></script>
+    <script src="./scripts/i_source_render.js" defer></script>
+    <script src="./scripts/source_render.js" defer></script>
+    <script src="./scripts/navigation_history.js" defer></script>
+    <script src="./scripts/screen_router.js" defer></script>
+    <script src="./scripts/image_editor_flow.js" defer></script>
+    <script src="./scripts/imagine_main.js" defer></script>
+    <script src="./scripts/card_actions.js" defer></script>
+    <script src="./scripts/collection_render.js" defer></script>
+    <script src="./scripts/prompt_render.js" defer></script>
+    <script src="./scripts/search_render.js" defer></script>
+    <script src="./scripts/prompt_account.js" defer></script>
+    <script src="./scripts/collection_utils.js" defer></script>
+    <script src="./scripts/collection_actions.js" defer></script>
+    <script src="./scripts/composer_attachments.js" defer></script>
+    <script src="./scripts/detail_events.js" defer></script>
+    <script src="./scripts/composer_events.js" defer></script>
+    <script src="./scripts/sidebar_events.js" defer></script>
+    <script src="./scripts/prompt_events.js" defer></script>
+    <script src="./scripts/collection_events.js" defer></script>
+    <script src="./scripts/screen_events.js" defer></script>
+    <script src="./scripts/automation.js" defer></script>
+  </head>
+  <body>
+    <button id="sidebarOpenBtn" class="sidebar_toggle sidebar_open" type="button" hidden aria-label="Open sidebar">&gt;&gt;</button>
+
+    <div id="appShell" class="app_shell">
+      <aside class="sidebar" aria-label="Main navigation">
+        <div class="sidebar_head">
+          <div class="brand">
+	            <button id="brandImagineBtn" class="brand_imagine_btn" type="button" aria-label="Imagine">
+              <img class="brand_icon" src="./assets/logos/grok.png" alt="Grok Chameleon" />
+            </button>
+          </div>
+          <button id="sidebarCloseBtn" class="ghost_btn sidebar_toggle sidebar_close" type="button" aria-label="Hide sidebar">&lt;&lt;</button>
+        </div>
+
+          <nav class="nav_stack" aria-label="Studio sections">
+            <button id="i_imagine_nav_btn" class="nav_item active" type="button">
+              <span class="nav_icon i_nav_icon" aria-hidden="true">I</span>
+              <span>Grok Imagine</span>
+            </button>
+            <button id="i_discover_nav_btn" class="nav_item nav_sub_item" type="button">
+              <span class="nav_icon suit_nav_icon" aria-hidden="true">♣</span>
+              <span>Discover</span>
+	            </button>
+	            <button id="i_unsaved_nav_btn" class="nav_item nav_sub_item" type="button">
+	              <span class="nav_icon suit_nav_icon" aria-hidden="true">♥</span>
+	              <span>Unsaved</span>
+	            </button>
+            <div class="nav_spacer" aria-hidden="true"></div>
+            <button id="b_build_btn" class="nav_item" type="button">
+              <span class="nav_icon b_nav_icon" aria-hidden="true">B</span>
+              <span>Grok Build</span>
+            </button>
+            <button id="b_collection_nav_btn" class="nav_item nav_sub_item" type="button">
+              <span class="nav_icon suit_nav_icon" aria-hidden="true">♦</span>
+              <span>Collection</span>
+            </button>
+            <button id="folder_btn" class="nav_item nav_sub_item open_folder_btn" type="button">
+              <span class="nav_icon suit_nav_icon" aria-hidden="true">♠</span>
+              <span>Open Folder</span>
+            </button>
+            <div class="nav_spacer" aria-hidden="true"></div>
+            <button id="prompt_main_btn" class="nav_item" type="button">
+              <span class="nav_icon" aria-hidden="true">P</span>
+              <span>Prompt</span>
+            </button>
+            <button id="search_btn" class="nav_item nav_sub_item search_btn" type="button">
+              <img src="./assets/icons/search.svg" alt="" />
+              <span>Search</span>
+            </button>
+            <input id="searchInput" class="sidebar_search_input" type="search" />
+            <button id="i_link_btn" class="nav_item link_btn" type="button">
+              <span class="nav_icon" aria-hidden="true">L</span>
+              <span>Link</span>
+            </button>
+            <input id="i_link_input" class="sidebar_search_input sidebar_link_input" type="url" placeholder="Paste" />
+          </nav>
+
+        <section class="account-card" aria-label="Account">
+          <div class="sidebar_library_actions">
+            <button id="set_library_path_btn" class="nav_item set_library_path_btn" type="button">
+              <img src="./assets/icons/map-pin.svg" alt="" />
+              <span>Set Library Path</span>
+            </button>
+            <button id="account_usage_btn" class="nav_item sidebar_usage_btn account_usage_btn" type="button">
+              <img src="./assets/icons/usage.svg" alt="" />
+              <span>Usage</span>
+            </button>
+          </div>
+
+          <button id="accountButton" class="account-button" type="button">
+            <span class="account-summary-row account-summary-imagine">
+              <span class="account-avatar account-avatar-imagine" aria-hidden="true">I</span>
+              <span class="account-copy">
+                <strong id="accountImagineEmail">Imagine</strong>
+                <small id="accountImagineStatus">Unknown</small>
+              </span>
+            </span>
+            <span class="account-summary-row account-summary-build">
+              <span class="account-avatar account-avatar-build" aria-hidden="true">B</span>
+              <span class="account-copy">
+                <strong id="accountBuildEmail">Build</strong>
+                <small id="accountBuildStatus">Ready</small>
+              </span>
+            </span>
+          </button>
+        </section>
+      </aside>
+
+        <main class="workspace i_main_open">
+        <header class="topbar">
+          <div class="topbar_copy">
+	            <h1>
+              <button id="titleImagineBtn" class="title_imagine_btn" type="button" aria-label="Grok Chameleon">
+                <svg class="title_logo_svg" viewBox="0 0 500 68" aria-hidden="true" focusable="false">
+                  <defs>
+                    <clipPath id="titleLogoWaveTopClip" clipPathUnits="userSpaceOnUse">
+                      <path d="M0 0 H500 V37 L484.38 33.94 L468.75 31.34 L453.13 29.61 L437.5 29 L421.88 29.61 L406.25 31.34 L390.63 33.94 L375 37 L359.38 40.06 L343.75 42.66 L328.13 44.39 L312.5 45 L296.88 44.39 L281.25 42.66 L265.63 40.06 L250 37 L234.38 33.94 L218.75 31.34 L203.13 29.61 L187.5 29 L171.88 29.61 L156.25 31.34 L140.63 33.94 L125 37 L109.38 40.06 L93.75 42.66 L78.13 44.39 L62.5 45 L46.88 44.39 L31.25 42.66 L15.63 40.06 L0 37 Z" />
+                    </clipPath>
+                    <clipPath id="titleLogoWaveBottomClip" clipPathUnits="userSpaceOnUse">
+                      <path d="M0 37 L15.63 40.06 L31.25 42.66 L46.88 44.39 L62.5 45 L78.13 44.39 L93.75 42.66 L109.38 40.06 L125 37 L140.63 33.94 L156.25 31.34 L171.88 29.61 L187.5 29 L203.13 29.61 L218.75 31.34 L234.38 33.94 L250 37 L265.63 40.06 L281.25 42.66 L296.88 44.39 L312.5 45 L328.13 44.39 L343.75 42.66 L359.38 40.06 L375 37 L390.63 33.94 L406.25 31.34 L421.88 29.61 L437.5 29 L453.13 29.61 L468.75 31.34 L484.38 33.94 L500 37 V68 H0 Z" />
+                    </clipPath>
+                  </defs>
+                  <text class="title_logo_text title_logo_text_base" x="0" y="55" clip-path="url(#titleLogoWaveBottomClip)"><tspan>Grok</tspan><tspan dx="0.55em">Chameleon</tspan></text>
+                  <text class="title_logo_text title_logo_text_wave" x="0" y="55" clip-path="url(#titleLogoWaveTopClip)"><tspan>Grok</tspan><tspan dx="0.55em">Chameleon</tspan></text>
+                </svg>
+              </button>
+            </h1>
+            <div class="topbar_subrow">
+              <p>Delightful imagination with Grok.</p>
+            </div>
+          </div>
+        </header>
+
+        <div id="selectionBar" class="selection-bar" hidden>
+          <button id="selectionMergeBtn" class="selection_action selection_merge_action" type="button">Merge</button>
+          <button id="selectionDownloadBtn" class="selection_action selection_download_action" type="button">Download</button>
+          <button id="selectionDeleteBtn" class="selection_action selection_delete_action" type="button">Delete</button>
+          <button id="selectionClearBtn" class="selection_action selection_clear_action" type="button" aria-label="Clear selection">X</button>
+        </div>
+
+	          <section id="i_main" class="i_main" aria-label="Imagine main">
+	            <header class="i_main_header">
+	              <div class="i_main_actions" aria-label="Imagine views">
+	                <button id="i_imagine_tab_btn" class="i_main_title_btn i_main_btn active" type="button">Imagine</button>
+	              </div>
+	              <div class="i_main_right_actions">
+	                <button id="i_t2i_btn" class="i_main_btn" type="button">T2I View</button>
+	              </div>
+	          </header>
+
+          <section id="i_card_list" class="card_list i_card_list" aria-label="Imagine media">
+
+          </section>
+        </section>
+
+        <section id="b_main" class="b_main" hidden aria-label="Build main">
+            <header class="b_main_header">
+              <div class="b_main_title_actions">
+                <h2>Build</h2>
+                <button id="b_collection_filter_btn" class="b_main_btn" type="button" aria-pressed="false">Collection</button>
+              </div>
+              <p>0 items</p>
+              <div class="b_main_actions">
+                <button id="b_t2i_view_btn" class="b_main_btn" type="button">T2I View</button>
+              </div>
+            </header>
+          <section class="card_list b_card_list" aria-label="Build media">
+
+          </section>
+        </section>
+
+        <section id="b_t2i_view_main" class="b_t2i_view_main" hidden aria-label="Build T2I view">
+          <header class="b_main_header b_t2i_view_header">
+            <h2>T2I View</h2>
+            <p>0 items</p>
+            <div class="b_main_actions">
+              <button id="b_t2i_view_back_btn" class="b_main_btn" type="button">Build</button>
+            </div>
+          </header>
+          <section class="card_list b_t2i_view_card_list" aria-label="Build T2I media">
+
+          </section>
+        </section>
+
+        <section id="search_main" class="search_main" hidden aria-label="Search results">
+          <header class="b_main_header search_main_header">
+            <h2>Search</h2>
+            <p class="search_count">0 items</p>
+            <div class="b_main_actions search_main_actions" aria-label="Search menu"></div>
+          </header>
+          <section class="card_list search_card_list" aria-label="Search results">
+
+          </section>
+        </section>
+
+        <section id="i_discover_main" class="i_discover_main" hidden aria-label="Discover main">
+          <header class="i_discover_main_header">
+            <h2>Discover</h2>
+          </header>
+          <section class="card_list i_discover_card_list" aria-label="Discover media">
+
+          </section>
+        </section>
+
+        <section id="i_unsaved_main" class="i_unsaved_main" hidden aria-label="Imagine unsaved">
+          <header class="i_unsaved_main_header">
+            <div class="i_unsaved_main_actions" aria-label="Imagine unsaved views">
+              <button id="i_unsaved_title_btn" class="i_main_title_btn i_main_btn active" type="button">Unsaved</button>
+            </div>
+            <div class="i_unsaved_main_right_actions">
+              <button id="i_unsaved_refresh_btn" class="i_main_btn" type="button">Refresh</button>
+            </div>
+          </header>
+          <section id="i_unsaved_card_list" class="card_list i_unsaved_card_list" aria-label="Imagine unsaved media">
+
+          </section>
+        </section>
+
+          <section id="collection_main" class="collection_main" hidden aria-label="Collection folders">
+          <header class="collection_main_header">
+            <h2>Collection</h2>
+            <div class="collection_main_actions">
+              <button class="collection_make_btn" type="button"><span aria-hidden="true">+</span>Make</button>
+              <button class="collection_rename_btn" type="button"><span aria-hidden="true">=</span>Rename</button>
+              <button class="collection_delete_btn" type="button"><span aria-hidden="true">-</span>Delete</button>
+            </div>
+          </header>
+          <div class="collection_layout">
+            <section id="collection_1st" class="collection_1st" aria-label="First folders">
+              <div class="collection_1st_heading">
+                <button class="collection_title_btn" type="button">Category</button>
+              </div>
+              <div class="collection_1st_card_list">
+                <div class="collection_empty">No category yet.</div>
+              </div>
+            </section>
+            <section id="collection_2nd" class="collection_2nd" aria-label="Second folders">
+	              <div class="collection_2nd_heading">
+	                <div class="collection_sort_btns" aria-label="Sort second-level folders">
+	                  <button class="collection_item_title_btn" type="button">Item</button>
+		                  <div class="collection_sort_center">
+		                    <button type="button" data-collection-sort="ko">가나다</button>
+		                    <button type="button" data-collection-sort="abc">ABC</button>
+		                  </div>
+		                  <button class="collection_sort_save_btn" type="button">Save</button>
+		                </div>
+                <strong></strong>
+              </div>
+              <div class="collection_2nd_card_grid">
+                <div class="collection_empty collection_2nd_empty"></div>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section id="2nd_main" class="second_main" hidden aria-label="Second folder media">
+          <header class="second_main_header">
+            <h2>Item</h2>
+            <div class="second_main_actions">
+              <button class="second_main_back_btn" type="button">Category</button>
+            </div>
+          </header>
+          <section class="card_list second_main_card_list" aria-label="Second folder cards">
+
+          </section>
+        </section>
+
+        <section id="i_detail" class="i_detail" hidden aria-label="Imagine detail">
+          <section class="i_detail_stage i_detail_stage_video">
+            <div class="i_detail_media_shell">
+              <button class="i_detail_action i_detail_return" type="button" aria-label="Back to list"><span class="detail_return_glyph" aria-hidden="true">↓</span></button>
+              <button class="i_detail_back" type="button" aria-label="Back"><span aria-hidden="true">&lt;</span></button>
+              <button class="i_detail_forward" type="button" aria-label="Forward"><span aria-hidden="true">&gt;</span></button>
+              <aside class="i_detail_thumb_list i_detail_thumb_scrollable" aria-label="Imagine versions">
+                <button class="i_detail_thumb i_detail_thumb_video active" type="button" aria-label="Video version">
+                  <span class="i_detail_thumb_fill"></span>
+                  <span class="i_detail_thumb_type"><img src="./assets/icons/video.svg" alt="" /></span>
+                </button>
+                <button class="i_detail_thumb i_detail_thumb_image" type="button" aria-label="Image version">
+                  <span class="i_detail_thumb_fill"></span>
+                </button>
+                <button class="i_detail_thumb i_detail_thumb_image" type="button" aria-label="Image version">
+                  <span class="i_detail_thumb_fill"></span>
+                </button>
+                <button class="i_detail_thumb i_detail_thumb_video" type="button" aria-label="Video version">
+                  <span class="i_detail_thumb_fill"></span>
+                  <span class="i_detail_thumb_type"><img src="./assets/icons/video.svg" alt="" /></span>
+                </button>
+                <button class="i_detail_thumb i_detail_thumb_image" type="button" aria-label="Image version">
+                  <span class="i_detail_thumb_fill"></span>
+                </button>
+                <button class="i_detail_thumb i_detail_thumb_image" type="button" aria-label="Image version">
+                  <span class="i_detail_thumb_fill"></span>
+                </button>
+                <button class="i_detail_thumb i_detail_thumb_video" type="button" aria-label="Video version">
+                  <span class="i_detail_thumb_fill"></span>
+                  <span class="i_detail_thumb_type"><img src="./assets/icons/video.svg" alt="" /></span>
+                </button>
+                <button class="i_detail_thumb i_detail_thumb_image" type="button" aria-label="Image version">
+                  <span class="i_detail_thumb_fill"></span>
+                </button>
+              </aside>
+              <div class="i_detail_media_wrap">
+                <div class="i_detail_meta_row">
+                  <span class="i_detail_provider_badge i_detail_provider_video"><img src="./assets/icons/video.svg" alt="" /></span>
+                  <span class="i_detail_model_badge"><span class="i_detail_resolution_name"></span><span class="i_detail_model_name">M 1.5</span></span>
+                </div>
+                <div class="i_detail_media i_detail_media_video"><img src="./assets/icons/video.svg" alt="" /></div>
+              </div>
+              <aside class="i_detail_actions" aria-label="Imagine actions">
+                <button class="i_detail_action i_detail_heart text2image-detail-save imagine-save-heart saved" type="button" aria-label="Save" aria-pressed="true">
+                  <span class="imagine-save-heart-icon" aria-hidden="true">
+                    <svg class="imagine-save-heart-svg" viewBox="0 0 24 24" focusable="false">
+                      <path class="imagine-save-heart-path" d="M12 20.2c-.28 0-.55-.1-.76-.29C6.15 15.32 3 12.48 3 8.62 3 5.78 5.12 3.7 7.9 3.7c1.62 0 3.16.75 4.1 1.94.94-1.19 2.48-1.94 4.1-1.94 2.78 0 4.9 2.08 4.9 4.92 0 3.86-3.15 6.7-8.24 11.29-.21.19-.48.29-.76.29Z"></path>
+                    </svg>
+                  </span>
+                </button>
+                <button class="i_detail_action i_detail_edit" type="button" aria-label="Edit"><span class="i_detail_edit_glyph" aria-hidden="true">e</span></button>
+                <button class="i_detail_action i_detail_crop_btn i_detail_image_tool_btn" type="button" aria-label="Crop" title="Crop" hidden>
+                  <span class="i_detail_crop_icon" aria-hidden="true"></span>
+                </button>
+                <div class="i_detail_aspect_picker i_detail_image_tool_btn" hidden>
+                  <button class="i_detail_action i_detail_aspect_btn" type="button" aria-label="Aspect Ratio">
+                    <span class="i_detail_aspect_icon" aria-hidden="true"></span>
+                  </button>
+                  <div class="i_detail_aspect_menu custom_select_menu" role="menu" aria-label="Aspect Ratio"></div>
+                </div>
+                <button class="i_detail_action i_detail_upscale_btn i_detail_video_tool_btn" type="button" aria-label="Upscale" hidden>
+                  <span class="i_detail_upscale_icon" aria-hidden="true"></span>
+                </button>
+                <button class="i_detail_action i_detail_move" type="button" aria-label="Move to Collection">
+                  <span class="i_detail_action_glyph" aria-hidden="true">↗</span>
+                </button>
+                <button class="i_detail_action i_detail_download" type="button" aria-label="Download">↓</button>
+                <button class="i_detail_action i_detail_delete i_detail_remove" type="button" aria-label="Remove"><span class="i_detail_delete_icon" aria-hidden="true"></span></button>
+              </aside>
+            </div>
+          </section>
+          <div class="i_detail_meta" title="Prompt"><span>Prompt</span></div>
+        </section>
+
+        <section id="b_detail" class="b_detail" hidden aria-label="Build detail">
+          <section class="b_detail_stage b_detail_stage_image">
+            <div class="b_detail_media_shell">
+              <button class="b_detail_action b_detail_return" type="button" aria-label="Back to list"><span class="detail_return_glyph" aria-hidden="true">↓</span></button>
+              <button class="b_detail_back" type="button" aria-label="Back"><span aria-hidden="true">&lt;</span></button>
+              <button class="b_detail_forward" type="button" aria-label="Forward"><span aria-hidden="true">&gt;</span></button>
+              <button class="b_detail_action b_detail_split_btn" type="button" aria-label="Split item"><span class="b_detail_split_glyph" aria-hidden="true">S</span></button>
+              <button class="b_detail_action b_detail_source_btn" type="button" aria-label="Set source image"><span class="b_detail_source_glyph" aria-hidden="true">P</span></button>
+              <aside class="b_detail_thumb_list b_detail_thumb_scrollable" aria-label="Build versions">
+                <button class="b_detail_thumb b_detail_thumb_image active" type="button" aria-label="Image version">
+                  <span class="b_detail_thumb_fill"></span>
+                </button>
+                <button class="b_detail_thumb b_detail_thumb_video" type="button" aria-label="Video version">
+                  <span class="b_detail_thumb_fill"></span>
+                  <span class="b_detail_thumb_type"><img src="./assets/icons/video.svg" alt="" /></span>
+                </button>
+                <button class="b_detail_thumb b_detail_thumb_image" type="button" aria-label="Image version">
+                  <span class="b_detail_thumb_fill"></span>
+                </button>
+                <button class="b_detail_thumb b_detail_thumb_image" type="button" aria-label="Image version">
+                  <span class="b_detail_thumb_fill"></span>
+                </button>
+                <button class="b_detail_thumb b_detail_thumb_video" type="button" aria-label="Video version">
+                  <span class="b_detail_thumb_fill"></span>
+                  <span class="b_detail_thumb_type"><img src="./assets/icons/video.svg" alt="" /></span>
+                </button>
+                <button class="b_detail_thumb b_detail_thumb_image" type="button" aria-label="Image version">
+                  <span class="b_detail_thumb_fill"></span>
+                </button>
+                <button class="b_detail_thumb b_detail_thumb_image" type="button" aria-label="Image version">
+                  <span class="b_detail_thumb_fill"></span>
+                </button>
+                <button class="b_detail_thumb b_detail_thumb_video" type="button" aria-label="Video version">
+                  <span class="b_detail_thumb_fill"></span>
+                  <span class="b_detail_thumb_type"><img src="./assets/icons/video.svg" alt="" /></span>
+                </button>
+              </aside>
+              <div class="b_detail_media_wrap">
+                <div class="b_detail_meta_row">
+                  <span class="b_detail_provider_badge b_detail_provider_image"><img src="./assets/icons/image.svg" alt="" /></span>
+                  <span class="b_detail_model_badge"><span class="b_detail_resolution_name"></span><span class="b_detail_model_name">Quality</span></span>
+                </div>
+                <div class="b_detail_media b_detail_media_image"><img src="./assets/icons/image.svg" alt="" /></div>
+              </div>
+              <aside class="b_detail_actions" aria-label="Build actions">
+                <button class="b_detail_action b_detail_heart text2image-detail-save imagine-save-heart" type="button" aria-label="Favorite" aria-pressed="false" hidden>
+                  <span class="imagine-save-heart-icon" aria-hidden="true">
+                    <svg class="imagine-save-heart-svg" viewBox="0 0 24 24" focusable="false">
+                      <path class="imagine-save-heart-path" d="M12 20.2c-.28 0-.55-.1-.76-.29C6.15 15.32 3 12.48 3 8.62 3 5.78 5.12 3.7 7.9 3.7c1.62 0 3.16.75 4.1 1.94.94-1.19 2.48-1.94 4.1-1.94 2.78 0 4.9 2.08 4.9 4.92 0 3.86-3.15 6.7-8.24 11.29-.21.19-.48.29-.76.29Z"></path>
+                    </svg>
+                  </span>
+                </button>
+                <button class="b_detail_action b_detail_edit" type="button" aria-label="Edit"><span class="b_detail_edit_glyph" aria-hidden="true">e</span></button>
+	                <button class="b_detail_action b_detail_move" type="button" aria-label="Move to Collection">
+                  <span class="b_detail_action_glyph" aria-hidden="true">↗</span>
+                </button>
+                <button class="b_detail_action b_detail_download" type="button" aria-label="Download">↓</button>
+                <button class="b_detail_action b_detail_delete" type="button" aria-label="Delete"><span class="b_detail_delete_icon" aria-hidden="true"></span></button>
+              </aside>
+            </div>
+          </section>
+          <div class="b_detail_meta" title="Prompt"><span>Prompt</span></div>
+        </section>
+
+        <section id="prompt_main" class="prompt_main" hidden aria-label="Prompt main">
+          <header class="prompt_main_header">
+            <div class="prompt_title_row">
+              <h2><button class="prompt_title_btn" type="button">Prompt</button></h2>
+              <button class="prompt_write_btn" type="button"><span aria-hidden="true">+</span> Write</button>
+              <p class="prompt_count">0 items</p>
+            </div>
+          </header>
+          <section class="card_list prompt_card_list" aria-label="Prompts">
+
+          </section>
+        </section>
+
+        <section id="prompt_save" class="prompt_save" hidden aria-label="New prompt">
+          <article class="prompt_save_card" role="dialog" aria-modal="true" aria-label="New prompt">
+            <input class="prompt_save_title" type="text" placeholder="Prompt title" aria-label="Prompt title" />
+            <div class="prompt_save_split">
+              <textarea class="prompt_save_text prompt_save_original" aria-label="Prompt content" placeholder="Write a prompt..."></textarea>
+              <div class="prompt_save_divider_box" aria-hidden="true"><span></span></div>
+              <textarea class="prompt_save_text prompt_save_translation" aria-label="Translated prompt" placeholder="Translation appears here." readonly></textarea>
+            </div>
+            <div class="prompt_save_actions">
+              <button class="ghost_btn prompt_save_translate" type="button" aria-label="ENG to KOR">
+                <span>ENG</span>
+                <svg class="translation_arrow_icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M14 7l5 5-5 5" /></svg>
+                <span>KOR</span>
+              </button>
+              <div class="prompt_save_actions_right">
+                <button id="prompt_save_cancel" class="ghost_btn prompt_save_cancel" type="button">Cancel</button>
+                <button id="prompt_save_confirm" class="primary_btn prompt_save_confirm" type="button">Save</button>
+              </div>
+            </div>
+          </article>
+        </section>
+
+        <section id="usage" class="usage" hidden aria-label="Usage">
+          <header class="usage_header">
+            <h2>Usage</h2>
+            <p>Build and Imagine usage overview</p>
+          </header>
+          <section class="usage_body">
+            <article class="usage_card">
+              <strong>Build</strong>
+              <span>Waiting for API usage data.</span>
+            </article>
+            <article class="usage_card">
+              <strong>Imagine</strong>
+              <span>Waiting for web session usage data.</span>
+            </article>
+          </section>
+        </section>
+
+        <section id="account" class="account" hidden tabindex="-1" aria-label="Account">
+          <header class="account_screen_head b_main_header">
+            <h2>Account</h2>
+            <div class="account_main_actions">
+              <button id="account_all_delete_btn" class="account_all_delete_btn" type="button" disabled>All Delete</button>
+            </div>
+          </header>
+          <section class="account_total_panel" aria-label="Total account">
+            <button id="total_account_btn" class="total_account_btn" type="button">Total Account</button>
+          </section>
+          <section class="account_selection_panel">
+            <div class="account_list">
+              <section class="account_column">
+                <div class="account_column_body"></div>
+              </section>
+              <section class="account_column">
+                <div class="account_column_body"></div>
+              </section>
+            </div>
+          </section>
+        </section>
+
+        <section id="composer" class="composer" aria-label="Create media">
+          <div id="composer_upload_tray" class="composer_upload_tray" hidden aria-label="Attachments">
+            <label class="composer_upload_box" id="composer_upload_box">
+              <input id="image_files" type="file" accept="image/*,video/mp4,video/webm,video/quicktime,video/*" multiple />
+              <img src="./assets/icons/upload-plus.svg" alt="" />
+              <span><strong>Image</strong><small>Upload or Drop</small></span>
+            </label>
+            <div id="composer_upload_thumb_list" class="composer_upload_thumb_list" aria-label="Recent uploads">
+            </div>
+            <div id="composer_attached_list" class="composer_attached_list" aria-label="Selected attachments">
+            </div>
+          </div>
+          <div class="composer_input_row">
+            <button id="composer_attach" class="composer_attach" type="button" aria-label="Attach">+</button>
+            <button id="composer_save" class="composer_save" type="button">Save</button>
+            <textarea id="composer_input" rows="1" wrap="soft" placeholder="Please enter the prompt"></textarea>
+            <button id="composer_send" class="composer_send" type="button" aria-label="Generate">
+              <svg class="composer_send_triangle" viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+                <path d="M5.2 3.6c0-.95 1.03-1.55 1.86-1.07l10.4 6.1c.82.48.82 1.66 0 2.14l-10.4 6.1c-.83.48-1.86-.12-1.86-1.07V3.6Z"></path>
+              </svg>
+            </button>
+          </div>
+          <div class="composer_options">
+            <span class="composer_provider_badge provider_imagine">Imagine</span>
+            <div class="composer_mode_controls">
+              <div class="composer_mode" role="tablist" aria-label="Mode">
+                <button class="tab active" type="button" data-mode="image" role="tab" aria-label="Image"><img src="./assets/icons/image.svg" alt="" /></button>
+                <button class="tab" type="button" data-mode="video" role="tab" aria-label="Video"><img src="./assets/icons/video.svg" alt="" /></button>
+                <button class="tab build_only_tab" type="button" data-mode="video_edit" role="tab" aria-label="Video Edit"><img src="./assets/icons/video-edit.svg" alt="" /></button>
+                <button class="tab" type="button" data-mode="extend" role="tab" aria-label="Extend">
+                  <span class="tab_icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24"><path d="M4 12h12"/><path d="m12 7 5 5-5 5"/><path d="M20 5v14"/></svg>
+                  </span>
+                </button>
+                <button class="tab" type="button" data-mode="analyze" role="tab" aria-label="Analyzer" title="Analyzer"><img src="./assets/icons/search.svg" alt="" /></button>
+              </div>
+              <div class="controls_grid">
+                <div class="custom_select" data-composer-control="video-model" hidden>
+                  <button class="custom_select_btn" type="button">M 1.5</button>
+                  <div class="custom_select_menu">
+                    <button class="custom_select_option active" type="button">M 1.5</button>
+                    <button class="custom_select_option" type="button">M 1.0</button>
+                  </div>
+                </div>
+                <div class="custom_select" data-composer-control="duration" hidden>
+                  <button class="custom_select_btn" type="button">6s</button>
+                  <div class="custom_select_menu">
+                    <button class="custom_select_option active" type="button">6s</button>
+                    <button class="custom_select_option" type="button">10s</button>
+                    <button class="custom_select_option" type="button">12s</button>
+                    <button class="custom_select_option" type="button">15s</button>
+                  </div>
+                </div>
+                <div class="custom_select" data-composer-control="aspect">
+                  <button class="custom_select_btn" type="button">Auto</button>
+                  <div class="custom_select_menu">
+                    <button class="custom_select_option active" type="button">Auto</button>
+                    <button class="custom_select_option" type="button">1:1</button>
+                    <button class="custom_select_option" type="button">16:9</button>
+                    <button class="custom_select_option" type="button">9:16</button>
+                    <button class="custom_select_option" type="button">4:3</button>
+                    <button class="custom_select_option" type="button">3:4</button>
+                    <button class="custom_select_option" type="button">3:2</button>
+                    <button class="custom_select_option" type="button">2:3</button>
+                  </div>
+                </div>
+                <div class="custom_select" data-composer-control="image-model">
+                  <button class="custom_select_btn" type="button">Quality</button>
+                  <div class="custom_select_menu">
+                    <button class="custom_select_option active" type="button">Quality</button>
+                    <button class="custom_select_option" type="button">Speed</button>
+                  </div>
+                </div>
+                <div class="custom_select" data-composer-control="resolution">
+                  <button class="custom_select_btn" type="button">1k</button>
+                  <div class="custom_select_menu">
+                    <button class="custom_select_option active" type="button">1k</button>
+                    <button class="custom_select_option" type="button">2k</button>
+                  </div>
+                </div>
+                <div class="custom_select" data-composer-control="count">
+                  <button class="custom_select_btn" type="button">Auto</button>
+                  <div class="custom_select_menu">
+                    <button class="custom_select_option active" type="button">Auto</button>
+                    <button class="custom_select_option" type="button">1</button>
+                    <button class="custom_select_option" type="button">2</button>
+                    <button class="custom_select_option" type="button">4</button>
+                    <button class="custom_select_option" type="button">8</button>
+                    <button class="custom_select_option" type="button">10</button>
+                  </div>
+                </div>
+                <div class="composer_option_note" data-composer-control="video-edit-note" hidden>-max 8.7s /  720p</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+      </main>
+    </div>
+
+    <div id="toast" class="toast" hidden></div>
+  </body>
+</html>

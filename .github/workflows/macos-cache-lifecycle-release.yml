@@ -14,6 +14,12 @@ concurrency:
 
 env:
   COMMON_MAIN: common/app/electron/main.js
+  COMMON_INDEX: common/app/web/index.html
+  COMMON_STATE: common/app/web/scripts/state.js
+  COMMON_BUILD_MAIN: common/app/web/scripts/build_main.js
+  COMMON_B_SOURCE: common/app/web/scripts/b_source_render.js
+  COMMON_SIDEBAR_EVENTS: common/app/web/scripts/sidebar_events.js
+  COMMON_MAIN_STYLE: common/app/web/styles/main.css
   COMMON_CARD_RENDER: common/app/web/scripts/card_render.js
   COMMON_I_DETAIL_ACTIONS: common/app/web/scripts/i_detail_actions.js
   COMMON_COMPOSER_EVENTS: common/app/web/scripts/composer_events.js
@@ -82,6 +88,12 @@ jobs:
             @{ Name = "main"; Relative = "electron\main.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_MAIN) },
             @{ Name = "preload"; Relative = "electron\preload-bridge.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_PRELOAD) },
             @{ Name = "server"; Relative = "runtime\server.py"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_SERVER) },
+            @{ Name = "index"; Relative = "web\index.html"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_INDEX) },
+            @{ Name = "state"; Relative = "web\scripts\state.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_STATE) },
+            @{ Name = "build_main"; Relative = "web\scripts\build_main.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_BUILD_MAIN) },
+            @{ Name = "b_source"; Relative = "web\scripts\b_source_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_B_SOURCE) },
+            @{ Name = "sidebar_events"; Relative = "web\scripts\sidebar_events.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_SIDEBAR_EVENTS) },
+            @{ Name = "main_style"; Relative = "web\styles\main.css"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_MAIN_STYLE) },
             @{ Name = "card_render"; Relative = "web\scripts\card_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_CARD_RENDER) },
             @{ Name = "i_detail_actions"; Relative = "web\scripts\i_detail_actions.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_I_DETAIL_ACTIONS) },
             @{ Name = "composer_events"; Relative = "web\scripts\composer_events.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_COMPOSER_EVENTS) },
@@ -104,6 +116,12 @@ jobs:
           $targetMain = ($sharedSources | Where-Object Name -eq "main").Target
           $targetPreload = ($sharedSources | Where-Object Name -eq "preload").Target
           $targetServer = ($sharedSources | Where-Object Name -eq "server").Target
+          $targetIndex = ($sharedSources | Where-Object Name -eq "index").Target
+          $targetState = ($sharedSources | Where-Object Name -eq "state").Target
+          $targetBuildMain = ($sharedSources | Where-Object Name -eq "build_main").Target
+          $targetBSource = ($sharedSources | Where-Object Name -eq "b_source").Target
+          $targetSidebarEvents = ($sharedSources | Where-Object Name -eq "sidebar_events").Target
+          $targetMainStyle = ($sharedSources | Where-Object Name -eq "main_style").Target
           $targetCardRender = ($sharedSources | Where-Object Name -eq "card_render").Target
           $targetIDetailActions = ($sharedSources | Where-Object Name -eq "i_detail_actions").Target
           $targetComposerEvents = ($sharedSources | Where-Object Name -eq "composer_events").Target
@@ -277,6 +295,12 @@ jobs:
           if (-not (Get-Content -Raw -LiteralPath $targetIDetailActions).Contains("function restoreImagineListScrollForScreen(screenId, scrollTop)")) { throw "Imagine detail source scroll restore marker missing." }
           if (-not (Get-Content -Raw -LiteralPath $targetComposerEvents).Contains("function syncComposerScrollClearance()")) { throw "Composer scroll clearance marker missing." }
           if (-not (Get-Content -Raw -LiteralPath $targetCardsPromptStyle).Contains("--composer-scroll-clearance")) { throw "Card list scroll clearance style missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetIndex).Contains('id="b_collection_filter_btn"')) { throw "Build Collection filter button missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetState).Contains("buildIncludeCollections: false")) { throw "Build Collection filter default missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetBuildMain).Contains("library_state.buildIncludeCollections && post?.items?.length")) { throw "Build Collection item filter missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetBSource).Contains('const collectionMode = library_state.buildIncludeCollections ? "with-collection" : "without-collection";')) { throw "Build Collection paging key missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetSidebarEvents).Contains('document.getElementById("b_collection_filter_btn")?.addEventListener')) { throw "Build Collection filter event missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetMainStyle).Contains("gap: 70px;")) { throw "Build Collection text spacing missing." }
           if (-not (Get-Content -Raw -LiteralPath $targetAttachments).Contains("conversation_id: conversationId")) { throw "Attachment conversation lineage marker missing." }
           if (-not (Get-Content -Raw -LiteralPath $targetISubmit).Contains("source_conversation_id: sourceContext.conversation_id")) { throw "Submit conversation lineage marker missing." }
           if (-not (Get-Content -Raw -LiteralPath $targetLibraryCore).Contains('if (type === "image" || type.startsWith("image/"))')) { throw "Sharp image preview marker missing." }
@@ -285,6 +309,7 @@ jobs:
           if (-not $detailRenderText.Contains("const visible = !post?.is_job_post")) { throw "Build detail heart visibility marker missing." }
           if ($detailRenderText.Contains("Boolean(post?.is_job_post)")) { throw "Build job heart visibility regression found." }
           if (-not (Get-Content -Raw -LiteralPath $targetISource).Contains("function isImagineT2iGroupContainer(post)")) { throw "T2I group filter marker missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetISource).Contains('screen_state.current_screen === "i_unsaved_main"')) { throw "Unsaved pagination refill marker missing." }
           $collectionActionsText = Get-Content -Raw -LiteralPath $targetCollectionActions
           foreach ($marker in @(
             'let moveToCollectionRequestPending = false;',
@@ -403,6 +428,12 @@ jobs:
             electron/main.js
             electron/preload-bridge.js
             runtime/server.py
+            web/index.html
+            web/scripts/state.js
+            web/scripts/build_main.js
+            web/scripts/b_source_render.js
+            web/scripts/sidebar_events.js
+            web/styles/main.css
             web/scripts/card_render.js
             web/scripts/i_detail_actions.js
             web/scripts/composer_events.js
@@ -423,6 +454,12 @@ jobs:
           main_js="$app_root/electron/main.js"
           preload_js="$app_root/electron/preload-bridge.js"
           server_py="$app_root/runtime/server.py"
+          index_html="$app_root/web/index.html"
+          state_js="$app_root/web/scripts/state.js"
+          build_main_js="$app_root/web/scripts/build_main.js"
+          b_source_js="$app_root/web/scripts/b_source_render.js"
+          sidebar_events_js="$app_root/web/scripts/sidebar_events.js"
+          main_css="$app_root/web/styles/main.css"
           card_render_js="$app_root/web/scripts/card_render.js"
           i_detail_actions_js="$app_root/web/scripts/i_detail_actions.js"
           composer_events_js="$app_root/web/scripts/composer_events.js"
@@ -515,6 +552,12 @@ jobs:
           grep -F 'function restoreImagineListScrollForScreen(screenId, scrollTop)' "$i_detail_actions_js"
           grep -F 'function syncComposerScrollClearance()' "$composer_events_js"
           grep -F -- '--composer-scroll-clearance' "$cards_prompt_css"
+          grep -F 'id="b_collection_filter_btn"' "$index_html"
+          grep -F 'buildIncludeCollections: false' "$state_js"
+          grep -F 'library_state.buildIncludeCollections && post?.items?.length' "$build_main_js"
+          grep -F 'const collectionMode = library_state.buildIncludeCollections ? "with-collection" : "without-collection";' "$b_source_js"
+          grep -F 'document.getElementById("b_collection_filter_btn")?.addEventListener' "$sidebar_events_js"
+          grep -F 'gap: 70px;' "$main_css"
           grep -F 'conversation_id: conversationId' "$attachments_js"
           grep -F 'source_conversation_id: sourceContext.conversation_id' "$i_submit_js"
           grep -F 'if (type === "image" || type.startsWith("image/"))' "$library_core_js"
@@ -525,6 +568,7 @@ jobs:
             exit 1
           fi
           grep -F 'function isImagineT2iGroupContainer(post)' "$i_source_js"
+          grep -F 'screen_state.current_screen === "i_unsaved_main"' "$i_source_js"
           grep -F 'let moveToCollectionRequestPending = false;' "$collection_actions_js"
           grep -F 'if (moveToCollectionRequestPending) return;' "$collection_actions_js"
           grep -F 'moveToCollectionRequestPending = true;' "$collection_actions_js"
@@ -598,6 +642,12 @@ jobs:
             electron/main.js
             electron/preload-bridge.js
             runtime/server.py
+            web/index.html
+            web/scripts/state.js
+            web/scripts/build_main.js
+            web/scripts/b_source_render.js
+            web/scripts/sidebar_events.js
+            web/styles/main.css
             web/scripts/card_render.js
             web/scripts/i_detail_actions.js
             web/scripts/composer_events.js
@@ -720,8 +770,8 @@ jobs:
           test "$(sha256sum "current/win/$WIN_ZIP" | awk '{print $1}')" = "$WIN_INPUT_SHA256"
           test "$(sha256sum "current/mac/$MAC_ZIP" | awk '{print $1}')" = "$MAC_INPUT_SHA256"
           short_sha="$(printf '%s' "$GITHUB_SHA" | cut -c1-12)"
-          win_backup="Win_Grok_Chameleon_a.previous-before-library-five-fixes-$short_sha.zip"
-          mac_backup="Mac_Grok_Chameleon_a.previous-before-library-five-fixes-$short_sha.zip"
+          win_backup="Win_Grok_Chameleon_a.previous-before-unsaved-collection-filter-$short_sha.zip"
+          mac_backup="Mac_Grok_Chameleon_a.previous-before-unsaved-collection-filter-$short_sha.zip"
           cp "current/win/$WIN_ZIP" "backups/$win_backup"
           cp "current/mac/$MAC_ZIP" "backups/$mac_backup"
           gh release upload "$WIN_TAG" "backups/$win_backup" --repo "$GITHUB_REPOSITORY"

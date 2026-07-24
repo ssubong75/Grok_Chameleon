@@ -624,6 +624,9 @@ function renderImagineUnsavedCards() {
       remoteMedia: true,
     });
   }
+  if (screen_state.current_screen === "i_unsaved_main") {
+    requestAnimationFrame(maybeLoadMoreImagineUnsavedCards);
+  }
 }
 
 bindVirtualCardListScroll(
