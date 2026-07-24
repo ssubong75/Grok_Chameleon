@@ -50,7 +50,7 @@ jobs:
       RELEASE_TAG: v20260720-041036-win
       INPUT_ZIP: Win_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Win_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: f42b03e5ad7c5050d42de078f3041f7f5984b5fd83b8adb5f276e1260c459a82
+      EXPECTED_INPUT_SHA256: 9e02db0610ec5df2900bded89bebdb78829884e1de22233b17587c61bb532bdc
 
     steps:
       - name: Check out the shared source commit
@@ -423,7 +423,7 @@ jobs:
       RELEASE_TAG: v20260720-042100-mac
       INPUT_ZIP: Mac_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Mac_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: b88319cd62944e0f1d694830e0eec1113622824183c5f7940dcbb0c381084249
+      EXPECTED_INPUT_SHA256: 76fab46651c4348951630bc82f770c0d003f01f92a6d3097cf6f671e8dff41b2
 
     steps:
       - name: Check out the shared source commit
@@ -815,8 +815,8 @@ jobs:
           MAC_TAG: v20260720-042100-mac
           WIN_ZIP: Win_Grok_Chameleon_a.zip
           MAC_ZIP: Mac_Grok_Chameleon_a.zip
-          WIN_INPUT_SHA256: f42b03e5ad7c5050d42de078f3041f7f5984b5fd83b8adb5f276e1260c459a82
-          MAC_INPUT_SHA256: b88319cd62944e0f1d694830e0eec1113622824183c5f7940dcbb0c381084249
+          WIN_INPUT_SHA256: 9e02db0610ec5df2900bded89bebdb78829884e1de22233b17587c61bb532bdc
+          MAC_INPUT_SHA256: 76fab46651c4348951630bc82f770c0d003f01f92a6d3097cf6f671e8dff41b2
         run: |
           set -euo pipefail
           mkdir -p current/win current/mac backups
@@ -825,8 +825,8 @@ jobs:
           test "$(sha256sum "current/win/$WIN_ZIP" | awk '{print $1}')" = "$WIN_INPUT_SHA256"
           test "$(sha256sum "current/mac/$MAC_ZIP" | awk '{print $1}')" = "$MAC_INPUT_SHA256"
           short_sha="$(printf '%s' "$GITHUB_SHA" | cut -c1-12)"
-          win_backup="Win_Grok_Chameleon_a.previous-before-restore-build-video-hover-$short_sha.zip"
-          mac_backup="Mac_Grok_Chameleon_a.previous-before-restore-build-video-hover-$short_sha.zip"
+          win_backup="Win_Grok_Chameleon_a.previous-before-prompt-bottom-clearance-$short_sha.zip"
+          mac_backup="Mac_Grok_Chameleon_a.previous-before-prompt-bottom-clearance-$short_sha.zip"
           cp "current/win/$WIN_ZIP" "backups/$win_backup"
           cp "current/mac/$MAC_ZIP" "backups/$mac_backup"
           gh release upload "$WIN_TAG" "backups/$win_backup" --repo "$GITHUB_REPOSITORY"

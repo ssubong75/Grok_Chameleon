@@ -35,6 +35,7 @@
 .search_card_list,
 .i_discover_card_list,
 .i_unsaved_card_list,
+.prompt_card_list,
 .second_main_card_list {
   padding-bottom: var(--composer-scroll-clearance, 156px);
   scroll-padding-bottom: var(--composer-scroll-clearance, 156px);
