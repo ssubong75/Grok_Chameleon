@@ -9043,17 +9043,19 @@ def library_media_object_url(rel_path: str, source_path: Path | None = None) -> 
     return media_url(rel_path, source_path)
 
 
-def card_preview_cache_root() -> Path:
-    return (app_support_dir() / "Cache").resolve()
+def card_preview_cache_root(root: Path | None = None) -> Path:
+    root = (root or library_root())
+    if not root:
+        raise RuntimeError("Library path is not set.")
+    root = root.resolve()
+    if root == Path(root.anchor):
+        raise RuntimeError("Refusing unsafe library cache root.")
+    return (root / "cache").resolve()
 
 
 def card_preview_cache_dir(root: Path | None = None) -> Path:
-    expected_root = card_preview_cache_root()
-    raw = str(os.environ.get("GROK_CHAMELEON_CARD_PREVIEW_CACHE_DIR") or "").strip()
-    candidate = Path(raw).expanduser() if raw else expected_root / "card-previews"
-    if not candidate.is_absolute():
-        raise RuntimeError("Card preview cache path must be absolute.")
-    candidate = candidate.resolve()
+    expected_root = card_preview_cache_root(root)
+    candidate = (expected_root / "card-previews").resolve()
     if candidate.parent != expected_root or candidate.name != "card-previews":
         raise RuntimeError("Refusing unsafe card preview cache path.")
     return candidate
@@ -9087,6 +9089,15 @@ def is_apple_metadata_file_name(name: str) -> bool:
     return Path(str(name or "")).name.startswith("._")
 
 
+def is_grok_preview_image_file_name(name: str) -> bool:
+    """Return True for Grok's downloaded preview-image naming convention."""
+    return bool(re.fullmatch(
+        r"preview_image(?:-\d+)*\.(?:jpg|jpeg|png|webp)",
+        Path(str(name or "")).name,
+        flags=re.IGNORECASE,
+    ))
+
+
 def thumbnail_for_video(folder: Path, rel_folder: str, video_name: str) -> dict:
     for name in thumbnail_candidates_for_video(video_name):
         thumbnail_path = folder / name
@@ -9107,6 +9118,9 @@ def thumbnail_file_names(folder: Path, meta: dict | None = None) -> set[str]:
         and media_type_for_name(entry.name) == "video"
     ]
     names = set()
+    for entry in sorted_entries(folder):
+        if entry.is_file() and is_grok_preview_image_file_name(entry.name):
+            names.add(entry.name)
     for video_name in video_names:
         for candidate in thumbnail_candidates_for_video(video_name):
             if (folder / candidate).is_file():
@@ -9182,12 +9196,15 @@ def media_items_from_meta(root: Path, folder: Path, rel_folder: str, meta) -> li
         return []
     items = []
     used_item_ids: set[str] = set()
+    thumb_names = thumbnail_file_names(folder, meta)
     for index, item in enumerate(raw_items):
         if not isinstance(item, dict):
             continue
         url = item.get("url") or item.get("media_url") or item.get("mediaUrl") or ""
         file_name = item.get("file") or ""
         if file_name and is_apple_metadata_file_name(file_name):
+            continue
+        if file_name in thumb_names:
             continue
         media_type = item.get("type") or media_type_for_name(file_name or url)
         if not media_type and str(item.get("mime_type") or item.get("mimeType") or "").startswith("video/"):
@@ -14167,20 +14184,13 @@ def representative_for_merged_items(items: list[dict]) -> str:
 
 
 def merge_target_parent(root: Path, posts: list[dict]) -> tuple[Path, str | None]:
-    target_parent = root / "created" / "merged_Item"
+    target_parent = root / "created"
     target_parent.mkdir(parents=True, exist_ok=True)
     return target_parent, None
 
 
 def merged_post_source(posts: list[dict]) -> str:
-    sources = [str(post.get("source") or "").strip() for post in posts if str(post.get("source") or "").strip()]
-    if not sources:
-        return "build"
-    if len(set(sources)) == 1:
-        return sources[0]
-    if "build" in sources:
-        return "build"
-    return sources[0]
+    return "build"
 
 
 def merge_selected_posts(payload: dict) -> dict:
@@ -14215,7 +14225,7 @@ def merge_selected_posts(payload: dict) -> dict:
     target_parent, collection_id = merge_target_parent(root, posts)
     source_dirs = [safe_join(root, post.get("folder_path") or "") for post in posts]
     if any(source_dir.resolve() == target_parent.resolve() or path_inside(source_dir, target_parent) for source_dir in source_dirs):
-        target_parent = root / "created" / "merged_Item"
+        target_parent = root / "created"
         target_parent.mkdir(parents=True, exist_ok=True)
         collection_id = None
 

@@ -14,6 +14,10 @@ concurrency:
 
 env:
   COMMON_MAIN: common/app/electron/main.js
+  COMMON_CARD_RENDER: common/app/web/scripts/card_render.js
+  COMMON_I_DETAIL_ACTIONS: common/app/web/scripts/i_detail_actions.js
+  COMMON_COMPOSER_EVENTS: common/app/web/scripts/composer_events.js
+  COMMON_CARDS_PROMPT_STYLE: common/app/web/styles/cards_prompt.css
   COMMON_COMPOSER: common/app/web/scripts/composer_options.js
   COMMON_ATTACHMENTS: common/app/web/scripts/composer_attachments.js
   COMMON_I_SUBMIT: common/app/web/scripts/i_composer_submit.js
@@ -39,7 +43,7 @@ jobs:
       RELEASE_TAG: v20260720-041036-win
       INPUT_ZIP: Win_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Win_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: d50ad16969975590c597dd5de8424fd5be48b6368568277823389c9c97c49773
+      EXPECTED_INPUT_SHA256: c836ff5a8ba57421474454a1613a25c67822100fc4d4a56398706d0ca9924225
 
     steps:
       - name: Check out the shared source commit
@@ -78,6 +82,10 @@ jobs:
             @{ Name = "main"; Relative = "electron\main.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_MAIN) },
             @{ Name = "preload"; Relative = "electron\preload-bridge.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_PRELOAD) },
             @{ Name = "server"; Relative = "runtime\server.py"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_SERVER) },
+            @{ Name = "card_render"; Relative = "web\scripts\card_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_CARD_RENDER) },
+            @{ Name = "i_detail_actions"; Relative = "web\scripts\i_detail_actions.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_I_DETAIL_ACTIONS) },
+            @{ Name = "composer_events"; Relative = "web\scripts\composer_events.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_COMPOSER_EVENTS) },
+            @{ Name = "cards_prompt_style"; Relative = "web\styles\cards_prompt.css"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_CARDS_PROMPT_STYLE) },
             @{ Name = "composer"; Relative = "web\scripts\composer_options.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_COMPOSER) },
             @{ Name = "attachments"; Relative = "web\scripts\composer_attachments.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_ATTACHMENTS) },
             @{ Name = "i_submit"; Relative = "web\scripts\i_composer_submit.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_I_SUBMIT) },
@@ -96,6 +104,10 @@ jobs:
           $targetMain = ($sharedSources | Where-Object Name -eq "main").Target
           $targetPreload = ($sharedSources | Where-Object Name -eq "preload").Target
           $targetServer = ($sharedSources | Where-Object Name -eq "server").Target
+          $targetCardRender = ($sharedSources | Where-Object Name -eq "card_render").Target
+          $targetIDetailActions = ($sharedSources | Where-Object Name -eq "i_detail_actions").Target
+          $targetComposerEvents = ($sharedSources | Where-Object Name -eq "composer_events").Target
+          $targetCardsPromptStyle = ($sharedSources | Where-Object Name -eq "cards_prompt_style").Target
           $targetComposer = ($sharedSources | Where-Object Name -eq "composer").Target
           $targetAttachments = ($sharedSources | Where-Object Name -eq "attachments").Target
           $targetISubmit = ($sharedSources | Where-Object Name -eq "i_submit").Target
@@ -243,14 +255,28 @@ jobs:
             'IMAGINE_DIRECT_I2I_MAX_WAIT_SECONDS = 14',
             'COLLECTION_MOVE_LOCK = threading.Lock()',
             'def thumbnail_file_names(folder: Path, meta: dict | None = None) -> set[str]:',
-            'existing = existing_remote_collection_post(target_parent, source_post, items)'
+            'existing = existing_remote_collection_post(target_parent, source_post, items)',
+            'def is_grok_preview_image_file_name(name: str) -> bool:',
+            'target_parent = root / "created"',
+            'def merged_post_source(posts: list[dict]) -> str:'
           )) {
             if (-not $serverText.Contains($marker)) { throw "Windows relation recovery marker missing: $marker" }
           }
           $mainText = Get-Content -Raw -LiteralPath $targetMain
-          foreach ($marker in @("payload.grokChameleonConversationId", 'process.platform === "darwin"', "process.resourcesPath")) {
+          foreach ($marker in @(
+            "payload.grokChameleonConversationId",
+            'process.platform === "darwin"',
+            "process.resourcesPath",
+            "function verifiedLibraryCardPreviewCacheDir(info = {})",
+            'const expectedCacheDir = path.resolve(resolvedLibraryRoot, "cache", "card-previews");',
+            'await clearCurrentCardPreviewCache("startup");'
+          )) {
             if (-not $mainText.Contains($marker)) { throw "Cross-platform main marker missing: $marker" }
           }
+          if (-not (Get-Content -Raw -LiteralPath $targetCardRender).Contains("storedBackTarget.scrollTop = scrollTop")) { throw "Imagine detail source scroll capture marker missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetIDetailActions).Contains("function restoreImagineListScrollForScreen(screenId, scrollTop)")) { throw "Imagine detail source scroll restore marker missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetComposerEvents).Contains("function syncComposerScrollClearance()")) { throw "Composer scroll clearance marker missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetCardsPromptStyle).Contains("--composer-scroll-clearance")) { throw "Card list scroll clearance style missing." }
           if (-not (Get-Content -Raw -LiteralPath $targetAttachments).Contains("conversation_id: conversationId")) { throw "Attachment conversation lineage marker missing." }
           if (-not (Get-Content -Raw -LiteralPath $targetISubmit).Contains("source_conversation_id: sourceContext.conversation_id")) { throw "Submit conversation lineage marker missing." }
           if (-not (Get-Content -Raw -LiteralPath $targetLibraryCore).Contains('if (type === "image" || type.startsWith("image/"))')) { throw "Sharp image preview marker missing." }
@@ -341,7 +367,7 @@ jobs:
       RELEASE_TAG: v20260720-042100-mac
       INPUT_ZIP: Mac_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Mac_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: c464ecb8bd3577c11da027d40cf499b2ef843eca0aa13dd69f2310ad7db2b32e
+      EXPECTED_INPUT_SHA256: f3890e06f13975d125fb4dfe946b04f013a0619b7a457f330a778bb1a4ab4495
 
     steps:
       - name: Check out the shared source commit
@@ -377,6 +403,10 @@ jobs:
             electron/main.js
             electron/preload-bridge.js
             runtime/server.py
+            web/scripts/card_render.js
+            web/scripts/i_detail_actions.js
+            web/scripts/composer_events.js
+            web/styles/cards_prompt.css
             web/scripts/composer_options.js
             web/scripts/composer_attachments.js
             web/scripts/i_composer_submit.js
@@ -393,6 +423,10 @@ jobs:
           main_js="$app_root/electron/main.js"
           preload_js="$app_root/electron/preload-bridge.js"
           server_py="$app_root/runtime/server.py"
+          card_render_js="$app_root/web/scripts/card_render.js"
+          i_detail_actions_js="$app_root/web/scripts/i_detail_actions.js"
+          composer_events_js="$app_root/web/scripts/composer_events.js"
+          cards_prompt_css="$app_root/web/styles/cards_prompt.css"
           attachments_js="$app_root/web/scripts/composer_attachments.js"
           i_submit_js="$app_root/web/scripts/i_composer_submit.js"
           library_core_js="$app_root/web/scripts/library_core.js"
@@ -474,6 +508,13 @@ jobs:
           grep -F 'COLLECTION_MOVE_LOCK = threading.Lock()' "$server_py"
           grep -F 'def thumbnail_file_names(folder: Path, meta: dict | None = None) -> set[str]:' "$server_py"
           grep -F 'existing = existing_remote_collection_post(target_parent, source_post, items)' "$server_py"
+          grep -F 'def is_grok_preview_image_file_name(name: str) -> bool:' "$server_py"
+          grep -F 'target_parent = root / "created"' "$server_py"
+          grep -F 'def merged_post_source(posts: list[dict]) -> str:' "$server_py"
+          grep -F 'storedBackTarget.scrollTop = scrollTop' "$card_render_js"
+          grep -F 'function restoreImagineListScrollForScreen(screenId, scrollTop)' "$i_detail_actions_js"
+          grep -F 'function syncComposerScrollClearance()' "$composer_events_js"
+          grep -F -- '--composer-scroll-clearance' "$cards_prompt_css"
           grep -F 'conversation_id: conversationId' "$attachments_js"
           grep -F 'source_conversation_id: sourceContext.conversation_id' "$i_submit_js"
           grep -F 'if (type === "image" || type.startsWith("image/"))' "$library_core_js"
@@ -509,6 +550,9 @@ jobs:
           grep -F 'process.platform === "darwin"' "$main_js"
           grep -F 'process.resourcesPath' "$main_js"
           grep -F 'path.join(resourceRoot, "Python", "bin", "python3")' "$main_js"
+          grep -F 'function verifiedLibraryCardPreviewCacheDir(info = {})' "$main_js"
+          grep -F 'const expectedCacheDir = path.resolve(resolvedLibraryRoot, "cache", "card-previews");' "$main_js"
+          grep -F 'await clearCurrentCardPreviewCache("startup");' "$main_js"
           grep -F 'app.on("activate"' "$main_js"
           grep -F 'app.on("window-all-closed"' "$main_js"
           python3 - "$migration_py" <<'PY'
@@ -554,6 +598,10 @@ jobs:
             electron/main.js
             electron/preload-bridge.js
             runtime/server.py
+            web/scripts/card_render.js
+            web/scripts/i_detail_actions.js
+            web/scripts/composer_events.js
+            web/styles/cards_prompt.css
             web/scripts/composer_options.js
             web/scripts/composer_attachments.js
             web/scripts/i_composer_submit.js
@@ -662,8 +710,8 @@ jobs:
           MAC_TAG: v20260720-042100-mac
           WIN_ZIP: Win_Grok_Chameleon_a.zip
           MAC_ZIP: Mac_Grok_Chameleon_a.zip
-          WIN_INPUT_SHA256: d50ad16969975590c597dd5de8424fd5be48b6368568277823389c9c97c49773
-          MAC_INPUT_SHA256: c464ecb8bd3577c11da027d40cf499b2ef843eca0aa13dd69f2310ad7db2b32e
+          WIN_INPUT_SHA256: c836ff5a8ba57421474454a1613a25c67822100fc4d4a56398706d0ca9924225
+          MAC_INPUT_SHA256: f3890e06f13975d125fb4dfe946b04f013a0619b7a457f330a778bb1a4ab4495
         run: |
           set -euo pipefail
           mkdir -p current/win current/mac backups
@@ -672,8 +720,8 @@ jobs:
           test "$(sha256sum "current/win/$WIN_ZIP" | awk '{print $1}')" = "$WIN_INPUT_SHA256"
           test "$(sha256sum "current/mac/$MAC_ZIP" | awk '{print $1}')" = "$MAC_INPUT_SHA256"
           short_sha="$(printf '%s' "$GITHUB_SHA" | cut -c1-12)"
-          win_backup="Win_Grok_Chameleon_a.previous-before-imagine-pagination-autofill-$short_sha.zip"
-          mac_backup="Mac_Grok_Chameleon_a.previous-before-imagine-pagination-autofill-$short_sha.zip"
+          win_backup="Win_Grok_Chameleon_a.previous-before-library-five-fixes-$short_sha.zip"
+          mac_backup="Mac_Grok_Chameleon_a.previous-before-library-five-fixes-$short_sha.zip"
           cp "current/win/$WIN_ZIP" "backups/$win_backup"
           cp "current/mac/$MAC_ZIP" "backups/$mac_backup"
           gh release upload "$WIN_TAG" "backups/$win_backup" --repo "$GITHUB_REPOSITORY"

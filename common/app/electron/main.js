@@ -45,7 +45,7 @@ const cardPreviewQueue = [];
 const cardPreviewTasks = new Map();
 const cardPreviewPruneTimes = new Map();
 let activeCardPreviewTasks = 0;
-const CARD_PREVIEW_LEGACY_CLEANUP_VERSION = "v1";
+let lastVerifiedCardPreviewCacheDir = "";
 
 function appendLog(line) {
   try {
@@ -54,82 +54,57 @@ function appendLog(line) {
   } catch (_) {}
 }
 
-function cardPreviewCacheRoot() {
-  return path.resolve(app.getPath("userData"), "Cache");
-}
-
-function cardPreviewCacheDir() {
-  return path.join(cardPreviewCacheRoot(), "card-previews");
-}
-
-function verifiedCurrentCardPreviewCacheDir() {
-  const cacheRoot = cardPreviewCacheRoot();
-  const cacheDir = path.resolve(cardPreviewCacheDir());
-  if (path.dirname(cacheDir) !== cacheRoot || path.basename(cacheDir) !== "card-previews") {
+function verifiedLibraryCardPreviewCacheDir(info = {}) {
+  const libraryRoot = String(info?.library_root || "").trim();
+  const cacheDir = String(info?.cache_dir || "").trim();
+  if (!path.isAbsolute(libraryRoot) || !path.isAbsolute(cacheDir)) {
+    throw new Error("Card preview library cache path is invalid.");
+  }
+  const resolvedLibraryRoot = path.resolve(libraryRoot);
+  const expectedCacheDir = path.resolve(resolvedLibraryRoot, "cache", "card-previews");
+  const resolvedCacheDir = path.resolve(cacheDir);
+  if (
+    resolvedLibraryRoot === path.parse(resolvedLibraryRoot).root
+    || resolvedCacheDir !== expectedCacheDir
+    || path.dirname(resolvedCacheDir) !== path.join(resolvedLibraryRoot, "cache")
+    || path.basename(resolvedCacheDir) !== "card-previews"
+    || !fs.existsSync(path.join(resolvedLibraryRoot, "library.json"))
+  ) {
     throw new Error("Refusing unsafe card preview cache path.");
   }
-  return cacheDir;
+  lastVerifiedCardPreviewCacheDir = resolvedCacheDir;
+  return resolvedCacheDir;
 }
 
-function clearCurrentCardPreviewCache(reason = "cleanup") {
-  let cacheDir = "";
+function clearVerifiedCardPreviewCache(cacheDir, reason = "cleanup") {
+  if (!cacheDir || path.resolve(cacheDir) !== lastVerifiedCardPreviewCacheDir) return false;
   try {
-    cacheDir = verifiedCurrentCardPreviewCacheDir();
-    fs.rmSync(cacheDir, { recursive: true, force: true });
-    cardPreviewPruneTimes.delete(cacheDir);
-    appendLog(`card preview cache cleared reason=${reason} path=${cacheDir}`);
+    const verifiedCacheDir = lastVerifiedCardPreviewCacheDir;
+    fs.rmSync(verifiedCacheDir, { recursive: true, force: true });
+    cardPreviewPruneTimes.delete(verifiedCacheDir);
+    appendLog(`card preview cache cleared reason=${reason} path=${verifiedCacheDir}`);
     return true;
   } catch (error) {
-    appendLog(`card preview cache cleanup failed reason=${reason} path=${cacheDir} detail=${error.message || String(error)}`);
+    appendLog(`card preview cache cleanup failed reason=${reason} path=${lastVerifiedCardPreviewCacheDir} detail=${error.message || String(error)}`);
     return false;
   }
 }
 
-function legacyCardPreviewMarkerPath(libraryRoot) {
-  const key = crypto.createHash("sha256").update(path.resolve(libraryRoot)).digest("hex").slice(0, 20);
-  return path.join(cardPreviewCacheRoot(), `.library-card-previews-cleaned-${CARD_PREVIEW_LEGACY_CLEANUP_VERSION}-${key}`);
+async function waitForCardPreviewTasks() {
+  const tasks = Array.from(cardPreviewTasks.values());
+  if (tasks.length) await Promise.allSettled(tasks);
 }
 
-function isExactLegacyCardPreviewCachePath(libraryRoot, legacyCacheDir) {
-  if (!path.isAbsolute(libraryRoot) || !path.isAbsolute(legacyCacheDir)) return false;
-  const resolvedLibraryRoot = path.resolve(libraryRoot);
-  const resolvedLegacyCacheDir = path.resolve(legacyCacheDir);
-  if (resolvedLibraryRoot === path.parse(resolvedLibraryRoot).root) return false;
-  if (path.relative(resolvedLibraryRoot, resolvedLegacyCacheDir) !== path.join("cache", "card-previews")) return false;
-  try {
-    return fs.statSync(resolvedLibraryRoot).isDirectory()
-      && fs.existsSync(path.join(resolvedLibraryRoot, "library.json"));
-  } catch (_) {
-    return false;
-  }
-}
-
-async function cleanupLegacyCardPreviewCacheOnce() {
+async function clearCurrentCardPreviewCache(reason = "cleanup") {
   try {
     const info = await fetchJson(`${SERVER_BASE}/api/card-preview/cache-info`, {
       signal: AbortSignal.timeout(3000),
     });
-    const currentCacheDir = String(info?.cache_dir || "").trim();
-    const libraryRoot = String(info?.library_root || "").trim();
-    const legacyCacheDir = String(info?.legacy_cache_dir || "").trim();
-    if (path.resolve(currentCacheDir) !== verifiedCurrentCardPreviewCacheDir()) {
-      throw new Error("Card preview cache path does not match the app cache directory.");
-    }
-    if (!isExactLegacyCardPreviewCachePath(libraryRoot, legacyCacheDir)) {
-      throw new Error("Refusing unsafe legacy card preview cache path.");
-    }
-    const markerPath = legacyCardPreviewMarkerPath(libraryRoot);
-    if (fs.existsSync(markerPath)) return;
-    if (fs.existsSync(legacyCacheDir)) {
-      fs.rmSync(legacyCacheDir, { recursive: true, force: true });
-      appendLog(`legacy library card preview cache cleared path=${legacyCacheDir}`);
-    }
-    fs.mkdirSync(cardPreviewCacheRoot(), { recursive: true });
-    const tempMarkerPath = `${markerPath}.${process.pid}.tmp`;
-    fs.writeFileSync(tempMarkerPath, `${new Date().toISOString()}\n`, { encoding: "utf8", mode: 0o600 });
-    fs.renameSync(tempMarkerPath, markerPath);
+    const cacheDir = verifiedLibraryCardPreviewCacheDir(info);
+    return clearVerifiedCardPreviewCache(cacheDir, reason);
   } catch (error) {
-    appendLog(`legacy card preview cleanup skipped: ${error.message || String(error)}`);
+    appendLog(`card preview cache cleanup skipped reason=${reason} detail=${error.message || String(error)}`);
+    return false;
   }
 }
 
@@ -256,10 +231,9 @@ async function ensureCardPreview(payload = {}) {
   infoUrl.search = source.search;
   const info = await fetchJson(infoUrl, { signal: AbortSignal.timeout(3000) });
   const sourcePath = String(info?.source_path || "").trim();
-  const cacheDir = String(info?.cache_dir || "").trim();
-  const expectedCacheDir = verifiedCurrentCardPreviewCacheDir();
-  if (!path.isAbsolute(sourcePath) || !path.isAbsolute(cacheDir) || path.resolve(cacheDir) !== expectedCacheDir) {
-    throw new Error("Card preview app cache path is invalid.");
+  const cacheDir = verifiedLibraryCardPreviewCacheDir(info);
+  if (!path.isAbsolute(sourcePath)) {
+    throw new Error("Card preview source path is invalid.");
   }
   const targetPath = path.join(cacheDir, `${cacheKey}.jpg`);
   const taskKey = `${cacheDir}\0${cacheKey}`;
@@ -531,9 +505,10 @@ async function exitAppNow(reason = "app-exit") {
       mainWindow.destroy();
     } catch (_) {}
   }
+  await waitForCardPreviewTasks();
+  await clearCurrentCardPreviewCache("shutdown");
   await requestShutdown();
   shutdownServerNow(false);
-  clearCurrentCardPreviewCache("shutdown");
   app.exit(0);
   setTimeout(() => process.exit(0), 100).unref();
 }
@@ -589,7 +564,6 @@ function pythonServerEnv() {
     GROK_CHAMELEON_NO_BROWSER: "1",
     PYTHONNOUSERSITE: "1",
     PYTHONDONTWRITEBYTECODE: "1",
-    GROK_CHAMELEON_CARD_PREVIEW_CACHE_DIR: verifiedCurrentCardPreviewCacheDir(),
   };
   if (fs.existsSync(VENDOR_PYTHON)) {
     env.PYTHONPATH = VENDOR_PYTHON;
@@ -1369,9 +1343,8 @@ async function boot() {
   try {
     installMediaPermissionGuards();
     installMenu();
-    clearCurrentCardPreviewCache("startup");
     await startServer();
-    await cleanupLegacyCardPreviewCacheOnce();
+    await clearCurrentCardPreviewCache("startup");
     createMainWindow();
     pollBridge();
   } catch (error) {
@@ -1401,6 +1374,6 @@ app.on("window-all-closed", () => {
 });
 
 app.on("will-quit", () => {
-  clearCurrentCardPreviewCache("will-quit");
+  clearVerifiedCardPreviewCache(lastVerifiedCardPreviewCacheDir, "will-quit");
   if (!appTerminating) shutdownServerNow();
 });
