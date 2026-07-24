@@ -261,20 +261,37 @@ function detailThumbButtonForItem(prefix, item, post, options = {}) {
   const fill = document.createElement("span");
   fill.className = `${prefix}_detail_thumb_fill`;
   const previewUrl = detailPreviewUrlForItem(prefix, { ...item, type }, post);
-  if (previewUrl) {
+  const videoUrl = type === "video" ? detailVideoPreviewUrlForItem(prefix, { ...item, type }, post) : "";
+  const buildPreviewSource = prefix === "b" ? (previewUrl || videoUrl) : "";
+  const appendVideoFallback = () => {
+    if (!videoUrl || !fill.isConnected) return;
+    fill.classList.remove("detail_thumb_preview");
+    fill.style.backgroundImage = "";
+    fill.classList.add("detail_thumb_video_preview");
+    const video = document.createElement("video");
+    video.src = videoUrl;
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = "metadata";
+    fill.replaceChildren(video);
+    bindHoverVideoPreview(button, video);
+  };
+  if (buildPreviewSource && typeof resolveLocalCardPreview === "function") {
+    fill.classList.add("detail_thumb_preview");
+    resolveLocalCardPreview(buildPreviewSource, "thumbnail").then((resolvedUrl) => {
+      if (!fill.isConnected) return;
+      if (resolvedUrl && (type !== "video" || resolvedUrl !== buildPreviewSource)) {
+        fill.style.backgroundImage = `url("${resolvedUrl}")`;
+      } else if (type === "video") {
+        appendVideoFallback();
+      }
+    });
+  } else if (previewUrl) {
     fill.classList.add("detail_thumb_preview");
     fill.style.backgroundImage = `url("${previewUrl}")`;
   } else {
-    const videoUrl = detailVideoPreviewUrlForItem(prefix, { ...item, type }, post);
     if (videoUrl) {
-      fill.classList.add("detail_thumb_video_preview");
-      const video = document.createElement("video");
-      video.src = videoUrl;
-      video.muted = true;
-      video.playsInline = true;
-      video.preload = "metadata";
-      fill.append(video);
-      bindHoverVideoPreview(button, video);
+      requestAnimationFrame(appendVideoFallback);
     }
   }
   button.append(fill);

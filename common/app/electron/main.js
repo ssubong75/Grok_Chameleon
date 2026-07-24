@@ -38,6 +38,7 @@ const bridgeWindows = new Map();
 const bridgeCommandQueues = new Map();
 const usageWindows = new Map();
 const CARD_PREVIEW_MAX_EDGE = 960;
+const THUMBNAIL_PREVIEW_MAX_EDGE = 320;
 const CARD_PREVIEW_MAX_ACTIVE = 2;
 const CARD_PREVIEW_MAX_FILES = 5000;
 const CARD_PREVIEW_MAX_BYTES = 512 * 1024 * 1024;
@@ -76,6 +77,35 @@ function verifiedLibraryCardPreviewCacheDir(info = {}) {
   return resolvedCacheDir;
 }
 
+function normalizedPreviewKind(value) {
+  return String(value || "").trim().toLowerCase() === "thumbnail" ? "thumbnail" : "card";
+}
+
+function verifiedLibraryBuildPreviewDir(info = {}, kind = "card") {
+  const libraryRoot = String(info?.library_root || "").trim();
+  const previewDir = String(info?.preview_dir || "").trim();
+  const normalizedKind = normalizedPreviewKind(kind);
+  if (!path.isAbsolute(libraryRoot) || !path.isAbsolute(previewDir)) {
+    throw new Error("Build preview path is invalid.");
+  }
+  const resolvedLibraryRoot = path.resolve(libraryRoot);
+  const expectedDir = path.resolve(
+    resolvedLibraryRoot,
+    "previews",
+    "build",
+    normalizedKind === "thumbnail" ? "thumbnails" : "cards",
+  );
+  const resolvedPreviewDir = path.resolve(previewDir);
+  if (
+    resolvedLibraryRoot === path.parse(resolvedLibraryRoot).root
+    || resolvedPreviewDir !== expectedDir
+    || !fs.existsSync(path.join(resolvedLibraryRoot, "library.json"))
+  ) {
+    throw new Error("Refusing unsafe build preview path.");
+  }
+  return resolvedPreviewDir;
+}
+
 function clearVerifiedCardPreviewCache(cacheDir, reason = "cleanup") {
   if (!cacheDir || path.resolve(cacheDir) !== lastVerifiedCardPreviewCacheDir) return false;
   try {
@@ -108,8 +138,16 @@ async function clearCurrentCardPreviewCache(reason = "cleanup") {
   }
 }
 
-function cardPreviewResult(key) {
-  return { key, url: `/api/card-preview?key=${key}` };
+function cardPreviewResult(key, storage = "cache", kind = "card") {
+  const normalizedKind = normalizedPreviewKind(kind);
+  return {
+    key,
+    storage,
+    kind: normalizedKind,
+    url: storage === "build"
+      ? `/api/build-preview?kind=${normalizedKind}&key=${key}`
+      : `/api/card-preview?key=${key}`,
+  };
 }
 
 function pumpCardPreviewQueue() {
@@ -197,20 +235,34 @@ function localCardPreviewSource(rawUrl) {
   return parsed;
 }
 
-async function generateCardPreview(sourcePath, targetPath) {
-  const sourceBytes = fs.readFileSync(sourcePath);
-  const sourceImage = nativeImage.createFromBuffer(sourceBytes);
+function usablePreviewFile(filePath) {
+  try {
+    if (fs.statSync(filePath).size <= 0) return false;
+    return !nativeImage.createFromPath(filePath).isEmpty();
+  } catch (_) {
+    return false;
+  }
+}
+
+async function generateCardPreview(sourcePath, targetPath, kind = "card") {
+  const normalizedKind = normalizedPreviewKind(kind);
+  const maxPreviewEdge = normalizedKind === "thumbnail" ? THUMBNAIL_PREVIEW_MAX_EDGE : CARD_PREVIEW_MAX_EDGE;
+  const jpegQuality = normalizedKind === "thumbnail" ? 78 : 82;
+  const isVideo = /\.(?:m4v|mov|mp4|webm)$/i.test(sourcePath);
+  const sourceImage = isVideo
+    ? await nativeImage.createThumbnailFromPath(sourcePath, { width: maxPreviewEdge, height: maxPreviewEdge })
+    : nativeImage.createFromBuffer(fs.readFileSync(sourcePath));
   if (sourceImage.isEmpty()) throw new Error("Card preview source is not a supported image.");
   const sourceSize = sourceImage.getSize();
   const maxEdge = Math.max(sourceSize.width, sourceSize.height);
-  const previewImage = maxEdge > CARD_PREVIEW_MAX_EDGE
+  const previewImage = maxEdge > maxPreviewEdge
     ? sourceImage.resize(
       sourceSize.width >= sourceSize.height
-        ? { width: CARD_PREVIEW_MAX_EDGE, quality: "good" }
-        : { height: CARD_PREVIEW_MAX_EDGE, quality: "good" },
+        ? { width: maxPreviewEdge, quality: "good" }
+        : { height: maxPreviewEdge, quality: "good" },
     )
     : sourceImage;
-  const previewBytes = previewImage.toJPEG(82);
+  const previewBytes = previewImage.toJPEG(jpegQuality);
   if (!previewBytes.length) throw new Error("Could not encode card preview.");
   const tempPath = `${targetPath}.${process.pid}.${Date.now()}.tmp`;
   fs.writeFileSync(tempPath, previewBytes);
@@ -226,37 +278,51 @@ async function generateCardPreview(sourcePath, targetPath) {
 
 async function ensureCardPreview(payload = {}) {
   const source = localCardPreviewSource(payload.url);
-  const cacheKey = crypto.createHash("sha256").update(`${source.pathname}${source.search}`).digest("hex");
+  const previewKind = normalizedPreviewKind(payload.kind);
   const infoUrl = new URL("/api/card-preview/source-info", SERVER_BASE);
   infoUrl.search = source.search;
+  infoUrl.searchParams.set("preview_kind", previewKind);
   const info = await fetchJson(infoUrl, { signal: AbortSignal.timeout(3000) });
   const sourcePath = String(info?.source_path || "").trim();
-  const cacheDir = verifiedLibraryCardPreviewCacheDir(info);
+  const storage = info?.storage === "build" ? "build" : "cache";
+  const previewKey = String(info?.preview_key || "").trim().toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(previewKey)) {
+    throw new Error("Card preview key is invalid.");
+  }
+  const previewDir = storage === "build"
+    ? verifiedLibraryBuildPreviewDir(info, previewKind)
+    : verifiedLibraryCardPreviewCacheDir(info);
   if (!path.isAbsolute(sourcePath)) {
     throw new Error("Card preview source path is invalid.");
   }
-  const targetPath = path.join(cacheDir, `${cacheKey}.jpg`);
-  const taskKey = `${cacheDir}\0${cacheKey}`;
-  try {
-    if (fs.statSync(targetPath).size > 0) {
+  const targetPath = path.join(previewDir, `${previewKey}.jpg`);
+  const taskKey = `${previewDir}\0${previewKey}`;
+  if (usablePreviewFile(targetPath)) {
+    if (storage === "cache") {
       touchCardPreviewCacheFile(targetPath);
-      pruneCardPreviewCache(cacheDir, targetPath);
-      return cardPreviewResult(cacheKey);
+      pruneCardPreviewCache(previewDir, targetPath);
     }
+    return cardPreviewResult(previewKey, storage, previewKind);
+  }
+  try {
+    fs.unlinkSync(targetPath);
   } catch (_) {}
   if (cardPreviewTasks.has(taskKey)) return cardPreviewTasks.get(taskKey);
   const task = queueCardPreviewTask(async () => {
-    fs.mkdirSync(cacheDir, { recursive: true });
-    try {
-      if (fs.statSync(targetPath).size > 0) {
+    fs.mkdirSync(previewDir, { recursive: true });
+    if (usablePreviewFile(targetPath)) {
+      if (storage === "cache") {
         touchCardPreviewCacheFile(targetPath);
-        pruneCardPreviewCache(cacheDir, targetPath);
-        return cardPreviewResult(cacheKey);
+        pruneCardPreviewCache(previewDir, targetPath);
       }
+      return cardPreviewResult(previewKey, storage, previewKind);
+    }
+    try {
+      fs.unlinkSync(targetPath);
     } catch (_) {}
-    await generateCardPreview(sourcePath, targetPath);
-    pruneCardPreviewCache(cacheDir, targetPath);
-    return cardPreviewResult(cacheKey);
+    await generateCardPreview(sourcePath, targetPath, previewKind);
+    if (storage === "cache") pruneCardPreviewCache(previewDir, targetPath);
+    return cardPreviewResult(previewKey, storage, previewKind);
   });
   cardPreviewTasks.set(taskKey, task);
   try {

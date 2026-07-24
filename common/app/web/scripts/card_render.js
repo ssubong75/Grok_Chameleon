@@ -42,10 +42,11 @@ function cardDisplayItemForContext(post, item, className = "") {
     card_preview_retries: 2,
   };
   if (detailItemType(cardItem) !== "video") return cardItem;
-  const posterUrl = buildCardVideoPosterUrl(post, cardItem);
+  const posterUrl = buildCardVideoPosterUrl(post, cardItem) || bDetailVideoPreviewUrl(cardItem);
   if (!posterUrl) return cardItem;
   return {
     ...cardItem,
+    card_static_video_preview: true,
     thumbnail_url: cardItem.thumbnail_url || posterUrl,
     poster_url: cardItem.poster_url || posterUrl,
   };

@@ -9074,6 +9074,101 @@ def card_preview_cache_path(key: str) -> Path | None:
     return cache_dir / f"{value}.jpg" if cache_dir else None
 
 
+BUILD_PREVIEW_KINDS = {
+    "card": "cards",
+    "thumbnail": "thumbnails",
+}
+
+
+def normalize_build_preview_kind(value: str) -> str:
+    kind = str(value or "").strip().lower()
+    return kind if kind in BUILD_PREVIEW_KINDS else "card"
+
+
+def build_preview_root(root: Path | None = None) -> Path:
+    root = (root or library_root())
+    if not root:
+        raise RuntimeError("Library path is not set.")
+    root = root.resolve()
+    if root == Path(root.anchor):
+        raise RuntimeError("Refusing unsafe build preview root.")
+    candidate = (root / "previews" / "build").resolve()
+    if candidate.parent != (root / "previews").resolve() or candidate.name != "build":
+        raise RuntimeError("Refusing unsafe build preview path.")
+    return candidate
+
+
+def build_preview_dir(kind: str, root: Path | None = None) -> Path:
+    normalized = normalize_build_preview_kind(kind)
+    preview_root = build_preview_root(root)
+    candidate = (preview_root / BUILD_PREVIEW_KINDS[normalized]).resolve()
+    if candidate.parent != preview_root:
+        raise RuntimeError("Refusing unsafe build preview directory.")
+    return candidate
+
+
+def build_preview_path(kind: str, key: str, root: Path | None = None) -> Path | None:
+    value = str(key or "").strip().lower()
+    if not re.fullmatch(r"[a-f0-9]{64}", value):
+        return None
+    return build_preview_dir(kind, root) / f"{value}.jpg"
+
+
+def build_preview_source(root: Path, source: Path) -> bool:
+    try:
+        rel = source.resolve().relative_to(root.resolve())
+    except ValueError:
+        return False
+    return bool(rel.parts and rel.parts[0] in {"created", "collection"})
+
+
+def preview_key_for_source(root: Path, source: Path) -> str:
+    resolved_root = root.resolve()
+    resolved_source = source.resolve()
+    rel = resolved_source.relative_to(resolved_root).as_posix()
+    stat = resolved_source.stat()
+    raw = f"{rel}\0{stat.st_mtime_ns}\0{stat.st_size}".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def remove_build_previews_for_source(root: Path, source: Path) -> None:
+    if not source.is_file() or not build_preview_source(root, source):
+        return
+    try:
+        key = preview_key_for_source(root, source)
+    except (OSError, ValueError):
+        return
+    for kind in BUILD_PREVIEW_KINDS:
+        target = build_preview_path(kind, key, root)
+        if not target:
+            continue
+        try:
+            target.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def remove_build_previews_for_items(root: Path, folder: Path, items: list[dict]) -> None:
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        file_name = str(item.get("file") or "").strip()
+        if not file_name or Path(file_name).name != file_name or file_name in seen:
+            continue
+        seen.add(file_name)
+        remove_build_previews_for_source(root, folder / file_name)
+
+
+def remove_build_previews_for_tree(root: Path, folder: Path) -> None:
+    if not folder.is_dir():
+        return
+    for post_json in folder.rglob("post.json"):
+        meta = read_json(post_json, {})
+        items = meta.get("items") if isinstance(meta, dict) else []
+        remove_build_previews_for_items(root, post_json.parent, items if isinstance(items, list) else [])
+
+
 def thumbnail_candidates_for_video(video_name: str) -> list[str]:
     stem = file_stem(video_name)
     names = []
@@ -9228,6 +9323,8 @@ def media_items_from_meta(root: Path, folder: Path, rel_folder: str, meta) -> li
             "mime_type": item.get("mime_type") or item.get("mimeType") or "",
             "role": item.get("role") or "result",
         }
+        for key in ("thumbnail", "thumbnail_url", "poster", "poster_url"):
+            item_data.pop(key, None)
         thumbnail = item.get("thumbnail") or item.get("poster") or ""
         thumbnail_url = item.get("thumbnail_url") or item.get("poster_url") or ""
         thumbnail_path = folder / thumbnail if thumbnail else None
@@ -9235,8 +9332,14 @@ def media_items_from_meta(root: Path, folder: Path, rel_folder: str, meta) -> li
             thumbnail_url = media_url(f"{rel_folder}/{thumbnail}".strip("/"), thumbnail_path)
         elif media_type == "video" and file_name and (folder / file_name).exists():
             thumb = thumbnail_for_video(folder, rel_folder, file_name)
-            thumbnail = thumb.get("thumbnail") or thumbnail
-            thumbnail_url = thumb.get("thumbnail_url") or thumbnail_url
+            thumbnail = thumb.get("thumbnail") or ""
+            thumbnail_url = thumb.get("thumbnail_url") or ""
+        elif source_path and source_path.exists():
+            thumbnail = ""
+            thumbnail_url = ""
+        elif thumbnail and str(thumbnail_url).startswith("/api/media"):
+            thumbnail = ""
+            thumbnail_url = ""
         if thumbnail:
             item_data["thumbnail"] = thumbnail
         if thumbnail_url:
@@ -11310,17 +11413,6 @@ def copy_file_to_directory(source_dir: Path, file_name: str, target_dir: Path) -
     if not source.exists():
         return ""
     target_name = unique_file_name(target_dir, file_stem(file_name), extension_for(file_name) or "bin")
-    shutil.copy2(source, target_dir / target_name)
-    return target_name
-
-
-def copy_thumbnail_to_directory(source_dir: Path, thumbnail_name: str, target_dir: Path) -> str:
-    if not thumbnail_name:
-        return ""
-    source = source_dir / thumbnail_name
-    if not source.exists():
-        return ""
-    target_name = unique_file_name(target_dir, file_stem(thumbnail_name), extension_for(thumbnail_name) or "jpg")
     shutil.copy2(source, target_dir / target_name)
     return target_name
 
@@ -13547,6 +13639,7 @@ def rename_collection_folder(payload: dict) -> dict:
     if destination.exists() and destination != target:
         raise RuntimeError("A folder with that name already exists.")
     if destination != target:
+        remove_build_previews_for_tree(root, target)
         target.rename(destination)
     refresh_collection_post_jsons(root, destination)
     destination_path = destination.relative_to(root).as_posix()
@@ -13566,6 +13659,7 @@ def delete_collection_folder(payload: dict) -> dict:
         raise RuntimeError("Library path is not set.")
     target, parts = collection_target(root, str(payload.get("target_path") or ""))
     parent_path = target.parent.relative_to(root).as_posix()
+    remove_build_previews_for_tree(root, target)
     move_path_to_trash(target)
     data = scan_library(root)
     if len(parts) > 2:
@@ -13762,6 +13856,8 @@ def delete_library_post(payload: dict) -> dict:
     if not post:
         raise RuntimeError("Selected post was not found.")
     target = assert_deletable_library_path(root, post.get("folder_path") or "")
+    if target.is_dir():
+        remove_build_previews_for_items(root, target, post.get("items") or [])
     move_path_to_trash(target)
     data = scan_library(root)
     collection_path, collection_post_path = collection_selection_for_deleted_post(post)
@@ -13800,6 +13896,7 @@ def delete_library_item(payload: dict) -> dict:
         if media_item_key(item) != item_key
     ]
     if not remaining_items:
+        remove_build_previews_for_items(root, post_dir, post.get("items") or [])
         move_path_to_trash(post_dir)
         data = scan_library(root)
         data["selected_path"] = ""
@@ -13807,6 +13904,7 @@ def delete_library_item(payload: dict) -> dict:
         return data
 
     moved: set[str] = set()
+    remove_build_previews_for_items(root, post_dir, [selected_item])
     move_post_item_file_to_trash(post_dir, str(selected_item.get("file") or ""), remaining_items, moved)
     move_post_item_file_to_trash(post_dir, str(selected_item.get("thumbnail") or ""), remaining_items, moved)
 
@@ -13911,12 +14009,46 @@ def copy_media_item_to_directory(source_dir: Path, item: dict, target_dir: Path)
     copied_file = copy_file_to_directory(source_dir, item.get("file") or "", target_dir) if item.get("file") else ""
     if item.get("file") and not copied_file and not item.get("url"):
         raise RuntimeError("Selected media file was not found.")
-    copied_thumbnail = copy_thumbnail_to_directory(source_dir, item.get("thumbnail") or "", target_dir)
-    return serializable_media_item({
+    copied_item = {
         **item,
         "file": copied_file or item.get("file") or "",
-        "thumbnail": copied_thumbnail or item.get("thumbnail") or "",
-    })
+    }
+    for key in ("thumbnail", "thumbnail_url", "poster", "poster_url"):
+        copied_item.pop(key, None)
+    return serializable_media_item(copied_item)
+
+
+def remove_embedded_preview_files(folder: Path, items: list[dict]) -> list[dict]:
+    original_names = {
+        str(item.get("file") or "").strip()
+        for item in items
+        if isinstance(item, dict)
+        and str(item.get("file") or "").strip()
+        and Path(str(item.get("file") or "").strip()).name == str(item.get("file") or "").strip()
+    }
+    preview_names = {
+        str(item.get(key) or "").strip()
+        for item in items
+        if isinstance(item, dict)
+        for key in ("thumbnail", "poster")
+        if str(item.get(key) or "").strip()
+        and Path(str(item.get(key) or "").strip()).name == str(item.get(key) or "").strip()
+    }
+    for name in preview_names - original_names:
+        target = folder / name
+        try:
+            target.unlink()
+        except FileNotFoundError:
+            pass
+    cleaned = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        next_item = dict(item)
+        for key in ("thumbnail", "thumbnail_url", "poster", "poster_url"):
+            next_item.pop(key, None)
+        cleaned.append(serializable_media_item(next_item))
+    return cleaned
 
 
 def remote_imagine_payload_post(payload: dict) -> dict:
@@ -13936,22 +14068,6 @@ def remote_imagine_item_url(item: dict) -> str:
         if value:
             return value
     for key in ("media_url", "mediaUrl", "url", "source_url", "original_url", "remote_url"):
-        value = imagine_unwrap_remote_proxy(str(metadata.get(key) or imagine_meta.get(key) or ""))
-        value = imagine_remote_url(value)
-        if value:
-            return value
-    return ""
-
-
-def remote_imagine_thumbnail_url(item: dict) -> str:
-    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-    imagine_meta = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
-    for key in ("thumbnail_url", "poster_url", "preview_url", "thumbnailImageUrl", "previewImageUrl"):
-        value = imagine_unwrap_remote_proxy(str(item.get(key) or ""))
-        value = imagine_remote_url(value)
-        if value:
-            return value
-    for key in ("thumbnail_url", "poster_url", "preview_url", "thumbnailImageUrl", "previewImageUrl"):
         value = imagine_unwrap_remote_proxy(str(metadata.get(key) or imagine_meta.get(key) or ""))
         value = imagine_remote_url(value)
         if value:
@@ -13994,21 +14110,8 @@ def copy_imagine_remote_item_to_directory(root: Path, item: dict, target_dir: Pa
     target_file = unique_path(target_dir / file_name)
     write_imagine_remote_url_to_file(media_url, target_file, account, media_type)
 
-    thumbnail_name = ""
-    thumbnail_url = remote_imagine_thumbnail_url(item)
-    if thumbnail_url and thumbnail_url != media_url:
-        thumb_base = download_payload_filename({"type": "image", "item_id": f"{target_file.stem}-thumb"}, thumbnail_url)
-        if not extension_for(thumb_base):
-            thumb_base = f"{target_file.stem}-thumb.jpg"
-        thumb_target = unique_path(target_dir / thumb_base)
-        try:
-            write_imagine_remote_url_to_file(thumbnail_url, thumb_target, account, "image")
-            thumbnail_name = thumb_target.name
-        except Exception:
-            thumbnail_name = ""
-
     item_id = item.get("item_id") or item.get("id") or target_file.stem or f"imagine-{index + 1}"
-    return serializable_media_item({
+    copied_item = {
         **item,
         "item_id": item_id,
         "type": media_type,
@@ -14016,9 +14119,10 @@ def copy_imagine_remote_item_to_directory(root: Path, item: dict, target_dir: Pa
         "url": "",
         "source_url": media_url,
         "media_url": media_url,
-        "thumbnail": thumbnail_name or item.get("thumbnail") or "",
-        "thumbnail_url": thumbnail_url if not thumbnail_name else "",
-    })
+    }
+    for key in ("thumbnail", "thumbnail_url", "poster", "poster_url"):
+        copied_item.pop(key, None)
+    return serializable_media_item(copied_item)
 
 
 def remote_collection_source_ids(post: dict) -> set[str]:
@@ -14285,6 +14389,12 @@ def merge_selected_posts(payload: dict) -> dict:
 
     for source_dir in source_dirs:
         if source_dir.exists() and source_dir.resolve() != final_dir.resolve():
+            source_post = next(
+                (post for post in posts if safe_join(root, post.get("folder_path") or "").resolve() == source_dir.resolve()),
+                None,
+            )
+            if source_post:
+                remove_build_previews_for_items(root, source_dir, source_post.get("items") or [])
             shutil.rmtree(source_dir)
 
     data = scan_library(root)
@@ -14363,6 +14473,7 @@ def move_post_to_collection(payload: dict) -> dict:
         if source_dir.resolve() == target_dir.resolve():
             raise RuntimeError("The selected post is already in this folder.")
         post_json = merge_items_into_post(post, source_dir, merge_post, target_dir, post.get("items") or [])
+        remove_build_previews_for_items(root, source_dir, post.get("items") or [])
         shutil.rmtree(source_dir)
         data = scan_library(root)
         data["selected_path"] = post_json["folder_path"]
@@ -14372,10 +14483,18 @@ def move_post_to_collection(payload: dict) -> dict:
         return data
     target_name = unique_directory_name(target_parent, source_dir.name)
     target_dir = target_parent / target_name
+    remove_build_previews_for_items(root, source_dir, post.get("items") or [])
     shutil.move(str(source_dir), str(target_dir))
     collection_id = Path(collection_path).name
     target_path = target_dir.relative_to(root).as_posix()
-    post_json = post_json_from_post(post, folder_path=target_path, collection=collection_id)
+    cleaned_items = remove_embedded_preview_files(target_dir, post.get("items") or [])
+    post_json = post_json_from_post(
+        post,
+        folder_path=target_path,
+        collection=collection_id,
+        items=cleaned_items,
+        representative=representative_for_remaining_items(cleaned_items),
+    )
     write_json(target_dir / "post.json", post_json)
     data = scan_library(root)
     data["selected_path"] = post_json["folder_path"]
@@ -14445,6 +14564,7 @@ def move_item_to_collection(payload: dict) -> dict:
         for item in post.get("items", [])
         if media_item_key(item) != selected_key
     ]
+    remove_build_previews_for_items(root, source_dir, [selected_item])
     if selected_item.get("file") and not any(item.get("file") == selected_item.get("file") for item in remaining_items):
         try:
             (source_dir / selected_item["file"]).unlink()
@@ -14509,6 +14629,7 @@ def split_library_item(payload: dict) -> dict:
         for item in items
         if media_item_key(item) != selected_key
     ]
+    remove_build_previews_for_items(root, source_dir, [selected_item])
     if selected_item.get("file") and not any(item.get("file") == selected_item.get("file") for item in remaining_items):
         try:
             (source_dir / selected_item["file"]).unlink()
@@ -15278,11 +15399,18 @@ class Handler(SimpleHTTPRequestHandler):
                 if not source.is_file():
                     self.send_error(HTTPStatus.NOT_FOUND)
                     return
-                cache_dir.mkdir(parents=True, exist_ok=True)
+                preview_kind = normalize_build_preview_kind(query.get("preview_kind", ["card"])[0])
+                persistent_build_preview = build_preview_source(root, source)
+                preview_dir = build_preview_dir(preview_kind, root) if persistent_build_preview else cache_dir
+                preview_dir.mkdir(parents=True, exist_ok=True)
                 self.send_json({
                     "ok": True,
                     "source_path": str(source),
                     "cache_dir": str(cache_dir),
+                    "preview_dir": str(preview_dir),
+                    "preview_key": preview_key_for_source(root, source),
+                    "preview_kind": preview_kind,
+                    "storage": "build" if persistent_build_preview else "cache",
                     "library_root": str(root.resolve()),
                     "legacy_cache_dir": str(legacy_cache_dir),
                 })
@@ -15290,6 +15418,17 @@ class Handler(SimpleHTTPRequestHandler):
             if parsed.path == "/api/card-preview":
                 query = parse_qs(parsed.query)
                 target = card_preview_cache_path(query.get("key", [""])[0])
+                if not target or not target.is_file():
+                    self.send_error(HTTPStatus.NOT_FOUND)
+                    return
+                self.send_local_file(target, "image/jpeg", cache_control="private, max-age=31536000, immutable")
+                return
+            if parsed.path == "/api/build-preview":
+                query = parse_qs(parsed.query)
+                target = build_preview_path(
+                    query.get("kind", ["card"])[0],
+                    query.get("key", [""])[0],
+                )
                 if not target or not target.is_file():
                     self.send_error(HTTPStatus.NOT_FOUND)
                     return
@@ -15325,6 +15464,22 @@ class Handler(SimpleHTTPRequestHandler):
             if parsed.path == "/api/card-preview":
                 query = parse_qs(parsed.query)
                 target = card_preview_cache_path(query.get("key", [""])[0])
+                if not target or not target.is_file():
+                    self.send_error(HTTPStatus.NOT_FOUND)
+                    return
+                self.send_local_file(
+                    target,
+                    "image/jpeg",
+                    head_only=True,
+                    cache_control="private, max-age=31536000, immutable",
+                )
+                return
+            if parsed.path == "/api/build-preview":
+                query = parse_qs(parsed.query)
+                target = build_preview_path(
+                    query.get("kind", ["card"])[0],
+                    query.get("key", [""])[0],
+                )
                 if not target or not target.is_file():
                     self.send_error(HTTPStatus.NOT_FOUND)
                     return

@@ -29,6 +29,7 @@ env:
   COMMON_I_SUBMIT: common/app/web/scripts/i_composer_submit.js
   COMMON_LIBRARY_CORE: common/app/web/scripts/library_core.js
   COMMON_DETAIL_STATE: common/app/web/scripts/detail_state.js
+  COMMON_DETAIL_MEDIA: common/app/web/scripts/detail_media.js
   COMMON_DETAIL_RENDER: common/app/web/scripts/detail_render.js
   COMMON_I_SOURCE: common/app/web/scripts/i_source_render.js
   COMMON_COLLECTION_ACTIONS: common/app/web/scripts/collection_actions.js
@@ -49,7 +50,7 @@ jobs:
       RELEASE_TAG: v20260720-041036-win
       INPUT_ZIP: Win_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Win_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: 6a6b98598a1760d5bb2bda7188cd53ece7398c56c96314501f72323aeb58719f
+      EXPECTED_INPUT_SHA256: 69f967d3670b5ecb6455c494e68e5ff25cd22215db20e621ec5826f3fe529f5b
 
     steps:
       - name: Check out the shared source commit
@@ -103,6 +104,7 @@ jobs:
             @{ Name = "i_submit"; Relative = "web\scripts\i_composer_submit.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_I_SUBMIT) },
             @{ Name = "library_core"; Relative = "web\scripts\library_core.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_LIBRARY_CORE) },
             @{ Name = "detail_state"; Relative = "web\scripts\detail_state.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_STATE) },
+            @{ Name = "detail_media"; Relative = "web\scripts\detail_media.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_MEDIA) },
             @{ Name = "detail_render"; Relative = "web\scripts\detail_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_RENDER) },
             @{ Name = "i_source"; Relative = "web\scripts\i_source_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_I_SOURCE) },
             @{ Name = "collection_actions"; Relative = "web\scripts\collection_actions.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_COLLECTION_ACTIONS) },
@@ -131,6 +133,7 @@ jobs:
           $targetISubmit = ($sharedSources | Where-Object Name -eq "i_submit").Target
           $targetLibraryCore = ($sharedSources | Where-Object Name -eq "library_core").Target
           $targetDetailState = ($sharedSources | Where-Object Name -eq "detail_state").Target
+          $targetDetailMedia = ($sharedSources | Where-Object Name -eq "detail_media").Target
           $targetDetailRender = ($sharedSources | Where-Object Name -eq "detail_render").Target
           $targetISource = ($sharedSources | Where-Object Name -eq "i_source").Target
           $targetCollectionActions = ($sharedSources | Where-Object Name -eq "collection_actions").Target
@@ -277,7 +280,11 @@ jobs:
             'def is_grok_preview_image_file_name(name: str) -> bool:',
             'target_parent = root / "created"',
             'def merged_post_source(posts: list[dict]) -> str:',
-            'saved_keys = imagine_saved_media_keys_cached(account, max_posts=1000)'
+            'saved_keys = imagine_saved_media_keys_cached(account, max_posts=1000)',
+            'def build_preview_dir(kind: str, root: Path | None = None) -> Path:',
+            'def remove_build_previews_for_tree(root: Path, folder: Path) -> None:',
+            'cleaned_items = remove_embedded_preview_files(target_dir, post.get("items") or [])',
+            'if parsed.path == "/api/build-preview":'
           )) {
             if (-not $serverText.Contains($marker)) { throw "Windows relation recovery marker missing: $marker" }
           }
@@ -287,7 +294,9 @@ jobs:
             'process.platform === "darwin"',
             "process.resourcesPath",
             "function verifiedLibraryCardPreviewCacheDir(info = {})",
+            "function verifiedLibraryBuildPreviewDir(info = {}, kind = \"card\")",
             'const expectedCacheDir = path.resolve(resolvedLibraryRoot, "cache", "card-previews");',
+            'normalizedKind === "thumbnail" ? "thumbnails" : "cards"',
             'await clearCurrentCardPreviewCache("startup");'
           )) {
             if (-not $mainText.Contains($marker)) { throw "Cross-platform main marker missing: $marker" }
@@ -323,8 +332,10 @@ jobs:
           if (-not (Get-Content -Raw -LiteralPath $targetISubmit).Contains("source_conversation_id: sourceContext.conversation_id")) { throw "Submit conversation lineage marker missing." }
           if (-not (Get-Content -Raw -LiteralPath $targetLibraryCore).Contains('if (type === "image" || type.startsWith("image/"))')) { throw "Sharp image preview marker missing." }
           if (-not (Get-Content -Raw -LiteralPath $targetDetailState).Contains("function detailItemPrompt(item)")) { throw "Detail prompt lineage marker missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetDetailMedia).Contains('resolveLocalCardPreview(url, kind = "card")')) { throw "Persistent Build preview kind marker missing." }
           $detailRenderText = Get-Content -Raw -LiteralPath $targetDetailRender
           if (-not $detailRenderText.Contains("const visible = !post?.is_job_post")) { throw "Build detail heart visibility marker missing." }
+          if (-not $detailRenderText.Contains('resolveLocalCardPreview(buildPreviewSource, "thumbnail")')) { throw "Build detail thumbnail preview marker missing." }
           if ($detailRenderText.Contains("Boolean(post?.is_job_post)")) { throw "Build job heart visibility regression found." }
           if (-not (Get-Content -Raw -LiteralPath $targetISource).Contains("function isImagineT2iGroupContainer(post)")) { throw "T2I group filter marker missing." }
           if (-not (Get-Content -Raw -LiteralPath $targetISource).Contains('screen_state.current_screen === "i_unsaved_main"')) { throw "Unsaved pagination refill marker missing." }
@@ -342,6 +353,7 @@ jobs:
           if ($promptEventsText -notmatch $promptWritePattern) { throw "Prompt Write does not open the shared prompt save dialog." }
           if (-not (Get-Content -Raw -LiteralPath $targetUiFeedback).Contains('".workspace.i_detail_open .i_detail_media, .workspace.b_detail_open .b_detail_media"')) { throw "Lucky media center marker missing." }
           if (-not (Get-Content -Raw -LiteralPath $targetAccountStyle).Contains(".lucky_notice.in_detail_media")) { throw "Lucky media position marker missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetCardRender).Contains("card_static_video_preview: true")) { throw "Build video card preview marker missing." }
           if (-not $mainText.Contains("const CARD_PREVIEW_MAX_EDGE = 960;")) { throw "Card preview size dropped below the 512x288 requirement." }
           $metadata = Get-ChildItem -LiteralPath $root -Recurse -Force | Where-Object {
             $_.Name -eq "__MACOSX" -or $_.Name -like "._*" -or $_.Name -eq ".DS_Store"
@@ -410,7 +422,7 @@ jobs:
       RELEASE_TAG: v20260720-042100-mac
       INPUT_ZIP: Mac_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Mac_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: 90aae9bed9fc9640ff8db249e9cadee267c5f47cb5bc2c739fb7969b06fa5e67
+      EXPECTED_INPUT_SHA256: 8ee5915421e134d6c197251a79a387d70f0453b5937a8d5c85d89b79880c889a
 
     steps:
       - name: Check out the shared source commit
@@ -461,6 +473,7 @@ jobs:
             web/scripts/i_composer_submit.js
             web/scripts/library_core.js
             web/scripts/detail_state.js
+            web/scripts/detail_media.js
             web/scripts/detail_render.js
             web/scripts/i_source_render.js
             web/scripts/collection_actions.js
@@ -486,6 +499,7 @@ jobs:
           i_submit_js="$app_root/web/scripts/i_composer_submit.js"
           library_core_js="$app_root/web/scripts/library_core.js"
           detail_state_js="$app_root/web/scripts/detail_state.js"
+          detail_media_js="$app_root/web/scripts/detail_media.js"
           detail_render_js="$app_root/web/scripts/detail_render.js"
           i_source_js="$app_root/web/scripts/i_source_render.js"
           collection_actions_js="$app_root/web/scripts/collection_actions.js"
@@ -567,6 +581,10 @@ jobs:
           grep -F 'target_parent = root / "created"' "$server_py"
           grep -F 'def merged_post_source(posts: list[dict]) -> str:' "$server_py"
           grep -F 'saved_keys = imagine_saved_media_keys_cached(account, max_posts=1000)' "$server_py"
+          grep -F 'def build_preview_dir(kind: str, root: Path | None = None) -> Path:' "$server_py"
+          grep -F 'def remove_build_previews_for_tree(root: Path, folder: Path) -> None:' "$server_py"
+          grep -F 'cleaned_items = remove_embedded_preview_files(target_dir, post.get("items") or [])' "$server_py"
+          grep -F 'if parsed.path == "/api/build-preview":' "$server_py"
           grep -F 'storedBackTarget.scrollTop = scrollTop' "$card_render_js"
           grep -F 'function restoreImagineListScrollForScreen(screenId, scrollTop)' "$i_detail_actions_js"
           grep -F 'restoreImagineListScrollForScreen(returnScreenId, returnScrollTop)' "$i_detail_actions_js"
@@ -588,7 +606,9 @@ jobs:
           grep -F 'source_conversation_id: sourceContext.conversation_id' "$i_submit_js"
           grep -F 'if (type === "image" || type.startsWith("image/"))' "$library_core_js"
           grep -F 'function detailItemPrompt(item)' "$detail_state_js"
+          grep -F 'resolveLocalCardPreview(url, kind = "card")' "$detail_media_js"
           grep -F 'const visible = !post?.is_job_post' "$detail_render_js"
+          grep -F 'resolveLocalCardPreview(buildPreviewSource, "thumbnail")' "$detail_render_js"
           if grep -F 'Boolean(post?.is_job_post)' "$detail_render_js"; then
             echo 'Build job heart visibility regression found.' >&2
             exit 1
@@ -610,6 +630,7 @@ jobs:
           PY
           grep -F '".workspace.i_detail_open .i_detail_media, .workspace.b_detail_open .b_detail_media"' "$ui_feedback_js"
           grep -F '.lucky_notice.in_detail_media' "$account_css"
+          grep -F 'card_static_video_preview: true' "$card_render_js"
           grep -F 'const CARD_PREVIEW_MAX_EDGE = 960;' "$main_js"
           grep -F 'RUNTIME_ROOT = Path(__file__).resolve().parent' "$server_py"
           grep -F 'APP_ROOT = RUNTIME_ROOT.parent' "$server_py"
@@ -621,7 +642,9 @@ jobs:
           grep -F 'process.resourcesPath' "$main_js"
           grep -F 'path.join(resourceRoot, "Python", "bin", "python3")' "$main_js"
           grep -F 'function verifiedLibraryCardPreviewCacheDir(info = {})' "$main_js"
+          grep -F 'function verifiedLibraryBuildPreviewDir(info = {}, kind = "card")' "$main_js"
           grep -F 'const expectedCacheDir = path.resolve(resolvedLibraryRoot, "cache", "card-previews");' "$main_js"
+          grep -F 'normalizedKind === "thumbnail" ? "thumbnails" : "cards"' "$main_js"
           grep -F 'await clearCurrentCardPreviewCache("startup");' "$main_js"
           grep -F 'app.on("activate"' "$main_js"
           grep -F 'app.on("window-all-closed"' "$main_js"
@@ -683,6 +706,7 @@ jobs:
             web/scripts/i_composer_submit.js
             web/scripts/library_core.js
             web/scripts/detail_state.js
+            web/scripts/detail_media.js
             web/scripts/detail_render.js
             web/scripts/i_source_render.js
             web/scripts/collection_actions.js
@@ -786,8 +810,8 @@ jobs:
           MAC_TAG: v20260720-042100-mac
           WIN_ZIP: Win_Grok_Chameleon_a.zip
           MAC_ZIP: Mac_Grok_Chameleon_a.zip
-          WIN_INPUT_SHA256: 6a6b98598a1760d5bb2bda7188cd53ece7398c56c96314501f72323aeb58719f
-          MAC_INPUT_SHA256: 90aae9bed9fc9640ff8db249e9cadee267c5f47cb5bc2c739fb7969b06fa5e67
+          WIN_INPUT_SHA256: 69f967d3670b5ecb6455c494e68e5ff25cd22215db20e621ec5826f3fe529f5b
+          MAC_INPUT_SHA256: 8ee5915421e134d6c197251a79a387d70f0453b5937a8d5c85d89b79880c889a
         run: |
           set -euo pipefail
           mkdir -p current/win current/mac backups
@@ -796,8 +820,8 @@ jobs:
           test "$(sha256sum "current/win/$WIN_ZIP" | awk '{print $1}')" = "$WIN_INPUT_SHA256"
           test "$(sha256sum "current/mac/$MAC_ZIP" | awk '{print $1}')" = "$MAC_INPUT_SHA256"
           short_sha="$(printf '%s' "$GITHUB_SHA" | cut -c1-12)"
-          win_backup="Win_Grok_Chameleon_a.previous-before-unsaved-saved-compare-1000-$short_sha.zip"
-          mac_backup="Mac_Grok_Chameleon_a.previous-before-unsaved-saved-compare-1000-$short_sha.zip"
+          win_backup="Win_Grok_Chameleon_a.previous-before-build-persistent-previews-$short_sha.zip"
+          mac_backup="Mac_Grok_Chameleon_a.previous-before-build-persistent-previews-$short_sha.zip"
           cp "current/win/$WIN_ZIP" "backups/$win_backup"
           cp "current/mac/$MAC_ZIP" "backups/$mac_backup"
           gh release upload "$WIN_TAG" "backups/$win_backup" --repo "$GITHUB_REPOSITORY"
