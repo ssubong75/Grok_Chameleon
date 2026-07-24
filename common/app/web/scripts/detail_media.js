@@ -666,6 +666,19 @@ function scheduleLocalCardPreview(preview, url, kind = "card") {
   else preview.cardPreviewLoad();
 }
 
+function scheduleLocalCardVideoPoster(preview, previewUrl, videoUrl) {
+  if (!preview || !previewUrl) return;
+  preview.cardPreviewLoad = () => {
+    if (preview.dataset.cardPreviewStarted === "true") return;
+    preview.dataset.cardPreviewStarted = "true";
+    resolveLocalCardPreview(previewUrl, "card").then((resolvedUrl) => {
+      if (preview.isConnected && resolvedUrl && resolvedUrl !== videoUrl) preview.poster = resolvedUrl;
+    });
+  };
+  if (localCardPreviewObserver) localCardPreviewObserver.observe(preview);
+  else preview.cardPreviewLoad();
+}
+
 function bindCardPreviewLoadState(media, preview, url, options = {}) {
   const key = String(url || "");
   if (!media || !preview || !key) return;
@@ -762,24 +775,18 @@ function appendMediaPreview(host, media, item, type) {
   const videoUrl = videoPreviewUrl({ ...item, type });
   if (videoUrl) {
     media.classList.add("has_preview", "has_video_preview");
-    if (previewUrl && item?.card_static_video_preview) {
-      const preview = document.createElement("img");
-      preview.className = "card_preview card_video_still_preview";
-      preview.alt = "";
-      preview.loading = item?.card_lazy_preview ? "lazy" : "eager";
-      preview.decoding = "async";
-      appendCardImagePreview(host, media, preview, previewUrl, item);
-      return;
-    }
     const preview = document.createElement("video");
     preview.className = "card_preview card_video_preview";
     preview.src = videoUrl;
-    if (previewUrl) preview.poster = previewUrl;
+    if (previewUrl && previewUrl !== videoUrl) preview.poster = previewUrl;
     preview.muted = true;
     preview.playsInline = true;
     preview.preload = previewUrl ? "metadata" : "auto";
     bindCardPreviewLoadState(media, preview, videoUrl, cardPreviewLoadOptions(host, item, videoUrl));
     media.append(preview);
+    if (previewUrl && item?.card_local_preview) {
+      scheduleLocalCardVideoPoster(preview, previewUrl, videoUrl);
+    }
     bindHoverVideoPreview(host, preview);
     return;
   }

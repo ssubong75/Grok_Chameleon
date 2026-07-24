@@ -46,7 +46,6 @@ function cardDisplayItemForContext(post, item, className = "") {
   if (!posterUrl) return cardItem;
   return {
     ...cardItem,
-    card_static_video_preview: true,
     thumbnail_url: cardItem.thumbnail_url || posterUrl,
     poster_url: cardItem.poster_url || posterUrl,
   };
