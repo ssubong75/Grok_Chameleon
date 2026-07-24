@@ -3491,7 +3491,7 @@ def list_imagine_unsaved(payload: dict) -> dict:
         limit = 20
     limit = max(1, min(limit, 40))
     cursor = str((payload or {}).get("cursor") or "").strip()
-    saved_keys = imagine_saved_media_keys_cached(account, max_posts=160)
+    saved_keys = imagine_saved_media_keys_cached(account, max_posts=1000)
     grouped_posts: dict[str, dict] = {}
     next_cursor = cursor
     current_cursor = cursor

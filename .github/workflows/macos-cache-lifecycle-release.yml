@@ -49,7 +49,7 @@ jobs:
       RELEASE_TAG: v20260720-041036-win
       INPUT_ZIP: Win_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Win_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: b583058b7f16255809280163e2f10d527d605ae57c1db8fb008ab921e1c63ec9
+      EXPECTED_INPUT_SHA256: 6a6b98598a1760d5bb2bda7188cd53ece7398c56c96314501f72323aeb58719f
 
     steps:
       - name: Check out the shared source commit
@@ -276,7 +276,8 @@ jobs:
             'existing = existing_remote_collection_post(target_parent, source_post, items)',
             'def is_grok_preview_image_file_name(name: str) -> bool:',
             'target_parent = root / "created"',
-            'def merged_post_source(posts: list[dict]) -> str:'
+            'def merged_post_source(posts: list[dict]) -> str:',
+            'saved_keys = imagine_saved_media_keys_cached(account, max_posts=1000)'
           )) {
             if (-not $serverText.Contains($marker)) { throw "Windows relation recovery marker missing: $marker" }
           }
@@ -409,7 +410,7 @@ jobs:
       RELEASE_TAG: v20260720-042100-mac
       INPUT_ZIP: Mac_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Mac_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: 30aa553d694e0886c249e09342a151d4236d2d0ee46f41a873db9f49bdae009d
+      EXPECTED_INPUT_SHA256: 90aae9bed9fc9640ff8db249e9cadee267c5f47cb5bc2c739fb7969b06fa5e67
 
     steps:
       - name: Check out the shared source commit
@@ -565,6 +566,7 @@ jobs:
           grep -F 'def is_grok_preview_image_file_name(name: str) -> bool:' "$server_py"
           grep -F 'target_parent = root / "created"' "$server_py"
           grep -F 'def merged_post_source(posts: list[dict]) -> str:' "$server_py"
+          grep -F 'saved_keys = imagine_saved_media_keys_cached(account, max_posts=1000)' "$server_py"
           grep -F 'storedBackTarget.scrollTop = scrollTop' "$card_render_js"
           grep -F 'function restoreImagineListScrollForScreen(screenId, scrollTop)' "$i_detail_actions_js"
           grep -F 'restoreImagineListScrollForScreen(returnScreenId, returnScrollTop)' "$i_detail_actions_js"
@@ -784,8 +786,8 @@ jobs:
           MAC_TAG: v20260720-042100-mac
           WIN_ZIP: Win_Grok_Chameleon_a.zip
           MAC_ZIP: Mac_Grok_Chameleon_a.zip
-          WIN_INPUT_SHA256: b583058b7f16255809280163e2f10d527d605ae57c1db8fb008ab921e1c63ec9
-          MAC_INPUT_SHA256: 30aa553d694e0886c249e09342a151d4236d2d0ee46f41a873db9f49bdae009d
+          WIN_INPUT_SHA256: 6a6b98598a1760d5bb2bda7188cd53ece7398c56c96314501f72323aeb58719f
+          MAC_INPUT_SHA256: 90aae9bed9fc9640ff8db249e9cadee267c5f47cb5bc2c739fb7969b06fa5e67
         run: |
           set -euo pipefail
           mkdir -p current/win current/mac backups
@@ -794,8 +796,8 @@ jobs:
           test "$(sha256sum "current/win/$WIN_ZIP" | awk '{print $1}')" = "$WIN_INPUT_SHA256"
           test "$(sha256sum "current/mac/$MAC_ZIP" | awk '{print $1}')" = "$MAC_INPUT_SHA256"
           short_sha="$(printf '%s' "$GITHUB_SHA" | cut -c1-12)"
-          win_backup="Win_Grok_Chameleon_a.previous-before-composer-clearance-$short_sha.zip"
-          mac_backup="Mac_Grok_Chameleon_a.previous-before-composer-clearance-$short_sha.zip"
+          win_backup="Win_Grok_Chameleon_a.previous-before-unsaved-saved-compare-1000-$short_sha.zip"
+          mac_backup="Mac_Grok_Chameleon_a.previous-before-unsaved-saved-compare-1000-$short_sha.zip"
           cp "current/win/$WIN_ZIP" "backups/$win_backup"
           cp "current/mac/$MAC_ZIP" "backups/$mac_backup"
           gh release upload "$WIN_TAG" "backups/$win_backup" --repo "$GITHUB_REPOSITORY"
