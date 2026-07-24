@@ -307,7 +307,8 @@ jobs:
           $composerEventsText = Get-Content -Raw -LiteralPath $targetComposerEvents
           foreach ($marker in @(
             "function syncComposerScrollClearance()",
-            ".i_discover_card_list, .i_unsaved_card_list, .second_main_card_list",
+            ".i_discover_card_list, .i_unsaved_card_list, .prompt_card_list, .second_main_card_list",
+            '"prompt_main"',
             '"2nd_main"'
           )) {
             if (-not $composerEventsText.Contains($marker)) { throw "Composer scroll clearance marker missing: $marker" }
@@ -318,6 +319,7 @@ jobs:
             ".search_card_list,",
             ".i_discover_card_list,",
             ".i_unsaved_card_list,",
+            ".prompt_card_list,",
             ".second_main_card_list"
           )) {
             if (-not $cardsPromptStyleText.Contains($marker)) { throw "Card list scroll clearance style missing: $marker" }
@@ -590,12 +592,14 @@ jobs:
           grep -F 'function restoreImagineListScrollForScreen(screenId, scrollTop)' "$i_detail_actions_js"
           grep -F 'restoreImagineListScrollForScreen(returnScreenId, returnScrollTop)' "$i_detail_actions_js"
           grep -F 'function syncComposerScrollClearance()' "$composer_events_js"
-          grep -F '.i_discover_card_list, .i_unsaved_card_list, .second_main_card_list' "$composer_events_js"
+          grep -F '.i_discover_card_list, .i_unsaved_card_list, .prompt_card_list, .second_main_card_list' "$composer_events_js"
+          grep -F '"prompt_main"' "$composer_events_js"
           grep -F '"2nd_main"' "$composer_events_js"
           grep -F -- '--composer-scroll-clearance' "$cards_prompt_css"
           grep -F '.search_card_list,' "$cards_prompt_css"
           grep -F '.i_discover_card_list,' "$cards_prompt_css"
           grep -F '.i_unsaved_card_list,' "$cards_prompt_css"
+          grep -F '.prompt_card_list,' "$cards_prompt_css"
           grep -F '.second_main_card_list' "$cards_prompt_css"
           grep -F 'id="b_collection_filter_btn"' "$index_html"
           grep -F 'buildIncludeCollections: false' "$state_js"
