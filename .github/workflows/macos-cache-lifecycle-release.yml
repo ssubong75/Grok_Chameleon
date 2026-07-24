@@ -294,7 +294,7 @@ jobs:
             'process.platform === "darwin"',
             "process.resourcesPath",
             "function verifiedLibraryCardPreviewCacheDir(info = {})",
-            "function verifiedLibraryBuildPreviewDir(info = {}, kind = \"card\")",
+            'function verifiedLibraryBuildPreviewDir(info = {}, kind = "card")',
             'const expectedCacheDir = path.resolve(resolvedLibraryRoot, "cache", "card-previews");',
             'normalizedKind === "thumbnail" ? "thumbnails" : "cards"',
             'await clearCurrentCardPreviewCache("startup");'
