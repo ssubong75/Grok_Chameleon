@@ -49,7 +49,7 @@ jobs:
       RELEASE_TAG: v20260720-041036-win
       INPUT_ZIP: Win_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Win_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: c836ff5a8ba57421474454a1613a25c67822100fc4d4a56398706d0ca9924225
+      EXPECTED_INPUT_SHA256: b583058b7f16255809280163e2f10d527d605ae57c1db8fb008ab921e1c63ec9
 
     steps:
       - name: Check out the shared source commit
@@ -293,8 +293,25 @@ jobs:
           }
           if (-not (Get-Content -Raw -LiteralPath $targetCardRender).Contains("storedBackTarget.scrollTop = scrollTop")) { throw "Imagine detail source scroll capture marker missing." }
           if (-not (Get-Content -Raw -LiteralPath $targetIDetailActions).Contains("function restoreImagineListScrollForScreen(screenId, scrollTop)")) { throw "Imagine detail source scroll restore marker missing." }
-          if (-not (Get-Content -Raw -LiteralPath $targetComposerEvents).Contains("function syncComposerScrollClearance()")) { throw "Composer scroll clearance marker missing." }
-          if (-not (Get-Content -Raw -LiteralPath $targetCardsPromptStyle).Contains("--composer-scroll-clearance")) { throw "Card list scroll clearance style missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetIDetailActions).Contains("restoreImagineListScrollForScreen(returnScreenId, returnScrollTop)")) { throw "Unsaved heart scroll restore call missing." }
+          $composerEventsText = Get-Content -Raw -LiteralPath $targetComposerEvents
+          foreach ($marker in @(
+            "function syncComposerScrollClearance()",
+            ".i_discover_card_list, .i_unsaved_card_list, .second_main_card_list",
+            '"2nd_main"'
+          )) {
+            if (-not $composerEventsText.Contains($marker)) { throw "Composer scroll clearance marker missing: $marker" }
+          }
+          $cardsPromptStyleText = Get-Content -Raw -LiteralPath $targetCardsPromptStyle
+          foreach ($marker in @(
+            "--composer-scroll-clearance",
+            ".search_card_list,",
+            ".i_discover_card_list,",
+            ".i_unsaved_card_list,",
+            ".second_main_card_list"
+          )) {
+            if (-not $cardsPromptStyleText.Contains($marker)) { throw "Card list scroll clearance style missing: $marker" }
+          }
           if (-not (Get-Content -Raw -LiteralPath $targetIndex).Contains('id="b_collection_filter_btn"')) { throw "Build Collection filter button missing." }
           if (-not (Get-Content -Raw -LiteralPath $targetState).Contains("buildIncludeCollections: false")) { throw "Build Collection filter default missing." }
           if (-not (Get-Content -Raw -LiteralPath $targetBuildMain).Contains("library_state.buildIncludeCollections && post?.items?.length")) { throw "Build Collection item filter missing." }
@@ -392,7 +409,7 @@ jobs:
       RELEASE_TAG: v20260720-042100-mac
       INPUT_ZIP: Mac_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Mac_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: f3890e06f13975d125fb4dfe946b04f013a0619b7a457f330a778bb1a4ab4495
+      EXPECTED_INPUT_SHA256: 30aa553d694e0886c249e09342a151d4236d2d0ee46f41a873db9f49bdae009d
 
     steps:
       - name: Check out the shared source commit
@@ -550,8 +567,15 @@ jobs:
           grep -F 'def merged_post_source(posts: list[dict]) -> str:' "$server_py"
           grep -F 'storedBackTarget.scrollTop = scrollTop' "$card_render_js"
           grep -F 'function restoreImagineListScrollForScreen(screenId, scrollTop)' "$i_detail_actions_js"
+          grep -F 'restoreImagineListScrollForScreen(returnScreenId, returnScrollTop)' "$i_detail_actions_js"
           grep -F 'function syncComposerScrollClearance()' "$composer_events_js"
+          grep -F '.i_discover_card_list, .i_unsaved_card_list, .second_main_card_list' "$composer_events_js"
+          grep -F '"2nd_main"' "$composer_events_js"
           grep -F -- '--composer-scroll-clearance' "$cards_prompt_css"
+          grep -F '.search_card_list,' "$cards_prompt_css"
+          grep -F '.i_discover_card_list,' "$cards_prompt_css"
+          grep -F '.i_unsaved_card_list,' "$cards_prompt_css"
+          grep -F '.second_main_card_list' "$cards_prompt_css"
           grep -F 'id="b_collection_filter_btn"' "$index_html"
           grep -F 'buildIncludeCollections: false' "$state_js"
           grep -F 'library_state.buildIncludeCollections && post?.items?.length' "$build_main_js"
@@ -760,8 +784,8 @@ jobs:
           MAC_TAG: v20260720-042100-mac
           WIN_ZIP: Win_Grok_Chameleon_a.zip
           MAC_ZIP: Mac_Grok_Chameleon_a.zip
-          WIN_INPUT_SHA256: c836ff5a8ba57421474454a1613a25c67822100fc4d4a56398706d0ca9924225
-          MAC_INPUT_SHA256: f3890e06f13975d125fb4dfe946b04f013a0619b7a457f330a778bb1a4ab4495
+          WIN_INPUT_SHA256: b583058b7f16255809280163e2f10d527d605ae57c1db8fb008ab921e1c63ec9
+          MAC_INPUT_SHA256: 30aa553d694e0886c249e09342a151d4236d2d0ee46f41a873db9f49bdae009d
         run: |
           set -euo pipefail
           mkdir -p current/win current/mac backups
@@ -770,8 +794,8 @@ jobs:
           test "$(sha256sum "current/win/$WIN_ZIP" | awk '{print $1}')" = "$WIN_INPUT_SHA256"
           test "$(sha256sum "current/mac/$MAC_ZIP" | awk '{print $1}')" = "$MAC_INPUT_SHA256"
           short_sha="$(printf '%s' "$GITHUB_SHA" | cut -c1-12)"
-          win_backup="Win_Grok_Chameleon_a.previous-before-unsaved-collection-filter-$short_sha.zip"
-          mac_backup="Mac_Grok_Chameleon_a.previous-before-unsaved-collection-filter-$short_sha.zip"
+          win_backup="Win_Grok_Chameleon_a.previous-before-composer-clearance-$short_sha.zip"
+          mac_backup="Mac_Grok_Chameleon_a.previous-before-composer-clearance-$short_sha.zip"
           cp "current/win/$WIN_ZIP" "backups/$win_backup"
           cp "current/mac/$MAC_ZIP" "backups/$mac_backup"
           gh release upload "$WIN_TAG" "backups/$win_backup" --repo "$GITHUB_REPOSITORY"

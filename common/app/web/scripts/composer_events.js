@@ -15,7 +15,9 @@ let composerPromptDragReleaseAt = Number.NEGATIVE_INFINITY;
 function syncComposerScrollClearance() {
   if (!composer) return;
   const composerRect = composer.getBoundingClientRect();
-  const visibleLists = [...document.querySelectorAll(".i_card_list, .b_card_list")]
+  const visibleLists = [...document.querySelectorAll(
+    ".i_card_list, .b_card_list, .b_t2i_view_card_list, .search_card_list, .i_discover_card_list, .i_unsaved_card_list, .second_main_card_list",
+  )]
     .filter((list) => !list.closest("[hidden]") && list.getBoundingClientRect().height > 0);
   const clearance = Math.max(16, ...visibleLists.map((list) => {
     const listRect = list.getBoundingClientRect();
@@ -31,7 +33,16 @@ composerScrollClearanceObserver?.observe(composer);
 const composerScreenObserver = typeof MutationObserver === "function"
   ? new MutationObserver(syncComposerScrollClearance)
   : null;
-for (const screen of document.querySelectorAll("#i_main, #b_main")) {
+for (const screenId of [
+  "i_main",
+  "b_main",
+  "b_t2i_view_main",
+  "search_main",
+  "i_discover_main",
+  "i_unsaved_main",
+  "2nd_main",
+]) {
+  const screen = document.getElementById(screenId);
   composerScreenObserver?.observe(screen, { attributes: true, attributeFilter: ["hidden"] });
 }
 window.addEventListener("resize", syncComposerScrollClearance);

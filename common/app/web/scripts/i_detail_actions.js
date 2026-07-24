@@ -432,6 +432,8 @@ async function likeImagineCardPost(post) {
     showErrorPanel("Save unavailable", "This Imagine card has no post id.");
     return;
   }
+  const returnScreenId = screen_state.current_screen === "i_unsaved_main" ? "i_unsaved_main" : "";
+  const returnScrollTop = returnScreenId ? imagineListScrollTopForScreen(returnScreenId) : null;
   const t2iPost = typeof isImagineT2iPost === "function" && isImagineT2iPost(post);
   const payload = {
     id: postId,
@@ -466,6 +468,7 @@ async function likeImagineCardPost(post) {
   } else {
     refreshImagineRemoteViews();
   }
+  if (returnScreenId) restoreImagineListScrollForScreen(returnScreenId, returnScrollTop);
   toast("Saved Imagine post.");
 }
 
