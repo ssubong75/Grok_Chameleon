@@ -40,6 +40,7 @@ env:
   COMMON_SERVER: common/app/runtime/server.py
   COMMON_IMAGINE_ACCOUNTS: common/app/runtime/imagine_accounts.py
   COMMON_PROMPT_ACCOUNT: common/app/web/scripts/prompt_account.js
+  COMMON_ACCOUNT_CORE: common/app/web/scripts/account_core.js
   COMMON_MIGRATION: common/migration/migration.py
   WINDOWS_MIGRATION_UI: platform/windows/migration/migration_windows.ps1
   MACOS_MIGRATION_UI: platform/macos/migration/Migration.swift
@@ -52,7 +53,7 @@ jobs:
       RELEASE_TAG: v20260720-041036-win
       INPUT_ZIP: Win_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Win_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: ed9cd548808acfe0bcfe884789548fd4f3dd1dd0d5f5977f253f1302ac5e5f49
+      EXPECTED_INPUT_SHA256: 03a6b022c85eb08df5685d88ce76c307bd4ba85977ca7fe3ad52b1f5037d9ea5
 
     steps:
       - name: Check out the shared source commit
@@ -113,6 +114,7 @@ jobs:
             @{ Name = "collection_actions"; Relative = "web\scripts\collection_actions.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_COLLECTION_ACTIONS) },
             @{ Name = "prompt_events"; Relative = "web\scripts\prompt_events.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_PROMPT_EVENTS) },
             @{ Name = "prompt_account"; Relative = "web\scripts\prompt_account.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_PROMPT_ACCOUNT) },
+            @{ Name = "account_core"; Relative = "web\scripts\account_core.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_ACCOUNT_CORE) },
             @{ Name = "ui_feedback"; Relative = "web\scripts\ui_feedback.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_UI_FEEDBACK) },
             @{ Name = "account_style"; Relative = "web\styles\account.css"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_ACCOUNT_STYLE) }
           )
@@ -124,6 +126,7 @@ jobs:
           $targetServer = ($sharedSources | Where-Object Name -eq "server").Target
           $targetImagineAccounts = ($sharedSources | Where-Object Name -eq "imagine_accounts").Target
           $targetPromptAccount = ($sharedSources | Where-Object Name -eq "prompt_account").Target
+          $targetAccountCore = ($sharedSources | Where-Object Name -eq "account_core").Target
           $targetIndex = ($sharedSources | Where-Object Name -eq "index").Target
           $targetState = ($sharedSources | Where-Object Name -eq "state").Target
           $targetBuildMain = ($sharedSources | Where-Object Name -eq "build_main").Target
@@ -300,7 +303,11 @@ jobs:
             'ACCOUNT_TIER_SORT_ORDER = {"heavy": 0, "super": 1, "free": 2}',
             'def sort_accounts_by_priority(accounts: list[dict], active_id: str = "") -> list[dict]:',
             'def write_build_auth(root: Path, data: dict, *, preserve_order: bool = False) -> None:',
-            'write_build_auth(root, store, preserve_order=True)'
+            'write_build_auth(root, store, preserve_order=True)',
+            'def oauth_browser_error(target: dict | None) -> str:',
+            'def build_account_is_denied(account: dict | None) -> bool:',
+            'denied_build_id = account_id(',
+            'verify_imagine_saved_access(normalize_imagine_account({'
           )) {
             if (-not $serverText.Contains($marker)) { throw "Windows account ordering marker missing: $marker" }
           }
@@ -313,9 +320,18 @@ jobs:
             'const accountTierSortOrder = { heavy: 0, super: 1, free: 2 };',
             'function sortAccountCardsByPriority(provider)',
             'row.draggable = true;',
-            'if (targetIndex >= 0 && from < targetIndex) to += 1;'
+            'if (targetIndex >= 0 && from < targetIndex) to += 1;',
+            'if (status === "denied") return "Denied";',
+            'Build account access denied.'
           )) {
             if (-not $promptAccountText.Contains($marker)) { throw "Windows account card marker missing: $marker" }
+          }
+          $accountCoreText = Get-Content -Raw -LiteralPath $targetAccountCore
+          foreach ($marker in @(
+            'function isDeniedBuildAccount(account)',
+            'function firstSelectableBuildAccountId(accounts)'
+          )) {
+            if (-not $accountCoreText.Contains($marker)) { throw "Windows denied account marker missing: $marker" }
           }
           $mainText = Get-Content -Raw -LiteralPath $targetMain
           foreach ($marker in @(
@@ -456,7 +472,7 @@ jobs:
       RELEASE_TAG: v20260720-042100-mac
       INPUT_ZIP: Mac_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Mac_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: 86b476663c1173e37b72735a45efa7b18dd5f7155bcc251680ba809873a57e89
+      EXPECTED_INPUT_SHA256: 014c860b8b67d1b764a7b37dc16ee450cc67859612c328d8033b23c3ad1334cb
 
     steps:
       - name: Check out the shared source commit
@@ -514,6 +530,7 @@ jobs:
             web/scripts/collection_actions.js
             web/scripts/prompt_events.js
             web/scripts/prompt_account.js
+            web/scripts/account_core.js
             web/scripts/ui_feedback.js
             web/styles/account.css
           )
@@ -523,6 +540,7 @@ jobs:
           server_py="$app_root/runtime/server.py"
           imagine_accounts_py="$app_root/runtime/imagine_accounts.py"
           prompt_account_js="$app_root/web/scripts/prompt_account.js"
+          account_core_js="$app_root/web/scripts/account_core.js"
           index_html="$app_root/web/index.html"
           state_js="$app_root/web/scripts/state.js"
           build_main_js="$app_root/web/scripts/build_main.js"
@@ -633,6 +651,10 @@ jobs:
           grep -F 'ACCOUNT_TIER_SORT_ORDER = {"heavy": 0, "super": 1, "free": 2}' "$server_py"
           grep -F 'def sort_accounts_by_priority(accounts: list[dict], active_id: str = "") -> list[dict]:' "$server_py"
           grep -F 'write_build_auth(root, store, preserve_order=True)' "$server_py"
+          grep -F 'def oauth_browser_error(target: dict | None) -> str:' "$server_py"
+          grep -F 'def build_account_is_denied(account: dict | None) -> bool:' "$server_py"
+          grep -F 'denied_build_id = account_id(' "$server_py"
+          grep -F 'verify_imagine_saved_access(normalize_imagine_account({' "$server_py"
           if grep -E 'supergrokheavy|freecreditswithsupergrok|supergrok포함무료크레딧' "$imagine_accounts_py"; then
             echo 'Account tier marketing fallback remains.' >&2
             exit 1
@@ -641,6 +663,10 @@ jobs:
           grep -F 'function sortAccountCardsByPriority(provider)' "$prompt_account_js"
           grep -F 'row.draggable = true;' "$prompt_account_js"
           grep -F 'if (targetIndex >= 0 && from < targetIndex) to += 1;' "$prompt_account_js"
+          grep -F 'if (status === "denied") return "Denied";' "$prompt_account_js"
+          grep -F 'Build account access denied.' "$prompt_account_js"
+          grep -F 'function isDeniedBuildAccount(account)' "$account_core_js"
+          grep -F 'function firstSelectableBuildAccountId(accounts)' "$account_core_js"
           grep -F 'storedBackTarget.scrollTop = scrollTop' "$card_render_js"
           grep -F 'function restoreImagineListScrollForScreen(screenId, scrollTop)' "$i_detail_actions_js"
           grep -F 'restoreImagineListScrollForScreen(returnScreenId, returnScrollTop)' "$i_detail_actions_js"
@@ -775,6 +801,7 @@ jobs:
             web/scripts/collection_actions.js
             web/scripts/prompt_events.js
             web/scripts/prompt_account.js
+            web/scripts/account_core.js
           )
           if find "$root" -type d -name '__pycache__' -print | grep -q .; then
             echo 'Python cache found before Mac packaging.' >&2
@@ -882,8 +909,8 @@ jobs:
           MAC_TAG: v20260720-042100-mac
           WIN_ZIP: Win_Grok_Chameleon_a.zip
           MAC_ZIP: Mac_Grok_Chameleon_a.zip
-          WIN_INPUT_SHA256: ed9cd548808acfe0bcfe884789548fd4f3dd1dd0d5f5977f253f1302ac5e5f49
-          MAC_INPUT_SHA256: 86b476663c1173e37b72735a45efa7b18dd5f7155bcc251680ba809873a57e89
+          WIN_INPUT_SHA256: 03a6b022c85eb08df5685d88ce76c307bd4ba85977ca7fe3ad52b1f5037d9ea5
+          MAC_INPUT_SHA256: 014c860b8b67d1b764a7b37dc16ee450cc67859612c328d8033b23c3ad1334cb
         run: |
           set -euo pipefail
           mkdir -p current/win current/mac backups
@@ -892,8 +919,8 @@ jobs:
           test "$(sha256sum "current/win/$WIN_ZIP" | awk '{print $1}')" = "$WIN_INPUT_SHA256"
           test "$(sha256sum "current/mac/$MAC_ZIP" | awk '{print $1}')" = "$MAC_INPUT_SHA256"
           short_sha="$(printf '%s' "$GITHUB_SHA" | cut -c1-12)"
-          win_backup="Win_Grok_Chameleon_a.previous-before-account-tier-order-$short_sha.zip"
-          mac_backup="Mac_Grok_Chameleon_a.previous-before-account-tier-order-$short_sha.zip"
+          win_backup="Win_Grok_Chameleon_a.previous-before-total-account-denied-$short_sha.zip"
+          mac_backup="Mac_Grok_Chameleon_a.previous-before-total-account-denied-$short_sha.zip"
           cp "current/win/$WIN_ZIP" "backups/$win_backup"
           cp "current/mac/$MAC_ZIP" "backups/$mac_backup"
           gh release upload "$WIN_TAG" "backups/$win_backup" --repo "$GITHUB_REPOSITORY"

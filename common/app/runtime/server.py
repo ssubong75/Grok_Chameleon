@@ -789,7 +789,37 @@ def start_oauth_callback_server() -> tuple[ThreadingHTTPServer, int]:
     raise RuntimeError(f"Could not start OAuth callback server: {last_error}")
 
 
-def wait_oauth_callback(server: ThreadingHTTPServer, timeout_seconds: int = 300) -> dict:
+def oauth_browser_error(target: dict | None) -> str:
+    ws_url = str((target or {}).get("webSocketDebuggerUrl") or "")
+    if not ws_url:
+        return ""
+    try:
+        result = cdp_call(
+            ws_url,
+            "Runtime.evaluate",
+            {
+                "expression": "document.body ? document.body.innerText : ''",
+                "returnByValue": True,
+            },
+            timeout=2,
+        )
+        value = result.get("result") if isinstance(result.get("result"), dict) else {}
+        text = str(value.get("value") or "").strip()
+    except Exception:
+        return ""
+    lowered = text.lower()
+    if "access denied" in lowered:
+        return "Access denied"
+    if "failed to generate authentication code" in lowered:
+        return "Failed to generate authentication code"
+    return ""
+
+
+def wait_oauth_callback(
+    server: ThreadingHTTPServer,
+    timeout_seconds: int = 300,
+    target: dict | None = None,
+) -> dict:
     server.timeout = 1
     deadline = time.monotonic() + max(1, timeout_seconds)
     while time.monotonic() < deadline:
@@ -797,6 +827,14 @@ def wait_oauth_callback(server: ThreadingHTTPServer, timeout_seconds: int = 300)
         result = getattr(server, "oauth_result", None)
         if isinstance(result, dict):
             return result
+        browser_error = oauth_browser_error(target)
+        if browser_error:
+            return {
+                "code": "",
+                "state": "",
+                "error": "access_denied",
+                "error_description": browser_error,
+            }
     raise RuntimeError("Timed out waiting for xAI account authorization.")
 
 
@@ -948,6 +986,14 @@ def normalize_build_account(account) -> dict:
     }
 
 
+def build_account_is_denied(account: dict | None) -> bool:
+    return (
+        isinstance(account, dict)
+        and str(account.get("status") or "") == "oauth_error"
+        and str(account.get("oauth_error") or "").lower() == "access_denied"
+    )
+
+
 def build_account_from_auth(raw, source_name: str = "", label: str = "") -> dict:
     candidates = auth_candidates(raw)
     chosen = candidates[0] if candidates else {}
@@ -982,12 +1028,18 @@ def normalize_build_auth(data) -> dict:
     raw_accounts = data.get("accounts") if isinstance(data, dict) and isinstance(data.get("accounts"), list) else []
     accounts = [normalize_build_account(item) for item in raw_accounts if isinstance(item, dict)]
     active_id = str(data.get("active_id") or "") if isinstance(data, dict) else ""
-    if active_id and not any(account["id"] == active_id for account in accounts):
+    active = next((account for account in accounts if account["id"] == active_id), None)
+    if active_id and (not active or build_account_is_denied(active)):
         active_id = ""
+    if not active_id:
+        active_id = next(
+            (account["id"] for account in accounts if not build_account_is_denied(account)),
+            "",
+        )
     return {
         "version": 1,
         "provider": "build",
-        "active_id": active_id or (accounts[0]["id"] if accounts else ""),
+        "active_id": active_id,
         "accounts": accounts,
         "updated_at": str((data or {}).get("updated_at") or now_iso()) if isinstance(data, dict) else now_iso(),
     }
@@ -1177,45 +1229,14 @@ def register_total_account(payload: dict) -> dict:
         identity = fetch_imagine_identity(cookies)
         imagine_email = str(identity.get("email") or "").strip()
 
-        verifier, challenge = oauth_pkce_pair()
-        state = secrets.token_hex(16)
-        nonce = secrets.token_hex(16)
-        callback_server, callback_port = start_oauth_callback_server()
-        redirect_uri = f"http://127.0.0.1:{callback_port}{XAI_OAUTH_REDIRECT_PATH}"
-        oauth_url = build_oauth_authorize_url(redirect_uri, challenge, state, nonce)
-        navigate_cdp_target(target, oauth_url)
-        callback_result = wait_oauth_callback(callback_server, timeout_seconds=300)
-        if callback_result.get("error"):
-            raise RuntimeError(callback_result.get("error_description") or callback_result.get("error") or "xAI authorization failed.")
-        if callback_result.get("state") != state:
-            raise RuntimeError("xAI authorization state mismatch.")
-        code = str(callback_result.get("code") or "")
-        if not code:
-            raise RuntimeError("xAI authorization did not return a code.")
-        tokens = exchange_oauth_code(code, redirect_uri, verifier)
-        userinfo = fetch_oauth_userinfo(str(tokens.get("access_token") or ""))
-        build_email = str(find_email_in_value(userinfo) or find_email_in_value(tokens) or "").strip()
-        if imagine_email and build_email and imagine_email.lower() != build_email.lower():
-            raise RuntimeError(f"Imagine account {imagine_email} and Build account {build_email} do not match.")
-        email = build_email or imagine_email
-
-        navigate_cdp_target(target, IMAGINE_BASE + "/imagine/saved")
-        target = wait_total_account_imagine_login(debug_port, timeout_seconds=60)
-        cookies = capture_total_account_cookies(target)
-        identity = fetch_imagine_identity(cookies) or identity
-        imagine_email = str(identity.get("email") or imagine_email).strip()
-        if imagine_email and build_email and imagine_email.lower() != build_email.lower():
-            raise RuntimeError(f"Imagine account {imagine_email} and Build account {build_email} do not match.")
-        email = build_email or imagine_email
-
         imagine_account = normalize_imagine_account({
             "provider": "imagine",
             "captured_at": now_iso(),
             "source_url": str(target.get("url") or IMAGINE_BASE + "/imagine"),
             "cookies": cookies,
             **identity,
-            "email": email or imagine_email,
-            "label": email or identity.get("label") or imagine_email or "Imagine",
+            "email": imagine_email,
+            "label": imagine_email or identity.get("label") or "Imagine",
         })
         verify_imagine_saved_access(imagine_account)
         files = account_files(root)
@@ -1227,24 +1248,105 @@ def register_total_account(payload: dict) -> dict:
         files["imagine"]["active_id"] = imagine_account["id"]
         write_imagine_auth(root, files["imagine"])
 
-        build_auth = build_auth_from_oauth(tokens, userinfo, email)
-        build_account = build_account_from_auth(build_auth, "xai_oauth", email)
-        previous_build_tier = matching_account_tier(files["build"].get("accounts") or [], build_account)
-        if previous_build_tier:
-            build_account["tier"] = previous_build_tier
-        files["build"]["accounts"] = upsert_account(files["build"].get("accounts") or [], build_account)
-        files["build"]["active_id"] = build_account["id"]
-        tier_result = fetch_build_usage_tier_for_account(root, files["build"], build_account)
-        if tier_result.get("ok"):
-            build_account["tier"] = normalize_account_tier(tier_result.get("tier"))
-            build_account["tier_checked_at"] = now_iso()
-        elif previous_build_tier:
-            build_account["tier"] = previous_build_tier
-        write_build_auth(root, files["build"])
+        try:
+            verifier, challenge = oauth_pkce_pair()
+            state = secrets.token_hex(16)
+            nonce = secrets.token_hex(16)
+            callback_server, callback_port = start_oauth_callback_server()
+            redirect_uri = f"http://127.0.0.1:{callback_port}{XAI_OAUTH_REDIRECT_PATH}"
+            oauth_url = build_oauth_authorize_url(redirect_uri, challenge, state, nonce)
+            navigate_cdp_target(target, oauth_url)
+            callback_result = wait_oauth_callback(callback_server, timeout_seconds=300, target=target)
+            if callback_result.get("error"):
+                raise RuntimeError(callback_result.get("error_description") or callback_result.get("error") or "xAI authorization failed.")
+            if callback_result.get("state") != state:
+                raise RuntimeError("xAI authorization state mismatch.")
+            code = str(callback_result.get("code") or "")
+            if not code:
+                raise RuntimeError("xAI authorization did not return a code.")
+            tokens = exchange_oauth_code(code, redirect_uri, verifier)
+            userinfo = fetch_oauth_userinfo(str(tokens.get("access_token") or ""))
+            build_email = str(find_email_in_value(userinfo) or find_email_in_value(tokens) or "").strip()
+            if imagine_email and build_email and imagine_email.lower() != build_email.lower():
+                raise RuntimeError(f"Imagine account {imagine_email} and Build account {build_email} do not match.")
+            email = build_email or imagine_email
+
+            build_auth = build_auth_from_oauth(tokens, userinfo, email)
+            build_account = build_account_from_auth(build_auth, "xai_oauth", email)
+            previous_build_tier = matching_account_tier(files["build"].get("accounts") or [], build_account)
+            if previous_build_tier:
+                build_account["tier"] = previous_build_tier
+            files["build"]["accounts"] = upsert_account(files["build"].get("accounts") or [], build_account)
+            files["build"]["active_id"] = build_account["id"]
+            tier_result = fetch_build_usage_tier_for_account(root, files["build"], build_account)
+            if tier_result.get("ok"):
+                build_account["tier"] = normalize_account_tier(tier_result.get("tier"))
+                build_account["tier_checked_at"] = now_iso()
+            elif previous_build_tier:
+                build_account["tier"] = previous_build_tier
+            write_build_auth(root, files["build"])
+        except Exception as exc:
+            build_error = str(exc).strip() or "Unknown Build registration error."
+            build_error_lower = build_error.lower()
+            build_denied = (
+                "access denied" in build_error_lower
+                or "failed to generate authentication code" in build_error_lower
+            )
+            denied_build_id = ""
+            if "access denied" in build_error_lower:
+                build_error = "Access denied"
+            if build_denied:
+                denied_build_id = account_id(
+                    "build_denied",
+                    imagine_email or imagine_account["id"],
+                )
+                denied_build_account = normalize_build_account({
+                    "id": denied_build_id,
+                    "provider": "build",
+                    "label": imagine_email or imagine_account.get("label") or "Build",
+                    "email": imagine_email,
+                    "tier": imagine_account.get("tier"),
+                    "source_name": "xai_oauth",
+                    "registered_at": now_iso(),
+                    "status": "oauth_error",
+                    "oauth_error": "access_denied",
+                    "oauth_error_at": now_iso(),
+                    "auth": {},
+                })
+                existing_build_accounts = files["build"].get("accounts") or []
+                files["build"]["accounts"] = [
+                    denied_build_account,
+                    *[
+                        account
+                        for account in existing_build_accounts
+                        if str(account.get("id") or "") != denied_build_id
+                    ],
+                ]
+                write_build_auth(root, files["build"])
+            data = scan_library(root)
+            data["total_account"] = {
+                "ok": True,
+                "partial": True,
+                "imagine_ok": True,
+                "build_ok": False,
+                "email": imagine_email,
+                "imagine_id": imagine_account["id"],
+                "build_id": denied_build_id,
+                "build_error": build_error[:500],
+                "message": f"Imagine registered. Build registration failed: {build_error[:300]}",
+            }
+            log_event(
+                f"total_account_partial session={session_id} "
+                f"email={imagine_email or ''} build_error={build_error[:300]}"
+            )
+            return data
 
         data = scan_library(root)
         data["total_account"] = {
             "ok": True,
+            "partial": False,
+            "imagine_ok": True,
+            "build_ok": True,
             "email": email,
             "imagine_id": imagine_account["id"],
             "build_id": build_account["id"],
@@ -1273,6 +1375,8 @@ def select_build_account(payload: dict) -> dict:
     account = next((account for account in build.get("accounts") or [] if account.get("id") == account_id_value), None)
     if not account:
         raise RuntimeError("Build account not found.")
+    if build_account_is_denied(account):
+        raise RuntimeError("Denied Build account cannot be selected.")
     build["accounts"] = reorder_accounts_by_ids(build.get("accounts") or [], [account_id_value])
     build["active_id"] = account_id_value
     previous_tier = normalize_account_tier(account.get("tier"))
@@ -1299,7 +1403,10 @@ def delete_build_account(payload: dict) -> dict:
         raise RuntimeError("Build account not found.")
     build["accounts"] = accounts
     if build.get("active_id") == account_id_value:
-        build["active_id"] = accounts[0].get("id") if accounts else ""
+        build["active_id"] = next(
+            (str(account.get("id") or "") for account in accounts if not build_account_is_denied(account)),
+            "",
+        )
     write_build_auth(root, build)
     return scan_library(root)
 
@@ -8822,9 +8929,9 @@ def active_build_account(root: Path) -> dict | None:
     accounts = build.get("accounts") if isinstance(build.get("accounts"), list) else []
     active_id = str(build.get("active_id") or "")
     active = next((account for account in accounts if str(account.get("id") or "") == active_id), None)
-    if active_id:
+    if active_id and active and not build_account_is_denied(active):
         return active
-    return accounts[0] if accounts else None
+    return next((account for account in accounts if not build_account_is_denied(account)), None)
 
 
 def active_build_store_and_account(root: Path) -> tuple[dict, dict]:
@@ -8832,9 +8939,12 @@ def active_build_store_and_account(root: Path) -> tuple[dict, dict]:
     accounts = build.get("accounts") if isinstance(build.get("accounts"), list) else []
     active_id = str(build.get("active_id") or "")
     account = next((item for item in accounts if str(item.get("id") or "") == active_id), None)
-    if active_id and not isinstance(account, dict):
+    if active_id and (not isinstance(account, dict) or build_account_is_denied(account)):
         raise RuntimeError("Selected Build account is missing. Choose a Build account again.")
-    account = account or (accounts[0] if accounts else None)
+    account = account or next(
+        (item for item in accounts if not build_account_is_denied(item)),
+        None,
+    )
     if not isinstance(account, dict):
         raise RuntimeError("Build account is not set.")
     return build, account
@@ -11239,6 +11349,12 @@ def wait_total_account_imagine_login(debug_port: int, timeout_seconds: int = 240
                 last_probe = chrome_bridge_login_probe(target)
                 if last_probe.get("ok"):
                     time.sleep(IMAGINE_BRIDGE_LOGIN_SAVE_DELAY_SECONDS)
+                    cookies = capture_total_account_cookies(target)
+                    verify_imagine_saved_access(normalize_imagine_account({
+                        "provider": "imagine",
+                        "source_url": str(target.get("url") or IMAGINE_BASE + "/imagine"),
+                        "cookies": cookies,
+                    }))
                     return target
             except Exception as exc:
                 last_probe = {"ok": False, "error": str(exc)[:240]}

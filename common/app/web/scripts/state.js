@@ -288,8 +288,9 @@
         accounts: (data.accounts.imagine.accounts || []).map(normalizeImagineAccount),
       };
     }
-    if (!account_state.build.accounts.some((account) => account.id === account_state.build.active_id)) {
-      account_state.build.active_id = account_state.build.accounts[0]?.id || "";
+    const activeBuild = account_state.build.accounts.find((account) => account.id === account_state.build.active_id);
+    if (!activeBuild || isDeniedBuildAccount(activeBuild)) {
+      account_state.build.active_id = firstSelectableBuildAccountId(account_state.build.accounts);
     }
     if (account_state.imagine.active_id && !account_state.imagine.accounts.some((account) => account.id === account_state.imagine.active_id)) {
       account_state.imagine.active_id = "";

@@ -234,6 +234,9 @@
 
   function accountStatus(account, provider) {
     if (!account) return "unknown";
+    if (provider === "build" && String(account.oauth_error || "").toLowerCase() === "access_denied") {
+      return "denied";
+    }
     if (provider === "imagine") {
       return account_state.imagineStatuses?.[account.id]?.status
         || account.status
@@ -248,12 +251,14 @@
     if (status === "ok") return "OK";
     if (status === "expired") return "Expired";
     if (status === "checking") return "Checking";
+    if (status === "denied") return "Denied";
     if (status === "login_required") return "Expired";
     if (status === "oauth_error") return "Expired";
     return "Unknown";
   }
 
   function accountStatusClass(status) {
+    if (status === "denied") return "expired";
     if (status === "login_required" || status === "oauth_error") return "expired";
     return status || "unknown";
   }
@@ -348,7 +353,13 @@
       deleteAccount(provider, account.id).catch((error) => setLibraryMessage(error.message || "Account delete failed."));
     });
 
-    const choose = () => selectAccount(provider, account.id);
+    const choose = () => {
+      if (provider === "build" && status === "denied") {
+        toastError("Build account access denied.");
+        return Promise.resolve();
+      }
+      return selectAccount(provider, account.id);
+    };
     row.addEventListener("click", () => choose().catch((error) => setLibraryMessage(error.message || "Account select failed.")));
     row.addEventListener("keydown", (event) => {
       if (event.key !== "Enter" && event.key !== " ") return;
@@ -762,11 +773,15 @@
     }
     try {
       const data = await qApi("/api/accounts/total/register", {});
+      const totalResult = data?.total_account || {};
       applyLibrarySnapshot(data);
       sortAccountCardsByPriority("build");
       sortAccountCardsByPriority("imagine");
       clearImagineAccountScopedCache(String(account_state.imagine.active_id || ""));
       renderAccounts();
+      if (totalResult.partial && totalResult.imagine_ok && totalResult.build_ok === false) {
+        toastError(totalResult.message || "Imagine registered. Build registration failed.");
+      }
     } finally {
       if (button) {
         button.disabled = false;
