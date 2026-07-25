@@ -38,6 +38,8 @@ env:
   COMMON_ACCOUNT_STYLE: common/app/web/styles/account.css
   COMMON_PRELOAD: common/app/electron/preload-bridge.js
   COMMON_SERVER: common/app/runtime/server.py
+  COMMON_IMAGINE_ACCOUNTS: common/app/runtime/imagine_accounts.py
+  COMMON_PROMPT_ACCOUNT: common/app/web/scripts/prompt_account.js
   COMMON_MIGRATION: common/migration/migration.py
   WINDOWS_MIGRATION_UI: platform/windows/migration/migration_windows.ps1
   MACOS_MIGRATION_UI: platform/macos/migration/Migration.swift
@@ -50,7 +52,7 @@ jobs:
       RELEASE_TAG: v20260720-041036-win
       INPUT_ZIP: Win_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Win_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: 9e02db0610ec5df2900bded89bebdb78829884e1de22233b17587c61bb532bdc
+      EXPECTED_INPUT_SHA256: ed9cd548808acfe0bcfe884789548fd4f3dd1dd0d5f5977f253f1302ac5e5f49
 
     steps:
       - name: Check out the shared source commit
@@ -89,6 +91,7 @@ jobs:
             @{ Name = "main"; Relative = "electron\main.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_MAIN) },
             @{ Name = "preload"; Relative = "electron\preload-bridge.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_PRELOAD) },
             @{ Name = "server"; Relative = "runtime\server.py"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_SERVER) },
+            @{ Name = "imagine_accounts"; Relative = "runtime\imagine_accounts.py"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_IMAGINE_ACCOUNTS) },
             @{ Name = "index"; Relative = "web\index.html"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_INDEX) },
             @{ Name = "state"; Relative = "web\scripts\state.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_STATE) },
             @{ Name = "build_main"; Relative = "web\scripts\build_main.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_BUILD_MAIN) },
@@ -109,6 +112,7 @@ jobs:
             @{ Name = "i_source"; Relative = "web\scripts\i_source_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_I_SOURCE) },
             @{ Name = "collection_actions"; Relative = "web\scripts\collection_actions.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_COLLECTION_ACTIONS) },
             @{ Name = "prompt_events"; Relative = "web\scripts\prompt_events.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_PROMPT_EVENTS) },
+            @{ Name = "prompt_account"; Relative = "web\scripts\prompt_account.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_PROMPT_ACCOUNT) },
             @{ Name = "ui_feedback"; Relative = "web\scripts\ui_feedback.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_UI_FEEDBACK) },
             @{ Name = "account_style"; Relative = "web\styles\account.css"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_ACCOUNT_STYLE) }
           )
@@ -118,6 +122,8 @@ jobs:
           $targetMain = ($sharedSources | Where-Object Name -eq "main").Target
           $targetPreload = ($sharedSources | Where-Object Name -eq "preload").Target
           $targetServer = ($sharedSources | Where-Object Name -eq "server").Target
+          $targetImagineAccounts = ($sharedSources | Where-Object Name -eq "imagine_accounts").Target
+          $targetPromptAccount = ($sharedSources | Where-Object Name -eq "prompt_account").Target
           $targetIndex = ($sharedSources | Where-Object Name -eq "index").Target
           $targetState = ($sharedSources | Where-Object Name -eq "state").Target
           $targetBuildMain = ($sharedSources | Where-Object Name -eq "build_main").Target
@@ -190,6 +196,8 @@ jobs:
           }
           python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" $targetServer
           if ($LASTEXITCODE -ne 0) { throw "Windows server.py syntax check failed." }
+          python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" $targetImagineAccounts
+          if ($LASTEXITCODE -ne 0) { throw "Windows imagine_accounts.py syntax check failed." }
           python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" $targetMigration
           if ($LASTEXITCODE -ne 0) { throw "Windows migration.py syntax check failed." }
           $tokens = $null
@@ -287,6 +295,27 @@ jobs:
             'if parsed.path == "/api/build-preview":'
           )) {
             if (-not $serverText.Contains($marker)) { throw "Windows relation recovery marker missing: $marker" }
+          }
+          foreach ($marker in @(
+            'ACCOUNT_TIER_SORT_ORDER = {"heavy": 0, "super": 1, "free": 2}',
+            'def sort_accounts_by_priority(accounts: list[dict], active_id: str = "") -> list[dict]:',
+            'def write_build_auth(root: Path, data: dict, *, preserve_order: bool = False) -> None:',
+            'write_build_auth(root, store, preserve_order=True)'
+          )) {
+            if (-not $serverText.Contains($marker)) { throw "Windows account ordering marker missing: $marker" }
+          }
+          $imagineAccountsText = Get-Content -Raw -LiteralPath $targetImagineAccounts
+          foreach ($forbidden in @("supergrokheavy", "freecreditswithsupergrok", "supergrok포함무료크레딧")) {
+            if ($imagineAccountsText.Contains($forbidden)) { throw "Windows account tier marketing fallback remains: $forbidden" }
+          }
+          $promptAccountText = Get-Content -Raw -LiteralPath $targetPromptAccount
+          foreach ($marker in @(
+            'const accountTierSortOrder = { heavy: 0, super: 1, free: 2 };',
+            'function sortAccountCardsByPriority(provider)',
+            'row.draggable = true;',
+            'if (targetIndex >= 0 && from < targetIndex) to += 1;'
+          )) {
+            if (-not $promptAccountText.Contains($marker)) { throw "Windows account card marker missing: $marker" }
           }
           $mainText = Get-Content -Raw -LiteralPath $targetMain
           foreach ($marker in @(
@@ -408,6 +437,8 @@ jobs:
           }
           python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" (Join-Path $verifiedAppRoot "runtime\server.py")
           if ($LASTEXITCODE -ne 0) { throw "Packaged Windows server syntax check failed." }
+          python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" (Join-Path $verifiedAppRoot "runtime\imagine_accounts.py")
+          if ($LASTEXITCODE -ne 0) { throw "Packaged Windows imagine_accounts syntax check failed." }
           "windows-output-sha256=" + (Get-FileHash -Algorithm SHA256 -LiteralPath $outputZip).Hash.ToLowerInvariant()
 
       - name: Retain the verified Windows build
@@ -425,7 +456,7 @@ jobs:
       RELEASE_TAG: v20260720-042100-mac
       INPUT_ZIP: Mac_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Mac_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: 76fab46651c4348951630bc82f770c0d003f01f92a6d3097cf6f671e8dff41b2
+      EXPECTED_INPUT_SHA256: 86b476663c1173e37b72735a45efa7b18dd5f7155bcc251680ba809873a57e89
 
     steps:
       - name: Check out the shared source commit
@@ -461,6 +492,7 @@ jobs:
             electron/main.js
             electron/preload-bridge.js
             runtime/server.py
+            runtime/imagine_accounts.py
             web/index.html
             web/scripts/state.js
             web/scripts/build_main.js
@@ -481,6 +513,7 @@ jobs:
             web/scripts/i_source_render.js
             web/scripts/collection_actions.js
             web/scripts/prompt_events.js
+            web/scripts/prompt_account.js
             web/scripts/ui_feedback.js
             web/styles/account.css
           )
@@ -488,6 +521,8 @@ jobs:
           main_js="$app_root/electron/main.js"
           preload_js="$app_root/electron/preload-bridge.js"
           server_py="$app_root/runtime/server.py"
+          imagine_accounts_py="$app_root/runtime/imagine_accounts.py"
+          prompt_account_js="$app_root/web/scripts/prompt_account.js"
           index_html="$app_root/web/index.html"
           state_js="$app_root/web/scripts/state.js"
           build_main_js="$app_root/web/scripts/build_main.js"
@@ -555,6 +590,13 @@ jobs:
           path = pathlib.Path(sys.argv[1])
           ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
           PY
+          python3 - "$imagine_accounts_py" <<'PY'
+          import ast
+          import pathlib
+          import sys
+          path = pathlib.Path(sys.argv[1])
+          ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+          PY
           grep -F 'const imageCountOptions = provider === "imagine"' "$target"
           grep -F '? buildT2iCountOptions.filter((option) => option !== "1")' "$target"
           grep -F 'const imageCountDefault = "5";' "$target"
@@ -588,6 +630,17 @@ jobs:
           grep -F 'def remove_build_previews_for_tree(root: Path, folder: Path) -> None:' "$server_py"
           grep -F 'cleaned_items = remove_embedded_preview_files(target_dir, post.get("items") or [])' "$server_py"
           grep -F 'if parsed.path == "/api/build-preview":' "$server_py"
+          grep -F 'ACCOUNT_TIER_SORT_ORDER = {"heavy": 0, "super": 1, "free": 2}' "$server_py"
+          grep -F 'def sort_accounts_by_priority(accounts: list[dict], active_id: str = "") -> list[dict]:' "$server_py"
+          grep -F 'write_build_auth(root, store, preserve_order=True)' "$server_py"
+          if grep -E 'supergrokheavy|freecreditswithsupergrok|supergrok포함무료크레딧' "$imagine_accounts_py"; then
+            echo 'Account tier marketing fallback remains.' >&2
+            exit 1
+          fi
+          grep -F 'const accountTierSortOrder = { heavy: 0, super: 1, free: 2 };' "$prompt_account_js"
+          grep -F 'function sortAccountCardsByPriority(provider)' "$prompt_account_js"
+          grep -F 'row.draggable = true;' "$prompt_account_js"
+          grep -F 'if (targetIndex >= 0 && from < targetIndex) to += 1;' "$prompt_account_js"
           grep -F 'storedBackTarget.scrollTop = scrollTop' "$card_render_js"
           grep -F 'function restoreImagineListScrollForScreen(screenId, scrollTop)' "$i_detail_actions_js"
           grep -F 'restoreImagineListScrollForScreen(returnScreenId, returnScrollTop)' "$i_detail_actions_js"
@@ -700,6 +753,7 @@ jobs:
             electron/main.js
             electron/preload-bridge.js
             runtime/server.py
+            runtime/imagine_accounts.py
             web/index.html
             web/scripts/state.js
             web/scripts/build_main.js
@@ -720,6 +774,7 @@ jobs:
             web/scripts/i_source_render.js
             web/scripts/collection_actions.js
             web/scripts/prompt_events.js
+            web/scripts/prompt_account.js
           )
           if find "$root" -type d -name '__pycache__' -print | grep -q .; then
             echo 'Python cache found before Mac packaging.' >&2
@@ -750,6 +805,7 @@ jobs:
           verified_migration="$verified_root/Migration.app"
           verified_app="$verified_main/Contents/Resources/app"
           verified_server="$verified_app/runtime/server.py"
+          verified_imagine_accounts="$verified_app/runtime/imagine_accounts.py"
           verified_migration_py="$verified_migration/Contents/Resources/migration.py"
           test -x "$verified_main/Contents/MacOS/Grok Chameleon"
           test -x "$verified_migration/Contents/MacOS/Migration"
@@ -766,6 +822,13 @@ jobs:
             fi
           done
           python3 - "$verified_server" <<'PY'
+          import ast
+          import pathlib
+          import sys
+          path = pathlib.Path(sys.argv[1])
+          ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+          PY
+          python3 - "$verified_imagine_accounts" <<'PY'
           import ast
           import pathlib
           import sys
@@ -819,8 +882,8 @@ jobs:
           MAC_TAG: v20260720-042100-mac
           WIN_ZIP: Win_Grok_Chameleon_a.zip
           MAC_ZIP: Mac_Grok_Chameleon_a.zip
-          WIN_INPUT_SHA256: 9e02db0610ec5df2900bded89bebdb78829884e1de22233b17587c61bb532bdc
-          MAC_INPUT_SHA256: 76fab46651c4348951630bc82f770c0d003f01f92a6d3097cf6f671e8dff41b2
+          WIN_INPUT_SHA256: ed9cd548808acfe0bcfe884789548fd4f3dd1dd0d5f5977f253f1302ac5e5f49
+          MAC_INPUT_SHA256: 86b476663c1173e37b72735a45efa7b18dd5f7155bcc251680ba809873a57e89
         run: |
           set -euo pipefail
           mkdir -p current/win current/mac backups
@@ -829,8 +892,8 @@ jobs:
           test "$(sha256sum "current/win/$WIN_ZIP" | awk '{print $1}')" = "$WIN_INPUT_SHA256"
           test "$(sha256sum "current/mac/$MAC_ZIP" | awk '{print $1}')" = "$MAC_INPUT_SHA256"
           short_sha="$(printf '%s' "$GITHUB_SHA" | cut -c1-12)"
-          win_backup="Win_Grok_Chameleon_a.previous-before-prompt-bottom-clearance-$short_sha.zip"
-          mac_backup="Mac_Grok_Chameleon_a.previous-before-prompt-bottom-clearance-$short_sha.zip"
+          win_backup="Win_Grok_Chameleon_a.previous-before-account-tier-order-$short_sha.zip"
+          mac_backup="Mac_Grok_Chameleon_a.previous-before-account-tier-order-$short_sha.zip"
           cp "current/win/$WIN_ZIP" "backups/$win_backup"
           cp "current/mac/$MAC_ZIP" "backups/$mac_backup"
           gh release upload "$WIN_TAG" "backups/$win_backup" --repo "$GITHUB_REPOSITORY"

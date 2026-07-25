@@ -509,20 +509,16 @@ def unescape_usage_tier_text(value: str) -> str:
 
 def parse_usage_tier_text(text: str) -> str:
     normalized = re.sub(r"\s+", " ", unescape_usage_tier_text(text)).strip().lower()
-    compact = re.sub(r"\s+", "", normalized)
     if (
         re.search(r'"issupergrokprouser"\s*:\s*true', normalized)
         or re.search(r'"bestsubscription"\s*:\s*"subscription_tier_super_grok_pro"', normalized)
         or re.search(r'"activesubscriptions"\s*:\s*\[[^\]]{0,4000}"tier"\s*:\s*"subscription_tier_super_grok_pro"', normalized)
-        or "supergrokheavy" in compact
     ):
         return "heavy"
     if (
         re.search(r'"issupergrokuser"\s*:\s*true', normalized)
         or re.search(r'"bestsubscription"\s*:\s*"subscription_tier_grok_pro"', normalized)
         or re.search(r'"activesubscriptions"\s*:\s*\[[^\]]{0,4000}"tier"\s*:\s*"subscription_tier_grok_pro"', normalized)
-        or "freecreditswithsupergrok" in compact
-        or "supergrok포함무료크레딧" in compact
     ):
         return "super"
     return "free"
@@ -1052,14 +1048,37 @@ def active_imagine_account(root: Path | None = None, account_id_value: str = "")
     return accounts[0] if accounts else {}
 
 
-def write_build_auth(root: Path, data: dict) -> None:
+ACCOUNT_TIER_SORT_ORDER = {"heavy": 0, "super": 1, "free": 2}
+
+
+def sort_accounts_by_priority(accounts: list[dict], active_id: str = "") -> list[dict]:
+    selected_id = str(active_id or "")
+
+    def sort_key(account: dict) -> tuple:
+        account_id_value = str(account.get("id") or "")
+        name = str(account.get("email") or account.get("label") or account_id_value).strip().casefold()
+        return (
+            0 if selected_id and account_id_value == selected_id else 1,
+            ACCOUNT_TIER_SORT_ORDER.get(normalize_account_tier(account.get("tier")), 2),
+            name,
+            account_id_value,
+        )
+
+    return sorted(accounts, key=sort_key)
+
+
+def write_build_auth(root: Path, data: dict, *, preserve_order: bool = False) -> None:
     normalized = normalize_build_auth(data)
+    if not preserve_order:
+        normalized["accounts"] = sort_accounts_by_priority(normalized["accounts"], normalized["active_id"])
     normalized["updated_at"] = now_iso()
     write_json(root / "account" / "build_auth.json", normalized)
 
 
-def write_imagine_auth(root: Path, data: dict) -> None:
+def write_imagine_auth(root: Path, data: dict, *, preserve_order: bool = False) -> None:
     normalized = normalize_imagine_auth(data)
+    if not preserve_order:
+        normalized["accounts"] = sort_accounts_by_priority(normalized["accounts"], normalized["active_id"])
     normalized["updated_at"] = now_iso()
     write_json(root / "account" / "imagine_auth.json", normalized)
 
@@ -1254,6 +1273,7 @@ def select_build_account(payload: dict) -> dict:
     account = next((account for account in build.get("accounts") or [] if account.get("id") == account_id_value), None)
     if not account:
         raise RuntimeError("Build account not found.")
+    build["accounts"] = reorder_accounts_by_ids(build.get("accounts") or [], [account_id_value])
     build["active_id"] = account_id_value
     previous_tier = normalize_account_tier(account.get("tier"))
     tier_result = fetch_build_usage_tier_for_account(root, build, account)
@@ -1319,9 +1339,9 @@ def reorder_account_store(payload: dict, provider: str) -> dict:
     store = files[key]
     store["accounts"] = reorder_accounts_by_ids(store.get("accounts") or [], [str(value) for value in ids])
     if key == "imagine":
-        write_imagine_auth(root, store)
+        write_imagine_auth(root, store, preserve_order=True)
     else:
-        write_build_auth(root, store)
+        write_build_auth(root, store, preserve_order=True)
     return scan_library(root)
 
 
@@ -8689,6 +8709,7 @@ def select_imagine_account(payload: dict) -> dict:
     imagine = account_files(root)["imagine"]
     if not any(account.get("id") == account_id_value for account in imagine.get("accounts") or []):
         raise RuntimeError("Imagine account not found.")
+    imagine["accounts"] = reorder_accounts_by_ids(imagine.get("accounts") or [], [account_id_value])
     imagine["active_id"] = account_id_value
     write_imagine_auth(root, imagine)
     return scan_library(root)
