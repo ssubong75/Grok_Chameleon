@@ -53,7 +53,7 @@ jobs:
       RELEASE_TAG: v20260720-041036-win
       INPUT_ZIP: Win_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Win_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: 03a6b022c85eb08df5685d88ce76c307bd4ba85977ca7fe3ad52b1f5037d9ea5
+      EXPECTED_INPUT_SHA256: 5dbd25b2c1ad39510adda44a0a3f97793f03f188ba1aef0ecc0464e42d982f83
 
     steps:
       - name: Check out the shared source commit
@@ -472,7 +472,7 @@ jobs:
       RELEASE_TAG: v20260720-042100-mac
       INPUT_ZIP: Mac_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Mac_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: 014c860b8b67d1b764a7b37dc16ee450cc67859612c328d8033b23c3ad1334cb
+      EXPECTED_INPUT_SHA256: bcf146e19f61477405aa6eeedf48c8fac2d1f7db7a8eba39b206306ac108e0ab
 
     steps:
       - name: Check out the shared source commit
@@ -909,8 +909,8 @@ jobs:
           MAC_TAG: v20260720-042100-mac
           WIN_ZIP: Win_Grok_Chameleon_a.zip
           MAC_ZIP: Mac_Grok_Chameleon_a.zip
-          WIN_INPUT_SHA256: 03a6b022c85eb08df5685d88ce76c307bd4ba85977ca7fe3ad52b1f5037d9ea5
-          MAC_INPUT_SHA256: 014c860b8b67d1b764a7b37dc16ee450cc67859612c328d8033b23c3ad1334cb
+          WIN_INPUT_SHA256: 5dbd25b2c1ad39510adda44a0a3f97793f03f188ba1aef0ecc0464e42d982f83
+          MAC_INPUT_SHA256: bcf146e19f61477405aa6eeedf48c8fac2d1f7db7a8eba39b206306ac108e0ab
         run: |
           set -euo pipefail
           mkdir -p current/win current/mac backups
@@ -919,8 +919,8 @@ jobs:
           test "$(sha256sum "current/win/$WIN_ZIP" | awk '{print $1}')" = "$WIN_INPUT_SHA256"
           test "$(sha256sum "current/mac/$MAC_ZIP" | awk '{print $1}')" = "$MAC_INPUT_SHA256"
           short_sha="$(printf '%s' "$GITHUB_SHA" | cut -c1-12)"
-          win_backup="Win_Grok_Chameleon_a.previous-before-total-account-denied-$short_sha.zip"
-          mac_backup="Mac_Grok_Chameleon_a.previous-before-total-account-denied-$short_sha.zip"
+          win_backup="Win_Grok_Chameleon_a.previous-before-total-account-login-sessions-$short_sha.zip"
+          mac_backup="Mac_Grok_Chameleon_a.previous-before-total-account-login-sessions-$short_sha.zip"
           cp "current/win/$WIN_ZIP" "backups/$win_backup"
           cp "current/mac/$MAC_ZIP" "backups/$mac_backup"
           gh release upload "$WIN_TAG" "backups/$win_backup" --repo "$GITHUB_REPOSITORY"

@@ -172,6 +172,9 @@ IMAGINE_BRIDGE_LOGIN_SAVE_DELAY_SECONDS = 2
 IMAGINE_DEBUG_LOG_PATH = Path.home() / "Library" / "Logs" / "Grok Chameleon" / "imagine_debug.jsonl"
 SHUTDOWN_TIMER: threading.Timer | None = None
 SHUTDOWN_LOCK = threading.Lock()
+TOTAL_ACCOUNT_SESSION_LOCK = threading.Lock()
+TOTAL_ACCOUNT_PROFILE_CLEANUP_LOCK = threading.Lock()
+TOTAL_ACCOUNT_SESSIONS: dict[str, dict] = {}
 BUILD_JOBS: dict[str, dict] = {}
 BUILD_JOB_LOCK = threading.Lock()
 BUILD_T2I_FILE_LOCK = threading.Lock()
@@ -1222,9 +1225,19 @@ def register_total_account(payload: dict) -> dict:
     target: dict | None = None
     callback_server: ThreadingHTTPServer | None = None
     log_event(f"total_account_start session={session_id} debug_port={debug_port}")
+    with TOTAL_ACCOUNT_SESSION_LOCK:
+        TOTAL_ACCOUNT_SESSIONS[session_id] = {
+            "root": str(root.resolve()),
+            "profile_dir": str(profile_dir),
+            "debug_port": debug_port,
+            "target": None,
+        }
     try:
         launch_total_account_browser(IMAGINE_BASE + "/imagine", profile_dir, debug_port)
         target = wait_total_account_imagine_login(debug_port)
+        with TOTAL_ACCOUNT_SESSION_LOCK:
+            if session_id in TOTAL_ACCOUNT_SESSIONS:
+                TOTAL_ACCOUNT_SESSIONS[session_id]["target"] = target
         cookies = capture_total_account_cookies(target)
         identity = fetch_imagine_identity(cookies)
         imagine_email = str(identity.get("email") or "").strip()
@@ -1359,11 +1372,10 @@ def register_total_account(payload: dict) -> dict:
                 callback_server.server_close()
             except Exception:
                 pass
-        close_cdp_browser(target)
-        try:
-            shutil.rmtree(profile_dir, ignore_errors=True)
-        except Exception:
-            pass
+        close_total_account_browser(target, debug_port)
+        remove_total_account_profile(root, profile_dir, "registration-finished")
+        with TOTAL_ACCOUNT_SESSION_LOCK:
+            TOTAL_ACCOUNT_SESSIONS.pop(session_id, None)
 
 
 def select_build_account(payload: dict) -> dict:
@@ -11296,8 +11308,163 @@ def available_loopback_port(preferred: int = 0) -> int:
         return int(sock.getsockname()[1])
 
 
+def total_account_sessions_dir(root: Path) -> Path:
+    resolved_root = Path(root).expanduser().resolve()
+    if resolved_root == Path(resolved_root.anchor) or not (resolved_root / "library.json").is_file():
+        raise RuntimeError("Refusing unsafe Total Account session root.")
+    account_dir = (resolved_root / "account").resolve()
+    sessions_dir = (account_dir / "login_sessions").resolve()
+    if account_dir.parent != resolved_root or sessions_dir.parent != account_dir or sessions_dir.name != "login_sessions":
+        raise RuntimeError("Refusing unsafe Total Account session path.")
+    return sessions_dir
+
+
 def total_account_profile_dir(root: Path, session_id: str) -> Path:
-    return root / "account" / "login_sessions" / safe_name(session_id, "session")
+    return total_account_sessions_dir(root) / safe_name(session_id, "session")
+
+
+def total_account_profile_debug_port(profile_dir: Path) -> int:
+    try:
+        first_line = (profile_dir / "DevToolsActivePort").read_text(
+            encoding="utf-8",
+            errors="ignore",
+        ).splitlines()[0].strip()
+        port = int(first_line)
+        return port if 0 < port < 65536 else 0
+    except (OSError, ValueError, IndexError):
+        return 0
+
+
+def remove_total_account_profile(
+    root: Path,
+    profile_dir: Path,
+    reason: str,
+    attempts: int = 20,
+    retry_delay: float = 0.25,
+) -> bool:
+    try:
+        sessions_dir = total_account_sessions_dir(root)
+        resolved_profile = Path(profile_dir).resolve()
+    except Exception as exc:
+        log_event(f"total_account_profile_cleanup refused reason={reason} detail={str(exc)[:240]}")
+        return False
+    if resolved_profile == sessions_dir or resolved_profile.parent != sessions_dir:
+        log_event(
+            f"total_account_profile_cleanup refused reason={reason} "
+            f"path={resolved_profile}"
+        )
+        return False
+
+    last_error = ""
+    with TOTAL_ACCOUNT_PROFILE_CLEANUP_LOCK:
+        for attempt in range(1, max(1, attempts) + 1):
+            if not resolved_profile.exists() and not resolved_profile.is_symlink():
+                log_event(
+                    f"total_account_profile_cleanup deleted reason={reason} "
+                    f"attempt={attempt} path={resolved_profile}"
+                )
+                return True
+            try:
+                if resolved_profile.is_symlink() or resolved_profile.is_file():
+                    resolved_profile.unlink()
+                else:
+                    shutil.rmtree(resolved_profile)
+                if not resolved_profile.exists() and not resolved_profile.is_symlink():
+                    log_event(
+                        f"total_account_profile_cleanup deleted reason={reason} "
+                        f"attempt={attempt} path={resolved_profile}"
+                    )
+                    return True
+            except OSError as exc:
+                last_error = str(exc)
+            if attempt < max(1, attempts):
+                time.sleep(max(0.0, retry_delay))
+    log_event(
+        f"total_account_profile_cleanup failed reason={reason} "
+        f"attempts={max(1, attempts)} path={resolved_profile} detail={last_error[:240]}"
+    )
+    return False
+
+
+def cleanup_total_account_login_sessions(
+    root: Path | None = None,
+    reason: str = "cleanup",
+    include_active: bool = False,
+) -> dict:
+    selected_root = root or library_root()
+    if not selected_root:
+        return {"deleted": 0, "skipped": 0, "failed": 0, "reason": reason}
+    target_root = Path(selected_root)
+    try:
+        sessions_dir = total_account_sessions_dir(target_root)
+    except Exception as exc:
+        log_event(f"total_account_sessions_cleanup refused reason={reason} detail={str(exc)[:240]}")
+        return {"deleted": 0, "skipped": 0, "failed": 1, "reason": reason}
+    if not sessions_dir.exists():
+        return {"deleted": 0, "skipped": 0, "failed": 0, "reason": reason}
+
+    with TOTAL_ACCOUNT_SESSION_LOCK:
+        active_sessions = {
+            Path(str(item.get("profile_dir") or "")).resolve(): dict(item)
+            for item in TOTAL_ACCOUNT_SESSIONS.values()
+            if str(item.get("root") or "") == str(target_root.resolve())
+            and str(item.get("profile_dir") or "")
+        }
+    try:
+        entries = list(sessions_dir.iterdir())
+    except OSError as exc:
+        log_event(
+            f"total_account_sessions_cleanup failed reason={reason} "
+            f"path={sessions_dir} detail={str(exc)[:240]}"
+        )
+        return {"deleted": 0, "skipped": 0, "failed": 1, "reason": reason}
+
+    deleted = 0
+    skipped = 0
+    failed = 0
+    for entry in entries:
+        resolved_entry = entry.resolve()
+        active = active_sessions.get(resolved_entry)
+        if active and not include_active:
+            skipped += 1
+            continue
+        debug_port = int((active or {}).get("debug_port") or 0)
+        if active and include_active:
+            close_total_account_browser(active.get("target"), debug_port)
+        elif not active:
+            debug_port = total_account_profile_debug_port(resolved_entry)
+            if debug_port and cdp_targets_optional(debug_port):
+                skipped += 1
+                log_event(
+                    f"total_account_profile_cleanup skipped reason={reason} "
+                    f"detail=profile-in-use path={resolved_entry}"
+                )
+                continue
+        if remove_total_account_profile(
+            target_root,
+            resolved_entry,
+            reason,
+            attempts=8,
+            retry_delay=0.25,
+        ):
+            deleted += 1
+        else:
+            failed += 1
+    try:
+        sessions_dir.rmdir()
+    except OSError:
+        pass
+    result = {
+        "deleted": deleted,
+        "skipped": skipped,
+        "failed": failed,
+        "reason": reason,
+    }
+    log_event(
+        f"total_account_sessions_cleanup reason={reason} "
+        f"deleted={deleted} skipped={skipped} failed={failed}"
+    )
+    return result
 
 
 def launch_total_account_browser(url: str, profile_dir: Path, debug_port: int) -> None:
@@ -11390,6 +11557,26 @@ def close_cdp_browser(target: dict | None) -> None:
         cdp_call(ws_url, "Browser.close", timeout=2)
     except Exception:
         pass
+
+
+def close_total_account_browser(
+    target: dict | None,
+    debug_port: int,
+    timeout_seconds: float = 5.0,
+) -> bool:
+    close_cdp_browser(target)
+    port = int(debug_port or 0)
+    if port <= 0:
+        return True
+    deadline = time.monotonic() + max(0.5, timeout_seconds)
+    while time.monotonic() < deadline:
+        targets = cdp_targets_optional(port)
+        if not targets:
+            return True
+        close_cdp_browser(targets[0])
+        time.sleep(0.2)
+    log_event(f"total_account_browser_close timeout debug_port={port}")
+    return False
 
 
 def unique_file_name(parent: Path, preferred_stem: str, extension: str) -> str:
@@ -15646,10 +15833,23 @@ class Handler(SimpleHTTPRequestHandler):
             if parsed.path == "/api/shutdown":
                 event = str((payload or {}).get("event") or "")
                 cleanup = permanent_delete_unfavorite_build_t2i() if event == "electron-shutdown" else None
+                login_sessions_cleanup = (
+                    cleanup_total_account_login_sessions(
+                        reason="electron-shutdown",
+                        include_active=True,
+                    )
+                    if event == "electron-shutdown"
+                    else None
+                )
                 self.send_json({
                     "ok": True,
                     "delay": 0.3 if event == "restart-cleanup" else 2.0,
                     **({"cleanup": cleanup} if cleanup is not None else {}),
+                    **(
+                        {"login_sessions_cleanup": login_sessions_cleanup}
+                        if login_sessions_cleanup is not None
+                        else {}
+                    ),
                 })
                 schedule_server_shutdown(self.server, 0.3 if event == "restart-cleanup" else 2.0)
                 return
@@ -15674,6 +15874,10 @@ class Handler(SimpleHTTPRequestHandler):
 
 def main() -> None:
     port = int(os.environ.get("GROK_CHAMELEON_PORT") or "8797")
+    cleanup_total_account_login_sessions(
+        reason="startup",
+        include_active=False,
+    )
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     url = f"http://127.0.0.1:{port}/"
     print(url, flush=True)
