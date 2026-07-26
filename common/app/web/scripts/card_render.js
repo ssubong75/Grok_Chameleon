@@ -81,7 +81,6 @@ function cardRenderHashForPost(post, className, backTargetOverride = null) {
     post?.area || "",
     post?.mode || "",
     post?.remote ? "remote" : "local",
-    library_state.selectedItems.has(post?.folder_path || "") ? "selected" : "",
     saved ? "saved" : "",
     buildFavorite ? "build_favorite" : "",
     typeof postHasLucky === "function" && postHasLucky(post, representative) ? "lucky" : "",

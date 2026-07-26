@@ -58,7 +58,7 @@ jobs:
       RELEASE_TAG: v20260720-041036-win
       INPUT_ZIP: Win_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Win_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: 36249c377695a1c8b0b7c89ab81784b890e5309ca1b9f63ebcd0ca1b54ab2d98
+      EXPECTED_INPUT_SHA256: ed5744f7427218fd1b95b62ed33dcded05a502d4dd2c301b0d8918f093614fce
 
     steps:
       - name: Check out the shared source commit
@@ -482,7 +482,7 @@ jobs:
       RELEASE_TAG: v20260720-042100-mac
       INPUT_ZIP: Mac_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Mac_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: c7983703540c7bdbe52fc1bbecc7f1889caf0489e8020204dd94ccc03f163a74
+      EXPECTED_INPUT_SHA256: bfad5a8fe098767864e444dfc606cc59e288bb021514f1538c637c26f9024299
 
     steps:
       - name: Check out the shared source commit
@@ -929,8 +929,8 @@ jobs:
           MAC_TAG: v20260720-042100-mac
           WIN_ZIP: Win_Grok_Chameleon_a.zip
           MAC_ZIP: Mac_Grok_Chameleon_a.zip
-          WIN_INPUT_SHA256: 36249c377695a1c8b0b7c89ab81784b890e5309ca1b9f63ebcd0ca1b54ab2d98
-          MAC_INPUT_SHA256: c7983703540c7bdbe52fc1bbecc7f1889caf0489e8020204dd94ccc03f163a74
+          WIN_INPUT_SHA256: ed5744f7427218fd1b95b62ed33dcded05a502d4dd2c301b0d8918f093614fce
+          MAC_INPUT_SHA256: bfad5a8fe098767864e444dfc606cc59e288bb021514f1538c637c26f9024299
         run: |
           set -euo pipefail
           mkdir -p current/win current/mac backups
