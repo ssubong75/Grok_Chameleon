@@ -3663,6 +3663,50 @@ def merge_imagine_unsaved_asset_post(groups: dict[str, dict], post: dict, group_
         existing["representative"] = representative.get("url") or representative.get("remote_url") or representative.get("item_id") or existing.get("representative") or ""
 
 
+IMAGINE_UNSAVED_CURSOR_PREFIX = "gc-unsaved-v1."
+
+
+def imagine_unsaved_asset_cursor_key(asset: dict) -> str:
+    if not isinstance(asset, dict):
+        return ""
+    for key in ("assetId", "id", "postId", "mediaPostId"):
+        value = str(asset.get(key) or "").strip()
+        if value:
+            return value
+    return canonical_remote_media_key(imagine_asset_primary_media_url(asset))
+
+
+def encode_imagine_unsaved_cursor(page_cursor: str, offset: int = 0, anchor: str = "") -> str:
+    payload = {
+        "v": 1,
+        "page": str(page_cursor or ""),
+        "offset": max(0, int(offset or 0)),
+        "anchor": str(anchor or ""),
+    }
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    token = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    return IMAGINE_UNSAVED_CURSOR_PREFIX + token
+
+
+def decode_imagine_unsaved_cursor(value: str) -> tuple[str, int, str]:
+    text = str(value or "").strip()
+    if not text.startswith(IMAGINE_UNSAVED_CURSOR_PREFIX):
+        return text, 0, ""
+    token = text[len(IMAGINE_UNSAVED_CURSOR_PREFIX):]
+    try:
+        raw = base64.urlsafe_b64decode(token + ("=" * (-len(token) % 4)))
+        payload = json.loads(raw.decode("utf-8"))
+        if not isinstance(payload, dict) or int(payload.get("v") or 0) != 1:
+            raise ValueError("unsupported cursor")
+        return (
+            str(payload.get("page") or "").strip(),
+            max(0, int(payload.get("offset") or 0)),
+            str(payload.get("anchor") or "").strip(),
+        )
+    except (ValueError, TypeError, json.JSONDecodeError, UnicodeDecodeError):
+        return "", 0, ""
+
+
 def list_imagine_unsaved(payload: dict) -> dict:
     root = library_root()
     if not root:
@@ -3678,8 +3722,9 @@ def list_imagine_unsaved(payload: dict) -> dict:
     cursor = str((payload or {}).get("cursor") or "").strip()
     saved_keys = imagine_saved_media_keys_cached(account, max_posts=1000)
     grouped_posts: dict[str, dict] = {}
-    next_cursor = cursor
-    current_cursor = cursor
+    current_cursor, current_offset, current_anchor = decode_imagine_unsaved_cursor(cursor)
+    response_cursor = ""
+    has_more = False
     pages_scanned = 0
     seen_paths: set[str] = set()
     while len(grouped_posts) < limit and pages_scanned < 12:
@@ -3695,14 +3740,20 @@ def list_imagine_unsaved(payload: dict) -> dict:
             query_parts.append(("cursor", current_cursor))
         data = imagine_get_json(f"/rest/assets?{urlencode(query_parts)}", account)
         assets = data.get("assets") if isinstance(data.get("assets"), list) else []
-        next_cursor = str(
+        upstream_next_cursor = str(
             data.get("nextPageToken")
             or data.get("nextCursor")
             or data.get("next_page_token")
             or data.get("cursor")
             or ""
         ).strip()
-        for asset in assets:
+        start_offset = min(current_offset, len(assets))
+        if current_offset:
+            previous_key = imagine_unsaved_asset_cursor_key(assets[current_offset - 1]) if current_offset <= len(assets) else ""
+            if not current_anchor or previous_key != current_anchor:
+                start_offset = 0
+        for asset_index in range(start_offset, len(assets)):
+            asset = assets[asset_index]
             if not isinstance(asset, dict) or imagine_asset_upload_only(asset):
                 continue
             asset_keys = imagine_asset_key_values(asset)
@@ -3718,12 +3769,29 @@ def list_imagine_unsaved(payload: dict) -> dict:
                 pass
             seen_paths.add(folder_path)
             if len(grouped_posts) >= limit:
+                next_offset = asset_index + 1
+                if next_offset < len(assets):
+                    response_cursor = encode_imagine_unsaved_cursor(
+                        current_cursor,
+                        next_offset,
+                        imagine_unsaved_asset_cursor_key(asset),
+                    )
+                    has_more = True
+                elif upstream_next_cursor and upstream_next_cursor != current_cursor:
+                    response_cursor = encode_imagine_unsaved_cursor(upstream_next_cursor)
+                    has_more = True
                 break
         pages_scanned += 1
-        if not next_cursor or next_cursor == current_cursor:
+        if len(grouped_posts) >= limit:
             break
-        current_cursor = next_cursor
-    posts = list(grouped_posts.values())[:limit]
+        if not upstream_next_cursor or upstream_next_cursor == current_cursor:
+            break
+        current_cursor = upstream_next_cursor
+        current_offset = 0
+        current_anchor = ""
+        response_cursor = encode_imagine_unsaved_cursor(current_cursor)
+        has_more = True
+    posts = list(grouped_posts.values())
     return {
         "ok": True,
         "source": "unsaved",
@@ -3731,8 +3799,8 @@ def list_imagine_unsaved(payload: dict) -> dict:
         "posts": posts,
         "items": posts,
         "cursor": cursor,
-        "next_cursor": next_cursor if next_cursor != cursor else "",
-        "has_more": bool(next_cursor and next_cursor != cursor),
+        "next_cursor": response_cursor,
+        "has_more": has_more,
         "imagine": {
             "id": account.get("id") or "",
             "email": account.get("email") or "",
