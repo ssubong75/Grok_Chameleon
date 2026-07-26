@@ -329,8 +329,8 @@ function syncImagineDetailToolButtons(type, item = null, post = null) {
       button.dataset.targetResolution = targetResolution;
       if (targetResolution) {
         button.setAttribute("aria-label", `Upscale to ${targetResolution}`);
-        button.title = `Upscale to ${targetResolution}`;
       }
+      button.removeAttribute("title");
       return;
     }
     button.hidden = !isVideo;

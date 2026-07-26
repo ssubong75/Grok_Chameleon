@@ -1233,6 +1233,82 @@ async function upscaleImagineSelectedDetailVideoDirect(button = null) {
   }
 }
 
+function imagineDetailPostIdFromAddress(address) {
+  const text = String(address || "").trim();
+  if (!text) return "";
+  const uuid = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+  try {
+    const url = new URL(text, window.location.origin);
+    const match = url.pathname.match(new RegExp(`/imagine/post/(${uuid})(?:/|$)`, "i"))
+      || url.pathname.match(new RegExp(`/generated/(${uuid})(?:/|-part-)`, "i"))
+      || url.pathname.match(new RegExp(`/users/${uuid}/(${uuid})(?:/|$)`, "i"));
+    return match?.[1] || "";
+  } catch {
+    const match = text.match(new RegExp(`/imagine/post/(${uuid})(?:[/?#]|$)`, "i"))
+      || text.match(new RegExp(`/generated/(${uuid})(?:/|-part-)`, "i"))
+      || text.match(new RegExp(`/users/${uuid}/(${uuid})(?:[/?#]|$)`, "i"));
+    return match?.[1] || "";
+  }
+}
+
+function imagineDetailConversationId(post, item, address = "") {
+  const itemMetadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
+  const itemImagine = itemMetadata.imagine && typeof itemMetadata.imagine === "object" ? itemMetadata.imagine : {};
+  const postMetadata = post?.metadata && typeof post.metadata === "object" ? post.metadata : {};
+  const postImagine = postMetadata.imagine && typeof postMetadata.imagine === "object" ? postMetadata.imagine : {};
+  let addressConversation = "";
+  try {
+    addressConversation = new URL(String(address || ""), window.location.origin).searchParams.get("conversation") || "";
+  } catch {
+    addressConversation = "";
+  }
+  return String(
+    addressConversation
+    || item?.conversation_id
+    || itemMetadata.conversation_id
+    || itemImagine.conversation_id
+    || post?.conversation_id
+    || postMetadata.conversation_id
+    || postImagine.conversation_id
+    || item?.root_post_id
+    || itemMetadata.root_post_id
+    || itemImagine.root_post_id
+    || itemMetadata.root_asset_id
+    || itemImagine.root_asset_id
+    || post?.root_post_id
+    || postMetadata.imagine_root_post_id
+    || postMetadata.raw_root_post_id
+    || post?.post_id
+    || ""
+  ).trim();
+}
+
+async function copyImagineSelectedDetailMediaAddress() {
+  const post = selectedLibraryPost();
+  const item = selectedDetailItem(post);
+  if (!post || !item) {
+    throw new Error("Select an Imagine media item.");
+  }
+  const address = typeof iDetailRawMediaUrl === "function"
+    ? String(iDetailRawMediaUrl(item) || "").trim()
+    : "";
+  if (!address) {
+    throw new Error("This media has no address.");
+  }
+  const postId = imagineDetailPostIdFromAddress(address)
+    || String(item?.asset_id || imagineActionPostIdForItem(item) || "").trim();
+  const conversationId = imagineDetailConversationId(post, item, address);
+  if (!postId || !conversationId) {
+    throw new Error("This media has no Imagine post address.");
+  }
+  const postAddress = `https://grok.com/imagine/post/${encodeURIComponent(postId)}?conversation=${encodeURIComponent(conversationId)}`;
+  const copied = typeof copyText === "function" && await copyText(postAddress);
+  if (!copied) {
+    throw new Error("Copy failed.");
+  }
+  toast("Imagine post address copied.");
+}
+
 function bindImagineDetailActions() {
   const heart = document.querySelector(".i_detail_heart");
   heart?.addEventListener("click", () => {
@@ -1248,6 +1324,12 @@ function bindImagineDetailActions() {
     action.catch((error) => {
       console.warn(error);
       showErrorPanel(saved ? "Unsave failed" : "Save failed", error?.message || (saved ? "Unsave failed." : "Save failed."));
+    });
+  });
+  document.querySelector(".i_detail_copy_url")?.addEventListener("click", () => {
+    copyImagineSelectedDetailMediaAddress().catch((error) => {
+      console.warn(error);
+      showErrorPanel("Copy failed", error?.message || "Copy failed.");
     });
   });
   document.querySelector(".i_detail_delete")?.addEventListener("click", () => {

@@ -32,6 +32,7 @@ env:
   COMMON_DETAIL_STATE: common/app/web/scripts/detail_state.js
   COMMON_DETAIL_MEDIA: common/app/web/scripts/detail_media.js
   COMMON_DETAIL_RENDER: common/app/web/scripts/detail_render.js
+  COMMON_DETAIL_STYLE: common/app/web/styles/detail.css
   COMMON_I_SOURCE: common/app/web/scripts/i_source_render.js
   COMMON_COLLECTION_ACTIONS: common/app/web/scripts/collection_actions.js
   COMMON_PROMPT_EVENTS: common/app/web/scripts/prompt_events.js
@@ -54,7 +55,7 @@ jobs:
       RELEASE_TAG: v20260720-041036-win
       INPUT_ZIP: Win_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Win_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: 3c038b275e9a0fe4db3c644469a2250bfe774bb62bcf7b3ac7ca18e77e63257e
+      EXPECTED_INPUT_SHA256: e73cde0b16f6a4f2d2ec6fc137118f8f636cba42c7b1c0bdb24302eaffcfde27
 
     steps:
       - name: Check out the shared source commit
@@ -112,6 +113,7 @@ jobs:
             @{ Name = "detail_state"; Relative = "web\scripts\detail_state.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_STATE) },
             @{ Name = "detail_media"; Relative = "web\scripts\detail_media.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_MEDIA) },
             @{ Name = "detail_render"; Relative = "web\scripts\detail_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_RENDER) },
+            @{ Name = "detail_style"; Relative = "web\styles\detail.css"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_STYLE) },
             @{ Name = "i_source"; Relative = "web\scripts\i_source_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_I_SOURCE) },
             @{ Name = "collection_actions"; Relative = "web\scripts\collection_actions.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_COLLECTION_ACTIONS) },
             @{ Name = "prompt_events"; Relative = "web\scripts\prompt_events.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_PROMPT_EVENTS) },
@@ -474,7 +476,7 @@ jobs:
       RELEASE_TAG: v20260720-042100-mac
       INPUT_ZIP: Mac_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Mac_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: 397a0be92cef33314c4b7d1b1728b20b188d051fb013449ca76fb73c4e27c638
+      EXPECTED_INPUT_SHA256: 73effeecd0074978143d9b944f76a4e1920b8710b25d98acee3de5b5b7325ea3
 
     steps:
       - name: Check out the shared source commit
@@ -529,6 +531,7 @@ jobs:
             web/scripts/detail_state.js
             web/scripts/detail_media.js
             web/scripts/detail_render.js
+            web/styles/detail.css
             web/scripts/i_source_render.js
             web/scripts/collection_actions.js
             web/scripts/prompt_events.js
@@ -801,6 +804,7 @@ jobs:
             web/scripts/detail_state.js
             web/scripts/detail_media.js
             web/scripts/detail_render.js
+            web/styles/detail.css
             web/scripts/i_source_render.js
             web/scripts/collection_actions.js
             web/scripts/prompt_events.js
@@ -913,8 +917,8 @@ jobs:
           MAC_TAG: v20260720-042100-mac
           WIN_ZIP: Win_Grok_Chameleon_a.zip
           MAC_ZIP: Mac_Grok_Chameleon_a.zip
-          WIN_INPUT_SHA256: 3c038b275e9a0fe4db3c644469a2250bfe774bb62bcf7b3ac7ca18e77e63257e
-          MAC_INPUT_SHA256: 397a0be92cef33314c4b7d1b1728b20b188d051fb013449ca76fb73c4e27c638
+          WIN_INPUT_SHA256: e73cde0b16f6a4f2d2ec6fc137118f8f636cba42c7b1c0bdb24302eaffcfde27
+          MAC_INPUT_SHA256: 73effeecd0074978143d9b944f76a4e1920b8710b25d98acee3de5b5b7325ea3
         run: |
           set -euo pipefail
           mkdir -p current/win current/mac backups
@@ -923,8 +927,8 @@ jobs:
           test "$(sha256sum "current/win/$WIN_ZIP" | awk '{print $1}')" = "$WIN_INPUT_SHA256"
           test "$(sha256sum "current/mac/$MAC_ZIP" | awk '{print $1}')" = "$MAC_INPUT_SHA256"
           short_sha="$(printf '%s' "$GITHUB_SHA" | cut -c1-12)"
-          win_backup="Win_Grok_Chameleon_a.previous-before-card-dismiss-scroll-$short_sha.zip"
-          mac_backup="Mac_Grok_Chameleon_a.previous-before-card-dismiss-scroll-$short_sha.zip"
+          win_backup="Win_Grok_Chameleon_a.previous-before-imagine-post-link-copy-$short_sha.zip"
+          mac_backup="Mac_Grok_Chameleon_a.previous-before-imagine-post-link-copy-$short_sha.zip"
           cp "current/win/$WIN_ZIP" "backups/$win_backup"
           cp "current/mac/$MAC_ZIP" "backups/$mac_backup"
           gh release upload "$WIN_TAG" "backups/$win_backup" --repo "$GITHUB_REPOSITORY"
