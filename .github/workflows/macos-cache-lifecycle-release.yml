@@ -929,8 +929,8 @@ jobs:
           MAC_TAG: v20260720-042100-mac
           WIN_ZIP: Win_Grok_Chameleon_a.zip
           MAC_ZIP: Mac_Grok_Chameleon_a.zip
-          WIN_INPUT_SHA256: 5b9cd3dd802f59468b1e96bd2804ec794aded0a5b0b648bdb237bab73d8a616f
-          MAC_INPUT_SHA256: 4f41f026f620504bae0c2e35eca853ac3224f190cbf90b652c8be45f96066cf9
+          WIN_INPUT_SHA256: 905059c899640feba6b4ca444cdf6991341bb7d65cbe303f672b4dd7c5ccb3e3
+          MAC_INPUT_SHA256: 3f2652d341b85a1f8568fea9f54d252770413eed4da0099f6c3f321358363eb0
         run: |
           set -euo pipefail
           mkdir -p current/win current/mac backups
