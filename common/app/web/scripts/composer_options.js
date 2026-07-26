@@ -184,7 +184,9 @@ function renderComposerOptions() {
     const isBuildDetailImageEdit = composerIsBuildDetailImageEdit();
     const isImageToImage = isBuildDetailImageEdit || composerEffectiveImageAttachmentCount() > 0;
     const hideImagineImageToImageOptions = provider === "imagine" && isImageToImage;
-    const showImageModel = isBuildDetailImageEdit || (!isImageToImage && !hideImagineImageToImageOptions);
+    const showImageModel = provider === "build"
+      || isBuildDetailImageEdit
+      || (!isImageToImage && !hideImagineImageToImageOptions);
     const imageAspectDefault = "Auto";
     const imageCountOptions = provider === "imagine"
       ? buildT2iCountOptions.filter((option) => option !== "1")
@@ -254,7 +256,7 @@ function composerRequestOptions() {
   const options = {
     duration: selectedComposerControl(composerControls.duration),
     aspect_ratio: isImagineImageToImage ? "" : composerAspectOption(selectedComposerControl(composerControls.aspect)),
-    image_model: isImageToImage && !isBuildDetailImageEdit ? "" : selectedComposerControl(composerControls.imageModel),
+    image_model: isImagineImageToImage ? "" : selectedComposerControl(composerControls.imageModel),
     resolution: isImagineImageToImage ? "" : composerResolutionOption(selectedComposerControl(composerControls.resolution)),
     count: isImageToImage ? "1" : selectedComposerControl(composerControls.count),
   };
