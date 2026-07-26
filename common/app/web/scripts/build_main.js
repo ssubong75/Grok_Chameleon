@@ -308,9 +308,9 @@
       const slotIndex = Number.parseInt(String(badge.dataset.jobSlotIndex || ""), 10) || 0;
       badge.classList.toggle("failed", failed);
       badge.classList.toggle("running", !failed);
-      badge.classList.toggle("credit_limit", creditLimit);
+      badge.classList.remove("credit_limit");
       const badgeLabel = badge.querySelector(".detail_job_badge_label") || badge.querySelector("span");
-      if (badgeLabel) badgeLabel.textContent = creditLimit ? "Credit Limit" : failed ? "×" : buildJobSlotProgressText(job, slotIndex);
+      if (badgeLabel) badgeLabel.textContent = failed ? "×" : buildJobSlotProgressText(job, slotIndex);
       if (failed) badge.removeAttribute("aria-disabled");
       else badge.setAttribute("aria-disabled", "true");
     }
@@ -628,17 +628,16 @@
       for (const candidate of detailJobs) {
         const candidateStatus = buildJobStatus(candidate);
         const candidateFailed = candidateStatus === "failed" || candidateStatus === "moderated";
-        const creditLimit = candidateFailed && isCreditLimitError(candidate.error);
         for (const slotIndex of visibleSlotsForDetailJob(candidate)) {
           const badge = document.createElement("button");
-          badge.className = `detail_job_badge ${candidateFailed ? "failed" : "running"}${creditLimit ? " credit_limit" : ""}`;
+          badge.className = `detail_job_badge ${candidateFailed ? "failed" : "running"}`;
           badge.type = "button";
           badge.dataset[generationJobDatasetKey(candidate)] = candidate.id;
           badge.dataset.jobSlotIndex = String(slotIndex);
           if (!candidateFailed) badge.setAttribute("aria-disabled", "true");
           const badgeLabel = document.createElement("span");
           badgeLabel.className = "detail_job_badge_label";
-          badgeLabel.textContent = creditLimit ? "Credit Limit" : candidateFailed ? "×" : buildJobSlotProgressText(candidate, slotIndex);
+          badgeLabel.textContent = candidateFailed ? "×" : buildJobSlotProgressText(candidate, slotIndex);
           badge.append(badgeLabel);
           if (candidateFailed) {
             badge.addEventListener("click", () => {

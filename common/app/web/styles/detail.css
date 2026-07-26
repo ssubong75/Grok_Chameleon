@@ -1717,17 +1717,6 @@
   pointer-events: auto;
 }
 
-.detail_job_badge.credit_limit {
-  flex-basis: auto;
-  width: auto;
-  min-width: 104px;
-  padding: 0 14px;
-  background: rgb(86 63 22 / 0.7);
-  color: #ffe2a3;
-  font-size: 13px;
-  white-space: nowrap;
-}
-
 .detail_job_badge_label {
   display: inline-block;
 }
