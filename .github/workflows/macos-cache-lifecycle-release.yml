@@ -57,7 +57,7 @@ jobs:
       RELEASE_TAG: v20260720-041036-win
       INPUT_ZIP: Win_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Win_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: 365ddf46dc8e830c6191ff0d87411c37ec6fdd2dda44d4d972ede2d1767f72e5
+      EXPECTED_INPUT_SHA256: 5b9cd3dd802f59468b1e96bd2804ec794aded0a5b0b648bdb237bab73d8a616f
 
     steps:
       - name: Check out the shared source commit
@@ -480,7 +480,7 @@ jobs:
       RELEASE_TAG: v20260720-042100-mac
       INPUT_ZIP: Mac_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Mac_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: 69936422e4b6d6fddf2f0d24de4d003834deffaf27cc26a2221e1e11777b58df
+      EXPECTED_INPUT_SHA256: 4f41f026f620504bae0c2e35eca853ac3224f190cbf90b652c8be45f96066cf9
 
     steps:
       - name: Check out the shared source commit
