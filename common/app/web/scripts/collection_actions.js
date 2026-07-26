@@ -145,8 +145,17 @@
       || null;
   }
 
-  async function moveToCollectionTarget({ sourcePost, itemKey = "", targetCollectionPath = "", targetPostPath = "" }) {
-    if (!sourcePost?.folder_path) return;
+  async function moveToCollectionTarget({
+    sourcePost,
+    sourcePosts = [],
+    itemKey = "",
+    targetCollectionPath = "",
+    targetPostPath = "",
+  }) {
+    const sources = (itemKey ? [sourcePost] : (sourcePosts.length ? sourcePosts : [sourcePost]))
+      .filter((post) => post?.folder_path)
+      .filter((post, index, posts) => posts.findIndex((candidate) => candidate.folder_path === post.folder_path) === index);
+    if (!sources.length) return;
     if (!library_state.apiReady) {
       setLibraryMessage("Move needs the local app launcher.");
       return;
@@ -159,27 +168,40 @@
     moveToCollectionRequestPending = true;
     try {
       const endpoint = itemKey ? "/api/collection/move-item" : "/api/collection/move-post";
-      const payload = {
-        post_path: sourcePost.folder_path,
-        collection_path: targetCollectionPath,
-        target_parent_path: targetPostPath || "",
-      };
-      if (sourcePost.remote || sourcePost.area === "imagine_remote" || sourcePost.area === "imagine_upload_remote") {
-        payload.source_post = sourcePost;
+      let data = null;
+      for (const source of sources) {
+        const payload = {
+          post_path: source.folder_path,
+          collection_path: targetCollectionPath,
+          target_parent_path: targetPostPath || "",
+        };
+        if (source.remote || source.area === "imagine_remote" || source.area === "imagine_upload_remote") {
+          payload.source_post = source;
+        }
+        if (itemKey) payload.item_key = itemKey;
+        data = await qApi(endpoint, payload);
       }
-      if (itemKey) payload.item_key = itemKey;
-      const data = await qApi(endpoint, payload);
       closeMoveToCollectionDialog();
       applyLibrarySnapshot(data);
-      toast("Moved to Collection.");
+      for (const source of sources) library_state.selectedItems?.delete?.(source.folder_path);
+      if (!library_state.selectedItems?.size) library_state.cardSelectionScreen = "";
+      if (typeof syncCardSelectionControls === "function") syncCardSelectionControls();
+      toast(sources.length > 1 ? "Moved items to Collection." : "Moved to Collection.");
     } finally {
       moveToCollectionRequestPending = false;
     }
   }
 
-  function openMoveToCollectionDialog({ postPath = "", itemKey = "" } = {}) {
+  function openMoveToCollectionDialog({ postPath = "", postPaths = [], itemKey = "" } = {}) {
     closeMoveToCollectionDialog();
-    const sourcePost = moveDialogPost(postPath);
+    const requestedPaths = (postPaths.length ? postPaths : [postPath])
+      .map((path) => String(path || "").trim())
+      .filter(Boolean);
+    const sourcePosts = requestedPaths
+      .map(moveDialogPost)
+      .filter(Boolean)
+      .filter((post, index, posts) => posts.findIndex((candidate) => candidate.folder_path === post.folder_path) === index);
+    const sourcePost = sourcePosts[0] || null;
     if (!sourcePost) {
       setLibraryMessage("Select a post to move.");
       return;
@@ -403,6 +425,7 @@
           collectionSelected = false;
           moveToCollectionTarget({
             sourcePost,
+            sourcePosts,
             itemKey,
             targetCollectionPath: selectedPrimaryPath,
             targetPostPath: post.folder_path,
@@ -574,6 +597,7 @@
       if (event.key === "Enter" && selectedSecondPath) {
         moveToCollectionTarget({
           sourcePost,
+          sourcePosts,
           itemKey,
           targetCollectionPath: selectedPrimaryPath,
           targetPostPath: selectedSecondPath,

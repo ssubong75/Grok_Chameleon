@@ -17,13 +17,41 @@
       .filter(Boolean);
   }
 
+  function isSelectedImagineUnsavedPost(post) {
+    return Boolean(
+      (typeof isImagineUnsavedPost === "function" && isImagineUnsavedPost(post))
+      || String(post?.folder_path || "").startsWith("imagine_unsaved/")
+    );
+  }
+
+  function cardSelectionUsesUnsavedActions() {
+    return screen_state.current_screen === "i_unsaved_main";
+  }
 
   function syncCardSelectionControls() {
+    const currentScreen = screen_state.current_screen;
+    if (
+      library_state.selectedItems?.size
+      && library_state.cardSelectionScreen
+      && library_state.cardSelectionScreen !== currentScreen
+    ) {
+      library_state.selectedItems.clear();
+      library_state.cardSelectionScreen = "";
+    }
+    if (library_state.selectedItems?.size && !library_state.cardSelectionScreen) {
+      library_state.cardSelectionScreen = currentScreen;
+    }
     const count = library_state.selectedItems?.size || 0;
     const selectionBar = document.getElementById("selectionBar");
     const selectionCount = document.getElementById("selectionCount");
+    const mergeButton = document.getElementById("selectionMergeBtn");
+    const unsavedActions = cardSelectionUsesUnsavedActions();
     if (selectionBar) selectionBar.hidden = count === 0;
     if (selectionCount) selectionCount.textContent = `Selected: ${count}`;
+    if (mergeButton) {
+      mergeButton.textContent = unsavedActions ? "Move" : "Merge";
+      mergeButton.dataset.selectionAction = unsavedActions ? "move" : "merge";
+    }
     for (const card of document.querySelectorAll("[data-library-post-path]")) {
       const selected = library_state.selectedItems?.has(card.dataset.libraryPostPath || "");
       if (card.classList.contains("card") || card.classList.contains("collection_2nd_card")) {
@@ -38,14 +66,23 @@
   function toggleCardSelection(path) {
     const key = String(path || "");
     if (!key) return;
+    if (
+      library_state.selectedItems.size
+      && library_state.cardSelectionScreen
+      && library_state.cardSelectionScreen !== screen_state.current_screen
+    ) {
+      library_state.selectedItems.clear();
+    }
     if (library_state.selectedItems.has(key)) library_state.selectedItems.delete(key);
     else library_state.selectedItems.add(key);
+    library_state.cardSelectionScreen = library_state.selectedItems.size ? screen_state.current_screen : "";
     syncCardSelectionControls();
   }
 
 
   function clearCardSelection() {
     library_state.selectedItems.clear();
+    library_state.cardSelectionScreen = "";
     syncCardSelectionControls();
   }
 
@@ -100,8 +137,56 @@
     return downloadLibraryItems(posts.flatMap((post) => post.items || []));
   }
 
+  async function moveSelectedUnsavedCardItems() {
+    const posts = selectedCardPosts().filter(isSelectedImagineUnsavedPost);
+    if (!posts.length) {
+      showErrorPanel("Move unavailable", "Select one or more Unsaved cards.");
+      return;
+    }
+    openMoveToCollectionDialog({
+      postPaths: posts.map((post) => post.folder_path),
+    });
+  }
+
+  async function deleteSelectedUnsavedCardItems() {
+    const posts = selectedCardPosts().filter(isSelectedImagineUnsavedPost);
+    const targets = posts
+      .map((post) => ({
+        post,
+        items: (post.items || []).filter((item) => imagineDeletePayloadForItem(post, item)),
+      }))
+      .filter((target) => target.items.length);
+    if (!targets.length) {
+      showErrorPanel("Delete unavailable", "The selected Unsaved cards have no post id.");
+      return;
+    }
+    const ok = await confirmAction({
+      title: "Delete Posts",
+      message: targets.length > 1 ? `Delete ${targets.length} selected Imagine posts?` : "Delete the selected Imagine post?",
+      confirmLabel: "Delete",
+    });
+    if (!ok) return;
+    const screenId = screen_state.current_screen;
+    const scrollTop = imagineListScrollTopForScreen(screenId);
+    for (const target of targets) {
+      for (const item of target.items) {
+        await deleteImagineRemoteItem(target.post, item);
+      }
+      removeImagineItemsFromPost(target.post, target.items, {
+        keepListScreen: true,
+        screenId,
+        scrollTop,
+      });
+    }
+    clearCardSelection();
+    toast(targets.length > 1 ? "Deleted Imagine posts." : "Deleted Imagine post.");
+  }
 
   async function deleteSelectedCardItems() {
+    if (cardSelectionUsesUnsavedActions()) {
+      await deleteSelectedUnsavedCardItems();
+      return;
+    }
     const posts = selectedCardPosts().filter((post) => !postRootFolderDeleteBlocked(post));
     if (!posts.length) {
       showErrorPanel("Delete unavailable", "Select local item cards to delete.");

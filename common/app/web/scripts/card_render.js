@@ -408,7 +408,14 @@ function cardVisualSelectButton(post) {
   button.dataset.libraryPostPath = post.folder_path || "";
   button.setAttribute("aria-label", "Select");
   button.setAttribute("aria-pressed", selected ? "true" : "false");
-  button.innerHTML = `<span class="selection-checkmark" aria-hidden="true">∨</span>`;
+  button.innerHTML = `
+    <span class="selection-checkmark" aria-hidden="true">
+      <span class="selection-checkmark-glyph">∨</span>
+      <svg class="selection-checkmark-rounded" viewBox="0 0 24 24" focusable="false">
+        <path d="M6 7.5 12 16.5 18 7.5"></path>
+      </svg>
+    </span>
+  `;
   button.addEventListener("click", (event) => {
     stopVisualCardAction(event);
     toggleCardSelection(post.folder_path);
@@ -604,14 +611,16 @@ function mediaCardForPost(post, className, backTargetOverride = null) {
   if (remoteOnly) article.classList.add("remote_card");
   if (!attachedJob) {
     if (remoteOnly) {
+      const unsavedPost = typeof isImagineUnsavedPost === "function" && isImagineUnsavedPost(post);
       article.append(
         (typeof isImagineDiscoverPost === "function" && isImagineDiscoverPost(post))
-          || (typeof isImagineUnsavedPost === "function" && isImagineUnsavedPost(post))
+          || unsavedPost
           || (typeof isImagineSearchPost === "function" && isImagineSearchPost(post))
           || (typeof isImagineT2iPost === "function" && isImagineT2iPost(post))
           ? imagineCardSaveButton(post)
           : imagineCardUnsaveButton(post),
       );
+      if (unsavedPost) article.append(cardVisualSelectButton(post));
     } else if (className === "b_t2i_card" && isBuildT2iPost(post)) {
       article.append(buildFavoriteButton(post));
     } else {

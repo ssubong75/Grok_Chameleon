@@ -327,6 +327,50 @@
   -webkit-text-stroke: 1.18px currentColor;
 }
 
+.selection-checkmark-rounded {
+  display: none;
+  width: 28.08px;
+  height: 28.08px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.b_card_list .media-card-select-button .selection-checkmark,
+.b_t2i_view_card_list .media-card-select-button .selection-checkmark,
+.i_unsaved_card_list .card_visual_select_btn .selection-checkmark,
+.second_main_card_list .media-card-select-button .selection-checkmark {
+  transform: translateY(2.8px);
+}
+
+.b_card_list .selection-checkmark-glyph,
+.b_t2i_view_card_list .selection-checkmark-glyph,
+.i_unsaved_card_list .card_visual_select_btn .selection-checkmark-glyph,
+.second_main_card_list .selection-checkmark-glyph {
+  display: none;
+}
+
+.b_card_list .selection-checkmark-rounded,
+.b_t2i_view_card_list .selection-checkmark-rounded,
+.i_unsaved_card_list .card_visual_select_btn .selection-checkmark-rounded,
+.second_main_card_list .selection-checkmark-rounded {
+  display: block;
+}
+
+.i_unsaved_card_list .card_visual_select_btn {
+  right: auto;
+  left: 10px;
+}
+
+.i_unsaved_card_list .card_visual_select_btn:hover,
+.i_unsaved_card_list .card_visual_select_btn:focus-visible,
+.i_unsaved_card_list .card.selected .card_visual_select_btn,
+.i_unsaved_card_list .card_visual_select_btn[aria-pressed="true"] {
+  color: var(--imagine-blue);
+}
+
 .card.selected .media-card-select-button .selection-checkmark,
 .media-card-select-button[aria-pressed="true"] .selection-checkmark {
   opacity: 1;

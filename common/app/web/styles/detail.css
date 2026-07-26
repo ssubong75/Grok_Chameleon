@@ -1296,7 +1296,22 @@
 
 .i_detail_action.i_detail_copy_url:hover,
 .i_detail_action.i_detail_copy_url:focus-visible {
+  color: var(--accent);
+}
+
+.i_detail_action.i_detail_aspect_btn:hover,
+.i_detail_action.i_detail_aspect_btn:focus-visible {
   color: var(--prompt-teal);
+}
+
+.i_detail_copy_arrow {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  font-size: 25px;
+  line-height: 1;
+  transform: rotate(180deg);
 }
 
 .i_detail_action.i_detail_upscale_btn:hover,
@@ -1355,8 +1370,8 @@
   fill: currentColor;
 }
 
-.i_detail_edit:hover,
-.i_detail_edit:focus-visible,
+.i_detail_action.i_detail_edit:hover,
+.i_detail_action.i_detail_edit:focus-visible,
 .i_detail_source_btn:hover,
 .i_detail_source_btn:focus-visible,
 .b_detail_edit:hover,

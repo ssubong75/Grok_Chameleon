@@ -2339,6 +2339,48 @@ def imagine_persist_generated_relation(
     })
 
 
+def imagine_restore_generated_relation_resolutions(post: dict, library: dict) -> bool:
+    if not isinstance(post, dict) or not isinstance(library, dict):
+        return False
+    post_id = str(post.get("post_id") or "").strip()
+    if not post_id:
+        return False
+    settings = library.get("settings") if isinstance(library.get("settings"), dict) else {}
+    relations = settings.get("imagine_generated_relations") if isinstance(settings.get("imagine_generated_relations"), dict) else {}
+    record = relations.get(post_id) if isinstance(relations.get(post_id), dict) else None
+    if not record:
+        return False
+    existing_by_key = {
+        imagine_relation_item_key(item): item
+        for item in post.get("items") or []
+        if isinstance(item, dict) and imagine_relation_item_key(item)
+    }
+    changed = False
+    for stored in record.get("items") if isinstance(record.get("items"), list) else []:
+        if not isinstance(stored, dict):
+            continue
+        stored_metadata = stored.get("metadata") if isinstance(stored.get("metadata"), dict) else {}
+        stored_imagine = stored_metadata.get("imagine") if isinstance(stored_metadata.get("imagine"), dict) else {}
+        stored_conversation_id = str(
+            stored.get("conversation_id")
+            or stored_imagine.get("conversation_id")
+            or ""
+        ).strip()
+        if stored_conversation_id and stored_conversation_id != post_id:
+            continue
+        key = imagine_relation_item_key(stored)
+        existing_item = existing_by_key.get(key)
+        stored_resolution = str(stored.get("resolution_name") or "").strip()
+        if (
+            existing_item
+            and not str(existing_item.get("resolution_name") or "").strip()
+            and stored_resolution
+        ):
+            existing_item["resolution_name"] = stored_resolution
+            changed = True
+    return changed
+
+
 def imagine_apply_generated_relations(post: dict, root: Path, account: dict, library: dict | None = None) -> dict:
     if not isinstance(post, dict):
         return post
@@ -2352,6 +2394,7 @@ def imagine_apply_generated_relations(post: dict, root: Path, account: dict, lib
     record = relations.get(post_id) if isinstance(relations.get(post_id), dict) else None
     if not record:
         return post
+    enriched_existing = imagine_restore_generated_relation_resolutions(post, library)
     hidden = {str(value) for value in settings.get("hidden_imagine_item_keys", []) if str(value)}
     existing_items = [dict(item) for item in post.get("items") or [] if isinstance(item, dict)]
     existing_keys = {imagine_relation_item_key(item) for item in existing_items}
@@ -2377,7 +2420,7 @@ def imagine_apply_generated_relations(post: dict, root: Path, account: dict, lib
             continue
         existing_items.append(item)
         existing_keys.add(key)
-    if len(existing_items) == len(post.get("items") or []):
+    if len(existing_items) == len(post.get("items") or []) and not enriched_existing:
         return post
     representative = imagine_representative_item(existing_items) or existing_items[0]
     post.update({
@@ -2979,11 +3022,13 @@ def list_imagine_saved(payload: dict) -> dict:
                         "conversation_id": conversation_id,
                         "error": str(exc)[:400],
                     })
+    library = merge_library_json(read_json(root / "library.json", {}))
     posts = []
     for conversation in conversations:
         conversation_id = str(conversation.get("conversationId") or "")
         post = imagine_saved_post_from_conversation(conversation, details.get(conversation_id, {}), account)
         if post:
+            imagine_restore_generated_relation_resolutions(post, library)
             posts.append(post)
     return {
         "ok": True,
