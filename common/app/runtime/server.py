@@ -62,6 +62,7 @@ THUMB_EXTS = ("jpg", "jpeg", "png", "webp")
 XAI_API_BASE = "https://api.x.ai/v1"
 DEFAULT_VIDEO_MODEL = "grok-imagine-video"
 DEFAULT_IMAGE_TO_VIDEO_MODEL = "grok-imagine-video-1.5"
+PREVIEW_IMAGE_TO_VIDEO_MODEL = "grok-imagine-video-1.5-preview"
 DEFAULT_ANALYZE_MODEL = "grok-4.3"
 ANALYZE_MODELS = {"grok-4.3", "grok-4.20-0309-non-reasoning"}
 
@@ -12516,7 +12517,11 @@ def build_image_request(payload: dict, options: dict, prompt: str, image_attachm
 
 
 def video_model_from_option(value: str, fallback: str) -> str:
-    normalized = re.sub(r"[^0-9.]", "", str(value or ""))
+    raw_value = str(value or "").strip().lower()
+    compact_value = re.sub(r"\s+", "", raw_value)
+    if compact_value in {"m1.5p", "1.5p"} or "1.5-preview" in compact_value:
+        return PREVIEW_IMAGE_TO_VIDEO_MODEL
+    normalized = re.sub(r"[^0-9.]", "", raw_value)
     if normalized == "1.0":
         return DEFAULT_VIDEO_MODEL
     if normalized == "1.5":

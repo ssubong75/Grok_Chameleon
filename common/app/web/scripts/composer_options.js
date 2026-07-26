@@ -66,13 +66,18 @@ function videoAttachmentBucket(imageCount) {
   return "text";
 }
 
-function videoModelOptionsForState(imageCount) {
+function videoModelOptionsForState(provider, imageCount) {
   if (imageCount >= 2) return ["M 1.0"];
+  const availableModels = provider === "build" ? buildVideoModelOptions : videoModelOptions;
   const selectedDuration = selectedComposerControl(composerControls.duration);
   const selectedResolution = selectedComposerControl(composerControls.resolution);
-  if (imageCount === 1 && isLongVideoDuration(selectedDuration)) return ["M 1.5"];
-  if (isHighVideoResolution(selectedResolution)) return ["M 1.5"];
-  return videoModelOptions;
+  if (imageCount === 1 && isLongVideoDuration(selectedDuration)) {
+    return availableModels.filter((model) => !isVideoModel10(model));
+  }
+  if (isHighVideoResolution(selectedResolution)) {
+    return availableModels.filter((model) => !isVideoModel10(model));
+  }
+  return availableModels;
 }
 
 function videoDurationOptionsForState(provider, imageCount, model) {
@@ -163,7 +168,7 @@ function setCustomSelectOptions(control, options, defaultValue, context) {
 function syncComposerVideoOptionControls(provider = composerState.provider, mode = composerState.mode) {
   const imageCount = composerEffectiveImageAttachmentCount();
   const bucket = videoAttachmentBucket(imageCount);
-  const modelOptions = videoModelOptionsForState(imageCount);
+  const modelOptions = videoModelOptionsForState(provider, imageCount);
   const modelDefault = imageCount >= 2 ? "M 1.0" : "M 1.5";
   const longDurationBlocksModel10 = imageCount === 1 && isLongVideoDuration(selectedComposerControl(composerControls.duration));
   const highResolutionBlocksModel10 = isHighVideoResolution(selectedComposerControl(composerControls.resolution));

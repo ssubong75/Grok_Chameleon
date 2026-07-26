@@ -102,6 +102,7 @@ function normalizeDetailModelLabel(type, raw) {
   const isVideoName = value.includes("video") || value.includes("t2v") || value.includes("i2v");
   const isImageName = value.includes("image") || value.includes("quality") || value.includes("speed") || value.includes("imagine-x");
   if (type === "video") {
+    if (value.includes("1.5-preview") || value.includes("m 1.5p") || value.includes("m1.5p")) return "M 1.5P";
     if (value.includes("1.5") || value.includes("m 1.5") || value.includes("m1.5")) return "M 1.5";
     if (value.includes("1.0") || value.includes("m 1.0") || value.includes("m1.0")) return "M 1.0";
     if (/^grok-imagine-video(?:$|[^0-9.])/.test(value)) return "M 1.0";

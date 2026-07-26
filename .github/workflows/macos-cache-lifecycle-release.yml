@@ -19,6 +19,7 @@ env:
   COMMON_BUILD_MAIN: common/app/web/scripts/build_main.js
   COMMON_B_SOURCE: common/app/web/scripts/b_source_render.js
   COMMON_SIDEBAR_EVENTS: common/app/web/scripts/sidebar_events.js
+  COMMON_COLLECTION_EVENTS: common/app/web/scripts/collection_events.js
   COMMON_MAIN_STYLE: common/app/web/styles/main.css
   COMMON_CARD_RENDER: common/app/web/scripts/card_render.js
   COMMON_CARD_ACTIONS: common/app/web/scripts/card_actions.js
@@ -102,6 +103,7 @@ jobs:
             @{ Name = "build_main"; Relative = "web\scripts\build_main.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_BUILD_MAIN) },
             @{ Name = "b_source"; Relative = "web\scripts\b_source_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_B_SOURCE) },
             @{ Name = "sidebar_events"; Relative = "web\scripts\sidebar_events.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_SIDEBAR_EVENTS) },
+            @{ Name = "collection_events"; Relative = "web\scripts\collection_events.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_COLLECTION_EVENTS) },
             @{ Name = "main_style"; Relative = "web\styles\main.css"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_MAIN_STYLE) },
             @{ Name = "card_render"; Relative = "web\scripts\card_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_CARD_RENDER) },
             @{ Name = "card_actions"; Relative = "web\scripts\card_actions.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_CARD_ACTIONS) },
@@ -522,6 +524,7 @@ jobs:
             web/scripts/build_main.js
             web/scripts/b_source_render.js
             web/scripts/sidebar_events.js
+            web/scripts/collection_events.js
             web/styles/main.css
             web/scripts/card_render.js
             web/scripts/card_actions.js
@@ -797,6 +800,7 @@ jobs:
             web/scripts/build_main.js
             web/scripts/b_source_render.js
             web/scripts/sidebar_events.js
+            web/scripts/collection_events.js
             web/styles/main.css
             web/scripts/card_render.js
             web/scripts/card_actions.js
