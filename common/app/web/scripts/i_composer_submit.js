@@ -58,6 +58,27 @@ function selectedImagineJobForPost(post = null) {
   return jobs[0] || null;
 }
 
+function renderImagineJobSourceViews() {
+  const discoverActive = screen_state.current_screen === "i_discover_main";
+  const unsavedActive = screen_state.current_screen === "i_unsaved_main";
+  const activeSourceScreen = discoverActive
+    ? "i_discover_main"
+    : (unsavedActive ? "i_unsaved_main" : "");
+  const scrollState = activeSourceScreen && typeof captureLibraryCardListScroll === "function"
+    ? captureLibraryCardListScroll(activeSourceScreen)
+    : null;
+  renderImagineSourceCards();
+  if (discoverActive && typeof renderImagineDiscoverCards === "function") {
+    renderImagineDiscoverCards();
+  }
+  if (unsavedActive && typeof renderImagineUnsavedCards === "function") {
+    renderImagineUnsavedCards();
+  }
+  if (typeof restoreLibraryCardListScroll === "function") {
+    restoreLibraryCardListScroll(scrollState);
+  }
+}
+
 function imagineJobDetailPost(job, basePost = null, jobs = null) {
   if (!job) return null;
   const type = buildJobTargetType(job);
@@ -145,7 +166,7 @@ function upsertImagineJob(job, options = {}) {
     updateImagineJobProgressDom(job);
     return;
   }
-  renderImagineSourceCards();
+  renderImagineJobSourceViews();
   const detailPost = selectedLibraryPost();
   if (selectedImagineJob()?.id === job.id || library_state.selectedImagineJobId === job.id || generationJobMatchesPost(job, detailPost)) renderDetailViews();
 }
@@ -167,7 +188,7 @@ function removeImagineJob(jobId, options = {}) {
     }
   }
   if (!options.skipRender) {
-    renderImagineSourceCards();
+    renderImagineJobSourceViews();
     renderDetailViews();
   }
 }
@@ -813,10 +834,16 @@ async function cancelImagineJobFromUi(jobId) {
 async function dismissImagineJobFromUi(jobId) {
   const id = String(jobId || "");
   if (!id) return;
+  const scrollState = typeof captureLibraryCardListScroll === "function"
+    ? captureLibraryCardListScroll()
+    : null;
   try {
     await qApi("/api/imagine/dismiss", { id });
   } catch (error) {
     console.warn(error);
   }
   removeImagineJob(id);
+  if (typeof restoreLibraryCardListScroll === "function") {
+    restoreLibraryCardListScroll(scrollState);
+  }
 }

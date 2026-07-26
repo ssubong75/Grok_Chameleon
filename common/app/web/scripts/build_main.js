@@ -220,6 +220,9 @@
       dismissGenerationJobFromUi(job);
       return;
     }
+    const scrollState = typeof captureLibraryCardListScroll === "function"
+      ? captureLibraryCardListScroll()
+      : null;
     if (!library_state.dismissedJobSlots) library_state.dismissedJobSlots = new Set();
     library_state.dismissedJobSlots.add(generationJobSlotKey(job, slotIndex));
     if (!generationJobHasVisibleSlots(job)) {
@@ -241,6 +244,9 @@
       renderBuildT2iViewCards();
     }
     renderDetailViews();
+    if (typeof restoreLibraryCardListScroll === "function") {
+      restoreLibraryCardListScroll(scrollState);
+    }
   }
 
 
@@ -528,12 +534,18 @@
   async function dismissBuildJobFromUi(jobId) {
     const id = String(jobId || "");
     if (!id) return;
+    const scrollState = typeof captureLibraryCardListScroll === "function"
+      ? captureLibraryCardListScroll()
+      : null;
     try {
       await qApi("/api/build/dismiss", { id });
     } catch (error) {
       console.warn(error);
     }
     removeBuildJob(id);
+    if (typeof restoreLibraryCardListScroll === "function") {
+      restoreLibraryCardListScroll(scrollState);
+    }
   }
 
 

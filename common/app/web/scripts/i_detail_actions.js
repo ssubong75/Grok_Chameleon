@@ -399,8 +399,7 @@ async function deleteImagineCardPost(post, button = null) {
     return;
   }
   const screenId = screen_state.current_screen;
-  const list = imagineListElementForScreen(screenId);
-  const scrollTop = list ? list.scrollTop : null;
+  const scrollTop = imagineListScrollTopForScreen(screenId);
   const ok = await confirmAction({
     title: "Delete Post",
     message: items.length > 1 ? `Delete this Imagine post and ${items.length} media item(s)?` : "Delete this Imagine post?",

@@ -21,6 +21,7 @@ env:
   COMMON_SIDEBAR_EVENTS: common/app/web/scripts/sidebar_events.js
   COMMON_MAIN_STYLE: common/app/web/styles/main.css
   COMMON_CARD_RENDER: common/app/web/scripts/card_render.js
+  COMMON_CARD_ACTIONS: common/app/web/scripts/card_actions.js
   COMMON_I_DETAIL_ACTIONS: common/app/web/scripts/i_detail_actions.js
   COMMON_COMPOSER_EVENTS: common/app/web/scripts/composer_events.js
   COMMON_CARDS_PROMPT_STYLE: common/app/web/styles/cards_prompt.css
@@ -53,7 +54,7 @@ jobs:
       RELEASE_TAG: v20260720-041036-win
       INPUT_ZIP: Win_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Win_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: 5dbd25b2c1ad39510adda44a0a3f97793f03f188ba1aef0ecc0464e42d982f83
+      EXPECTED_INPUT_SHA256: 3c038b275e9a0fe4db3c644469a2250bfe774bb62bcf7b3ac7ca18e77e63257e
 
     steps:
       - name: Check out the shared source commit
@@ -100,6 +101,7 @@ jobs:
             @{ Name = "sidebar_events"; Relative = "web\scripts\sidebar_events.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_SIDEBAR_EVENTS) },
             @{ Name = "main_style"; Relative = "web\styles\main.css"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_MAIN_STYLE) },
             @{ Name = "card_render"; Relative = "web\scripts\card_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_CARD_RENDER) },
+            @{ Name = "card_actions"; Relative = "web\scripts\card_actions.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_CARD_ACTIONS) },
             @{ Name = "i_detail_actions"; Relative = "web\scripts\i_detail_actions.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_I_DETAIL_ACTIONS) },
             @{ Name = "composer_events"; Relative = "web\scripts\composer_events.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_COMPOSER_EVENTS) },
             @{ Name = "cards_prompt_style"; Relative = "web\styles\cards_prompt.css"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_CARDS_PROMPT_STYLE) },
@@ -472,7 +474,7 @@ jobs:
       RELEASE_TAG: v20260720-042100-mac
       INPUT_ZIP: Mac_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Mac_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: bcf146e19f61477405aa6eeedf48c8fac2d1f7db7a8eba39b206306ac108e0ab
+      EXPECTED_INPUT_SHA256: 397a0be92cef33314c4b7d1b1728b20b188d051fb013449ca76fb73c4e27c638
 
     steps:
       - name: Check out the shared source commit
@@ -516,6 +518,7 @@ jobs:
             web/scripts/sidebar_events.js
             web/styles/main.css
             web/scripts/card_render.js
+            web/scripts/card_actions.js
             web/scripts/i_detail_actions.js
             web/scripts/composer_events.js
             web/styles/cards_prompt.css
@@ -787,6 +790,7 @@ jobs:
             web/scripts/sidebar_events.js
             web/styles/main.css
             web/scripts/card_render.js
+            web/scripts/card_actions.js
             web/scripts/i_detail_actions.js
             web/scripts/composer_events.js
             web/styles/cards_prompt.css
@@ -909,8 +913,8 @@ jobs:
           MAC_TAG: v20260720-042100-mac
           WIN_ZIP: Win_Grok_Chameleon_a.zip
           MAC_ZIP: Mac_Grok_Chameleon_a.zip
-          WIN_INPUT_SHA256: 5dbd25b2c1ad39510adda44a0a3f97793f03f188ba1aef0ecc0464e42d982f83
-          MAC_INPUT_SHA256: bcf146e19f61477405aa6eeedf48c8fac2d1f7db7a8eba39b206306ac108e0ab
+          WIN_INPUT_SHA256: 3c038b275e9a0fe4db3c644469a2250bfe774bb62bcf7b3ac7ca18e77e63257e
+          MAC_INPUT_SHA256: 397a0be92cef33314c4b7d1b1728b20b188d051fb013449ca76fb73c4e27c638
         run: |
           set -euo pipefail
           mkdir -p current/win current/mac backups
@@ -919,8 +923,8 @@ jobs:
           test "$(sha256sum "current/win/$WIN_ZIP" | awk '{print $1}')" = "$WIN_INPUT_SHA256"
           test "$(sha256sum "current/mac/$MAC_ZIP" | awk '{print $1}')" = "$MAC_INPUT_SHA256"
           short_sha="$(printf '%s' "$GITHUB_SHA" | cut -c1-12)"
-          win_backup="Win_Grok_Chameleon_a.previous-before-total-account-login-sessions-$short_sha.zip"
-          mac_backup="Mac_Grok_Chameleon_a.previous-before-total-account-login-sessions-$short_sha.zip"
+          win_backup="Win_Grok_Chameleon_a.previous-before-card-dismiss-scroll-$short_sha.zip"
+          mac_backup="Mac_Grok_Chameleon_a.previous-before-card-dismiss-scroll-$short_sha.zip"
           cp "current/win/$WIN_ZIP" "backups/$win_backup"
           cp "current/mac/$MAC_ZIP" "backups/$mac_backup"
           gh release upload "$WIN_TAG" "backups/$win_backup" --repo "$GITHUB_REPOSITORY"
