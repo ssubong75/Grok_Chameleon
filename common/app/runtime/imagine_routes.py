@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+from collections.abc import Callable
+
+
+JsonHandler = Callable[[dict], dict]
+JobGetter = Callable[[str], dict]
+
+
+def imagine_post_routes(
+    *,
+    start_imagine_login: JsonHandler,
+    open_imagine_usage_page: JsonHandler,
+    list_imagine_saved: JsonHandler,
+    list_imagine_discover: JsonHandler,
+    list_imagine_unsaved: JsonHandler,
+    search_imagine_media: JsonHandler,
+    load_imagine_remote_link_post: JsonHandler,
+    list_imagine_uploads: JsonHandler,
+    start_imagine_job: JsonHandler,
+    get_imagine_job: JobGetter,
+    cancel_imagine_job: JsonHandler,
+    dismiss_imagine_job: JsonHandler,
+    delete_imagine_media_post: JsonHandler,
+    delete_imagine_asset: JsonHandler,
+    delete_imagine_asset_metadata: JsonHandler,
+    delete_imagine_conversation: JsonHandler,
+    like_imagine_media_post: JsonHandler,
+    unsave_imagine_media_post: JsonHandler,
+    upscale_imagine_video_post: JsonHandler,
+    crop_imagine_image_post: JsonHandler,
+    capture_imagine_login: JsonHandler,
+    select_imagine_account: JsonHandler,
+    logout_imagine_account: JsonHandler,
+    delete_imagine_account: JsonHandler,
+    reorder_imagine_accounts: JsonHandler,
+    imagine_account_statuses: JsonHandler,
+) -> dict[str, JsonHandler]:
+    return {
+        "/api/imagine/login/start": start_imagine_login,
+        "/api/imagine/usage-page": open_imagine_usage_page,
+        "/api/imagine/saved": list_imagine_saved,
+        "/api/imagine/remote/list": list_imagine_saved,
+        "/api/imagine/discover": list_imagine_discover,
+        "/api/imagine/unsaved": list_imagine_unsaved,
+        "/api/imagine/search": search_imagine_media,
+        "/api/imagine/remote/link": load_imagine_remote_link_post,
+        "/api/imagine/uploads": list_imagine_uploads,
+        "/api/imagine/start": lambda payload: {"ok": True, "job": start_imagine_job(payload)},
+        "/api/imagine/job": lambda payload: {"ok": True, "job": get_imagine_job(str(payload.get("id") or ""))},
+        "/api/imagine/cancel": cancel_imagine_job,
+        "/api/imagine/dismiss": dismiss_imagine_job,
+        "/api/imagine/post/delete": delete_imagine_media_post,
+        "/api/imagine/asset/delete": delete_imagine_asset,
+        "/api/imagine/asset-metadata/delete": delete_imagine_asset_metadata,
+        "/api/imagine/conversation/delete": delete_imagine_conversation,
+        "/api/imagine/post/like": like_imagine_media_post,
+        "/api/imagine/post/unsave": unsave_imagine_media_post,
+        "/api/imagine/post/unlike": unsave_imagine_media_post,
+        "/api/imagine/video/upscale": upscale_imagine_video_post,
+        "/api/imagine/image/crop": crop_imagine_image_post,
+        "/api/imagine/login/capture": capture_imagine_login,
+        "/api/imagine/select": select_imagine_account,
+        "/api/imagine/logout": logout_imagine_account,
+        "/api/imagine/delete": delete_imagine_account,
+        "/api/imagine/reorder": reorder_imagine_accounts,
+        "/api/imagine/accounts/status": imagine_account_statuses,
+    }

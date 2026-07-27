@@ -28,6 +28,10 @@
     return screen_state.current_screen === "i_unsaved_main";
   }
 
+  function cardSelectionUsesImagineDeleteActions() {
+    return ["i_main", "i_unsaved_main"].includes(screen_state.current_screen);
+  }
+
   function syncCardSelectionControls() {
     const currentScreen = screen_state.current_screen;
     if (
@@ -148,16 +152,22 @@
     });
   }
 
-  async function deleteSelectedUnsavedCardItems() {
-    const posts = selectedCardPosts().filter(isSelectedImagineUnsavedPost);
+  async function deleteSelectedImagineCardItems() {
+    const unsavedOnly = cardSelectionUsesUnsavedActions();
+    const posts = selectedCardPosts().filter((post) => (
+      unsavedOnly
+        ? isSelectedImagineUnsavedPost(post)
+        : post?.source === "imagine" && post?.area === "imagine_remote"
+    ));
     const targets = posts
       .map((post) => ({
         post,
-        items: (post.items || []).filter((item) => imagineDeletePayloadForItem(post, item)),
+        items: (post.items || []).filter(Boolean),
+        payload: imagineConversationDeletePayloadForPost(post),
       }))
-      .filter((target) => target.items.length);
+      .filter((target) => target.items.length && target.payload);
     if (!targets.length) {
-      showErrorPanel("Delete unavailable", "The selected Unsaved cards have no post id.");
+      showErrorPanel("Delete unavailable", "The selected Imagine cards have no deletion target.");
       return;
     }
     const ok = await confirmAction({
@@ -168,10 +178,30 @@
     if (!ok) return;
     const screenId = screen_state.current_screen;
     const scrollTop = imagineListScrollTopForScreen(screenId);
-    for (const target of targets) {
-      for (const item of target.items) {
-        await deleteImagineRemoteItem(target.post, item);
+    const results = await Promise.allSettled(
+      targets.map((target) => deleteImagineRemoteCard(target.post, { hide: false })),
+    );
+    const deletedTargets = [];
+    const failures = [];
+    for (let index = 0; index < results.length; index += 1) {
+      const result = results[index];
+      if (result.status === "fulfilled") {
+        const deletedItems = result.value?.deletedItems || [];
+        if (deletedItems.length) {
+          deletedTargets.push({
+            ...targets[index],
+            items: deletedItems,
+          });
+        }
+        failures.push(...(result.value?.failures || []));
+      } else {
+        failures.push(result.reason);
       }
+    }
+    if (deletedTargets.length) {
+      await hideImagineRemoteItems(deletedTargets.flatMap((target) => target.items));
+    }
+    for (const target of deletedTargets) {
       removeImagineItemsFromPost(target.post, target.items, {
         keepListScreen: true,
         screenId,
@@ -179,12 +209,20 @@
       });
     }
     clearCardSelection();
-    toast(targets.length > 1 ? "Deleted Imagine posts." : "Deleted Imagine post.");
+    if (deletedTargets.length) {
+      toast(deletedTargets.length > 1 ? "Deleted Imagine posts." : "Deleted Imagine post.");
+    }
+    if (failures.length) {
+      showErrorPanel(
+        "Delete failed",
+        `${failures.length} selected card(s) could not be deleted. ${failures[0]?.message || ""}`.trim(),
+      );
+    }
   }
 
   async function deleteSelectedCardItems() {
-    if (cardSelectionUsesUnsavedActions()) {
-      await deleteSelectedUnsavedCardItems();
+    if (cardSelectionUsesImagineDeleteActions()) {
+      await deleteSelectedImagineCardItems();
       return;
     }
     const posts = selectedCardPosts().filter((post) => !postRootFolderDeleteBlocked(post));

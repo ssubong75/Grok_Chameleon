@@ -44,6 +44,7 @@ env:
   COMMON_PRELOAD: common/app/electron/preload-bridge.js
   COMMON_SERVER: common/app/runtime/server.py
   COMMON_IMAGINE_ACCOUNTS: common/app/runtime/imagine_accounts.py
+  COMMON_IMAGINE_ROUTES: common/app/runtime/imagine_routes.py
   COMMON_PROMPT_ACCOUNT: common/app/web/scripts/prompt_account.js
   COMMON_ACCOUNT_CORE: common/app/web/scripts/account_core.js
   COMMON_MIGRATION: common/migration/migration.py
@@ -58,7 +59,7 @@ jobs:
       RELEASE_TAG: v20260720-041036-win
       INPUT_ZIP: Win_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Win_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: ed5744f7427218fd1b95b62ed33dcded05a502d4dd2c301b0d8918f093614fce
+      EXPECTED_INPUT_SHA256: 3c95388fded308629799a5bf912dabe011a8050ced3492c0fa75765d911b0532
 
     steps:
       - name: Check out the shared source commit
@@ -98,6 +99,7 @@ jobs:
             @{ Name = "preload"; Relative = "electron\preload-bridge.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_PRELOAD) },
             @{ Name = "server"; Relative = "runtime\server.py"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_SERVER) },
             @{ Name = "imagine_accounts"; Relative = "runtime\imagine_accounts.py"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_IMAGINE_ACCOUNTS) },
+            @{ Name = "imagine_routes"; Relative = "runtime\imagine_routes.py"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_IMAGINE_ROUTES) },
             @{ Name = "index"; Relative = "web\index.html"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_INDEX) },
             @{ Name = "state"; Relative = "web\scripts\state.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_STATE) },
             @{ Name = "build_main"; Relative = "web\scripts\build_main.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_BUILD_MAIN) },
@@ -135,6 +137,7 @@ jobs:
           $targetPreload = ($sharedSources | Where-Object Name -eq "preload").Target
           $targetServer = ($sharedSources | Where-Object Name -eq "server").Target
           $targetImagineAccounts = ($sharedSources | Where-Object Name -eq "imagine_accounts").Target
+          $targetImagineRoutes = ($sharedSources | Where-Object Name -eq "imagine_routes").Target
           $targetPromptAccount = ($sharedSources | Where-Object Name -eq "prompt_account").Target
           $targetAccountCore = ($sharedSources | Where-Object Name -eq "account_core").Target
           $targetIndex = ($sharedSources | Where-Object Name -eq "index").Target
@@ -211,6 +214,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Windows server.py syntax check failed." }
           python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" $targetImagineAccounts
           if ($LASTEXITCODE -ne 0) { throw "Windows imagine_accounts.py syntax check failed." }
+          python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" $targetImagineRoutes
+          if ($LASTEXITCODE -ne 0) { throw "Windows imagine_routes.py syntax check failed." }
           python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" $targetMigration
           if ($LASTEXITCODE -ne 0) { throw "Windows migration.py syntax check failed." }
           $tokens = $null
@@ -465,6 +470,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Packaged Windows server syntax check failed." }
           python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" (Join-Path $verifiedAppRoot "runtime\imagine_accounts.py")
           if ($LASTEXITCODE -ne 0) { throw "Packaged Windows imagine_accounts syntax check failed." }
+          python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" (Join-Path $verifiedAppRoot "runtime\imagine_routes.py")
+          if ($LASTEXITCODE -ne 0) { throw "Packaged Windows imagine_routes syntax check failed." }
           "windows-output-sha256=" + (Get-FileHash -Algorithm SHA256 -LiteralPath $outputZip).Hash.ToLowerInvariant()
 
       - name: Retain the verified Windows build
@@ -482,7 +489,7 @@ jobs:
       RELEASE_TAG: v20260720-042100-mac
       INPUT_ZIP: Mac_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Mac_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: bfad5a8fe098767864e444dfc606cc59e288bb021514f1538c637c26f9024299
+      EXPECTED_INPUT_SHA256: a4f6d4b66f89178d70e69257204cdfd74936b09c1ea93b885f5cb88764de5305
 
     steps:
       - name: Check out the shared source commit
@@ -519,6 +526,7 @@ jobs:
             electron/preload-bridge.js
             runtime/server.py
             runtime/imagine_accounts.py
+            runtime/imagine_routes.py
             web/index.html
             web/scripts/state.js
             web/scripts/build_main.js
@@ -554,6 +562,7 @@ jobs:
           preload_js="$app_root/electron/preload-bridge.js"
           server_py="$app_root/runtime/server.py"
           imagine_accounts_py="$app_root/runtime/imagine_accounts.py"
+          imagine_routes_py="$app_root/runtime/imagine_routes.py"
           prompt_account_js="$app_root/web/scripts/prompt_account.js"
           account_core_js="$app_root/web/scripts/account_core.js"
           index_html="$app_root/web/index.html"
@@ -624,6 +633,13 @@ jobs:
           ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
           PY
           python3 - "$imagine_accounts_py" <<'PY'
+          import ast
+          import pathlib
+          import sys
+          path = pathlib.Path(sys.argv[1])
+          ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+          PY
+          python3 - "$imagine_routes_py" <<'PY'
           import ast
           import pathlib
           import sys
@@ -795,6 +811,7 @@ jobs:
             electron/preload-bridge.js
             runtime/server.py
             runtime/imagine_accounts.py
+            runtime/imagine_routes.py
             web/index.html
             web/scripts/state.js
             web/scripts/build_main.js
@@ -853,6 +870,7 @@ jobs:
           verified_app="$verified_main/Contents/Resources/app"
           verified_server="$verified_app/runtime/server.py"
           verified_imagine_accounts="$verified_app/runtime/imagine_accounts.py"
+          verified_imagine_routes="$verified_app/runtime/imagine_routes.py"
           verified_migration_py="$verified_migration/Contents/Resources/migration.py"
           test -x "$verified_main/Contents/MacOS/Grok Chameleon"
           test -x "$verified_migration/Contents/MacOS/Migration"
@@ -876,6 +894,13 @@ jobs:
           ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
           PY
           python3 - "$verified_imagine_accounts" <<'PY'
+          import ast
+          import pathlib
+          import sys
+          path = pathlib.Path(sys.argv[1])
+          ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+          PY
+          python3 - "$verified_imagine_routes" <<'PY'
           import ast
           import pathlib
           import sys
@@ -929,8 +954,8 @@ jobs:
           MAC_TAG: v20260720-042100-mac
           WIN_ZIP: Win_Grok_Chameleon_a.zip
           MAC_ZIP: Mac_Grok_Chameleon_a.zip
-          WIN_INPUT_SHA256: ed5744f7427218fd1b95b62ed33dcded05a502d4dd2c301b0d8918f093614fce
-          MAC_INPUT_SHA256: bfad5a8fe098767864e444dfc606cc59e288bb021514f1538c637c26f9024299
+          WIN_INPUT_SHA256: 3c95388fded308629799a5bf912dabe011a8050ced3492c0fa75765d911b0532
+          MAC_INPUT_SHA256: a4f6d4b66f89178d70e69257204cdfd74936b09c1ea93b885f5cb88764de5305
         run: |
           set -euo pipefail
           mkdir -p current/win current/mac backups

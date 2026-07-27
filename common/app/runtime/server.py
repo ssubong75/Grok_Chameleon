@@ -1530,6 +1530,30 @@ def imagine_post_json(path: str, payload: dict, account: dict, timeout: int = 12
         raise RuntimeError(f"Imagine returned non-JSON response: {body[:1000]}") from exc
 
 
+def imagine_delete_json(path: str, account: dict, timeout: int = 15, referer: str = "") -> dict:
+    headers = imagine_saved_headers(account)
+    headers.pop("Content-Type", None)
+    if referer:
+        headers["Referer"] = referer
+    request = urllib.request.Request(
+        IMAGINE_BASE + path,
+        headers=headers,
+        method="DELETE",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read(4000).decode("utf-8", errors="replace")
+        raise RuntimeError(f"Imagine HTTP {exc.code}: {detail[:1000]}") from exc
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        raise RuntimeError(f"Imagine network error: {exc}") from exc
+    try:
+        return json.loads(body) if body.strip() else {}
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Imagine returned non-JSON response: {body[:1000]}") from exc
+
+
 def verify_imagine_saved_access(account: dict) -> None:
     try:
         imagine_get_json(
@@ -3566,6 +3590,12 @@ def imagine_unsaved_post_from_asset(asset: dict, account: dict) -> dict | None:
     if kind not in {"image", "video"} or not raw_url:
         return None
     asset_id = str(asset.get("assetId") or asset.get("id") or asset.get("postId") or file_stem(Path(urlparse(raw_url).path).name) or uuid.uuid4().hex)
+    conversation_id = str(
+        asset.get("sourceConversationId")
+        or asset.get("rootAssetSourceConversationId")
+        or asset.get("conversationId")
+        or ""
+    ).strip()
     account_id_value = str(account.get("id") or "")
     account_email = str(account.get("email") or "")
     preview_url = raw_url if kind == "image" else imagine_asset_preview_url(asset, "")
@@ -3589,12 +3619,14 @@ def imagine_unsaved_post_from_asset(asset: dict, account: dict) -> dict | None:
         "prompt": prompt,
         "created_at": created_at,
         "asset_id": asset_id,
+        "conversation_id": conversation_id,
         "liked": False,
         "favorite": False,
         "metadata": {
             "remote_url": raw_url,
             "media_url": raw_url,
             "asset_id": asset_id,
+            "conversation_id": conversation_id,
             "root_asset_id": asset.get("rootAssetId") or "",
             "file_source": asset.get("fileSource") or asset.get("source") or "",
             "account_id": account_id_value,
@@ -3604,6 +3636,7 @@ def imagine_unsaved_post_from_asset(asset: dict, account: dict) -> dict | None:
             "imagine": {
                 "asset_id": asset_id,
                 "post_id": str(asset.get("postId") or asset.get("mediaPostId") or asset_id),
+                "conversation_id": conversation_id,
                 "media_url": raw_url,
                 "media_type": kind,
                 "remote_view": "unsaved",
@@ -3633,6 +3666,7 @@ def imagine_unsaved_post_from_asset(asset: dict, account: dict) -> dict | None:
         "account_email": account_email,
         "metadata": {
             "imagine_asset_id": asset_id,
+            "conversation_id": conversation_id,
             "file_source": asset.get("fileSource") or asset.get("source") or "",
             "remote_view": "unsaved",
             "liked": False,
@@ -4042,6 +4076,90 @@ def imagine_media_post_action(payload: dict, action: str) -> dict:
 
 def delete_imagine_media_post(payload: dict) -> dict:
     return imagine_media_post_action(payload, "delete")
+
+
+def imagine_delete_target_id(payload: dict) -> str:
+    payload = payload if isinstance(payload, dict) else {}
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
+    for value in (
+        payload.get("asset_id"),
+        payload.get("item_id"),
+        payload.get("id"),
+        payload.get("post_id"),
+        metadata.get("asset_id"),
+        imagine.get("asset_id"),
+        imagine.get("post_id"),
+        payload.get("media_url"),
+        payload.get("remote_url"),
+    ):
+        target_id = extract_imagine_post_id_from_text(value)
+        if target_id:
+            return target_id
+    return ""
+
+
+def imagine_delete_account(payload: dict) -> dict:
+    root = library_root()
+    if not root:
+        raise RuntimeError("Library path is not set.")
+    account = active_imagine_account(root, str((payload or {}).get("account_id") or ""))
+    if not account:
+        raise RuntimeError("Select or capture an Imagine account first.")
+    return account
+
+
+def delete_imagine_asset(payload: dict) -> dict:
+    payload = payload if isinstance(payload, dict) else {}
+    account = imagine_delete_account(payload)
+    asset_id = imagine_delete_target_id(payload)
+    if not asset_id:
+        raise RuntimeError("Imagine asset id is required.")
+    conversation_id = str(payload.get("conversation_id") or "").strip()
+    detail_post_id = str(payload.get("detail_post_id") or payload.get("post_id") or asset_id).strip()
+    result = imagine_delete_json(
+        f"/rest/assets/{quote(asset_id, safe='')}",
+        account,
+        timeout=15,
+        referer=imagine_detail_referer(detail_post_id, conversation_id),
+    )
+    return {"ok": True, "asset_id": asset_id, "result": result}
+
+
+def delete_imagine_asset_metadata(payload: dict) -> dict:
+    payload = payload if isinstance(payload, dict) else {}
+    account = imagine_delete_account(payload)
+    asset_id = imagine_delete_target_id(payload)
+    if not asset_id:
+        raise RuntimeError("Imagine asset id is required.")
+    result = imagine_delete_json(
+        f"/rest/assets-metadata/{quote(asset_id, safe='')}",
+        account,
+        timeout=15,
+        referer=IMAGINE_BASE + "/files",
+    )
+    return {"ok": True, "asset_id": asset_id, "result": result}
+
+
+def delete_imagine_conversation(payload: dict) -> dict:
+    payload = payload if isinstance(payload, dict) else {}
+    account = imagine_delete_account(payload)
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
+    conversation_id = str(
+        payload.get("conversation_id")
+        or payload.get("source_conversation_id")
+        or metadata.get("conversation_id")
+        or imagine.get("conversation_id")
+        or ""
+    ).strip()
+    if not conversation_id:
+        conversation_id, _ = imagine_asset_conversation_context(payload, account)
+    if not conversation_id:
+        raise RuntimeError("Imagine conversation id could not be resolved.")
+    path = f"/rest/app-chat/conversations/{quote(conversation_id, safe='')}?{urlencode({'deleteMedia': 'true'})}"
+    result = imagine_delete_json(path, account, timeout=45, referer=IMAGINE_BASE + "/imagine/saved")
+    return {"ok": True, "conversation_id": conversation_id, "result": result}
 
 
 def like_imagine_media_post(payload: dict) -> dict:
@@ -15526,6 +15644,9 @@ POST_JSON_ROUTES = {
         cancel_imagine_job=cancel_imagine_job,
         dismiss_imagine_job=dismiss_imagine_job,
         delete_imagine_media_post=delete_imagine_media_post,
+        delete_imagine_asset=delete_imagine_asset,
+        delete_imagine_asset_metadata=delete_imagine_asset_metadata,
+        delete_imagine_conversation=delete_imagine_conversation,
         like_imagine_media_post=like_imagine_media_post,
         unsave_imagine_media_post=unsave_imagine_media_post,
         upscale_imagine_video_post=upscale_imagine_video_post,

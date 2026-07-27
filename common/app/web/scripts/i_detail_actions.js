@@ -335,15 +335,59 @@ function removeImagineItemFromPost(post, removedItem) {
   return removeImagineItemsFromPost(post, removedItem);
 }
 
+function imagineDeleteAssetIdForItem(item) {
+  const metadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
+  const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
+  return String(
+    item?.asset_id
+    || metadata.asset_id
+    || imagine.asset_id
+    || item?.item_id
+    || item?.id
+    || item?.post_id
+    || imagine.post_id
+    || "",
+  ).trim();
+}
+
+function imagineDeleteConversationIdForPost(post, item = null) {
+  const itemMetadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
+  const itemImagine = itemMetadata.imagine && typeof itemMetadata.imagine === "object" ? itemMetadata.imagine : {};
+  const postMetadata = post?.metadata && typeof post.metadata === "object" ? post.metadata : {};
+  const postImagine = postMetadata.imagine && typeof postMetadata.imagine === "object" ? postMetadata.imagine : {};
+  const explicitId = String(
+    item?.conversation_id
+    || itemMetadata.conversation_id
+    || itemImagine.conversation_id
+    || post?.conversation_id
+    || postMetadata.conversation_id
+    || postImagine.conversation_id
+    || "",
+  ).trim();
+  if (explicitId) return explicitId;
+  if (isImagineUnsavedPost(post, item)) return "";
+  return String(
+    postMetadata.imagine_root_post_id
+    || postMetadata.raw_root_post_id
+    || post?.root_post_id
+    || post?.post_id
+    || "",
+  ).trim();
+}
+
 function imagineDeletePayloadForItem(post, item) {
   const postId = imagineActionPostIdForItem(item);
-  if (!postId) {
+  const assetId = imagineDeleteAssetIdForItem(item);
+  if (!postId && !assetId) {
     return null;
   }
   return {
-    id: postId,
+    id: assetId || postId,
+    asset_id: assetId,
     post_id: postId,
     item_id: item?.item_id || "",
+    detail_post_id: imagineActionPostIdForPost(post),
+    conversation_id: imagineDeleteConversationIdForPost(post, item),
     type: item?.type || "",
     media_url: item?.remote_url || item?.url || item?.metadata?.media_url || item?.metadata?.remote_url || item?.metadata?.imagine?.media_url || "",
     remote_url: item?.remote_url || item?.url || "",
@@ -352,22 +396,66 @@ function imagineDeletePayloadForItem(post, item) {
   };
 }
 
-async function deleteImagineRemoteItem(post, item) {
-  const deletePayload = imagineDeletePayloadForItem(post, item);
-  if (!deletePayload) {
-    throw new Error("This Imagine item has no post id.");
-  }
-  try {
-    await qApi("/api/imagine/post/delete", deletePayload);
-  } catch (error) {
-    const message = String(error?.message || "");
-    if (!message.includes("Media post not found") && !message.includes("HTTP 404")) throw error;
-  }
-  const hiddenKeys = imaginePostIdKeysForItem(item);
+function imagineConversationDeletePayloadForPost(post) {
+  const items = (post?.items || []).filter(Boolean);
+  const representative = representativeItem(items, post) || post?.representative_item || items[0];
+  const payload = imagineDeletePayloadForItem(post, representative);
+  if (!payload) return null;
+  return {
+    ...payload,
+    conversation_id: imagineDeleteConversationIdForPost(post, representative),
+  };
+}
+
+async function hideImagineRemoteItems(items) {
+  const hiddenKeys = Array.from(new Set(
+    (items || []).flatMap((item) => imaginePostIdKeysForItem(item)),
+  ));
   if (hiddenKeys.length) {
     await qApi("/api/imagine/item/hide", { keys: hiddenKeys });
   }
-  return true;
+}
+
+async function deleteImagineRemoteItem(post, item) {
+  const deletePayload = imagineDeletePayloadForItem(post, item);
+  if (!deletePayload) {
+    throw new Error("This Imagine item has no asset id.");
+  }
+  const endpoint = isImagineUnsavedPost(post, item)
+    ? "/api/imagine/asset-metadata/delete"
+    : "/api/imagine/asset/delete";
+  const result = await qApi(endpoint, deletePayload);
+  await hideImagineRemoteItems([item]);
+  return result;
+}
+
+async function deleteImagineRemoteCard(post, { hide = true } = {}) {
+  const items = (post?.items || []).filter(Boolean);
+  if (isImagineUnsavedPost(post)) {
+    const results = await Promise.allSettled(items.map((item) => {
+      const payload = imagineDeletePayloadForItem(post, item);
+      if (!payload) throw new Error("This Unsaved item has no asset id.");
+      return qApi("/api/imagine/asset-metadata/delete", payload);
+    }));
+    const deletedItems = [];
+    const failures = [];
+    for (let index = 0; index < results.length; index += 1) {
+      const result = results[index];
+      if (result.status === "fulfilled") deletedItems.push(items[index]);
+      else failures.push(result.reason);
+    }
+    if (hide && deletedItems.length) {
+      await hideImagineRemoteItems(deletedItems);
+    }
+    return { deletedItems, failures };
+  }
+  const deletePayload = imagineConversationDeletePayloadForPost(post);
+  if (!deletePayload) throw new Error("This Imagine card has no deletion target.");
+  const data = await qApi("/api/imagine/conversation/delete", deletePayload);
+  if (hide) {
+    await hideImagineRemoteItems(items);
+  }
+  return { deletedItems: items, failures: [], data };
 }
 
 async function deleteImagineSelectedDetailItem() {
@@ -378,7 +466,7 @@ async function deleteImagineSelectedDetailItem() {
     return;
   }
   if (!imagineDeletePayloadForItem(post, item)) {
-    showErrorPanel("Delete unavailable", "This Imagine item has no post id.");
+    showErrorPanel("Delete unavailable", "This Imagine item has no asset id.");
     return;
   }
   const ok = await confirmAction({
@@ -393,9 +481,9 @@ async function deleteImagineSelectedDetailItem() {
 }
 
 async function deleteImagineCardPost(post, button = null) {
-  const items = (post?.items || []).filter((item) => imagineDeletePayloadForItem(post, item));
-  if (!post || !items.length) {
-    showErrorPanel("Delete unavailable", "This Imagine card has no post id.");
+  const items = (post?.items || []).filter(Boolean);
+  if (!post || !items.length || !imagineConversationDeletePayloadForPost(post)) {
+    showErrorPanel("Delete unavailable", "This Imagine card has no deletion target.");
     return;
   }
   const screenId = screen_state.current_screen;
@@ -408,15 +496,21 @@ async function deleteImagineCardPost(post, button = null) {
   if (!ok) return;
   button?.setAttribute("aria-busy", "true");
   try {
-    for (const item of items) {
-      await deleteImagineRemoteItem(post, item);
+    const result = await deleteImagineRemoteCard(post);
+    if (result.deletedItems.length) {
+      removeImagineItemsFromPost(post, result.deletedItems, {
+        keepListScreen: true,
+        screenId,
+        scrollTop,
+      });
+      toast("Deleted Imagine post.");
     }
-    removeImagineItemsFromPost(post, items, {
-      keepListScreen: true,
-      screenId,
-      scrollTop,
-    });
-    toast("Deleted Imagine post.");
+    if (result.failures.length) {
+      showErrorPanel(
+        "Delete failed",
+        `${result.failures.length} media item(s) could not be deleted. ${result.failures[0]?.message || ""}`.trim(),
+      );
+    }
   } catch (error) {
     showErrorPanel("Delete failed", error?.message || "Delete failed.");
   } finally {
