@@ -8,13 +8,13 @@ document.getElementById("selectionDownloadBtn")?.addEventListener("click", () =>
 
 document.getElementById("selectionMergeBtn")?.addEventListener("click", () => {
   const button = document.getElementById("selectionMergeBtn");
-  const movingUnsavedCards = button?.dataset.selectionAction === "move";
-  const action = movingUnsavedCards ? moveSelectedUnsavedCardItems : mergeSelectedCardItems;
+  const movingImagineCards = button?.dataset.selectionAction === "move";
+  const action = movingImagineCards ? moveSelectedImagineCardItems : mergeSelectedCardItems;
   action().catch((error) => {
     console.warn(error);
     showErrorPanel(
-      movingUnsavedCards ? "Move failed" : "Merge failed",
-      error?.message || (movingUnsavedCards ? "Move failed." : "Merge failed."),
+      movingImagineCards ? "Move failed" : "Merge failed",
+      error?.message || (movingImagineCards ? "Move failed." : "Merge failed."),
     );
   });
 });

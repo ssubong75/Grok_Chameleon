@@ -611,6 +611,7 @@ function mediaCardForPost(post, className, backTargetOverride = null) {
   if (!attachedJob) {
     if (remoteOnly) {
       const unsavedPost = typeof isImagineUnsavedPost === "function" && isImagineUnsavedPost(post);
+      const imagineCardScreenId = backTargetOverride?.screenId || "i_main";
       article.append(
         (typeof isImagineDiscoverPost === "function" && isImagineDiscoverPost(post))
           || unsavedPost
@@ -619,7 +620,9 @@ function mediaCardForPost(post, className, backTargetOverride = null) {
           ? imagineCardSaveButton(post)
           : imagineCardUnsaveButton(post),
       );
-      if (unsavedPost) article.append(cardVisualSelectButton(post));
+      if (unsavedPost || imagineCardScreenId === "i_main") {
+        article.append(cardVisualSelectButton(post));
+      }
     } else if (className === "b_t2i_card" && isBuildT2iPost(post)) {
       article.append(buildFavoriteButton(post));
     } else {

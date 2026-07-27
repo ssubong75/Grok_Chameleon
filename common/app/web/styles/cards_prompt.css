@@ -340,6 +340,7 @@
 
 .b_card_list .media-card-select-button .selection-checkmark,
 .b_t2i_view_card_list .media-card-select-button .selection-checkmark,
+.i_card_list .card_visual_select_btn .selection-checkmark,
 .i_unsaved_card_list .card_visual_select_btn .selection-checkmark,
 .second_main_card_list .media-card-select-button .selection-checkmark {
   transform: translateY(2.8px);
@@ -347,6 +348,7 @@
 
 .b_card_list .selection-checkmark-glyph,
 .b_t2i_view_card_list .selection-checkmark-glyph,
+.i_card_list .card_visual_select_btn .selection-checkmark-glyph,
 .i_unsaved_card_list .card_visual_select_btn .selection-checkmark-glyph,
 .second_main_card_list .selection-checkmark-glyph {
   display: none;
@@ -354,16 +356,23 @@
 
 .b_card_list .selection-checkmark-rounded,
 .b_t2i_view_card_list .selection-checkmark-rounded,
+.i_card_list .card_visual_select_btn .selection-checkmark-rounded,
 .i_unsaved_card_list .card_visual_select_btn .selection-checkmark-rounded,
 .second_main_card_list .selection-checkmark-rounded {
   display: block;
 }
 
+.i_card_list .card_visual_select_btn,
 .i_unsaved_card_list .card_visual_select_btn {
-  right: auto;
-  left: 10px;
+  top: 58px;
+  right: 10px;
+  left: auto;
 }
 
+.i_card_list .card_visual_select_btn:hover,
+.i_card_list .card_visual_select_btn:focus-visible,
+.i_card_list .card.selected .card_visual_select_btn,
+.i_card_list .card_visual_select_btn[aria-pressed="true"],
 .i_unsaved_card_list .card_visual_select_btn:hover,
 .i_unsaved_card_list .card_visual_select_btn:focus-visible,
 .i_unsaved_card_list .card.selected .card_visual_select_btn,

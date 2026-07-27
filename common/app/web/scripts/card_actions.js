@@ -28,6 +28,10 @@
     return screen_state.current_screen === "i_unsaved_main";
   }
 
+  function cardSelectionUsesImagineMoveActions() {
+    return ["i_main", "i_unsaved_main"].includes(screen_state.current_screen);
+  }
+
   function cardSelectionUsesImagineDeleteActions() {
     return ["i_main", "i_unsaved_main"].includes(screen_state.current_screen);
   }
@@ -49,12 +53,12 @@
     const selectionBar = document.getElementById("selectionBar");
     const selectionCount = document.getElementById("selectionCount");
     const mergeButton = document.getElementById("selectionMergeBtn");
-    const unsavedActions = cardSelectionUsesUnsavedActions();
+    const imagineMoveActions = cardSelectionUsesImagineMoveActions();
     if (selectionBar) selectionBar.hidden = count === 0;
     if (selectionCount) selectionCount.textContent = `Selected: ${count}`;
     if (mergeButton) {
-      mergeButton.textContent = unsavedActions ? "Move" : "Merge";
-      mergeButton.dataset.selectionAction = unsavedActions ? "move" : "merge";
+      mergeButton.textContent = imagineMoveActions ? "Move" : "Merge";
+      mergeButton.dataset.selectionAction = imagineMoveActions ? "move" : "merge";
     }
     for (const card of document.querySelectorAll("[data-library-post-path]")) {
       const selected = library_state.selectedItems?.has(card.dataset.libraryPostPath || "");
@@ -141,10 +145,15 @@
     return downloadLibraryItems(posts.flatMap((post) => post.items || []));
   }
 
-  async function moveSelectedUnsavedCardItems() {
-    const posts = selectedCardPosts().filter(isSelectedImagineUnsavedPost);
+  async function moveSelectedImagineCardItems() {
+    const unsavedOnly = cardSelectionUsesUnsavedActions();
+    const posts = selectedCardPosts().filter((post) => (
+      unsavedOnly
+        ? isSelectedImagineUnsavedPost(post)
+        : post?.source === "imagine" && post?.area === "imagine_remote"
+    ));
     if (!posts.length) {
-      showErrorPanel("Move unavailable", "Select one or more Unsaved cards.");
+      showErrorPanel("Move unavailable", "Select one or more Imagine cards.");
       return;
     }
     openMoveToCollectionDialog({
