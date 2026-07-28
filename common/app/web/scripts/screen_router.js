@@ -49,7 +49,7 @@ function openScreen(screenId, activeButtonId = "", options = {}) {
     button.classList.toggle("active", button.id === activeButtonId);
   }
 
-  if (["i_main", "i_discover_main", "i_unsaved_main", "b_main", "b_t2i_view_main", "collection_main", "2nd_main"].includes(screenId)) {
+  if (["i_main", "i_discover_main", "b_main", "b_t2i_view_main", "collection_main", "2nd_main"].includes(screenId)) {
     screen_state.current_main = screenId;
   }
 
@@ -69,7 +69,7 @@ function openScreen(screenId, activeButtonId = "", options = {}) {
   if (screenId === "i_detail" || screenId === "b_detail") playActiveDetailVideoIfSelected();
   if (screenId === "i_detail" || screenId === "b_detail") updateDetailPostNavigationButtons();
   if (screenId === "collection_main") scheduleCollectionRows();
-  if ((screenId === "i_main" || screenId === "i_discover_main" || screenId === "i_unsaved_main") && typeof prepareActiveImagineBridgeSession === "function") {
+  if ((screenId === "i_main" || screenId === "i_discover_main") && typeof prepareActiveImagineBridgeSession === "function") {
     prepareActiveImagineBridgeSession().catch((error) => console.warn(error));
   }
   if (typeof scheduleScreenVirtualCardList === "function") scheduleScreenVirtualCardList(screenId);

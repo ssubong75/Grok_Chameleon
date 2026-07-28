@@ -75,6 +75,7 @@
         "fileAttachments", "resolvedImageReferences", "videoGenModelConfig",
         "imageEditModelConfig", "mediaGenInput", "params", "url", "mimeType",
         "filename", "fileName", "grokChameleonDirectUpload", "grokChameleonUploadAssetIds", "grokChameleonUploadUrls",
+        "grokChameleonFallbackSourceUrls",
         "activeContainerIds", "canonicalContainerId", "discoverNewContainers", "startNewConversation",
       ]) {
         if (Object.prototype.hasOwnProperty.call(value, key)) output[key] = compactValue(value[key], depth + 1);
@@ -2272,6 +2273,7 @@
   function generationSourceReady(state, sourceId, rootSourceId = "") {
     const value = resolvedMediaId(state, sourceId);
     if (!value) return false;
+    if (!state?.byId?.[value]) return false;
     const rootId = resolvedMediaId(state, rootSourceId);
     if (rootId) {
       if (value === rootId && state?.byId?.[rootId]) return true;
@@ -2382,11 +2384,14 @@
     const rawInputAssets = Array.isArray(params.inputAssets) ? params.inputAssets.filter(Boolean) : [];
     const inputIds = rawInputAssets.map(String);
     const urls = imageReferenceUrls(payload);
+    const fallbackSourceUrls = Array.isArray(payload.grokChameleonFallbackSourceUrls)
+      ? payload.grokChameleonFallbackSourceUrls.map((value) => String(value || "").trim()).filter(Boolean)
+      : [];
     const conversationId = String(payload.grokChameleonConversationId || "").trim();
     const parentResponseId = String(payload.grokChameleonParentResponseId || "").trim();
     const directUpload = Boolean(payload.grokChameleonDirectUpload);
-    const startNewConversation = Boolean(payload.grokChameleonStartNewConversation || directUpload);
-    const continueExistingConversation = Boolean(conversationId) && !startNewConversation;
+    let startNewConversation = Boolean(payload.grokChameleonStartNewConversation || directUpload);
+    let continueExistingConversation = Boolean(conversationId) && !startNewConversation;
     const directUploadAssetIds = Array.isArray(payload.grokChameleonUploadAssetIds)
       ? payload.grokChameleonUploadAssetIds.map((value) => String(value || "").trim()).filter(Boolean)
       : [];
@@ -2592,6 +2597,10 @@
       let imageReferences;
       let isRedo = false;
       let videoInputAsset;
+      let videoRequestInputIds = inputIds;
+      let videoRequestMediaGenInput = payload.mediaGenInput;
+      let videoConversationId = conversationId;
+      let videoParentResponseId = parentResponseId;
       const duration = params.duration;
       const resolutionName = String(params.resolutionName || videoConfig.resolutionName || "").trim().toLowerCase();
       const durationSeconds = Number(duration || videoConfig.videoLength || 0) || 0;
@@ -2646,7 +2655,7 @@
           });
         }
       }
-      const rootContainerId = rootContainerIdFor(state, explicitRootSeedId || rootSeedId);
+      let rootContainerId = rootContainerIdFor(state, explicitRootSeedId || rootSeedId);
       let generateVideoMethod = resolveStoreMethod(state, storeContext.record, "generateVideoForImage");
       const stateFunctionNames = listFunctionNames(state);
       const storeFunctionNames = listFunctionNames(storeContext.record?.store);
@@ -2723,6 +2732,67 @@
         variant.kind,
         rootContainerId || containerId,
       );
+      const sourceReady = generationSourceReady(
+        state,
+        videoInputAsset || parentPostId || extendPostId || containerId,
+        rootContainerId || containerId,
+      );
+      if (
+        !sourceReady
+        && ["imageToVideo", "referenceToVideo"].includes(variant.kind)
+        && fallbackSourceUrls.length > 0
+      ) {
+        pushStoreTrace("store_generation_source_fallback_start", {
+          requestId,
+          variant: variant.kind,
+          sourceId: videoInputAsset || parentPostId || containerId,
+          conversationId,
+          parentResponseId,
+          fallbackUrl: fallbackSourceUrls[0],
+        });
+        const fallbackPostId = await ensureContainerFromInput(
+          state,
+          "image",
+          prompt,
+          [],
+          fallbackSourceUrls,
+          "image/jpeg",
+        );
+        if (!fallbackPostId) throw new Error("Official fallback source post could not be created.");
+        state = storeContext.record ? mediaStoreStateForRecord(storeContext.record) : getMediaStoreState();
+        state = await hydrateGenerationSource(
+          storeContext,
+          fallbackPostId,
+          requestId,
+          `${variant.kind}Fallback`,
+          fallbackPostId,
+        );
+        if (!generationSourceReady(state, fallbackPostId, fallbackPostId)) {
+          throw new Error("Official fallback source post could not be loaded.");
+        }
+        containerId = fallbackPostId;
+        videoInputAsset = fallbackPostId;
+        parentPostId = undefined;
+        rootContainerId = fallbackPostId;
+        videoConversationId = "";
+        videoParentResponseId = "";
+        startNewConversation = true;
+        continueExistingConversation = false;
+        videoRequestInputIds = [fallbackPostId];
+        videoRequestMediaGenInput = {
+          ...(payload.mediaGenInput || {}),
+          [variant.kind]: {
+            ...params,
+            inputAssets: [fallbackPostId],
+          },
+        };
+        pushStoreTrace("store_generation_source_fallback_ready", {
+          requestId,
+          variant: variant.kind,
+          fallbackPostId,
+          startNewConversation,
+        });
+      }
       await applyOfficialVideoGenerationSettings({
         requestId,
         variant: variant.kind,
@@ -2733,7 +2803,7 @@
       if (!startNewConversation && (variant.kind === "imageToVideo" || variant.kind === "referenceToVideo" || variant.kind === "videoExtension")) {
         syncCurrentRootContainer(state, requestId, variant.kind, rootContainerId || containerId);
       }
-      state = ensureStoreLoginState(state, storeContext.record, requestId, "generateVideoForImage", [containerId, videoInputAsset, parentPostId, extendPostId].concat(inputIds, directUploadAssetIds));
+      state = ensureStoreLoginState(state, storeContext.record, requestId, "generateVideoForImage", [containerId, videoInputAsset, parentPostId, extendPostId].concat(videoRequestInputIds, directUploadAssetIds));
       if (!startNewConversation && (variant.kind === "imageToVideo" || variant.kind === "referenceToVideo" || variant.kind === "videoExtension")) {
         syncCurrentRootContainer(state, requestId, variant.kind, rootContainerId || containerId);
       }
@@ -2816,8 +2886,15 @@
         isRedo,
         imageReferences,
         onVideoGenerationStart,
-        payload.mediaGenInput
+        videoRequestMediaGenInput
       ];
+      const activeConversationRoute = continueExistingConversation
+        ? {
+            ...conversationRoute,
+            conversationId: videoConversationId,
+            parentResponseId: videoParentResponseId,
+          }
+        : null;
       pushStoreTrace("store_generation_video_args", {
         requestId,
         variant: variant.kind,
@@ -2850,9 +2927,9 @@
           expectedType: "video",
           prompt,
         });
-        if (continueExistingConversation) armConversationRequestRoute(conversationRoute);
+        if (activeConversationRoute) armConversationRequestRoute(activeConversationRoute);
         callState = startStoreMethodCall("generateVideoForImage", generateVideoMethod.fn, args);
-        callState = await retryRateLimitedStoreCall("generateVideoForImage", generateVideoMethod.fn, args, requestId, callState, 2, conversationRoute);
+        callState = await retryRateLimitedStoreCall("generateVideoForImage", generateVideoMethod.fn, args, requestId, callState, 2, activeConversationRoute);
         videoTracking.responseCapture = videoResponseCapture;
       }
       const videoResponseCapture = videoTracking.responseCapture || null;
@@ -2867,9 +2944,9 @@
         callState,
         storeContext.record,
         videoTracking,
-        conversationId,
-        parentResponseId,
-        inputIds,
+        videoConversationId,
+        videoParentResponseId,
+        videoRequestInputIds,
         videoResponseCapture,
       );
       const finalState = storeContext.record ? mediaStoreStateForRecord(storeContext.record) : getMediaStoreState();
@@ -2878,13 +2955,13 @@
           videoResponseCapture,
           resultEvents,
           "video",
-          [containerId, ...inputIds, ...directUploadAssetIds],
+          [containerId, ...videoRequestInputIds, ...directUploadAssetIds],
         )
         : "";
       const canonicalContainerId = startNewConversation
         ? (
           captureCanonicalContainerId
-          || canonicalGenerationContainerId(finalState, containerId, videoTracking, resultEvents, "video", inputIds)
+          || canonicalGenerationContainerId(finalState, containerId, videoTracking, resultEvents, "video", videoRequestInputIds)
         )
         : "";
       if (startNewConversation && canonicalContainerId) {

@@ -369,15 +369,29 @@
   left: auto;
 }
 
+.i_card_list .card_visual_select_btn.card_visual_select_primary {
+  top: 8px;
+}
+
 .i_card_list .card_visual_select_btn:hover,
 .i_card_list .card_visual_select_btn:focus-visible,
 .i_card_list .card.selected .card_visual_select_btn,
-.i_card_list .card_visual_select_btn[aria-pressed="true"],
+.i_card_list .card_visual_select_btn[aria-pressed="true"] {
+  color: #a61729;
+}
+
 .i_unsaved_card_list .card_visual_select_btn:hover,
 .i_unsaved_card_list .card_visual_select_btn:focus-visible,
 .i_unsaved_card_list .card.selected .card_visual_select_btn,
 .i_unsaved_card_list .card_visual_select_btn[aria-pressed="true"] {
   color: var(--imagine-blue);
+}
+
+.b_card_list .media-card-select-button:not(.text2image-save-button):hover,
+.b_card_list .media-card-select-button:not(.text2image-save-button):focus-visible,
+.b_card_list .card.selected .media-card-select-button:not(.text2image-save-button),
+.b_card_list .media-card-select-button:not(.text2image-save-button)[aria-pressed="true"] {
+  color: #a61729;
 }
 
 .card.selected .media-card-select-button .selection-checkmark,

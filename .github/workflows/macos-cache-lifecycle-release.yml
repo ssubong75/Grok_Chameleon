@@ -19,7 +19,9 @@ env:
   COMMON_BUILD_MAIN: common/app/web/scripts/build_main.js
   COMMON_B_SOURCE: common/app/web/scripts/b_source_render.js
   COMMON_SIDEBAR_EVENTS: common/app/web/scripts/sidebar_events.js
+  COMMON_SIDEBAR_STYLE: common/app/web/styles/sidebar.css
   COMMON_COLLECTION_EVENTS: common/app/web/scripts/collection_events.js
+  COMMON_COLLECTION_STYLE: common/app/web/styles/collection.css
   COMMON_MAIN_STYLE: common/app/web/styles/main.css
   COMMON_CARD_RENDER: common/app/web/scripts/card_render.js
   COMMON_CARD_ACTIONS: common/app/web/scripts/card_actions.js
@@ -37,6 +39,8 @@ env:
   COMMON_DETAIL_RENDER: common/app/web/scripts/detail_render.js
   COMMON_DETAIL_STYLE: common/app/web/styles/detail.css
   COMMON_I_SOURCE: common/app/web/scripts/i_source_render.js
+  COMMON_IMAGINE_MAIN: common/app/web/scripts/imagine_main.js
+  COMMON_RENDER: common/app/web/scripts/render.js
   COMMON_COLLECTION_ACTIONS: common/app/web/scripts/collection_actions.js
   COMMON_PROMPT_EVENTS: common/app/web/scripts/prompt_events.js
   COMMON_UI_FEEDBACK: common/app/web/scripts/ui_feedback.js
@@ -59,7 +63,7 @@ jobs:
       RELEASE_TAG: v20260720-041036-win
       INPUT_ZIP: Win_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Win_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: 30bf678595dfdc14a9df39aabf44259126e9275570c09c868bded633f9b3e35f
+      EXPECTED_INPUT_SHA256: 6a8b0367a3cf4ab3c32a0dd9a1aa2ee0b29675d9fa3614bb7228cc3665530279
 
     steps:
       - name: Check out the shared source commit
@@ -105,7 +109,9 @@ jobs:
             @{ Name = "build_main"; Relative = "web\scripts\build_main.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_BUILD_MAIN) },
             @{ Name = "b_source"; Relative = "web\scripts\b_source_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_B_SOURCE) },
             @{ Name = "sidebar_events"; Relative = "web\scripts\sidebar_events.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_SIDEBAR_EVENTS) },
+            @{ Name = "sidebar_style"; Relative = "web\styles\sidebar.css"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_SIDEBAR_STYLE) },
             @{ Name = "collection_events"; Relative = "web\scripts\collection_events.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_COLLECTION_EVENTS) },
+            @{ Name = "collection_style"; Relative = "web\styles\collection.css"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_COLLECTION_STYLE) },
             @{ Name = "main_style"; Relative = "web\styles\main.css"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_MAIN_STYLE) },
             @{ Name = "card_render"; Relative = "web\scripts\card_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_CARD_RENDER) },
             @{ Name = "card_actions"; Relative = "web\scripts\card_actions.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_CARD_ACTIONS) },
@@ -123,6 +129,8 @@ jobs:
             @{ Name = "detail_render"; Relative = "web\scripts\detail_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_RENDER) },
             @{ Name = "detail_style"; Relative = "web\styles\detail.css"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_STYLE) },
             @{ Name = "i_source"; Relative = "web\scripts\i_source_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_I_SOURCE) },
+            @{ Name = "imagine_main"; Relative = "web\scripts\imagine_main.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_IMAGINE_MAIN) },
+            @{ Name = "render"; Relative = "web\scripts\render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_RENDER) },
             @{ Name = "collection_actions"; Relative = "web\scripts\collection_actions.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_COLLECTION_ACTIONS) },
             @{ Name = "prompt_events"; Relative = "web\scripts\prompt_events.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_PROMPT_EVENTS) },
             @{ Name = "prompt_account"; Relative = "web\scripts\prompt_account.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_PROMPT_ACCOUNT) },
@@ -489,7 +497,7 @@ jobs:
       RELEASE_TAG: v20260720-042100-mac
       INPUT_ZIP: Mac_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Mac_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: 33e610af0d590a995e637be962d7df5e5a69b13577a2cf68156475136dcef88f
+      EXPECTED_INPUT_SHA256: c3cae4734e0788e469d1330e38a7ec37e69baf04abb67ce43a02db35b15c96de
 
     steps:
       - name: Check out the shared source commit
@@ -532,7 +540,9 @@ jobs:
             web/scripts/build_main.js
             web/scripts/b_source_render.js
             web/scripts/sidebar_events.js
+            web/styles/sidebar.css
             web/scripts/collection_events.js
+            web/styles/collection.css
             web/styles/main.css
             web/scripts/card_render.js
             web/scripts/card_actions.js
@@ -550,6 +560,8 @@ jobs:
             web/scripts/detail_render.js
             web/styles/detail.css
             web/scripts/i_source_render.js
+            web/scripts/imagine_main.js
+            web/scripts/render.js
             web/scripts/collection_actions.js
             web/scripts/prompt_events.js
             web/scripts/prompt_account.js
@@ -954,8 +966,8 @@ jobs:
           MAC_TAG: v20260720-042100-mac
           WIN_ZIP: Win_Grok_Chameleon_a.zip
           MAC_ZIP: Mac_Grok_Chameleon_a.zip
-          WIN_INPUT_SHA256: 30bf678595dfdc14a9df39aabf44259126e9275570c09c868bded633f9b3e35f
-          MAC_INPUT_SHA256: 33e610af0d590a995e637be962d7df5e5a69b13577a2cf68156475136dcef88f
+          WIN_INPUT_SHA256: 6a8b0367a3cf4ab3c32a0dd9a1aa2ee0b29675d9fa3614bb7228cc3665530279
+          MAC_INPUT_SHA256: c3cae4734e0788e469d1330e38a7ec37e69baf04abb67ce43a02db35b15c96de
         run: |
           set -euo pipefail
           mkdir -p current/win current/mac backups
@@ -964,8 +976,8 @@ jobs:
           test "$(sha256sum "current/win/$WIN_ZIP" | awk '{print $1}')" = "$WIN_INPUT_SHA256"
           test "$(sha256sum "current/mac/$MAC_ZIP" | awk '{print $1}')" = "$MAC_INPUT_SHA256"
           short_sha="$(printf '%s' "$GITHUB_SHA" | cut -c1-12)"
-          win_backup="Win_Grok_Chameleon_a.previous-before-imagine-ui-selection-$short_sha.zip"
-          mac_backup="Mac_Grok_Chameleon_a.previous-before-imagine-ui-selection-$short_sha.zip"
+          win_backup="Win_Grok_Chameleon_a.previous-before-imagine-saved-i2v-ui-$short_sha.zip"
+          mac_backup="Mac_Grok_Chameleon_a.previous-before-imagine-saved-i2v-ui-$short_sha.zip"
           cp "current/win/$WIN_ZIP" "backups/$win_backup"
           cp "current/mac/$MAC_ZIP" "backups/$mac_backup"
           gh release upload "$WIN_TAG" "backups/$win_backup" --repo "$GITHUB_REPOSITORY"

@@ -5,7 +5,6 @@
       "b_t2i_view_main",
       "search_main",
       "i_discover_main",
-      "i_unsaved_main",
       "collection_main",
     "2nd_main",
     "i_detail",
@@ -17,7 +16,6 @@
     const navButtonIds = [
       "i_imagine_nav_btn",
       "i_discover_nav_btn",
-      "i_unsaved_nav_btn",
       "b_build_btn",
       "b_collection_nav_btn",
       "prompt_main_btn",
@@ -186,11 +184,11 @@
 
   function syncSidebarTogglePosition() {
     const linkRect = document.getElementById("i_link_btn")?.getBoundingClientRect();
-    const libraryRect = setLibraryPathBtn?.getBoundingClientRect();
-    if (!linkRect || !libraryRect || linkRect.height === 0 || libraryRect.height === 0) return;
+    const folderRect = folderBtn?.getBoundingClientRect();
+    if (!linkRect || !folderRect || linkRect.height === 0 || folderRect.height === 0) return;
     const linkCenter = linkRect.top + (linkRect.height / 2);
-    const libraryCenter = libraryRect.top + (libraryRect.height / 2);
-    const toggleTop = (linkCenter + libraryCenter) / 2;
+    const folderCenter = folderRect.top + (folderRect.height / 2);
+    const toggleTop = (linkCenter + folderCenter) / 2;
     document.documentElement.style.setProperty("--sidebar-toggle-top", `${toggleTop}px`);
   }
 

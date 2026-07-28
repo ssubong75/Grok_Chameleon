@@ -200,6 +200,12 @@ function rememberHiddenImaginePost(post) {
   }
 }
 
+function forgetHiddenImaginePost(post) {
+  const hidden = library_state.imagineHiddenRemotePostIds;
+  if (!(hidden instanceof Set)) return;
+  for (const key of imaginePostIdKeysForPost(post)) hidden.delete(key);
+}
+
 function imaginePostHidden(post) {
   const hidden = library_state.imagineHiddenRemotePostIds;
   if (!(hidden instanceof Set) || !hidden.size) return false;
@@ -286,9 +292,247 @@ function mergeImagineRemotePosts(existingPosts, nextPosts) {
     if (post?.folder_path) merged.set(post.folder_path, post);
   }
   for (const post of nextPosts || []) {
-    if (post?.folder_path) merged.set(post.folder_path, post);
+    if (!post?.folder_path) continue;
+    const existing = merged.get(post.folder_path);
+    if (!existing) {
+      merged.set(post.folder_path, post);
+      continue;
+    }
+    const existingFlat = existing?.metadata?.flat_only === true;
+    const nextFlat = post?.metadata?.flat_only === true;
+    const primary = existingFlat && !nextFlat ? post : existing;
+    const secondary = primary === existing ? post : existing;
+    const known = new Set((primary.items || []).flatMap(imaginePostIdKeysForItem));
+    const items = [...(primary.items || [])];
+    for (const item of secondary.items || []) {
+      const keys = imaginePostIdKeysForItem(item);
+      if (keys.some((key) => known.has(key))) continue;
+      items.push(item);
+      for (const key of keys) known.add(key);
+    }
+    const representative = representativeItem(items, { ...primary, items }) || items[0];
+    merged.set(post.folder_path, normalizeServerPost({
+      ...primary,
+      items,
+      representative: representative?.file || representative?.url || representative?.item_id || "",
+      representative_item: representative,
+      metadata: {
+        ...(primary.metadata || {}),
+        flat_only: existingFlat && nextFlat,
+      },
+    }));
   }
   return Array.from(merged.values());
+}
+
+function mergeImagineRefreshedPosts(existingPosts, refreshedPosts) {
+  const existing = reconcileImagineSavedDisplayPosts(existingPosts || []);
+  const refreshed = reconcileImagineSavedDisplayPosts(refreshedPosts || []);
+  if (!existing.length) return refreshed;
+  if (!refreshed.length) return [];
+
+  const existingKeys = existing.map(imagineSavedPostMatchKeys);
+  const matchedExistingIndexes = new Set();
+  const refreshedForExistingIndex = new Map();
+  const newPosts = [];
+
+  for (const post of refreshed) {
+    const exactIndex = existing.findIndex((candidate, index) => (
+      !matchedExistingIndexes.has(index)
+      && candidate?.folder_path
+      && candidate.folder_path === post?.folder_path
+    ));
+    const postKeys = imagineSavedPostMatchKeys(post);
+    const matchedIndex = exactIndex >= 0
+      ? exactIndex
+      : existingKeys.findIndex((keys, index) => (
+        !matchedExistingIndexes.has(index)
+        && !(
+          isImagineT2iGroupContainer(post)
+          && existing[index]?.metadata?.local_heart === true
+        )
+        && !(
+          post?.metadata?.local_heart === true
+          && isImagineT2iGroupContainer(existing[index])
+        )
+        && Array.from(postKeys).some((key) => keys.has(key))
+      ));
+    if (matchedIndex < 0) {
+      newPosts.push(post);
+      continue;
+    }
+    matchedExistingIndexes.add(matchedIndex);
+    refreshedForExistingIndex.set(matchedIndex, post);
+  }
+
+  return [
+    ...newPosts,
+    ...existing.map((post, index) => refreshedForExistingIndex.get(index)).filter(Boolean),
+  ];
+}
+
+function imagineSavedItemAssetId(item) {
+  const metadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
+  const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
+  return String(
+    item?.asset_id
+    || metadata.asset_id
+    || imagine.asset_id
+    || item?.item_id
+    || item?.post_id
+    || imagine.post_id
+    || "",
+  ).trim();
+}
+
+function imagineSavedItemSourceIds(item) {
+  const metadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
+  const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
+  return [
+    item?.source_item_id,
+    item?.parent_post_id,
+    item?.original_post_id,
+    metadata.source_item_id,
+    metadata.parent_post_id,
+    metadata.original_post_id,
+    imagine.source_item_id,
+    imagine.parent_post_id,
+    imagine.original_post_id,
+  ].map((value) => String(value || "").trim()).filter(Boolean);
+}
+
+function reconcileImagineSavedDisplayPosts(posts) {
+  const merged = mergeImagineRemotePosts([], posts || []);
+  const groupedPosts = merged.filter((post) => post?.metadata?.flat_only !== true);
+  const groupedAssetIds = new Set(groupedPosts.flatMap((post) => (
+    (post.items || []).map(imagineSavedItemAssetId).filter(Boolean)
+  )));
+  const groupedSourceIds = new Set(groupedPosts.flatMap((post) => (
+    (post.items || []).flatMap(imagineSavedItemSourceIds)
+  )));
+  return merged.map((post) => {
+    if (post?.metadata?.flat_only !== true) return post;
+    const items = (post.items || []).filter((item) => {
+      const assetId = imagineSavedItemAssetId(item);
+      return assetId && !groupedAssetIds.has(assetId) && !groupedSourceIds.has(assetId);
+    });
+    if (!items.length) return null;
+    const representative = representativeItem(items, { ...post, items }) || items[0];
+    return normalizeServerPost({
+      ...post,
+      items,
+      representative: representative?.file || representative?.url || representative?.item_id || "",
+      representative_item: representative,
+    });
+  }).filter(Boolean);
+}
+
+const IMAGINE_PENDING_SAVED_STORAGE_PREFIX = "grok-chameleon:imagine-pending-saved:";
+let imaginePendingSavedRefreshTimer = 0;
+let imaginePendingSavedRefreshAttempt = 0;
+
+function imaginePendingSavedAccountId() {
+  return String(activeImagineSavedAccount()?.id || account_state.imagine?.active_id || "").trim();
+}
+
+function imaginePendingSavedStorageKey() {
+  const accountId = imaginePendingSavedAccountId();
+  return accountId ? `${IMAGINE_PENDING_SAVED_STORAGE_PREFIX}${accountId}` : "";
+}
+
+function imagineSavedPostIsPending(post) {
+  return post?.metadata?.saved_sync_pending === true;
+}
+
+function imaginePendingSavedPosts() {
+  return (library_state.imagineRemotePosts || []).filter(imagineSavedPostIsPending);
+}
+
+function persistImaginePendingSavedPosts() {
+  const storageKey = imaginePendingSavedStorageKey();
+  if (!storageKey) return;
+  const pending = imaginePendingSavedPosts();
+  try {
+    if (pending.length) localStorage.setItem(storageKey, JSON.stringify(pending));
+    else localStorage.removeItem(storageKey);
+  } catch {
+    // Pending cards remain available in memory when storage is unavailable.
+  }
+}
+
+function restoreImaginePendingSavedPosts() {
+  const storageKey = imaginePendingSavedStorageKey();
+  if (!storageKey) return [];
+  try {
+    const stored = JSON.parse(localStorage.getItem(storageKey) || "[]");
+    return Array.isArray(stored) ? normalizeImagineRemotePosts(stored).filter(imagineSavedPostIsPending) : [];
+  } catch {
+    return [];
+  }
+}
+
+function imagineSavedPostMatchKeys(post) {
+  const keys = new Set(imaginePostIdKeysForPost(post).map((value) => String(value || "").trim()).filter(Boolean));
+  for (const item of post?.items || []) {
+    for (const key of imaginePostIdKeysForItem(item)) keys.add(String(key || "").trim());
+  }
+  return keys;
+}
+
+function imaginePendingSavedExpectedKeys(post) {
+  const entries = Array.isArray(post?.metadata?.saved_sync_items) ? post.metadata.saved_sync_items : [];
+  return entries.map((entry) => new Set([
+    entry?.liked_id,
+    entry?.media_url,
+  ].map((value) => String(value || "").trim()).filter(Boolean)));
+}
+
+function reconcileImaginePendingSavedPosts(remotePosts, memoryPending = []) {
+  const pendingByPath = new Map();
+  for (const post of [...restoreImaginePendingSavedPosts(), ...memoryPending]) {
+    if (post?.folder_path && imagineSavedPostIsPending(post)) pendingByPath.set(post.folder_path, post);
+  }
+  if (!pendingByPath.size) return remotePosts;
+  const remoteWithKeys = (remotePosts || []).map((post) => ({
+    post,
+    keys: imagineSavedPostMatchKeys(post),
+  }));
+  const unresolved = [];
+  for (const pending of pendingByPath.values()) {
+    const expected = imaginePendingSavedExpectedKeys(pending);
+    const confirmed = expected.length > 0 && expected.every((candidateKeys) => (
+      Array.from(candidateKeys).some((key) => remoteWithKeys.some((entry) => entry.keys.has(key)))
+    ));
+    if (!confirmed) unresolved.push(pending);
+  }
+  if (!unresolved.length) return remotePosts;
+  const unresolvedKeys = new Set(unresolved.flatMap((post) => (
+    imaginePendingSavedExpectedKeys(post).flatMap((keys) => Array.from(keys))
+  )));
+  const withoutPartialDuplicates = remoteWithKeys
+    .filter((entry) => !Array.from(entry.keys).some((key) => unresolvedKeys.has(key)))
+    .map((entry) => entry.post);
+  return [...unresolved, ...withoutPartialDuplicates];
+}
+
+function scheduleImaginePendingSavedRefresh() {
+  if (imaginePendingSavedRefreshTimer || !imaginePendingSavedPosts().length) return;
+  const delays = [1500, 4000, 10000, 30000];
+  if (imaginePendingSavedRefreshAttempt >= delays.length) return;
+  const delay = delays[imaginePendingSavedRefreshAttempt];
+  imaginePendingSavedRefreshAttempt += 1;
+  imaginePendingSavedRefreshTimer = window.setTimeout(() => {
+    imaginePendingSavedRefreshTimer = 0;
+    loadImagineSavedCards({ force: true }).catch(() => {});
+  }, delay);
+}
+
+function beginImaginePendingSavedRefresh() {
+  if (imaginePendingSavedRefreshTimer) {
+    window.clearTimeout(imaginePendingSavedRefreshTimer);
+    imaginePendingSavedRefreshTimer = 0;
+  }
+  imaginePendingSavedRefreshAttempt = 0;
 }
 
 async function loadImagineSavedCards({ force = false, append = false } = {}) {
@@ -296,6 +540,14 @@ async function loadImagineSavedCards({ force = false, append = false } = {}) {
   if (!force && !append && library_state.imagineRemoteLoaded) return;
   if (append && !library_state.imagineRemoteCursor) return;
   if (!canLoadImagineSavedList()) return;
+  const restoredPending = restoreImaginePendingSavedPosts();
+  if (restoredPending.length) {
+    library_state.imagineRemotePosts = mergeImagineRemotePosts(
+      restoredPending,
+      (library_state.imagineRemotePosts || []).filter((post) => !imagineSavedPostIsPending(post)),
+    );
+  }
+  const existingPosts = reconcileImagineSavedDisplayPosts(library_state.imagineRemotePosts || []);
   library_state.imagineRemoteLoading = true;
   library_state.imagineRemoteError = "";
   renderImagineSourceCards();
@@ -306,12 +558,25 @@ async function loadImagineSavedCards({ force = false, append = false } = {}) {
     });
     const posts = Array.isArray(data.posts) ? data.posts : [];
     const normalized = normalizeImagineRemotePosts(posts);
-    library_state.imagineRemotePosts = append && !force
-      ? mergeImagineRemotePosts(library_state.imagineRemotePosts || [], normalized)
-      : normalized;
+    const pending = [
+      ...restoreImaginePendingSavedPosts(),
+      ...imaginePendingSavedPosts(),
+    ];
+    const remotePosts = append && !force
+      ? mergeImagineRemotePosts(
+        (library_state.imagineRemotePosts || []).filter((post) => !imagineSavedPostIsPending(post)),
+        normalized,
+      )
+      : mergeImagineRefreshedPosts(existingPosts, normalized);
+    library_state.imagineRemotePosts = reconcileImagineSavedDisplayPosts(
+      reconcileImaginePendingSavedPosts(remotePosts, pending),
+    );
     library_state.imagineRemoteCursor = String(data.next_cursor || "");
     library_state.imagineRemoteHasMore = Boolean(data.has_more && library_state.imagineRemoteCursor);
     library_state.imagineRemoteLoaded = true;
+    persistImaginePendingSavedPosts();
+    if (imaginePendingSavedPosts().length) scheduleImaginePendingSavedRefresh();
+    else imaginePendingSavedRefreshAttempt = 0;
   } catch (error) {
     library_state.imagineRemoteError = error?.message || "Imagine saved list failed.";
   } finally {
@@ -436,7 +701,7 @@ function imagineSourcePosts() {
     ));
   }
   if (library_state.iMainView === imagineViewValue("IMAGINE", "imagine")) {
-    return (library_state.imagineRemotePosts || []).filter((post) => (
+    return reconcileImagineSavedDisplayPosts(library_state.imagineRemotePosts || []).filter((post) => (
       !isImagineT2iPost(post) && !isImagineT2iGroupContainer(post)
     ));
   }
@@ -510,7 +775,6 @@ function renderImagineSourceCards() {
   }
   document.getElementById("i_imagine_tab_btn")?.classList.toggle("active", library_state.iMainView === imagineViewValue("IMAGINE", "imagine"));
   document.getElementById("i_t2i_btn")?.classList.toggle("active", t2iView);
-  document.getElementById("i_unsaved_nav_btn")?.classList.toggle("active", library_state.iMainView === imagineViewValue("UNSAVED", "unsaved"));
   const count = document.querySelector(".i_main_header p");
   const jobSlots = t2iView
     ? visibleJobs.reduce((total, job) => total + (typeof visibleGenerationJobSlots === "function" ? visibleGenerationJobSlots(job).length : buildJobT2iSlotCount(job)), 0)
@@ -635,29 +899,7 @@ bindVirtualCardListScroll(
   maybeLoadMoreImagineDiscoverCards,
 );
 bindVirtualCardListScroll(
-  IMAGINE_UNSAVED_VIRTUAL_LIST_KEY,
-  document.querySelector(".i_unsaved_card_list"),
-  maybeLoadMoreImagineUnsavedCards,
-);
-bindVirtualCardListScroll(
   IMAGINE_VIRTUAL_LIST_KEY,
   document.querySelector(".i_card_list"),
   maybeLoadMoreImagineSavedCards,
 );
-document.getElementById("i_unsaved_refresh_btn")?.addEventListener("click", () => {
-  library_state.imagineUnsavedLoaded = false;
-  library_state.imagineUnsavedCursor = "";
-  loadImagineUnsavedCards({ force: true }).catch((error) => {
-    library_state.imagineUnsavedError = error?.message || "Imagine Unsaved list failed.";
-    library_state.imagineUnsavedLoading = false;
-    renderImagineUnsavedCards();
-  });
-});
-
-function openImagineUnsaved() {
-  library_state.iMainView = imagineViewValue("UNSAVED", "unsaved");
-  setImagineTab("i_unsaved_nav_btn");
-  setImagineLinkInputOpen(false);
-  openScreen("i_unsaved_main", "i_unsaved_nav_btn");
-  renderImagineUnsavedCards();
-}

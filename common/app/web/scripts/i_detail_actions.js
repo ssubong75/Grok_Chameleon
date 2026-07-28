@@ -36,10 +36,30 @@ function imagineLikeTargetForItem(item) {
     || imagine.media_url
     || "",
   ).trim();
+  const assetId = String(
+    item?.asset_id
+    || metadata.asset_id
+    || imagine.asset_id
+    || item?.item_id
+    || item?.post_id
+    || imagine.post_id
+    || "",
+  ).trim();
   return {
+    id: assetId,
+    asset_id: assetId,
+    item_id: item?.item_id || assetId,
+    post_id: item?.post_id || assetId,
     type: item?.type || imagine.media_type || "image",
     media_url: mediaUrl,
     remote_url: mediaUrl,
+    external_reference: Boolean(
+      metadata.external_reference
+      || imagine.external_reference
+      || metadata.link_source
+      || imagine.link_source
+      || ["discover", "link", "search"].includes(String(metadata.remote_view || imagine.remote_view || "").toLowerCase())
+    ),
     metadata,
   };
 }
@@ -107,18 +127,62 @@ function isImagineSearchPost(post, item = null) {
   );
 }
 
+function isImagineLinkSourcePost(post, item = null) {
+  const postMeta = imaginePostActionMetadata(post);
+  const itemMeta = imaginePostActionMetadata(item);
+  return Boolean(
+    postMeta.metadata.link_source
+    || postMeta.imagine.link_source
+    || itemMeta.metadata.link_source
+    || itemMeta.imagine.link_source
+    || postMeta.metadata.remote_view === "link"
+    || postMeta.imagine.remote_view === "link"
+    || itemMeta.metadata.remote_view === "link"
+    || itemMeta.imagine.remote_view === "link"
+  );
+}
+
+function imagineLinkBundleItems(post, fallbackItems = []) {
+  const fallback = (fallbackItems || []).filter(Boolean);
+  if (!isImagineLinkSourcePost(post, fallback[0])) return fallback;
+  const items = (post?.items || []).filter(Boolean);
+  return items.length ? items : fallback;
+}
+
+function imagineLinkRegistrationItem(post, fallbackItem = null) {
+  const postMeta = imaginePostActionMetadata(post);
+  const fallbackMeta = imaginePostActionMetadata(fallbackItem);
+  const linkPostId = String(
+    postMeta.metadata.link_post_id
+    || postMeta.imagine.link_post_id
+    || fallbackMeta.metadata.link_post_id
+    || fallbackMeta.imagine.link_post_id
+    || "",
+  ).trim();
+  const items = (post?.items || []).filter(Boolean);
+  if (linkPostId) {
+    const linkedItem = items.find((item) => imagineLikeTargetForItem(item).id === linkPostId);
+    if (linkedItem) return linkedItem;
+  }
+  return fallbackItem || representativeItem(items, post) || items[0] || null;
+}
+
 function imaginePostLiked(post, item = null) {
   const postMeta = imaginePostActionMetadata(post);
   const itemMeta = imaginePostActionMetadata(item);
+  if (item) {
+    return Boolean(
+      item?.liked === true
+      || item?.favorite === true
+      || itemMeta.metadata.liked === true
+      || itemMeta.imagine.liked === true
+    );
+  }
   return Boolean(
     post?.liked === true
     || post?.favorite === true
     || postMeta.metadata.liked === true
     || postMeta.imagine.liked === true
-    || item?.liked === true
-    || item?.favorite === true
-    || itemMeta.metadata.liked === true
-    || itemMeta.imagine.liked === true
   );
 }
 
@@ -140,10 +204,171 @@ function markImaginePostLiked(post, liked) {
   }
 }
 
+function markImagineItemLiked(item, liked) {
+  if (!item) return;
+  item.liked = liked;
+  item.favorite = liked;
+  item.metadata = item.metadata && typeof item.metadata === "object" ? item.metadata : {};
+  item.metadata.liked = liked;
+  item.metadata.imagine = item.metadata.imagine && typeof item.metadata.imagine === "object" ? item.metadata.imagine : {};
+  item.metadata.imagine.liked = liked;
+}
+
+function imagineSavedGroupIdForPost(post) {
+  const metadata = post?.metadata && typeof post.metadata === "object" ? post.metadata : {};
+  const folderPath = String(post?.folder_path || "");
+  return String(
+    metadata.local_saved_group_id
+    || metadata.group_id
+    || (folderPath.startsWith("imagine_unsaved/") ? folderPath.slice("imagine_unsaved/".length) : "")
+    || imagineActionPostIdForPost(post)
+    || "",
+  ).trim();
+}
+
+function imagineLikeResultMappings(data) {
+  const explicit = Array.isArray(data?.mappings)
+    ? data.mappings
+      .filter((mapping) => mapping && typeof mapping === "object")
+      .map((mapping) => ({
+        source_id: String(mapping.source_id || "").trim(),
+        source_item_id: String(mapping.source_item_id || "").trim(),
+        liked_id: String(mapping.liked_id || mapping.id || "").trim(),
+        media_url: String(mapping.media_url || "").trim(),
+        external_reference: Boolean(mapping.external_reference),
+      }))
+      .filter((mapping) => mapping.liked_id)
+    : [];
+  if (explicit.length) return explicit;
+  return (Array.isArray(data?.ids) ? data.ids : [data?.id])
+    .map((id) => String(id || "").trim())
+    .filter(Boolean)
+    .map((likedId) => ({
+      source_id: "",
+      source_item_id: "",
+      liked_id: likedId,
+      media_url: "",
+      external_reference: false,
+    }));
+}
+
+function applyImagineLikedIdToItem(item, likedId) {
+  if (!item || !likedId) return;
+  item.post_id = likedId;
+  item.root_post_id = likedId;
+  item.metadata = item.metadata && typeof item.metadata === "object" ? item.metadata : {};
+  item.metadata.post_id = likedId;
+  item.metadata.imagine = item.metadata.imagine && typeof item.metadata.imagine === "object" ? item.metadata.imagine : {};
+  item.metadata.imagine.post_id = likedId;
+  item.metadata.imagine.root_post_id = likedId;
+}
+
+function applyImagineUnsavedLikeResult(post, data) {
+  const items = (post?.items || []).filter(Boolean);
+  const mappings = imagineLikeResultMappings(data);
+  if (!post || !items.length || mappings.length < items.length) {
+    throw new Error(`Only ${mappings.length} of ${items.length} Unsaved media item(s) were saved.`);
+  }
+  const unusedItems = new Set(items);
+  const applied = [];
+  for (const mapping of mappings) {
+    let item = items.find((candidate) => {
+      if (!unusedItems.has(candidate)) return false;
+      const keys = typeof imaginePostIdKeysForItem === "function"
+        ? imaginePostIdKeysForItem(candidate)
+        : [imagineActionPostIdForItem(candidate), candidate?.remote_url, candidate?.url];
+      return (mapping.source_item_id && keys.includes(mapping.source_item_id))
+        || (mapping.source_id && keys.includes(mapping.source_id))
+        || (mapping.media_url && keys.includes(mapping.media_url));
+    });
+    if (!item) item = Array.from(unusedItems)[0];
+    if (!item) continue;
+    unusedItems.delete(item);
+    applyImagineLikedIdToItem(item, mapping.liked_id);
+    if (mapping.external_reference) {
+      item.metadata = item.metadata && typeof item.metadata === "object" ? item.metadata : {};
+      item.metadata.external_reference = true;
+      item.metadata.imagine = item.metadata.imagine && typeof item.metadata.imagine === "object" ? item.metadata.imagine : {};
+      item.metadata.imagine.external_reference = true;
+    }
+    applied.push({
+      source_id: mapping.source_id,
+      source_item_id: mapping.source_item_id,
+      liked_id: mapping.liked_id,
+      media_url: mapping.media_url || item.remote_url || item.url || item.metadata?.media_url || "",
+      external_reference: Boolean(mapping.external_reference),
+    });
+  }
+  if (applied.length < items.length) {
+    throw new Error(`Only ${applied.length} of ${items.length} Unsaved media item(s) were saved.`);
+  }
+  const groupId = imagineSavedGroupIdForPost(post);
+  const firstLikedId = applied[0]?.liked_id || "";
+  post.post_id = firstLikedId;
+  post.metadata = post.metadata && typeof post.metadata === "object" ? post.metadata : {};
+  post.metadata.local_saved_group_id = groupId || firstLikedId;
+  post.metadata.saved_sync_pending = false;
+  post.metadata.saved_sync_items = applied;
+  delete post.metadata.saved_sync_pending_at;
+  post.metadata.imagine_root_post_id = firstLikedId;
+  post.metadata.imagine = post.metadata.imagine && typeof post.metadata.imagine === "object" ? post.metadata.imagine : {};
+  post.metadata.imagine.post_id = firstLikedId;
+  post.metadata.imagine.root_post_id = firstLikedId;
+}
+
+function savedImagineSingleItemPost(post, item, data, savedItems = [item]) {
+  const mapping = imagineLikeResultMappings(data)[0];
+  if (!post || !item || !mapping?.liked_id) {
+    throw new Error("The selected Imagine media item was not confirmed in Saved.");
+  }
+  applyImagineLikedIdToItem(item, mapping.liked_id);
+  if (mapping.external_reference) {
+    item.metadata = item.metadata && typeof item.metadata === "object" ? item.metadata : {};
+    item.metadata.external_reference = true;
+    item.metadata.imagine = item.metadata.imagine && typeof item.metadata.imagine === "object" ? item.metadata.imagine : {};
+    item.metadata.imagine.external_reference = true;
+  }
+  item.liked = true;
+  item.favorite = true;
+  const items = (savedItems || []).filter(Boolean);
+  for (const savedItem of items) {
+    savedItem.liked = true;
+    savedItem.favorite = true;
+    savedItem.metadata = savedItem.metadata && typeof savedItem.metadata === "object" ? savedItem.metadata : {};
+    savedItem.metadata.liked = true;
+    savedItem.metadata.imagine = savedItem.metadata.imagine && typeof savedItem.metadata.imagine === "object"
+      ? savedItem.metadata.imagine
+      : {};
+    savedItem.metadata.imagine.liked = true;
+  }
+  const representative = representativeItem(items, { ...post, items }) || item;
+  const groupId = imagineSavedGroupIdForPost(post) || mapping.liked_id;
+  const metadata = post.metadata && typeof post.metadata === "object" ? { ...post.metadata } : {};
+  metadata.local_saved_group_id = groupId;
+  metadata.saved_sync_pending = false;
+  metadata.saved_sync_items = [{
+    source_id: mapping.source_id,
+    source_item_id: mapping.source_item_id,
+    liked_id: mapping.liked_id,
+    media_url: mapping.media_url || item.remote_url || item.url || item.metadata?.media_url || "",
+    external_reference: Boolean(mapping.external_reference),
+  }];
+  metadata.imagine_root_post_id = mapping.liked_id;
+  return {
+    ...post,
+    post_id: mapping.liked_id,
+    items,
+    representative: representative?.url || representative?.remote_url || representative?.item_id || "",
+    representative_item: representative,
+    metadata,
+  };
+}
+
 function savedImaginePostFromLocalPost(post) {
   if (!post) return null;
   const postId = imagineActionPostIdForPost(post);
   if (!postId) return null;
+  const groupId = imagineSavedGroupIdForPost(post) || postId;
   const representative = representativeItem(post.items || [], post) || post.representative_item || post.items?.[0] || {};
   const metadata = post.metadata && typeof post.metadata === "object" ? { ...post.metadata } : {};
   metadata.liked = true;
@@ -160,7 +385,7 @@ function savedImaginePostFromLocalPost(post) {
     remote: true,
     liked: true,
     favorite: true,
-    folder_path: `imagine_saved/${postId}`,
+    folder_path: `imagine_saved/${groupId}`,
     folderName: post.title || post.folderName || postId,
     representative: representative?.url || representative?.remote_url || representative?.item_id || post.representative || "",
     representative_item: representative,
@@ -182,11 +407,39 @@ function savedImaginePostFromLocalPost(post) {
   });
 }
 
+function imagineLocalHeartSnapshot(post, items) {
+  const selectedItems = (items || []).filter(Boolean);
+  if (!post || !selectedItems.length) return null;
+  const representative = representativeItem(selectedItems, { ...post, items: selectedItems }) || selectedItems[0];
+  const snapshot = savedImaginePostFromLocalPost({
+    ...post,
+    items: selectedItems,
+    representative: representative?.url || representative?.remote_url || representative?.item_id || "",
+    representative_item: representative,
+  });
+  if (!snapshot) return null;
+  snapshot.metadata = snapshot.metadata && typeof snapshot.metadata === "object" ? snapshot.metadata : {};
+  snapshot.metadata.local_heart = true;
+  snapshot.metadata.saved_sync_pending = false;
+  for (const item of snapshot.items || []) {
+    item.metadata = item.metadata && typeof item.metadata === "object" ? item.metadata : {};
+    item.metadata.local_heart = true;
+    item.metadata.imagine = item.metadata.imagine && typeof item.metadata.imagine === "object" ? item.metadata.imagine : {};
+    item.metadata.imagine.local_heart = true;
+  }
+  return snapshot;
+}
+
 function addImaginePostToSavedView(post) {
   const savedPost = savedImaginePostFromLocalPost(post);
   if (!savedPost) return;
   if (typeof upsertImagineRemotePost === "function") {
-    upsertImagineRemotePost(savedPost);
+    const existing = (library_state.imagineRemotePosts || [])
+      .find((candidate) => candidate?.folder_path === savedPost.folder_path);
+    const merged = existing && typeof mergeImagineRemotePosts === "function"
+      ? mergeImagineRemotePosts([existing], [savedPost])[0]
+      : savedPost;
+    upsertImagineRemotePost(merged || savedPost);
   } else {
     const list = Array.isArray(library_state.imagineRemotePosts) ? library_state.imagineRemotePosts : [];
     const index = list.findIndex((candidate) => candidate?.folder_path === savedPost.folder_path);
@@ -202,7 +455,6 @@ function refreshImagineRemoteViews() {
   syncImagineRemotePostsIntoLibrary();
   renderImagineSourceCards();
   if (typeof renderImagineDiscoverCards === "function") renderImagineDiscoverCards();
-  if (typeof renderImagineUnsavedCards === "function") renderImagineUnsavedCards();
   renderDetailViews();
 }
 
@@ -226,13 +478,12 @@ function returnToImagineUnsavedMain() {
   library_state.selectedPostPath = "";
   library_state.selectedDetailItemId = "";
   library_state.selectedImagineJobId = "";
-  library_state.iMainView = typeof imagineViewValue === "function" ? imagineViewValue("UNSAVED", "unsaved") : "unsaved";
-  if (typeof setImagineTab === "function") setImagineTab("i_unsaved_nav_btn");
-  openScreen("i_unsaved_main", "i_unsaved_nav_btn");
+  library_state.iMainView = typeof imagineViewValue === "function" ? imagineViewValue("IMAGINE", "imagine") : "imagine";
+  if (typeof setImagineTab === "function") setImagineTab("i_imagine_tab_btn");
+  openScreen("i_main", "i_imagine_nav_btn");
 }
 
 function imagineListElementForScreen(screenId = screen_state.current_screen) {
-  if (screenId === "i_unsaved_main") return document.querySelector(".i_unsaved_card_list");
   if (screenId === "i_discover_main") return document.querySelector(".i_discover_card_list");
   if (screenId === "i_main") return document.querySelector(".i_card_list");
   if (screenId === "search_main") return document.querySelector(".search_card_list");
@@ -265,9 +516,7 @@ function restoreImagineListScrollForScreen(screenId, scrollTop) {
 }
 
 function renderImagineListForScreen(screenId = screen_state.current_screen, scrollTop = null) {
-  if (screenId === "i_unsaved_main" && typeof renderImagineUnsavedCards === "function") {
-    renderImagineUnsavedCards();
-  } else if (screenId === "i_discover_main" && typeof renderImagineDiscoverCards === "function") {
+  if (screenId === "i_discover_main" && typeof renderImagineDiscoverCards === "function") {
     renderImagineDiscoverCards();
   } else if (screenId === "search_main" && typeof renderSearchResults === "function") {
     renderSearchResults();
@@ -429,6 +678,46 @@ async function deleteImagineRemoteItem(post, item) {
   return result;
 }
 
+function isImagineConversationNotFoundError(error) {
+  const message = String(error?.message || error || "");
+  return /\bHTTP 404\b/i.test(message) && /Conversation(?:' with ID)?[^]*not found/i.test(message);
+}
+
+async function deleteImagineCardAssets(post, items) {
+  const deletedItems = [];
+  const failures = [];
+  for (const item of (items || [])) {
+    const payload = imagineDeletePayloadForItem(post, item);
+    if (!payload) {
+      failures.push(new Error("This Imagine item has no asset id."));
+      continue;
+    }
+    try {
+      await qApi("/api/imagine/asset/delete", payload);
+      deletedItems.push(item);
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  return { deletedItems, failures };
+}
+
+async function unsaveImagineLinkCardAfterDeleteFailure(post, items) {
+  const registrationItem = imagineLinkRegistrationItem(post, items?.[0] || null);
+  const target = imagineLikeTargetForItem(registrationItem);
+  if (!target.id) {
+    throw new Error("This linked Imagine post has no asset id.");
+  }
+  await qApi("/api/imagine/post/unsave", {
+    account_id: post?.account_id || iDetailAccountId(registrationItem, post),
+    items: [{
+      ...target,
+      detail_post_id: imagineActionPostIdForPost(post),
+      conversation_id: imagineDeleteConversationIdForPost(post, registrationItem),
+    }],
+  });
+}
+
 async function deleteImagineRemoteCard(post, { hide = true } = {}) {
   const items = (post?.items || []).filter(Boolean);
   if (isImagineUnsavedPost(post)) {
@@ -451,7 +740,28 @@ async function deleteImagineRemoteCard(post, { hide = true } = {}) {
   }
   const deletePayload = imagineConversationDeletePayloadForPost(post);
   if (!deletePayload) throw new Error("This Imagine card has no deletion target.");
-  const data = await qApi("/api/imagine/conversation/delete", deletePayload);
+  let data;
+  try {
+    data = await qApi("/api/imagine/conversation/delete", deletePayload);
+  } catch (error) {
+    if (!isImagineConversationNotFoundError(error)) throw error;
+    const assetResult = await deleteImagineCardAssets(post, items);
+    if (assetResult.failures.length && isImagineLinkSourcePost(post, items[0])) {
+      await unsaveImagineLinkCardAfterDeleteFailure(post, items);
+      assetResult.deletedItems = items;
+      assetResult.failures = [];
+    }
+    if (hide && assetResult.deletedItems.length) {
+      await hideImagineRemoteItems(assetResult.deletedItems);
+    }
+    return {
+      ...assetResult,
+      data: {
+        ok: assetResult.failures.length === 0,
+        action: "asset-delete-fallback",
+      },
+    };
+  }
   if (hide) {
     await hideImagineRemoteItems(items);
   }
@@ -521,40 +831,45 @@ async function deleteImagineCardPost(post, button = null) {
 async function likeImagineCardPost(post) {
   const representative = representativeItem(post?.items || [], post) || post?.representative_item || post?.items?.[0];
   const postId = imagineActionPostIdForPost(post);
-  if (!post || !representative || !postId) {
+  const unsavedPost = Boolean(post && typeof isImagineUnsavedPost === "function" && isImagineUnsavedPost(post));
+  if (!post || !representative || (!postId && !unsavedPost)) {
     showErrorPanel("Save unavailable", "This Imagine card has no post id.");
     return;
   }
   const returnScreenId = screen_state.current_screen === "i_unsaved_main" ? "i_unsaved_main" : "";
   const returnScrollTop = returnScreenId ? imagineListScrollTopForScreen(returnScreenId) : null;
   const t2iPost = typeof isImagineT2iPost === "function" && isImagineT2iPost(post);
-  const payload = {
-    id: postId,
-    account_id: iDetailAccountId(representative, post),
-  };
-  if (t2iPost) {
-    Object.assign(payload, imagineLikeTargetForItem(representative));
-  } else {
-    payload.items = (post.items || []).map((item) => ({
-      id: imagineActionPostIdForItem(item),
-      post_id: imagineActionPostIdForItem(item),
-      item_id: item?.item_id || "",
-      type: item?.type || "",
-      media_url: item?.remote_url || item?.url || item?.metadata?.media_url || item?.metadata?.remote_url || item?.metadata?.imagine?.media_url || "",
-      remote_url: item?.remote_url || item?.url || "",
-      metadata: item?.metadata || {},
-    }));
+  const linkSource = isImagineLinkSourcePost(post, representative);
+  const payload = { account_id: iDetailAccountId(representative, post) };
+  const selectedItems = t2iPost ? [representative] : (post.items || []);
+  const localItems = linkSource ? imagineLinkBundleItems(post, selectedItems) : selectedItems;
+  const registrationItems = linkSource
+    ? [imagineLinkRegistrationItem(post, representative)].filter(Boolean)
+    : selectedItems;
+  payload.items = registrationItems
+    .map(imagineLikeTargetForItem)
+    .filter((target) => target.id);
+  payload.local_group_id = imagineSavedGroupIdForPost(post);
+  payload.local_post = imagineLocalHeartSnapshot(post, localItems);
+  if (post.__imagineSavePending) return;
+  post.__imagineSavePending = true;
+  let data;
+  try {
+    data = await qApi("/api/imagine/post/like", payload);
+  } finally {
+    post.__imagineSavePending = false;
   }
-  const data = await qApi("/api/imagine/post/like", payload);
   if (t2iPost) applyImagineLikeResultPostId(post, representative, data);
+  else if (unsavedPost) applyImagineUnsavedLikeResult(post, data);
+  if (typeof forgetHiddenImaginePost === "function") forgetHiddenImaginePost(post);
   markImaginePostLiked(post, true);
   addImaginePostToSavedView(post);
   const movedFromT2i = moveImagineT2iPostOutOfSessionView(post);
-  if (isImagineUnsavedPost(post)) {
+  if (unsavedPost) {
     library_state.imagineUnsavedPosts = (library_state.imagineUnsavedPosts || [])
       .filter((candidate) => candidate?.folder_path !== post.folder_path);
-    library_state.imagineRemoteLoaded = false;
   }
+  library_state.imagineRemoteLoaded = false;
   if (movedFromT2i) {
     renderImagineSourceCards();
     renderDetailViews();
@@ -565,133 +880,153 @@ async function likeImagineCardPost(post) {
   toast("Saved Imagine post.");
 }
 
-async function unsaveImagineDiscoverPost(post) {
-  const representative = representativeItem(post?.items || [], post) || post?.representative_item || post?.items?.[0];
-  const postId = imagineActionPostIdForPost(post);
-  if (!post || !representative || !postId) {
-    showErrorPanel("Unsave unavailable", "This Imagine post has no post id.");
-    return;
-  }
-  const ok = await confirmAction({
-    title: "Unsave post",
-    message: "This will remove the post from Saved.",
-    confirmLabel: "Unsave",
-  });
-  if (!ok) return;
-  await qApi("/api/imagine/post/unsave", {
-    id: postId,
-    account_id: iDetailAccountId(representative, post),
-  });
-  markImaginePostLiked(post, false);
-  refreshImagineRemoteViews();
-  toast("Unsaved Imagine post.");
-}
-
-async function unsaveImagineCardPost(post) {
-  const representative = representativeItem(post?.items || [], post) || post?.representative_item || post?.items?.[0];
-  if (!post || !representative) {
-    showErrorPanel("Unsave unavailable", "Select an Imagine card to unsave.");
-    return;
-  }
-  const postId = imagineActionPostIdForPost(post);
-  if (!postId) {
-    showErrorPanel("Unsave unavailable", "This Imagine card has no post id.");
-    return;
-  }
-  const ok = await confirmAction({
-    title: "Unsave post",
-    message: "This will remove the post from Saved.",
-    confirmLabel: "Unsave",
-  });
-  if (!ok) return;
-  await qApi("/api/imagine/post/unsave", {
-    id: postId,
-    account_id: iDetailAccountId(representative, post),
-  });
-  rememberHiddenImaginePost(post);
+function removeImagineSavedItemsOnly(post, removedItems, scrollTop = null) {
+  const removedKeys = new Set((removedItems || []).flatMap((item) => imaginePostIdKeysForItem(item)));
+  const updatePost = (candidate) => {
+    if (!candidate || candidate.folder_path !== post.folder_path) return candidate;
+    const items = (candidate.items || []).filter((item) => (
+      !imaginePostIdKeysForItem(item).some((key) => removedKeys.has(key))
+    ));
+    if (!items.length) return null;
+    const representative = representativeItem(items, { ...candidate, items }) || items[0];
+    return normalizeServerPost({
+      ...candidate,
+      items,
+      representative: representative?.file || representative?.url || representative?.item_id || "",
+      representative_item: representative,
+    });
+  };
   library_state.imagineRemotePosts = (library_state.imagineRemotePosts || [])
-    .filter((candidate) => candidate?.folder_path !== post.folder_path);
+    .map(updatePost)
+    .filter(Boolean);
   syncImagineRemotePostsIntoLibrary();
-  if (library_state.selectedPostPath === post.folder_path) {
+  const current = selectedLibraryPost();
+  if (library_state.selectedPostPath === post.folder_path && !current) {
     library_state.selectedPostPath = "";
     library_state.selectedDetailItemId = "";
+    openScreen("i_main", screen_state.current_i_nav_btn || "i_imagine_nav_btn");
+  } else if (current) {
+    const nextItem = current.items?.[0] || current.representative_item;
+    if (nextItem) library_state.selectedDetailItemId = mediaItemKey(nextItem);
   }
   renderImagineSourceCards();
   renderDetailViews();
+  if (scrollTop !== null) restoreImagineListScrollForScreen("i_main", scrollTop);
+}
+
+async function unsaveImaginePost(post, { item = null } = {}) {
+  const selectedTargets = (item ? [item] : (post?.items || [])).filter(Boolean);
+  if (!post || !selectedTargets.length) {
+    showErrorPanel("Unsave unavailable", "This Imagine post has no media item.");
+    return;
+  }
+  const linkSource = isImagineLinkSourcePost(post, selectedTargets[0]);
+  const localTargets = linkSource ? imagineLinkBundleItems(post, selectedTargets) : selectedTargets;
+  const registrationTargets = linkSource
+    ? [imagineLinkRegistrationItem(post, selectedTargets[0])].filter(Boolean)
+    : selectedTargets;
+  const targetEntries = registrationTargets
+    .map((targetItem) => ({ item: targetItem, payload: imagineLikeTargetForItem(targetItem) }))
+    .filter((entry) => entry.payload.id);
+  if (!targetEntries.length || targetEntries.length !== registrationTargets.length) {
+    showErrorPanel("Unsave unavailable", "This Imagine post has no asset id.");
+    return;
+  }
+  const ok = await confirmAction({
+    title: "Unsave post",
+    message: localTargets.length > 1 ? `Remove ${localTargets.length} media item(s) from Saved?` : "Remove this media item from Saved?",
+    confirmLabel: "Unsave",
+  });
+  if (!ok) return;
+  const accountId = post.account_id || iDetailAccountId(registrationTargets[0], post);
+  await qApi("/api/imagine/post/unsave", {
+    account_id: accountId,
+    items: targetEntries.map((entry) => ({
+      ...entry.payload,
+      detail_post_id: imagineActionPostIdForPost(post),
+      conversation_id: imagineDeleteConversationIdForPost(post, entry.item),
+    })),
+  });
+  for (const target of localTargets) {
+    target.liked = false;
+    target.favorite = false;
+  }
+  const scrollTop = screen_state.current_screen === "i_main"
+    ? imagineListScrollTopForScreen("i_main")
+    : null;
+  removeImagineSavedItemsOnly(post, localTargets, scrollTop);
+  library_state.imagineUnsavedLoaded = false;
   toast("Unsaved Imagine post.");
+}
+
+async function unsaveImagineDiscoverPost(post, item = null) {
+  return unsaveImaginePost(post, { item });
+}
+
+async function unsaveImagineCardPost(post) {
+  return unsaveImaginePost(post);
 }
 
 async function unsaveImagineSelectedDetailPost() {
   const post = selectedLibraryPost();
-  if (!post) {
-    showErrorPanel("Unsave unavailable", "Select an Imagine post to unsave.");
-    return;
-  }
-  const postId = imagineActionPostIdForPost(post);
-  if (!postId) {
-    showErrorPanel("Unsave unavailable", "This Imagine post has no post id.");
-    return;
-  }
-  const ok = await confirmAction({
-    title: "Unsave post",
-    message: "This will remove the post from Saved.",
-    confirmLabel: "Unsave",
-  });
-  if (!ok) return;
-  await qApi("/api/imagine/post/unsave", {
-    id: postId,
-    account_id: post.account_id || iDetailAccountId(post.representative_item || post.items?.[0], post),
-  });
-  rememberHiddenImaginePost(post);
-  library_state.imagineRemotePosts = (library_state.imagineRemotePosts || [])
-    .filter((candidate) => candidate?.folder_path !== post.folder_path);
-  syncImagineRemotePostsIntoLibrary();
-  library_state.selectedPostPath = "";
-  library_state.selectedDetailItemId = "";
-  renderImagineSourceCards();
-  renderDetailViews();
-  openScreen("i_main", screen_state.current_i_nav_btn || "i_imagine_nav_btn");
-  toast("Unsaved Imagine post.");
+  const item = selectedDetailItem(post) || post?.representative_item || post?.items?.[0];
+  return unsaveImaginePost(post, { item });
 }
 
 async function likeImagineSelectedDetailPost() {
   const post = selectedLibraryPost();
   const item = selectedDetailItem(post) || post?.representative_item || post?.items?.[0];
   const postId = imagineActionPostIdForPost(post);
-  if (!post || !item || !postId) {
+  const unsavedPost = Boolean(post && typeof isImagineUnsavedPost === "function" && isImagineUnsavedPost(post, item));
+  if (!post || !item || (!postId && !unsavedPost)) {
     showErrorPanel("Save unavailable", "This Imagine post has no post id.");
     return;
   }
   const t2iPost = typeof isImagineT2iPost === "function" && isImagineT2iPost(post);
-  const payload = {
-    id: postId,
-    account_id: post.account_id || iDetailAccountId(item, post),
-  };
-  if (t2iPost) {
-    Object.assign(payload, imagineLikeTargetForItem(item));
-  } else {
-    payload.items = (post.items || []).map((candidate) => ({
-      id: imagineActionPostIdForItem(candidate),
-      post_id: imagineActionPostIdForItem(candidate),
-      item_id: candidate?.item_id || "",
-      type: candidate?.type || "",
-      media_url: candidate?.remote_url || candidate?.url || candidate?.metadata?.media_url || candidate?.metadata?.remote_url || candidate?.metadata?.imagine?.media_url || "",
-      remote_url: candidate?.remote_url || candidate?.url || "",
-      metadata: candidate?.metadata || {},
-    }));
+  const linkSource = isImagineLinkSourcePost(post, item);
+  const localItems = linkSource ? imagineLinkBundleItems(post, [item]) : [item];
+  const registrationItem = linkSource ? imagineLinkRegistrationItem(post, item) : item;
+  const payload = { account_id: post.account_id || iDetailAccountId(registrationItem, post) };
+  payload.items = [imagineLikeTargetForItem(registrationItem)].filter((target) => target.id);
+  payload.local_group_id = imagineSavedGroupIdForPost(post);
+  payload.local_post = imagineLocalHeartSnapshot(post, localItems);
+  if (post.__imagineSavePending) return;
+  post.__imagineSavePending = true;
+  let data;
+  try {
+    data = await qApi("/api/imagine/post/like", payload);
+  } finally {
+    post.__imagineSavePending = false;
   }
-  const data = await qApi("/api/imagine/post/like", payload);
-  if (t2iPost) applyImagineLikeResultPostId(post, item, data);
-  markImaginePostLiked(post, true);
-  addImaginePostToSavedView(post);
+  const savedItemPost = savedImagineSingleItemPost(post, registrationItem, data, localItems);
+  if (t2iPost) applyImagineLikeResultPostId(savedItemPost, registrationItem, data);
+  if (linkSource) markImaginePostLiked(post, true);
+  else markImagineItemLiked(registrationItem, true);
+  if (typeof forgetHiddenImaginePost === "function") forgetHiddenImaginePost(post);
+  addImaginePostToSavedView(savedItemPost);
   const movedFromT2i = moveImagineT2iPostOutOfSessionView(post);
-  const movedFromUnsaved = isImagineUnsavedPost(post, item);
+  const movedFromUnsaved = unsavedPost;
   if (movedFromUnsaved) {
+    const selectedKeys = new Set(imaginePostIdKeysForItem(item));
     library_state.imagineUnsavedPosts = (library_state.imagineUnsavedPosts || [])
-      .filter((candidate) => candidate?.folder_path !== post.folder_path);
+      .map((candidate) => {
+        if (candidate?.folder_path !== post.folder_path) return candidate;
+        const items = (candidate.items || []).filter((candidateItem) => (
+          !imaginePostIdKeysForItem(candidateItem).some((key) => selectedKeys.has(key))
+        ));
+        if (!items.length) return null;
+        const representative = representativeItem(items, { ...candidate, items }) || items[0];
+        return normalizeServerPost({
+          ...candidate,
+          items,
+          representative: representative?.file || representative?.url || representative?.item_id || "",
+          representative_item: representative,
+        });
+      })
+      .filter(Boolean);
     library_state.imagineUnsavedLoaded = true;
-    library_state.imagineRemoteLoaded = false;
   }
+  library_state.imagineRemoteLoaded = false;
   if (movedFromT2i) {
     returnToImagineT2iMain();
     renderImagineSourceCards();
@@ -1408,16 +1743,17 @@ function bindImagineDetailActions() {
   heart?.addEventListener("click", () => {
     const post = selectedLibraryPost();
     const item = selectedDetailItem(post);
-    const saved = heart.classList.contains("saved") || heart.getAttribute("aria-pressed") === "true";
-    const action = isImagineDiscoverPost(post, item)
-      || isImagineUnsavedPost(post, item)
-      || isImagineSearchPost(post, item)
-      || (typeof isImagineT2iPost === "function" && isImagineT2iPost(post))
-      ? (saved ? unsaveImagineDiscoverPost(post) : likeImagineSelectedDetailPost())
-      : (saved ? unsaveImagineSelectedDetailPost() : Promise.resolve());
-    action.catch((error) => {
+    const canSave = typeof detailCanSaveImaginePost === "function"
+      && detailCanSaveImaginePost(post, item);
+    const saved = typeof imaginePostLiked === "function"
+      && (imaginePostLiked(post, item) || imaginePostLiked(post));
+    if (!canSave || saved) {
+      syncImagineDetailHeartState(post, item);
+      return;
+    }
+    likeImagineSelectedDetailPost().catch((error) => {
       console.warn(error);
-      showErrorPanel(saved ? "Unsave failed" : "Save failed", error?.message || (saved ? "Unsave failed." : "Save failed."));
+      showErrorPanel("Save failed", error?.message || "Save failed.");
     });
   });
   document.querySelector(".i_detail_copy_url")?.addEventListener("click", () => {

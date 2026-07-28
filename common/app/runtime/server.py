@@ -133,6 +133,10 @@ IMAGINE_SAVED_MEDIA_KEYS_CACHE_SECONDS = 45
 
 IMAGINE_SAVED_MEDIA_KEYS_CACHE: dict[str, tuple[float, set[str]]] = {}
 IMAGINE_SAVED_MEDIA_KEYS_CACHE_LOCK = threading.Lock()
+IMAGINE_OWNER_USER_ID_CACHE: dict[str, str] = {}
+IMAGINE_OWNER_USER_ID_CACHE_LOCK = threading.Lock()
+IMAGINE_SAVE_ACTIVE_KEYS: set[str] = set()
+IMAGINE_SAVE_ACTIVE_LOCK = threading.Lock()
 
 BUILD_VIDEO_TERMINAL_STATUSES = {"failed", "expired", "cancelled", "canceled"}
 IMAGE_ASPECT_RATIOS = {"auto", "1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "2:1", "1:2", "19.5:9", "9:19.5", "20:9", "9:20"}
@@ -441,6 +445,9 @@ def default_library_json() -> dict:
             "collection_sort": {},
             "hidden_upload_keys": [],
             "hidden_imagine_item_keys": [],
+            "imagine_locally_unsaved_asset_ids": {},
+            "imagine_local_heart_posts": {},
+            "imagine_external_reference_asset_ids": {},
             "imagine_upload_asset_cache": {},
             "imagine_generated_relations": {},
         },
@@ -464,6 +471,9 @@ def merge_library_json(data) -> dict:
     settings.setdefault("collection_sort", {})
     settings.setdefault("hidden_upload_keys", [])
     settings.setdefault("hidden_imagine_item_keys", [])
+    settings.setdefault("imagine_locally_unsaved_asset_ids", {})
+    settings.setdefault("imagine_local_heart_posts", {})
+    settings.setdefault("imagine_external_reference_asset_ids", {})
     settings.setdefault("imagine_upload_asset_cache", {})
     settings.setdefault("imagine_generated_relations", {})
     base["settings"] = settings
@@ -1571,9 +1581,11 @@ def verify_imagine_saved_access(account: dict) -> None:
         raise
 
 
-def imagine_get_json(path: str, account: dict, timeout: int = 12) -> dict:
+def imagine_get_json(path: str, account: dict, timeout: int = 12, referer: str = "") -> dict:
     headers = imagine_saved_headers(account)
     headers.pop("Content-Type", None)
+    if referer:
+        headers["Referer"] = referer
     request = urllib.request.Request(
         IMAGINE_BASE + path,
         headers=headers,
@@ -1821,6 +1833,29 @@ def imagine_post_id_from_value(value: str) -> str:
         if match:
             return match.group(1)
     return ""
+
+
+def imagine_post_page_url(value: str, post_id: str) -> str:
+    canonical = f"{IMAGINE_BASE}/imagine/post/{quote(post_id, safe='')}"
+    text = str(value or "").strip()
+    if not text:
+        return canonical
+    try:
+        parsed = urlparse(text)
+    except ValueError:
+        return canonical
+    host = str(parsed.hostname or "").strip().lower()
+    if parsed.scheme not in {"http", "https"} or host not in {"grok.com", "www.grok.com"}:
+        return canonical
+    if imagine_post_id_from_value(parsed.path) != post_id:
+        return canonical
+    return parsed._replace(
+        scheme="https",
+        netloc="grok.com",
+        path=f"/imagine/post/{post_id}",
+        params="",
+        fragment="",
+    ).geturl()
 
 
 def imagine_url_kind(key: str, url: str, node: dict) -> str:
@@ -2406,6 +2441,33 @@ def imagine_restore_generated_relation_resolutions(post: dict, library: dict) ->
     return changed
 
 
+def imagine_post_is_link_source(post: dict) -> bool:
+    if not isinstance(post, dict):
+        return False
+    metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+    imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
+    if (
+        metadata.get("link_source")
+        or imagine.get("link_source")
+        or str(metadata.get("remote_view") or "").strip().lower() == "link"
+        or str(imagine.get("remote_view") or "").strip().lower() == "link"
+    ):
+        return True
+    for item in post.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        item_metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        item_imagine = item_metadata.get("imagine") if isinstance(item_metadata.get("imagine"), dict) else {}
+        if (
+            item_metadata.get("link_source")
+            or item_imagine.get("link_source")
+            or str(item_metadata.get("remote_view") or "").strip().lower() == "link"
+            or str(item_imagine.get("remote_view") or "").strip().lower() == "link"
+        ):
+            return True
+    return False
+
+
 def imagine_apply_generated_relations(post: dict, root: Path, account: dict, library: dict | None = None) -> dict:
     if not isinstance(post, dict):
         return post
@@ -2423,6 +2485,8 @@ def imagine_apply_generated_relations(post: dict, root: Path, account: dict, lib
     hidden = {str(value) for value in settings.get("hidden_imagine_item_keys", []) if str(value)}
     existing_items = [dict(item) for item in post.get("items") or [] if isinstance(item, dict)]
     existing_keys = {imagine_relation_item_key(item) for item in existing_items}
+    link_source = imagine_post_is_link_source(post)
+    local_t2i_heart = imagine_post_is_local_t2i_heart(post)
     for stored in record.get("items") if isinstance(record.get("items"), list) else []:
         if not isinstance(stored, dict):
             continue
@@ -2433,9 +2497,14 @@ def imagine_apply_generated_relations(post: dict, root: Path, account: dict, lib
             or stored_imagine.get("conversation_id")
             or ""
         ).strip()
-        # A result created in a new Imagine conversation belongs to that new
-        # Saved post.  Do not also graft it onto the source post.
-        if stored_conversation_id and stored_conversation_id != post_id:
+        # Linked sources and local T2I-heart cards remain their own anchors even
+        # when Grok places a generated child in a different Saved conversation.
+        if (
+            stored_conversation_id
+            and stored_conversation_id != post_id
+            and not link_source
+            and not local_t2i_heart
+        ):
             continue
         item = imagine_relation_materialized_item(stored, account)
         key = imagine_relation_item_key(item)
@@ -2982,6 +3051,330 @@ def imagine_conversation_detail(conversation_id: str, account: dict) -> dict:
     )
 
 
+IMAGINE_SAVED_CURSOR_PREFIX = "gc-saved-v2."
+
+
+def encode_imagine_saved_cursor(
+    conversation_cursor: str,
+    asset_cursor: str,
+    *,
+    conversations_done: bool,
+    assets_done: bool,
+) -> str:
+    payload = {
+        "v": 2,
+        "conversations": str(conversation_cursor or ""),
+        "assets": str(asset_cursor or ""),
+        "conversations_done": bool(conversations_done),
+        "assets_done": bool(assets_done),
+    }
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    token = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    return IMAGINE_SAVED_CURSOR_PREFIX + token
+
+
+def decode_imagine_saved_cursor(value: str) -> tuple[str, str, bool, bool]:
+    text = str(value or "").strip()
+    if not text:
+        return "", "", False, False
+    if not text.startswith(IMAGINE_SAVED_CURSOR_PREFIX):
+        return text, "", False, False
+    token = text[len(IMAGINE_SAVED_CURSOR_PREFIX):]
+    try:
+        raw = base64.urlsafe_b64decode(token + ("=" * (-len(token) % 4)))
+        payload = json.loads(raw.decode("utf-8"))
+        if not isinstance(payload, dict) or int(payload.get("v") or 0) != 2:
+            raise ValueError("unsupported cursor")
+        return (
+            str(payload.get("conversations") or "").strip(),
+            str(payload.get("assets") or "").strip(),
+            bool(payload.get("conversations_done")),
+            bool(payload.get("assets_done")),
+        )
+    except (ValueError, TypeError, json.JSONDecodeError, UnicodeDecodeError):
+        return "", "", False, False
+
+
+def imagine_item_asset_id(item: dict) -> str:
+    if not isinstance(item, dict):
+        return ""
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
+    return str(
+        item.get("asset_id")
+        or metadata.get("asset_id")
+        or imagine.get("asset_id")
+        or item.get("item_id")
+        or item.get("post_id")
+        or ""
+    ).strip()
+
+
+def filter_imagine_saved_post_items(post: dict, excluded_asset_ids: set[str]) -> dict | None:
+    if not isinstance(post, dict):
+        return None
+    items = [
+        item
+        for item in post.get("items") or []
+        if isinstance(item, dict) and imagine_item_asset_id(item) not in excluded_asset_ids
+    ]
+    if not items:
+        return None
+    representative = imagine_representative_item(items) or items[-1]
+    filtered = dict(post)
+    filtered["items"] = items
+    filtered["representative_item"] = representative
+    filtered["representative"] = (
+        representative.get("url")
+        or representative.get("remote_url")
+        or representative.get("item_id")
+        or ""
+    )
+    return filtered
+
+
+def imagine_flat_saved_post_from_asset(
+    asset: dict,
+    account: dict,
+    *,
+    external_reference: bool = False,
+) -> dict | None:
+    post = imagine_unsaved_post_from_asset(asset, account)
+    if not post:
+        return None
+    asset_id = str(asset.get("assetId") or asset.get("id") or "").strip()
+    conversation_id = str(
+        asset.get("sourceConversationId")
+        or asset.get("rootAssetSourceConversationId")
+        or asset.get("conversationId")
+        or ""
+    ).strip()
+    group_id = conversation_id or asset_id
+    metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+    metadata.update({
+        "imagine_root_post_id": group_id,
+        "conversation_id": conversation_id,
+        "remote_view": "saved",
+        "saved_content_view": "assets",
+        "flat_only": True,
+        "grouped": False,
+        "external_reference": bool(external_reference),
+        "liked": True,
+    })
+    post.update({
+        "post_id": group_id,
+        "mode": "saved",
+        "liked": True,
+        "favorite": True,
+        "folder_path": f"imagine_saved/{group_id}",
+        "metadata": metadata,
+    })
+    for item in post.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        item_metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        imagine = item_metadata.get("imagine") if isinstance(item_metadata.get("imagine"), dict) else {}
+        item_metadata.update({
+            "remote_view": "saved",
+            "flat_only": True,
+            "external_reference": bool(external_reference),
+            "liked": True,
+        })
+        imagine.update({
+            "remote_view": "saved",
+            "flat_only": True,
+            "external_reference": bool(external_reference),
+            "liked": True,
+        })
+        item_metadata["imagine"] = imagine
+        item.update({
+            "metadata": item_metadata,
+            "liked": True,
+            "favorite": True,
+        })
+    return post
+
+
+def merge_imagine_flat_saved_post(groups: dict[str, dict], post: dict) -> None:
+    folder_path = str(post.get("folder_path") or "")
+    if not folder_path:
+        return
+    existing = groups.get(folder_path)
+    if not existing:
+        groups[folder_path] = post
+        return
+    known_ids = {imagine_item_asset_id(item) for item in existing.get("items") or []}
+    for item in post.get("items") or []:
+        item_id = imagine_item_asset_id(item)
+        if item_id and item_id in known_ids:
+            continue
+        existing.setdefault("items", []).append(item)
+        if item_id:
+            known_ids.add(item_id)
+    representative = imagine_representative_item(existing.get("items") or []) or existing.get("representative_item")
+    if isinstance(representative, dict):
+        existing["representative_item"] = representative
+        existing["representative"] = representative.get("url") or representative.get("item_id") or ""
+
+
+def imagine_post_is_local_t2i_heart(post: dict) -> bool:
+    if not isinstance(post, dict):
+        return False
+    metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+    imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
+    action = str(
+        metadata.get("generated_action")
+        or imagine.get("generated_action")
+        or post.get("generated_action")
+        or ""
+    ).strip().lower()
+    return bool(metadata.get("local_heart")) and action in {
+        "t2i",
+        "texttoimage",
+        "text_to_image",
+        "text-to-image",
+    }
+
+
+def merge_imagine_local_heart_post(
+    groups: dict[str, dict],
+    local_post: dict,
+    *,
+    insert_if_missing: bool = True,
+) -> None:
+    local_items = [item for item in local_post.get("items") or [] if isinstance(item, dict)]
+    local_ids = {imagine_item_asset_id(item) for item in local_items if imagine_item_asset_id(item)}
+    if not local_ids:
+        return
+    if imagine_post_is_local_t2i_heart(local_post):
+        folder_path = str(local_post.get("folder_path") or "").strip()
+        if not folder_path:
+            return
+        independent_post = dict(local_post)
+        independent_metadata = (
+            dict(independent_post.get("metadata"))
+            if isinstance(independent_post.get("metadata"), dict)
+            else {}
+        )
+        independent_metadata["t2i_group_container"] = False
+        independent_post.update({
+            "mode": "saved",
+            "t2i_group_container": False,
+            "metadata": independent_metadata,
+        })
+        groups[folder_path] = independent_post
+        return
+    if imagine_post_is_link_source(local_post):
+        matching_keys = [
+            folder_path
+            for folder_path, post in groups.items()
+            if local_ids & {
+                imagine_item_asset_id(item)
+                for item in post.get("items") or []
+                if imagine_item_asset_id(item)
+            }
+        ]
+        if not matching_keys:
+            if insert_if_missing:
+                merge_imagine_flat_saved_post(groups, local_post)
+            return
+        anchor = dict(local_post)
+        items_by_id = {
+            imagine_item_asset_id(item): dict(item)
+            for item in local_items
+            if imagine_item_asset_id(item)
+        }
+        created_at_values = [str(anchor.get("created_at") or "")]
+        for folder_path in matching_keys:
+            destination = groups.pop(folder_path, None)
+            if not isinstance(destination, dict):
+                continue
+            created_at_values.append(str(destination.get("created_at") or ""))
+            for item in destination.get("items") or []:
+                if not isinstance(item, dict):
+                    continue
+                item_id = imagine_item_asset_id(item)
+                if not item_id:
+                    continue
+                existing_item = items_by_id.get(item_id)
+                if existing_item is None:
+                    items_by_id[item_id] = dict(item)
+                    continue
+                combined_item = {**existing_item, **item}
+                existing_metadata = existing_item.get("metadata") if isinstance(existing_item.get("metadata"), dict) else {}
+                item_metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+                combined_metadata = {**item_metadata, **existing_metadata}
+                existing_imagine = existing_metadata.get("imagine") if isinstance(existing_metadata.get("imagine"), dict) else {}
+                item_imagine = item_metadata.get("imagine") if isinstance(item_metadata.get("imagine"), dict) else {}
+                combined_metadata["imagine"] = {**item_imagine, **existing_imagine}
+                combined_item["metadata"] = combined_metadata
+                combined_item["liked"] = True
+                combined_item["favorite"] = True
+                items_by_id[item_id] = combined_item
+        anchor_items = list(items_by_id.values())
+        for item in anchor_items:
+            created_at_values.append(str(item.get("created_at") or ""))
+        representative = imagine_representative_item(anchor_items) or anchor_items[-1]
+        anchor_metadata = anchor.get("metadata") if isinstance(anchor.get("metadata"), dict) else {}
+        anchor_metadata.update({
+            "liked": True,
+            "local_heart": True,
+            "link_source": True,
+            "app_preserved_generated_relations": True,
+        })
+        anchor.update({
+            "items": anchor_items,
+            "liked": True,
+            "favorite": True,
+            "created_at": max(created_at_values),
+            "representative_item": representative,
+            "representative": representative.get("url") or representative.get("remote_url") or representative.get("item_id") or "",
+            "metadata": anchor_metadata,
+        })
+        groups[str(anchor.get("folder_path") or "")] = anchor
+        return
+    destination = next((
+        post for post in groups.values()
+        if local_ids & {
+            imagine_item_asset_id(item)
+            for item in post.get("items") or []
+            if imagine_item_asset_id(item)
+        }
+    ), None)
+    if destination is None:
+        if insert_if_missing:
+            merge_imagine_flat_saved_post(groups, local_post)
+        return
+    items_by_id = {
+        imagine_item_asset_id(item): item
+        for item in destination.get("items") or []
+        if imagine_item_asset_id(item)
+    }
+    for local_item in local_items:
+        item_id = imagine_item_asset_id(local_item)
+        if not item_id:
+            continue
+        existing_item = items_by_id.get(item_id)
+        if existing_item is None:
+            items_by_id[item_id] = local_item
+            continue
+        metadata = existing_item.get("metadata") if isinstance(existing_item.get("metadata"), dict) else {}
+        imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
+        metadata.update({"liked": True, "local_heart": True})
+        imagine.update({"liked": True, "local_heart": True})
+        metadata["imagine"] = imagine
+        existing_item.update({"liked": True, "favorite": True, "metadata": metadata})
+    destination["items"] = list(items_by_id.values())
+    destination["liked"] = True
+    destination["favorite"] = True
+    destination_metadata = destination.get("metadata") if isinstance(destination.get("metadata"), dict) else {}
+    destination_metadata.update({"liked": True, "local_heart": True})
+    destination["metadata"] = destination_metadata
+    representative = imagine_representative_item(destination["items"]) or destination["items"][-1]
+    destination["representative_item"] = representative
+    destination["representative"] = representative.get("url") or representative.get("remote_url") or representative.get("item_id") or ""
+
+
 def list_imagine_saved(payload: dict) -> dict:
     root = library_root()
     if not root:
@@ -2995,17 +3388,22 @@ def list_imagine_saved(payload: dict) -> dict:
         limit = 20
     limit = min(40, max(1, limit))
     cursor = str((payload or {}).get("cursor") or "").strip()
+    conversation_cursor, asset_cursor, conversations_done, assets_done = decode_imagine_saved_cursor(cursor)
     query_params = {
         "pageSize": str(limit),
         "kind": "CONVERSATION_KIND_IMAGINE",
     }
-    if cursor:
-        query_params["pageToken"] = cursor
+    if conversation_cursor:
+        query_params["pageToken"] = conversation_cursor
     try:
-        data = imagine_get_json(
-            "/rest/app-chat/conversations?" + urlencode(query_params),
-            account,
-            timeout=20,
+        data = (
+            {"conversations": [], "nextPageToken": ""}
+            if conversations_done
+            else imagine_get_json(
+                "/rest/app-chat/conversations?" + urlencode(query_params),
+                account,
+                timeout=20,
+            )
         )
     except RuntimeError as exc:
         message = str(exc)
@@ -3048,13 +3446,113 @@ def list_imagine_saved(payload: dict) -> dict:
                         "error": str(exc)[:400],
                     })
     library = merge_library_json(read_json(root / "library.json", {}))
+    locally_unsaved = imagine_account_setting_ids(root, "imagine_locally_unsaved_asset_ids", account)
+    external_reference_ids = imagine_account_setting_ids(root, "imagine_external_reference_asset_ids", account)
+    local_heart_posts = [
+        imagine_apply_generated_relations(local_post, root, account, library)
+        for local_post in imagine_account_local_heart_posts(root, account)
+    ]
     posts = []
     for conversation in conversations:
         conversation_id = str(conversation.get("conversationId") or "")
         post = imagine_saved_post_from_conversation(conversation, details.get(conversation_id, {}), account)
         if post:
             imagine_restore_generated_relation_resolutions(post, library)
-            posts.append(post)
+            filtered_post = filter_imagine_saved_post_items(post, locally_unsaved)
+            if filtered_post:
+                posts.append(filtered_post)
+
+    asset_query = [
+        ("pageSize", str(limit)),
+        ("orderBy", "ORDER_BY_CREATE_TIME"),
+        ("workspaceKind", "WORKSPACE_KIND_IMAGINE_ALL"),
+    ]
+    if asset_cursor:
+        asset_query.append(("pageToken", asset_cursor))
+    asset_data = (
+        {"assets": [], "nextPageToken": ""}
+        if assets_done
+        else imagine_get_json("/rest/assets?" + urlencode(asset_query), account, timeout=20)
+    )
+    assets = asset_data.get("assets") if isinstance(asset_data.get("assets"), list) else []
+    current_owner_user_id = remember_imagine_owner_user_id(account, next((
+        str((conversation.get("latestAssetMetadata") or {}).get("ownerUserId") or "").strip()
+        for conversation in conversations
+        if isinstance(conversation.get("latestAssetMetadata"), dict)
+        and str((conversation.get("latestAssetMetadata") or {}).get("ownerUserId") or "").strip()
+    ), ""))
+    grouped_asset_ids = {
+        imagine_item_asset_id(item)
+        for post in [*posts, *local_heart_posts]
+        for item in post.get("items") or []
+        if imagine_item_asset_id(item)
+    }
+    grouped_source_ids = {
+        str(
+            item.get("source_item_id")
+            or item.get("parent_post_id")
+            or item.get("original_post_id")
+            or ""
+        ).strip()
+        for post in [*posts, *local_heart_posts]
+        for item in post.get("items") or []
+        if str(
+            item.get("source_item_id")
+            or item.get("parent_post_id")
+            or item.get("original_post_id")
+            or ""
+        ).strip()
+    }
+    saved_groups: dict[str, dict] = {
+        str(post.get("folder_path") or ""): post
+        for post in posts
+        if str(post.get("folder_path") or "")
+    }
+    for asset in assets:
+        if not isinstance(asset, dict):
+            continue
+        asset_id = str(asset.get("assetId") or asset.get("id") or "").strip()
+        if not asset_id or asset_id in locally_unsaved:
+            continue
+        if asset_id in grouped_asset_ids or asset_id in grouped_source_ids:
+            continue
+        owner_user_id = str(asset.get("ownerUserId") or "").strip()
+        external_reference = (
+            asset_id in external_reference_ids
+            or bool(owner_user_id and current_owner_user_id and owner_user_id != current_owner_user_id)
+        )
+        flat_post = imagine_flat_saved_post_from_asset(
+            asset,
+            account,
+            external_reference=external_reference,
+        )
+        if flat_post:
+            merge_imagine_flat_saved_post(saved_groups, flat_post)
+    for local_post in local_heart_posts:
+        if not cursor or imagine_post_is_link_source(local_post):
+            merge_imagine_local_heart_post(
+                saved_groups,
+                local_post,
+                insert_if_missing=not bool(cursor),
+            )
+    posts = list(saved_groups.values())
+    posts.sort(key=lambda post: str(post.get("created_at") or ""), reverse=True)
+
+    next_conversation_cursor = str(data.get("nextPageToken") or "").strip()
+    next_asset_cursor = str(asset_data.get("nextPageToken") or asset_data.get("nextCursor") or "").strip()
+    next_conversations_done = conversations_done or not next_conversation_cursor
+    next_assets_done = assets_done or not next_asset_cursor
+    has_more = not (next_conversations_done and next_assets_done)
+    next_cursor = (
+        encode_imagine_saved_cursor(
+            next_conversation_cursor,
+            next_asset_cursor,
+            conversations_done=next_conversations_done,
+            assets_done=next_assets_done,
+        )
+        if has_more
+        else ""
+    )
     return {
         "ok": True,
         "source": "saved",
@@ -3062,8 +3560,8 @@ def list_imagine_saved(payload: dict) -> dict:
         "posts": posts,
         "items": posts,
         "cursor": cursor,
-        "next_cursor": str(data.get("nextPageToken") or ""),
-        "has_more": bool(data.get("nextPageToken")),
+        "next_cursor": next_cursor,
+        "has_more": has_more,
         "imagine": {
             "id": account.get("id") or "",
             "email": account.get("email") or "",
@@ -3091,8 +3589,200 @@ def imagine_get_media_post_direct(post_id: str, account: dict, timeout: int = 12
                 return candidate
         if posts and isinstance(posts[0], dict):
             return posts[0]
+    try:
+        public_post = imagine_get_public_asset_post(post_id, account, timeout=timeout)
+        if public_post:
+            imagine_debug_event("link_public_asset_fallback", {
+                "post_id": post_id,
+                "reference_count": len(public_post.get("images") or []),
+                "direct_errors": errors[-2:],
+            })
+            return public_post
+    except Exception as exc:
+        errors.append(str(exc)[:240])
+    try:
+        public_post = imagine_get_public_page_post(post_id, account, timeout=timeout)
+        if public_post:
+            imagine_debug_event("link_public_page_fallback", {
+                "post_id": post_id,
+                "direct_errors": errors[-3:],
+            })
+            return public_post
+    except Exception as exc:
+        errors.append(str(exc)[:240])
     detail = "; ".join(errors[-2:])
     raise RuntimeError(("Could not load the Imagine source media post. " + detail).strip())
+
+
+def imagine_public_asset_reference_ids(asset: dict) -> list[str]:
+    if not isinstance(asset, dict):
+        return []
+    values: list[object] = []
+    aux_keys = asset.get("auxKeys")
+    if isinstance(aux_keys, dict):
+        for key, value in aux_keys.items():
+            compact_key = re.sub(r"[^a-z0-9]", "", str(key or "").lower())
+            if "reference" in compact_key or "inputasset" in compact_key:
+                values.append(value)
+    media_gen_input = asset.get("mediaGenInput")
+    if isinstance(media_gen_input, dict):
+        for value in media_gen_input.values():
+            if isinstance(value, dict) and isinstance(value.get("inputAssets"), list):
+                values.extend(value.get("inputAssets") or [])
+    reference_ids: list[str] = []
+    seen_ids: set[str] = set()
+
+    def collect(value: object) -> None:
+        if isinstance(value, list):
+            for item in value:
+                collect(item)
+            return
+        if isinstance(value, dict):
+            for item in value.values():
+                collect(item)
+            return
+        if not isinstance(value, str):
+            return
+        text = value.strip()
+        if not text:
+            return
+        if text[:1] in {"[", "{"}:
+            try:
+                collect(json.loads(text))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+        for match in re.findall(
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+            text,
+        ):
+            reference_id = match.lower()
+            if reference_id not in seen_ids:
+                seen_ids.add(reference_id)
+                reference_ids.append(reference_id)
+
+    for value in values:
+        collect(value)
+    root_id = str(asset.get("assetId") or asset.get("id") or "").strip().lower()
+    return [reference_id for reference_id in reference_ids if reference_id != root_id]
+
+
+def imagine_get_public_asset_post(post_id: str, account: dict, timeout: int = 12) -> dict:
+    referer = f"{IMAGINE_BASE}/imagine/post/{quote(post_id, safe='')}"
+    data = imagine_get_json(
+        f"/rest/assets/{quote(post_id, safe='')}",
+        account,
+        timeout=timeout,
+        referer=referer,
+    )
+    asset = data.get("asset") if isinstance(data.get("asset"), dict) else data
+    if not isinstance(asset, dict) or not imagine_asset_primary_media_url(asset):
+        raise RuntimeError("Imagine public asset response did not contain media.")
+    public_post = dict(asset)
+    public_post.setdefault("id", str(asset.get("assetId") or post_id))
+    public_post.setdefault("postId", str(asset.get("assetId") or post_id))
+    public_post.setdefault("mediaUrl", imagine_asset_primary_media_url(asset))
+    reference_assets: list[dict] = []
+    for reference_id in imagine_public_asset_reference_ids(asset):
+        try:
+            reference_data = imagine_get_json(
+                f"/rest/assets/{quote(reference_id, safe='')}",
+                account,
+                timeout=timeout,
+                referer=referer,
+            )
+        except Exception as exc:
+            imagine_debug_event("link_public_reference_failed", {
+                "post_id": post_id,
+                "reference_id": reference_id,
+                "error": str(exc)[:300],
+            })
+            continue
+        reference_asset = (
+            reference_data.get("asset")
+            if isinstance(reference_data.get("asset"), dict)
+            else reference_data
+        )
+        if not isinstance(reference_asset, dict) or not imagine_asset_primary_media_url(reference_asset):
+            continue
+        normalized_reference = dict(reference_asset)
+        normalized_reference.setdefault("id", str(reference_asset.get("assetId") or reference_id))
+        normalized_reference.setdefault("postId", str(reference_asset.get("assetId") or reference_id))
+        normalized_reference.setdefault("mediaUrl", imagine_asset_primary_media_url(reference_asset))
+        reference_assets.append(normalized_reference)
+    if reference_assets:
+        first_reference_id = str(
+            reference_assets[0].get("assetId")
+            or reference_assets[0].get("id")
+            or ""
+        ).strip()
+        public_post.setdefault("originalPostId", first_reference_id)
+        public_post.setdefault("originalPost", reference_assets[0])
+        public_post["images"] = reference_assets
+    return public_post
+
+
+def imagine_get_public_page_post(post_id: str, account: dict, timeout: int = 12) -> dict:
+    page_url = f"{IMAGINE_BASE}/imagine/post/{quote(post_id, safe='')}"
+    headers = imagine_saved_headers(account)
+    headers.update({
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Referer": IMAGINE_BASE + "/imagine",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin",
+    })
+    headers.pop("Content-Type", None)
+    headers.pop("Origin", None)
+    request = urllib.request.Request(page_url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read(2000).decode("utf-8", errors="replace")
+        raise RuntimeError(f"Imagine public page HTTP {exc.code}: {detail[:500]}") from exc
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        raise RuntimeError(f"Imagine public page network error: {exc}") from exc
+    metadata: dict[str, str] = {}
+    for tag in re.findall(r"<meta\b[^>]*>", body, flags=re.IGNORECASE):
+        attributes = {
+            str(key).lower(): html.unescape(value)
+            for key, _, value in re.findall(
+                r"([:\w-]+)\s*=\s*([\"'])(.*?)\2",
+                tag,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+        }
+        metadata_key = str(attributes.get("property") or attributes.get("name") or "").lower()
+        content = str(attributes.get("content") or "").strip()
+        if metadata_key and content and metadata_key not in metadata:
+            metadata[metadata_key] = content
+    video_url = metadata.get("og:video") or metadata.get("og:video:url") or ""
+    image_url = metadata.get("og:image") or metadata.get("twitter:image") or ""
+    if image_url and not (
+        post_id.lower() in image_url.lower()
+        or urlparse(image_url).hostname in {"assets.grok.com", "imagine-public.x.ai"}
+    ):
+        image_url = ""
+    media_url = video_url or image_url
+    if not media_url:
+        raise RuntimeError("Imagine public page did not contain media metadata.")
+    try:
+        width = int(metadata.get("og:image:width") or 0)
+        height = int(metadata.get("og:image:height") or 0)
+    except (TypeError, ValueError):
+        width = 0
+        height = 0
+    return {
+        "id": post_id,
+        "postId": post_id,
+        "mediaUrl": media_url,
+        "mediaType": "video" if video_url else "image",
+        "thumbnailUrl": image_url,
+        "prompt": metadata.get("description") or metadata.get("og:description") or "",
+        "width": width,
+        "height": height,
+        "createTime": "",
+    }
 
 
 def load_imagine_remote_link_post(payload: dict) -> dict:
@@ -3108,6 +3798,7 @@ def load_imagine_remote_link_post(payload: dict) -> dict:
     post_id = imagine_post_id_from_value(raw_value)
     if not post_id:
         raise RuntimeError("Enter a valid Grok Imagine post link.")
+    link_url = imagine_post_page_url(raw_value, post_id)
     account = active_imagine_account(root, str((payload or {}).get("account_id") or ""))
     if not account:
         raise RuntimeError("Select or capture an Imagine account first.")
@@ -3117,45 +3808,57 @@ def load_imagine_remote_link_post(payload: dict) -> dict:
         post = imagine_apply_generated_relations(post, root, account)
     if not post:
         raise RuntimeError("Could not load the linked Imagine post.")
+    link_asset_ids = {
+        imagine_item_asset_id(item)
+        for item in post.get("items") or []
+        if imagine_item_asset_id(item)
+    }
+    link_asset_ids.add(post_id)
+    saved_link_ids = link_asset_ids & imagine_local_heart_asset_ids(root, account)
+    link_is_saved = bool(saved_link_ids)
     metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
     metadata.update({
         "remote_view": "link",
         "link_source": True,
         "link_post_id": post_id,
-        "link_url": f"{IMAGINE_BASE}/imagine/post/{post_id}",
-        "liked": False,
+        "link_url": link_url,
+        "liked": link_is_saved,
     })
     post["metadata"] = metadata
     post["mode"] = "link"
-    post["liked"] = False
-    post["favorite"] = False
+    post["liked"] = link_is_saved
+    post["favorite"] = link_is_saved
     for item in post.get("items") or []:
         if not isinstance(item, dict):
             continue
+        item_asset_id = imagine_item_asset_id(item)
+        item_is_saved = item_asset_id in saved_link_ids
         item_metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
         imagine = item_metadata.get("imagine") if isinstance(item_metadata.get("imagine"), dict) else {}
         item_metadata.update({
             "remote_view": "link",
             "link_source": True,
             "link_post_id": post_id,
-            "link_url": f"{IMAGINE_BASE}/imagine/post/{post_id}",
-            "liked": False,
+            "link_url": link_url,
+            "liked": item_is_saved,
         })
         imagine.update({
             "remote_view": "link",
             "link_source": True,
             "link_post_id": post_id,
-            "liked": False,
+            "liked": item_is_saved,
         })
         item_metadata["imagine"] = imagine
         item["metadata"] = item_metadata
-        item["liked"] = False
-        item["favorite"] = False
+        item["liked"] = item_is_saved
+        item["favorite"] = item_is_saved
     return {
         "ok": True,
         "source": "link",
         "post_id": post_id,
-        "url": f"{IMAGINE_BASE}/imagine/post/{post_id}",
+        "url": link_url,
+        "saved": link_is_saved,
+        "saved_ids": sorted(saved_link_ids),
         "post": post,
         "posts": [post],
         "items": [post],
@@ -3410,39 +4113,321 @@ def canonical_remote_media_key(value) -> str:
     return path or text
 
 
+def imagine_account_settings_key(account: dict) -> str:
+    return str(account.get("id") or account.get("email") or "").strip().lower()
+
+
+def remember_imagine_owner_user_id(account: dict, owner_user_id: str = "") -> str:
+    account_key = imagine_account_settings_key(account)
+    owner_id = str(owner_user_id or "").strip()
+    if not account_key:
+        return owner_id
+    with IMAGINE_OWNER_USER_ID_CACHE_LOCK:
+        if owner_id:
+            IMAGINE_OWNER_USER_ID_CACHE[account_key] = owner_id
+        return owner_id or IMAGINE_OWNER_USER_ID_CACHE.get(account_key, "")
+
+
+def imagine_account_setting_ids(root: Path | None, setting_name: str, account: dict) -> set[str]:
+    if not root:
+        return set()
+    library = merge_library_json(read_json(root / "library.json", {}))
+    settings = library.get("settings") if isinstance(library.get("settings"), dict) else {}
+    by_account = settings.get(setting_name) if isinstance(settings.get(setting_name), dict) else {}
+    account_key = imagine_account_settings_key(account)
+    values = by_account.get(account_key) if isinstance(by_account.get(account_key), list) else []
+    return {str(value).strip() for value in values if str(value).strip()}
+
+
+def update_imagine_account_setting_ids(
+    root: Path,
+    setting_name: str,
+    account: dict,
+    *,
+    add: set[str] | None = None,
+    remove: set[str] | None = None,
+) -> set[str]:
+    ensure_library_root(root)
+    library_path = root / "library.json"
+    library = merge_library_json(read_json(library_path, {}))
+    settings = library.setdefault("settings", {})
+    by_account = settings.get(setting_name) if isinstance(settings.get(setting_name), dict) else {}
+    account_key = imagine_account_settings_key(account)
+    values = {
+        str(value).strip()
+        for value in (by_account.get(account_key) if isinstance(by_account.get(account_key), list) else [])
+        if str(value).strip()
+    }
+    values.update(str(value).strip() for value in (add or set()) if str(value).strip())
+    values.difference_update(str(value).strip() for value in (remove or set()) if str(value).strip())
+    by_account[account_key] = sorted(values)
+    settings[setting_name] = by_account
+    library["updated_at"] = now_iso()
+    write_json(library_path, library)
+    return values
+
+
+def imagine_account_local_heart_posts(root: Path | None, account: dict) -> list[dict]:
+    if not root:
+        return []
+    library = merge_library_json(read_json(root / "library.json", {}))
+    settings = library.get("settings") if isinstance(library.get("settings"), dict) else {}
+    by_account = settings.get("imagine_local_heart_posts") if isinstance(settings.get("imagine_local_heart_posts"), dict) else {}
+    account_key = imagine_account_settings_key(account)
+    posts = by_account.get(account_key) if isinstance(by_account.get(account_key), list) else []
+    return [dict(post) for post in posts if isinstance(post, dict)]
+
+
+def imagine_local_heart_asset_ids(root: Path | None, account: dict) -> set[str]:
+    return {
+        imagine_item_asset_id(item)
+        for post in imagine_account_local_heart_posts(root, account)
+        for item in post.get("items") or []
+        if imagine_item_asset_id(item)
+    }
+
+
+def imagine_local_heart_media_keys(root: Path | None, account: dict) -> set[str]:
+    keys: set[str] = set()
+    for post in imagine_account_local_heart_posts(root, account):
+        for item in post.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            asset_id = imagine_item_asset_id(item)
+            kind = str(item.get("type") or "").strip().lower()
+            if asset_id and kind:
+                keys.add(f"asset:{kind}:{asset_id}")
+            elif asset_id:
+                keys.add(f"asset:{asset_id}")
+            media_url = str(item.get("remote_url") or item.get("url") or "").strip()
+            url_key = canonical_remote_media_key(media_url)
+            if url_key:
+                keys.add(f"url:{url_key}")
+    return keys
+
+
+def normalize_imagine_local_heart_post(payload: dict, targets: list[dict], account: dict) -> dict | None:
+    raw_post = (payload or {}).get("local_post")
+    if not isinstance(raw_post, dict):
+        return None
+    try:
+        post = json.loads(json.dumps(raw_post, ensure_ascii=False))
+    except (TypeError, ValueError):
+        return None
+    target_ids = {str(target.get("id") or "").strip() for target in targets if str(target.get("id") or "").strip()}
+    link_source = imagine_post_is_link_source(post)
+    matched_target_ids: set[str] = set()
+    items: list[dict] = []
+    for raw_item in post.get("items") or []:
+        if not isinstance(raw_item, dict):
+            continue
+        item = dict(raw_item)
+        asset_id = imagine_item_asset_id(item)
+        is_registration_target = bool(asset_id and asset_id in target_ids)
+        if not asset_id or (not is_registration_target and not link_source):
+            continue
+        if is_registration_target:
+            matched_target_ids.add(asset_id)
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
+        metadata.update({
+            "asset_id": asset_id,
+            "remote_view": "saved",
+            "liked": True,
+            "local_heart": True,
+            "local_heart_companion": bool(link_source and not is_registration_target),
+        })
+        imagine.update({
+            "asset_id": asset_id,
+            "remote_view": "saved",
+            "liked": True,
+            "local_heart": True,
+            "local_heart_companion": bool(link_source and not is_registration_target),
+        })
+        metadata["imagine"] = imagine
+        item.update({
+            "item_id": asset_id,
+            "asset_id": asset_id,
+            "liked": True,
+            "favorite": True,
+            "metadata": metadata,
+        })
+        items.append(item)
+    if not items or not matched_target_ids:
+        return None
+    metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+    group_id = str(
+        (payload or {}).get("local_group_id")
+        or metadata.get("local_saved_group_id")
+        or metadata.get("group_id")
+        or metadata.get("conversation_id")
+        or post.get("post_id")
+        or imagine_item_asset_id(items[0])
+        or ""
+    ).strip()
+    if not group_id:
+        return None
+    representative = imagine_representative_item(items) or items[-1]
+    metadata.update({
+        "local_saved_group_id": group_id,
+        "remote_view": "saved",
+        "liked": True,
+        "local_heart": True,
+        "saved_sync_pending": False,
+        "local_heart_primary_asset_ids": sorted(matched_target_ids),
+    })
+    post.update({
+        "post_id": group_id,
+        "source": "imagine",
+        "mode": "saved",
+        "area": "imagine_remote",
+        "remote": True,
+        "liked": True,
+        "favorite": True,
+        "folder_path": f"imagine_saved/{group_id}",
+        "folderName": str(post.get("folderName") or post.get("title") or group_id),
+        "representative": representative.get("url") or representative.get("remote_url") or representative.get("item_id") or "",
+        "representative_item": representative,
+        "items": items,
+        "account_id": str(account.get("id") or ""),
+        "account_email": str(account.get("email") or ""),
+        "metadata": metadata,
+    })
+    post.pop("__imagineSavePending", None)
+    return post
+
+
+def update_imagine_local_heart_posts(
+    root: Path,
+    account: dict,
+    *,
+    add_post: dict | None = None,
+    remove_asset_ids: set[str] | None = None,
+) -> list[dict]:
+    ensure_library_root(root)
+    library_path = root / "library.json"
+    with IMAGINE_SAVE_ACTIVE_LOCK:
+        library = merge_library_json(read_json(library_path, {}))
+        settings = library.setdefault("settings", {})
+        by_account = settings.get("imagine_local_heart_posts") if isinstance(settings.get("imagine_local_heart_posts"), dict) else {}
+        account_key = imagine_account_settings_key(account)
+        posts = [
+            dict(post)
+            for post in (by_account.get(account_key) if isinstance(by_account.get(account_key), list) else [])
+            if isinstance(post, dict)
+        ]
+        remove_ids = {str(value).strip() for value in (remove_asset_ids or set()) if str(value).strip()}
+        if remove_ids:
+            remaining_posts: list[dict] = []
+            for post in posts:
+                post_asset_ids = {
+                    imagine_item_asset_id(item)
+                    for item in post.get("items") or []
+                    if isinstance(item, dict) and imagine_item_asset_id(item)
+                }
+                if imagine_post_is_link_source(post) and bool(post_asset_ids & remove_ids):
+                    continue
+                items = [
+                    item
+                    for item in post.get("items") or []
+                    if isinstance(item, dict) and imagine_item_asset_id(item) not in remove_ids
+                ]
+                if not items:
+                    continue
+                representative = imagine_representative_item(items) or items[-1]
+                post["items"] = items
+                post["representative_item"] = representative
+                post["representative"] = representative.get("url") or representative.get("remote_url") or representative.get("item_id") or ""
+                remaining_posts.append(post)
+            posts = remaining_posts
+        if isinstance(add_post, dict):
+            add_ids = {
+                imagine_item_asset_id(item)
+                for item in add_post.get("items") or []
+                if imagine_item_asset_id(item)
+            }
+            destination = next((
+                post for post in posts
+                if str(post.get("folder_path") or "") == str(add_post.get("folder_path") or "")
+                or bool(add_ids & {
+                    imagine_item_asset_id(item)
+                    for item in post.get("items") or []
+                    if imagine_item_asset_id(item)
+                })
+            ), None)
+            if destination is None:
+                posts.append(add_post)
+            else:
+                items_by_id = {
+                    imagine_item_asset_id(item): item
+                    for item in destination.get("items") or []
+                    if imagine_item_asset_id(item)
+                }
+                for item in add_post.get("items") or []:
+                    item_id = imagine_item_asset_id(item)
+                    if item_id:
+                        items_by_id[item_id] = item
+                destination.update({
+                    "liked": True,
+                    "favorite": True,
+                    "metadata": add_post.get("metadata") or destination.get("metadata") or {},
+                })
+                destination["items"] = list(items_by_id.values())
+                representative = imagine_representative_item(destination["items"]) or destination["items"][-1]
+                destination["representative_item"] = representative
+                destination["representative"] = representative.get("url") or representative.get("remote_url") or representative.get("item_id") or ""
+        by_account[account_key] = posts
+        settings["imagine_local_heart_posts"] = by_account
+        library["updated_at"] = now_iso()
+        write_json(library_path, library)
+    return posts
+
+
+def invalidate_imagine_saved_media_keys_cache(account: dict) -> None:
+    account_key = imagine_account_settings_key(account)
+    with IMAGINE_SAVED_MEDIA_KEYS_CACHE_LOCK:
+        for cache_key in list(IMAGINE_SAVED_MEDIA_KEYS_CACHE):
+            if cache_key.startswith(account_key + ":"):
+                IMAGINE_SAVED_MEDIA_KEYS_CACHE.pop(cache_key, None)
+
+
 def imagine_saved_media_keys(account: dict, max_posts: int = 160) -> set[str]:
     keys: set[str] = set()
     cursor = ""
+    seen_cursors: set[str] = set()
     seen = 0
-    while seen < max_posts:
-        request_payload = {
-            "limit": min(40, max_posts - seen),
-            "includeCanvas": False,
-            "filter": {
-                "source": "MEDIA_POST_SOURCE_LIKED",
-                "safeForWork": False,
-            },
-        }
+    root = library_root()
+    locally_unsaved = imagine_account_setting_ids(
+        root,
+        "imagine_locally_unsaved_asset_ids",
+        account,
+    )
+    while max_posts <= 0 or seen < max_posts:
+        page_size = 40 if max_posts <= 0 else min(40, max_posts - seen)
+        query_parts = [
+            ("pageSize", str(max(1, page_size))),
+            ("orderBy", "ORDER_BY_CREATE_TIME"),
+            ("workspaceKind", "WORKSPACE_KIND_IMAGINE_ALL"),
+        ]
         if cursor:
-            request_payload["cursor"] = cursor
-        data = imagine_post_json("/rest/media/post/list", request_payload, account)
-        root_posts = data.get("posts") if isinstance(data.get("posts"), list) else []
-        if not root_posts:
+            query_parts.append(("pageToken", cursor))
+        data = imagine_get_json("/rest/assets?" + urlencode(query_parts), account, timeout=20)
+        assets = data.get("assets") if isinstance(data.get("assets"), list) else []
+        if not assets:
             break
-        for root_post in root_posts:
-            for entry in collect_imagine_media_entries(root_post):
-                kind = str(entry.get("type") or "").strip()
-                item_id = str(entry.get("item_id") or "").strip()
-                if item_id and kind:
-                    keys.add(f"asset:{kind}:{item_id}")
-                    keys.add(f"post:{kind}:{item_id}")
-                url_key = canonical_remote_media_key(entry.get("url"))
-                if url_key:
-                    keys.add(f"url:{url_key}")
-        seen += len(root_posts)
-        cursor = str(data.get("nextCursor") or "").strip()
-        if not cursor:
+        for asset in assets:
+            if not isinstance(asset, dict):
+                continue
+            asset_id = str(asset.get("assetId") or asset.get("id") or "").strip()
+            if asset_id and asset_id in locally_unsaved:
+                continue
+            keys.update(imagine_asset_key_values(asset))
+        seen += len(assets)
+        next_cursor = str(data.get("nextPageToken") or data.get("nextCursor") or "").strip()
+        if not next_cursor or next_cursor in seen_cursors:
             break
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
     return keys
 
 
@@ -3567,6 +4552,14 @@ def imagine_asset_upload_only(asset: dict) -> bool:
 
 def imagine_asset_group_key(asset: dict, fallback: str) -> str:
     for key in (
+        "sourceConversationId",
+        "rootAssetSourceConversationId",
+        "conversationId",
+    ):
+        value = str(asset.get(key) or "").strip()
+        if value:
+            return value
+    for key in (
         "assetId",
         "id",
         "postId",
@@ -3603,7 +4596,11 @@ def imagine_unsaved_post_from_asset(asset: dict, account: dict) -> dict | None:
     proxied_preview = imagine_saved_proxy_url(preview_url, "image", account_id_value) if preview_url else (proxied_url if kind == "image" else "")
     created_at = str(asset.get("lastUseTime") or asset.get("updateTime") or asset.get("createTime") or now_iso())
     title = str(asset.get("name") or asset.get("title") or asset_id).strip()
-    prompt = imagine_text_value(asset.get("prompt") or asset.get("metadata") or "")
+    media_gen = imagine_conversation_media_gen(asset)
+    prompt = imagine_text_value(media_gen.get("prompt") or asset.get("prompt") or asset.get("metadata") or "")
+    input_assets = [str(value) for value in media_gen.get("input_assets") or [] if str(value or "").strip()]
+    source_item_id = next((value for value in input_assets if value != asset_id), "")
+    owner_user_id = str(asset.get("ownerUserId") or asset.get("owner_user_id") or "").strip()
     item = {
         "item_id": asset_id,
         "type": kind,
@@ -3615,6 +4612,9 @@ def imagine_unsaved_post_from_asset(asset: dict, account: dict) -> dict | None:
         "mime_type": "video/mp4" if kind == "video" else str(asset.get("mimeType") or "image/*"),
         "role": "result",
         "relation": "unsaved",
+        "source_item_id": source_item_id,
+        "original_post_id": source_item_id,
+        "parent_post_id": source_item_id,
         "title": title,
         "prompt": prompt,
         "created_at": created_at,
@@ -3631,12 +4631,17 @@ def imagine_unsaved_post_from_asset(asset: dict, account: dict) -> dict | None:
             "file_source": asset.get("fileSource") or asset.get("source") or "",
             "account_id": account_id_value,
             "account_email": account_email,
+            "owner_user_id": owner_user_id,
             "remote_view": "unsaved",
             "liked": False,
             "imagine": {
                 "asset_id": asset_id,
                 "post_id": str(asset.get("postId") or asset.get("mediaPostId") or asset_id),
                 "conversation_id": conversation_id,
+                "source_item_id": source_item_id,
+                "original_post_id": source_item_id,
+                "parent_post_id": source_item_id,
+                "owner_user_id": owner_user_id,
                 "media_url": raw_url,
                 "media_type": kind,
                 "remote_view": "unsaved",
@@ -3668,6 +4673,7 @@ def imagine_unsaved_post_from_asset(asset: dict, account: dict) -> dict | None:
             "imagine_asset_id": asset_id,
             "conversation_id": conversation_id,
             "file_source": asset.get("fileSource") or asset.get("source") or "",
+            "owner_user_id": owner_user_id,
             "remote_view": "unsaved",
             "liked": False,
         },
@@ -3754,7 +4760,8 @@ def list_imagine_unsaved(payload: dict) -> dict:
         limit = 20
     limit = max(1, min(limit, 40))
     cursor = str((payload or {}).get("cursor") or "").strip()
-    saved_keys = imagine_saved_media_keys_cached(account, max_posts=1000)
+    saved_keys = imagine_saved_media_keys_cached(account, max_posts=0)
+    saved_keys.update(imagine_local_heart_media_keys(root, account))
     grouped_posts: dict[str, dict] = {}
     current_cursor, current_offset, current_anchor = decode_imagine_unsaved_cursor(cursor)
     response_cursor = ""
@@ -4123,6 +5130,15 @@ def delete_imagine_asset(payload: dict) -> dict:
         timeout=15,
         referer=imagine_detail_referer(detail_post_id, conversation_id),
     )
+    root = library_root()
+    if root:
+        update_imagine_account_setting_ids(
+            root,
+            "imagine_external_reference_asset_ids",
+            account,
+            remove={asset_id},
+        )
+    invalidate_imagine_saved_media_keys_cache(account)
     return {"ok": True, "asset_id": asset_id, "result": result}
 
 
@@ -4162,100 +5178,299 @@ def delete_imagine_conversation(payload: dict) -> dict:
     return {"ok": True, "conversation_id": conversation_id, "result": result}
 
 
-def like_imagine_media_post(payload: dict) -> dict:
+def imagine_save_targets(payload: dict) -> list[dict]:
+    payload = payload if isinstance(payload, dict) else {}
+    raw_items = payload.get("items")
+    targets = [item for item in raw_items if isinstance(item, dict)] if isinstance(raw_items, list) else []
+    if not targets:
+        targets = [payload]
+    normalized: list[dict] = []
+    seen: set[str] = set()
+    for target in targets:
+        metadata = target.get("metadata") if isinstance(target.get("metadata"), dict) else {}
+        imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
+        target_id = imagine_post_id_from_value(str(
+            target.get("asset_id")
+            or target.get("item_id")
+            or target.get("id")
+            or target.get("post_id")
+            or metadata.get("asset_id")
+            or imagine.get("asset_id")
+            or imagine.get("post_id")
+            or ""
+        )) or extract_imagine_post_id_from_text(
+            target.get("media_url")
+            or target.get("remote_url")
+            or target.get("url")
+            or metadata.get("media_url")
+            or imagine.get("media_url")
+            or ""
+        )
+        if not target_id or target_id in seen:
+            continue
+        seen.add(target_id)
+        remote_view = str(
+            target.get("remote_view")
+            or metadata.get("remote_view")
+            or imagine.get("remote_view")
+            or ""
+        ).strip().lower()
+        normalized.append({
+            "id": target_id,
+            "source_id": str(target.get("id") or target.get("post_id") or target_id).strip(),
+            "source_item_id": str(target.get("item_id") or target_id).strip(),
+            "visit_post_id": imagine_post_id_from_value(str(
+                target.get("link_post_id")
+                or metadata.get("link_post_id")
+                or imagine.get("link_post_id")
+                or target_id
+            )) or target_id,
+            "visit_url": imagine_post_page_url(
+                str(
+                    target.get("link_url")
+                    or metadata.get("link_url")
+                    or imagine.get("link_url")
+                    or ""
+                ),
+                imagine_post_id_from_value(str(
+                    target.get("link_post_id")
+                    or metadata.get("link_post_id")
+                    or imagine.get("link_post_id")
+                    or target_id
+                )) or target_id,
+            ),
+            "media_url": str(
+                target.get("media_url")
+                or target.get("remote_url")
+                or target.get("url")
+                or metadata.get("media_url")
+                or imagine.get("media_url")
+                or ""
+            ).strip(),
+            "external_reference": bool(
+                target.get("external_reference")
+                or metadata.get("external_reference")
+                or imagine.get("external_reference")
+                or metadata.get("link_source")
+                or imagine.get("link_source")
+                or remote_view in {"discover", "link", "search"}
+            ),
+        })
+    return normalized
+
+
+def sync_imagine_official_saved_registration(
+    root: Path,
+    account: dict,
+    requested_ids: set[str],
+    visits: list[dict],
+) -> None:
+    visited_ids: list[str] = []
+    registered_ids: list[str] = []
+    errors: list[str] = []
+    for visit in visits:
+        visit_post_id = str(visit.get("post_id") or "").strip()
+        visit_url = imagine_post_page_url(str(visit.get("url") or ""), visit_post_id)
+        if not requested_ids.issubset(imagine_local_heart_asset_ids(root, account)):
+            return
+        try:
+            result = native_bridge_account_command(
+                root,
+                account,
+                "visit_post",
+                {
+                    "url": visit_url,
+                    "post_id": visit_post_id,
+                    "user_agent": imagine_user_agent(),
+                },
+                timeout_seconds=35,
+            )
+            visited_ids.append(visit_post_id)
+            if bool(result.get("registered")):
+                registered_ids.append(visit_post_id)
+            else:
+                detail = str(result.get("verification_error") or "not present in the official Saved asset list")
+                errors.append(f"{visit_post_id}: {detail[:240]}")
+        except Exception as exc:
+            errors.append(f"{visit_post_id}: {str(exc)[:240]}")
+    if not requested_ids.issubset(imagine_local_heart_asset_ids(root, account)):
+        sync_imagine_official_saved_deletion(account, requested_ids)
+        return
+    imagine_debug_event("local_heart_official_registration", {
+        "requested_ids": sorted(requested_ids),
+        "visited_post_ids": visited_ids,
+        "registered_post_ids": registered_ids,
+        "success": set(registered_ids) >= {
+            str(visit.get("post_id") or "").strip()
+            for visit in visits
+            if str(visit.get("post_id") or "").strip()
+        },
+        "errors": errors,
+    })
+
+
+def sync_imagine_official_saved_deletion(account: dict, asset_ids: set[str]) -> None:
+    deleted_ids: list[str] = []
+    errors: list[str] = []
+    for asset_id in asset_ids:
+        try:
+            imagine_delete_json(
+                f"/rest/assets/{quote(asset_id, safe='')}",
+                account,
+                timeout=15,
+                referer=f"{IMAGINE_BASE}/imagine/post/{quote(asset_id, safe='')}",
+            )
+            deleted_ids.append(asset_id)
+        except Exception as exc:
+            errors.append(f"{asset_id}: {str(exc)[:240]}")
+    imagine_debug_event("local_heart_official_deleted", {
+        "requested_ids": sorted(asset_ids),
+        "deleted_ids": sorted(deleted_ids),
+        "errors": errors,
+    })
+
+
+def _like_imagine_media_post(payload: dict) -> dict:
     root = library_root()
     if not root:
         raise RuntimeError("Library path is not set.")
     account = active_imagine_account(root, str((payload or {}).get("account_id") or ""))
     if not account:
         raise RuntimeError("Select or capture an Imagine account first.")
-    targets: list[dict] = []
-    raw_items = (payload or {}).get("items")
-    if isinstance(raw_items, list):
-        targets.extend(item for item in raw_items if isinstance(item, dict))
-    targets.append(payload or {})
-    liked_ids: list[str] = []
-    results: list[dict] = []
-    errors: list[str] = []
-
-    def media_type_for_target(target: dict) -> str:
-        kind = str(target.get("type") or target.get("media_type") or "").strip().lower()
-        return "MEDIA_POST_TYPE_VIDEO" if kind == "video" else "MEDIA_POST_TYPE_IMAGE"
-
-    def media_url_for_target(target: dict) -> str:
-        metadata = target.get("metadata") if isinstance(target.get("metadata"), dict) else {}
-        imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
-        return str(
-            target.get("media_url")
-            or target.get("remote_url")
-            or target.get("url")
-            or metadata.get("media_url")
-            or metadata.get("remote_url")
-            or imagine.get("media_url")
-            or ""
-        ).strip()
-
-    def id_for_target(target: dict) -> str:
-        metadata = target.get("metadata") if isinstance(target.get("metadata"), dict) else {}
-        imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
-        raw_id = str(
-            target.get("id")
-            or target.get("post_id")
-            or target.get("item_id")
-            or imagine.get("post_id")
-            or metadata.get("post_id")
-            or ""
-        ).strip()
-        return imagine_post_id_from_value(raw_id) or raw_id
-
+    targets = imagine_save_targets(payload or {})
+    if not targets:
+        raise RuntimeError("Imagine asset id is required.")
+    requested_ids = {target["id"] for target in targets}
+    local_post = normalize_imagine_local_heart_post(payload or {}, targets, account)
+    if not local_post:
+        raise RuntimeError("Imagine local heart data is missing.")
+    update_imagine_local_heart_posts(root, account, add_post=local_post)
+    update_imagine_account_setting_ids(
+        root,
+        "imagine_locally_unsaved_asset_ids",
+        account,
+        remove=requested_ids,
+    )
+    visits: list[dict] = []
+    seen_visit_post_ids: set[str] = set()
     for target in targets:
-        post_id_value = id_for_target(target)
-        media_url = media_url_for_target(target)
-        if post_id_value and post_id_value in liked_ids:
-            continue
-        try:
-            if not post_id_value:
-                raise RuntimeError("missing post id")
-            result = imagine_post_json("/rest/media/post/like", {"id": post_id_value}, account, timeout=15)
-        except Exception as exc:
-            if not media_url:
-                errors.append(str(exc)[:240])
-                continue
-            try:
-                create_result = imagine_post_json(
-                    "/rest/media/post/create",
-                    {
-                        "mediaType": media_type_for_target(target),
-                        "mediaUrl": media_url,
-                    },
-                    account,
-                    timeout=15,
-                    referer=IMAGINE_BASE + "/files",
-                )
-                post = create_result.get("post") if isinstance(create_result.get("post"), dict) else {}
-                post_id_value = imagine_post_id(post, post_id_value or extract_imagine_post_id_from_text(media_url))
-                if not post_id_value:
-                    raise RuntimeError("Imagine post id could not be resolved.")
-                result = imagine_post_json("/rest/media/post/like", {"id": post_id_value}, account, timeout=15, referer=IMAGINE_BASE + "/files")
-            except Exception as fallback_exc:
-                errors.append(str(fallback_exc)[:240])
-                continue
-        liked_ids.append(post_id_value)
-        results.append(result if isinstance(result, dict) else {"result": result})
-    if not liked_ids:
-        raise RuntimeError("Imagine post like failed. " + "; ".join(errors[-2:]))
+        visit_post_id = str(target.get("visit_post_id") or target["id"]).strip()
+        if visit_post_id and visit_post_id not in seen_visit_post_ids:
+            seen_visit_post_ids.add(visit_post_id)
+            visits.append({
+                "post_id": visit_post_id,
+                "url": imagine_post_page_url(str(target.get("visit_url") or ""), visit_post_id),
+            })
+    external_ids = {
+        target["id"]
+        for target in targets
+        if target.get("external_reference")
+    }
+    if external_ids:
+        update_imagine_account_setting_ids(
+            root,
+            "imagine_external_reference_asset_ids",
+            account,
+            add=external_ids,
+        )
+    invalidate_imagine_saved_media_keys_cache(account)
+    threading.Thread(
+        target=sync_imagine_official_saved_registration,
+        args=(root, dict(account), set(requested_ids), list(visits)),
+        daemon=True,
+    ).start()
+    mappings = [{
+        "source_id": target["source_id"],
+        "source_item_id": target["source_item_id"],
+        "liked_id": target["id"],
+        "media_url": target["media_url"],
+        "external_reference": bool(target.get("external_reference")),
+    } for target in targets]
+    liked_ids = [target["id"] for target in targets]
     return {
         "ok": True,
         "action": "like",
         "id": liked_ids[0],
         "ids": liked_ids,
-        "result": results[0] if results else {},
-        "results": results,
+        "mappings": mappings,
+        "errors": [],
+        "verified": True,
+        "verified_ids": liked_ids,
+        "local_saved": True,
+        "official_saved": "pending",
+        "official_verified_ids": [],
+        "result": {},
+        "results": [],
     }
 
 
+def like_imagine_media_post(payload: dict) -> dict:
+    account_id = str((payload or {}).get("account_id") or "").strip().lower()
+    operation_key = account_id or "active-imagine-account"
+    with IMAGINE_SAVE_ACTIVE_LOCK:
+        if operation_key in IMAGINE_SAVE_ACTIVE_KEYS:
+            raise RuntimeError("Imagine save is already in progress.")
+        IMAGINE_SAVE_ACTIVE_KEYS.add(operation_key)
+    try:
+        return _like_imagine_media_post(payload)
+    finally:
+        with IMAGINE_SAVE_ACTIVE_LOCK:
+            IMAGINE_SAVE_ACTIVE_KEYS.discard(operation_key)
+
+
 def unsave_imagine_media_post(payload: dict) -> dict:
-    return imagine_media_post_action(payload, "unsave")
+    root = library_root()
+    if not root:
+        raise RuntimeError("Library path is not set.")
+    account = active_imagine_account(root, str((payload or {}).get("account_id") or ""))
+    if not account:
+        raise RuntimeError("Select or capture an Imagine account first.")
+    targets = imagine_save_targets(payload or {})
+    asset_ids = {target["id"] for target in targets}
+    if not asset_ids:
+        raise RuntimeError("Imagine asset id is required.")
+    local_asset_ids = set(asset_ids)
+    for local_post in imagine_account_local_heart_posts(root, account):
+        post_asset_ids = {
+            imagine_item_asset_id(item)
+            for item in local_post.get("items") or []
+            if isinstance(item, dict) and imagine_item_asset_id(item)
+        }
+        if imagine_post_is_link_source(local_post) and bool(post_asset_ids & asset_ids):
+            local_asset_ids.update(post_asset_ids)
+    update_imagine_local_heart_posts(
+        root,
+        account,
+        remove_asset_ids=asset_ids,
+    )
+    update_imagine_account_setting_ids(
+        root,
+        "imagine_locally_unsaved_asset_ids",
+        account,
+        add=local_asset_ids,
+    )
+    update_imagine_account_setting_ids(
+        root,
+        "imagine_external_reference_asset_ids",
+        account,
+        remove=local_asset_ids,
+    )
+    invalidate_imagine_saved_media_keys_cache(account)
+    threading.Thread(
+        target=sync_imagine_official_saved_deletion,
+        args=(dict(account), set(asset_ids)),
+        daemon=True,
+    ).start()
+    return {
+        "ok": True,
+        "action": "unsave",
+        "id": next(iter(asset_ids)),
+        "ids": sorted(asset_ids),
+        "local_only": False,
+        "official_deleted": "pending",
+        "errors": [],
+        "results": [],
+    }
 
 
 def normalize_imagine_upscale_resolution(value) -> str:
@@ -4648,10 +5863,12 @@ def imagine_source_conversation_context(
         or payload.get("parent_response_id")
         or ""
     ).strip()
-    if not conversation_id:
+    if not conversation_id or not parent_response_id:
         asset_conversation_id, asset_response_id = imagine_asset_conversation_context(source, account)
-        if asset_conversation_id:
-            return asset_conversation_id, asset_response_id or parent_response_id
+        if not conversation_id and asset_conversation_id:
+            conversation_id = asset_conversation_id
+        if not parent_response_id and asset_response_id:
+            parent_response_id = asset_response_id
     return conversation_id, parent_response_id
 
 
@@ -8012,6 +9229,8 @@ def imagine_video_request(payload: dict, prompt: str, request_id: str, action: s
         request["grokChameleonDirectUpload"] = True
         request["grokChameleonUploadAssetIds"] = input_asset_ids
         request["grokChameleonUploadUrls"] = direct_upload_urls
+    elif action != "extend" and direct_upload_urls:
+        request["grokChameleonFallbackSourceUrls"] = direct_upload_urls[:1]
     if start_new_conversation:
         request["grokChameleonStartNewConversation"] = True
     if conversation_id:

@@ -442,20 +442,18 @@ function imagineCardUnsaveButton(post) {
 }
 
 function imagineCardSaveButton(post) {
-  const saved = typeof imaginePostLiked === "function" ? imaginePostLiked(post) : false;
   const button = document.createElement("button");
-  button.className = `i_remote_save_btn text2image-save-button media-card-select-button imagine-save-heart${saved ? " saved" : ""}`;
+  button.className = "i_remote_save_btn text2image-save-button media-card-select-button imagine-save-heart";
   button.type = "button";
   button.dataset.libraryPostPath = post.folder_path || "";
-  button.setAttribute("aria-label", saved ? "Unsave" : "Save");
-  button.setAttribute("aria-pressed", saved ? "true" : "false");
+  button.setAttribute("aria-label", "Save");
+  button.setAttribute("aria-pressed", "false");
   button.innerHTML = imagineCardHeartIconHtml();
   button.addEventListener("click", (event) => {
     stopVisualCardAction(event);
-    const action = (typeof imaginePostLiked === "function" && imaginePostLiked(post))
-      ? unsaveImagineDiscoverPost(post)
-      : likeImagineCardPost(post);
-    action.catch((error) => showErrorPanel("Save failed", error?.message || "Save failed."));
+    if (typeof imaginePostLiked === "function" && imaginePostLiked(post)) return;
+    likeImagineCardPost(post)
+      .catch((error) => showErrorPanel("Save failed", error?.message || "Save failed."));
   });
   return button;
 }
@@ -612,16 +610,19 @@ function mediaCardForPost(post, className, backTargetOverride = null) {
     if (remoteOnly) {
       const unsavedPost = typeof isImagineUnsavedPost === "function" && isImagineUnsavedPost(post);
       const imagineCardScreenId = backTargetOverride?.screenId || "i_main";
-      article.append(
+      const saveSource = (
         (typeof isImagineDiscoverPost === "function" && isImagineDiscoverPost(post))
-          || unsavedPost
-          || (typeof isImagineSearchPost === "function" && isImagineSearchPost(post))
-          || (typeof isImagineT2iPost === "function" && isImagineT2iPost(post))
-          ? imagineCardSaveButton(post)
-          : imagineCardUnsaveButton(post),
+        || (typeof isImagineT2iPost === "function" && isImagineT2iPost(post))
       );
+      const saved = typeof imaginePostLiked === "function" && imaginePostLiked(post);
+      const showSaveButton = saveSource && !saved;
+      if (showSaveButton) article.append(imagineCardSaveButton(post));
       if (unsavedPost || imagineCardScreenId === "i_main") {
-        article.append(cardVisualSelectButton(post));
+        const selectButton = cardVisualSelectButton(post);
+        if (imagineCardScreenId === "i_main" && !showSaveButton) {
+          selectButton.classList.add("card_visual_select_primary");
+        }
+        article.append(selectButton);
       }
     } else if (className === "b_t2i_card" && isBuildT2iPost(post)) {
       article.append(buildFavoriteButton(post));

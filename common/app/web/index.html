@@ -79,10 +79,6 @@
               <span class="nav_icon suit_nav_icon" aria-hidden="true">♣</span>
               <span>Discover</span>
 	            </button>
-	            <button id="i_unsaved_nav_btn" class="nav_item nav_sub_item" type="button">
-	              <span class="nav_icon suit_nav_icon" aria-hidden="true">♥</span>
-	              <span>Unsaved</span>
-	            </button>
             <div class="nav_spacer" aria-hidden="true"></div>
             <button id="b_build_btn" class="nav_item" type="button">
               <span class="nav_icon b_nav_icon" aria-hidden="true">B</span>
@@ -91,10 +87,6 @@
             <button id="b_collection_nav_btn" class="nav_item nav_sub_item" type="button">
               <span class="nav_icon suit_nav_icon" aria-hidden="true">♦</span>
               <span>Collection</span>
-            </button>
-            <button id="folder_btn" class="nav_item nav_sub_item open_folder_btn" type="button">
-              <span class="nav_icon suit_nav_icon" aria-hidden="true">♠</span>
-              <span>Open Folder</span>
             </button>
             <div class="nav_spacer" aria-hidden="true"></div>
             <button id="prompt_main_btn" class="nav_item" type="button">
@@ -115,32 +107,37 @@
 
         <section class="account-card" aria-label="Account">
           <div class="sidebar_library_actions">
+            <button id="folder_btn" class="nav_item open_folder_btn" type="button">
+              <span class="nav_icon suit_nav_icon" aria-hidden="true">♠</span>
+              <span>Open Folder</span>
+            </button>
             <button id="set_library_path_btn" class="nav_item set_library_path_btn" type="button">
               <img src="./assets/icons/map-pin.svg" alt="" />
               <span>Set Library Path</span>
             </button>
+          </div>
+          <div class="sidebar_account_actions">
             <button id="account_usage_btn" class="nav_item sidebar_usage_btn account_usage_btn" type="button">
               <img src="./assets/icons/usage.svg" alt="" />
               <span>Usage</span>
             </button>
+            <button id="accountButton" class="account-button" type="button">
+              <span class="account-summary-row account-summary-imagine">
+                <span class="account-avatar account-avatar-imagine" aria-hidden="true">I</span>
+                <span class="account-copy">
+                  <strong id="accountImagineEmail">Imagine</strong>
+                  <small id="accountImagineStatus">Unknown</small>
+                </span>
+              </span>
+              <span class="account-summary-row account-summary-build">
+                <span class="account-avatar account-avatar-build" aria-hidden="true">B</span>
+                <span class="account-copy">
+                  <strong id="accountBuildEmail">Build</strong>
+                  <small id="accountBuildStatus">Ready</small>
+                </span>
+              </span>
+            </button>
           </div>
-
-          <button id="accountButton" class="account-button" type="button">
-            <span class="account-summary-row account-summary-imagine">
-              <span class="account-avatar account-avatar-imagine" aria-hidden="true">I</span>
-              <span class="account-copy">
-                <strong id="accountImagineEmail">Imagine</strong>
-                <small id="accountImagineStatus">Unknown</small>
-              </span>
-            </span>
-            <span class="account-summary-row account-summary-build">
-              <span class="account-avatar account-avatar-build" aria-hidden="true">B</span>
-              <span class="account-copy">
-                <strong id="accountBuildEmail">Build</strong>
-                <small id="accountBuildStatus">Ready</small>
-              </span>
-            </span>
-          </button>
         </section>
       </aside>
 
@@ -236,20 +233,6 @@
             <h2>Discover</h2>
           </header>
           <section class="card_list i_discover_card_list" aria-label="Discover media">
-
-          </section>
-        </section>
-
-        <section id="i_unsaved_main" class="i_unsaved_main" hidden aria-label="Imagine unsaved">
-          <header class="i_unsaved_main_header">
-            <div class="i_unsaved_main_actions" aria-label="Imagine unsaved views">
-              <button id="i_unsaved_title_btn" class="i_main_title_btn i_main_btn active" type="button">Unsaved</button>
-            </div>
-            <div class="i_unsaved_main_right_actions">
-              <button id="i_unsaved_refresh_btn" class="i_main_btn" type="button">Refresh</button>
-            </div>
-          </header>
-          <section id="i_unsaved_card_list" class="card_list i_unsaved_card_list" aria-label="Imagine unsaved media">
 
           </section>
         </section>
@@ -351,7 +334,7 @@
                 <div class="i_detail_media i_detail_media_video"><img src="./assets/icons/video.svg" alt="" /></div>
               </div>
               <aside class="i_detail_actions" aria-label="Imagine actions">
-                <button class="i_detail_action i_detail_heart text2image-detail-save imagine-save-heart saved" type="button" aria-label="Save" aria-pressed="true">
+                <button class="i_detail_action i_detail_heart text2image-detail-save imagine-save-heart" type="button" aria-label="Save" aria-pressed="false" hidden>
                   <span class="imagine-save-heart-icon" aria-hidden="true">
                     <svg class="imagine-save-heart-svg" viewBox="0 0 24 24" focusable="false">
                       <path class="imagine-save-heart-path" d="M12 20.2c-.28 0-.55-.1-.76-.29C6.15 15.32 3 12.48 3 8.62 3 5.78 5.12 3.7 7.9 3.7c1.62 0 3.16.75 4.1 1.94.94-1.19 2.48-1.94 4.1-1.94 2.78 0 4.9 2.08 4.9 4.92 0 3.86-3.15 6.7-8.24 11.29-.21.19-.48.29-.76.29Z"></path>

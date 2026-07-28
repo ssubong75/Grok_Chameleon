@@ -606,7 +606,7 @@ function removeUnavailableImagineItem(postPath, url, host = null) {
       return;
     }
     if (/^imagine_unsaved\//.test(path)) {
-      if (typeof renderImagineUnsavedCards === "function") renderImagineUnsavedCards();
+      if (typeof renderImagineSourceCards === "function") renderImagineSourceCards();
       return;
     }
     if (typeof renderImagineSourceCards === "function") renderImagineSourceCards();

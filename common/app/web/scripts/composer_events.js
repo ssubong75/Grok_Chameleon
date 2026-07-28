@@ -16,7 +16,7 @@ function syncComposerScrollClearance() {
   if (!composer) return;
   const composerRect = composer.getBoundingClientRect();
   const visibleLists = [...document.querySelectorAll(
-    ".i_card_list, .b_card_list, .b_t2i_view_card_list, .search_card_list, .i_discover_card_list, .i_unsaved_card_list, .prompt_card_list, .second_main_card_list",
+    ".i_card_list, .b_card_list, .b_t2i_view_card_list, .search_card_list, .i_discover_card_list, .prompt_card_list, .second_main_card_list",
   )]
     .filter((list) => !list.closest("[hidden]") && list.getBoundingClientRect().height > 0);
   const clearance = Math.max(16, ...visibleLists.map((list) => {
@@ -39,7 +39,6 @@ for (const screenId of [
   "b_t2i_view_main",
   "search_main",
   "i_discover_main",
-  "i_unsaved_main",
   "prompt_main",
   "2nd_main",
 ]) {

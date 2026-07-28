@@ -35,15 +35,6 @@ function refreshImagineDiscoverMain() {
   return Promise.resolve();
 }
 
-function refreshImagineUnsavedMain() {
-  if (typeof loadImagineUnsavedCards === "function" && typeof canLoadImagineSavedList === "function" && canLoadImagineSavedList()) {
-    library_state.imagineUnsavedCursor = "";
-    return loadImagineUnsavedCards({ force: true });
-  }
-  renderImagineUnsavedCards();
-  return Promise.resolve();
-}
-
 function waitForRefreshPaint() {
   return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
 }
@@ -51,7 +42,6 @@ function waitForRefreshPaint() {
 function cardListForRefreshScreen(screenId) {
   if (screenId === "i_main") return document.querySelector(".i_card_list");
   if (screenId === "i_discover_main") return document.querySelector(".i_discover_card_list");
-  if (screenId === "i_unsaved_main") return document.querySelector(".i_unsaved_card_list");
   if (screenId === "b_main") return document.querySelector(".b_card_list");
   if (screenId === "collection_main") return document.querySelector(".collection_1st_card_list");
   if (screenId === "2nd_main") return document.querySelector(".second_main_card_list");
@@ -90,10 +80,6 @@ async function refreshCurrentMainView() {
   }
   if (screenId === "i_discover_main") {
     await refreshImagineDiscoverMain();
-    return;
-  }
-  if (screenId === "i_unsaved_main") {
-    await refreshImagineUnsavedMain();
     return;
   }
   if (screenId === "b_main") {
@@ -252,7 +238,6 @@ const searchBtn = document.getElementById("search_btn");
 const sidebarActiveButtonIdForCurrentScreen = () => {
   if (screen_state.current_screen === "i_main") return screen_state.current_i_nav_btn || "i_imagine_nav_btn";
   if (screen_state.current_screen === "i_discover_main") return "i_discover_nav_btn";
-  if (screen_state.current_screen === "i_unsaved_main") return "i_unsaved_nav_btn";
   if (screen_state.current_screen === "b_main" || screen_state.current_screen === "b_t2i_view_main") return screen_state.current_b_nav_btn || "b_build_btn";
   if (screen_state.current_screen === "collection_main" || screen_state.current_screen === "2nd_main") return "b_collection_nav_btn";
   if (screen_state.current_screen === "prompt_main") return "prompt_main_btn";
@@ -292,7 +277,7 @@ const applySearchQuery = () => {
     const nextButton = nextScreen.startsWith("i_")
       ? (nextScreen === "i_discover_main"
         ? "i_discover_nav_btn"
-        : (nextScreen === "i_unsaved_main" ? "i_unsaved_nav_btn" : screen_state.current_i_nav_btn || "i_imagine_nav_btn"))
+        : screen_state.current_i_nav_btn || "i_imagine_nav_btn")
       : (nextScreen.startsWith("b_") ? screen_state.current_b_nav_btn || "b_build_btn" : sidebarActiveButtonIdForCurrentScreen());
     openScreen(nextScreen, nextButton);
   }

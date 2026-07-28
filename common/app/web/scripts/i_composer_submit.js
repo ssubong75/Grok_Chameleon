@@ -60,19 +60,15 @@ function selectedImagineJobForPost(post = null) {
 
 function renderImagineJobSourceViews() {
   const discoverActive = screen_state.current_screen === "i_discover_main";
-  const unsavedActive = screen_state.current_screen === "i_unsaved_main";
   const activeSourceScreen = discoverActive
     ? "i_discover_main"
-    : (unsavedActive ? "i_unsaved_main" : "");
+    : "";
   const scrollState = activeSourceScreen && typeof captureLibraryCardListScroll === "function"
     ? captureLibraryCardListScroll(activeSourceScreen)
     : null;
   renderImagineSourceCards();
   if (discoverActive && typeof renderImagineDiscoverCards === "function") {
     renderImagineDiscoverCards();
-  }
-  if (unsavedActive && typeof renderImagineUnsavedCards === "function") {
-    renderImagineUnsavedCards();
   }
   if (typeof restoreLibraryCardListScroll === "function") {
     restoreLibraryCardListScroll(scrollState);

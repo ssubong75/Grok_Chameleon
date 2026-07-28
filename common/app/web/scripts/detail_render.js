@@ -172,20 +172,24 @@ function detailIsImagineLinkSource(post, item) {
   );
 }
 
+function detailCanSaveImaginePost(post, item) {
+  return Boolean(
+    detailIsImagineLinkSource(post, item)
+    || (typeof isImagineDiscoverPost === "function" && isImagineDiscoverPost(post, item))
+    || (typeof isImagineT2iPost === "function" && isImagineT2iPost(post))
+  );
+}
+
 function syncImagineDetailHeartState(post, item) {
   const button = document.querySelector(".i_detail_heart");
   if (!button) return;
-  const t2iGenerated = typeof isImagineT2iPost === "function" && isImagineT2iPost(post);
-  const saved = detailIsImagineLinkSource(post, item) || t2iGenerated
-    ? false
-    : ((typeof isImagineDiscoverPost === "function" && isImagineDiscoverPost(post, item))
-      || (typeof isImagineUnsavedPost === "function" && isImagineUnsavedPost(post, item))
-      || (typeof isImagineSearchPost === "function" && isImagineSearchPost(post, item))
-      ? (typeof imaginePostLiked === "function" ? imaginePostLiked(post, item) : false)
-      : true);
-  button.classList.toggle("saved", saved);
-  button.setAttribute("aria-pressed", saved ? "true" : "false");
-  button.setAttribute("aria-label", saved ? "Unsave" : "Save");
+  const saved = typeof imaginePostLiked === "function"
+    && (imaginePostLiked(post, item) || imaginePostLiked(post));
+  const visible = detailCanSaveImaginePost(post, item) && !saved;
+  button.hidden = !visible;
+  button.classList.remove("saved");
+  button.setAttribute("aria-pressed", "false");
+  button.setAttribute("aria-label", "Save");
 }
 
 function syncBuildDetailHeartState(post) {

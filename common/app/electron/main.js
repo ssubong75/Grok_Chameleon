@@ -990,6 +990,74 @@ async function showUsagePage(command) {
   return { ok: true, status: "loading", url: win.webContents.getURL() || targetUrl };
 }
 
+async function visitImaginePostPage(command) {
+  const targetUrl = String(command?.url || "");
+  if (!/^https:\/\/grok\.com\/imagine\/post\/[0-9a-f-]+(?:[/?#]|$)/i.test(targetUrl)) {
+    throw new Error("Imagine post page URL is invalid.");
+  }
+  const partition = bridgePartition(command);
+  installMediaPermissionGuard(session.fromPartition(partition));
+  const userAgent = String(command?.user_agent || "").trim();
+  const win = new BrowserWindow({
+    width: 720,
+    height: 720,
+    show: false,
+    paintWhenInitiallyHidden: true,
+    title: `${APP_NAME} Imagine Post`,
+    backgroundColor: "#090b0c",
+    webPreferences: {
+      partition,
+      contextIsolation: true,
+      nodeIntegration: false,
+      webSecurity: true,
+      autoplayPolicy: "no-user-gesture-required",
+      backgroundThrottling: false,
+    },
+  });
+  try {
+    if (userAgent) win.webContents.setUserAgent(userAgent);
+    await applyBridgeCookies(win, command, { clearExisting: false });
+    await waitForLoad(win, targetUrl, { forceTarget: true, timeoutMs: 20000 });
+    await sleep(2500);
+    let registration = { registered: false, verification_error: "" };
+    try {
+      const postId = JSON.stringify(String(command?.post_id || ""));
+      registration = await win.webContents.executeJavaScript(`
+        (async () => {
+          const postId = ${postId};
+          const response = await fetch(
+            "/rest/assets?pageSize=40&orderBy=ORDER_BY_CREATE_TIME&workspaceKind=WORKSPACE_KIND_IMAGINE_ALL",
+            { method: "GET", credentials: "include", headers: { accept: "application/json, text/plain, */*" } }
+          );
+          if (!response.ok) {
+            return { registered: false, verification_error: "Saved verification HTTP " + response.status };
+          }
+          const data = await response.json();
+          const assets = Array.isArray(data?.assets) ? data.assets : [];
+          return {
+            registered: assets.some((asset) => String(asset?.assetId || asset?.id || "") === postId),
+            verification_error: "",
+          };
+        })()
+      `, true);
+    } catch (error) {
+      registration = {
+        registered: false,
+        verification_error: error?.message || String(error),
+      };
+    }
+    return {
+      ok: true,
+      status: "visited",
+      url: win.webContents.getURL() || targetUrl,
+      registered: Boolean(registration?.registered),
+      verification_error: String(registration?.verification_error || ""),
+    };
+  } finally {
+    if (!win.isDestroyed()) win.destroy();
+  }
+}
+
 function normalizeGrokUrl(value) {
   try {
     const parsed = new URL(String(value || ""));
@@ -1344,6 +1412,11 @@ async function handleBridgeCommand(command) {
   try {
     if (command.type === "open_page") {
       const value = await openBridgePage(command);
+      await sendBridgeResult(id, true, value);
+      return;
+    }
+    if (command.type === "visit_post") {
+      const value = await visitImaginePostPage(command);
       await sendBridgeResult(id, true, value);
       return;
     }
