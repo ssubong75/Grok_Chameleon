@@ -975,7 +975,7 @@ async function likeImagineCardPost(post) {
     library_state.imagineUnsavedPosts = (library_state.imagineUnsavedPosts || [])
       .filter((candidate) => candidate?.folder_path !== post.folder_path);
   }
-  library_state.imagineRemoteLoaded = false;
+  if (!linkSource) library_state.imagineRemoteLoaded = false;
   if (movedFromT2i) {
     renderImagineSourceCards();
     renderDetailViews();
@@ -1132,7 +1132,7 @@ async function likeImagineSelectedDetailPost() {
       .filter(Boolean);
     library_state.imagineUnsavedLoaded = true;
   }
-  library_state.imagineRemoteLoaded = false;
+  if (!linkSource) library_state.imagineRemoteLoaded = false;
   if (movedFromT2i) {
     returnToImagineT2iMain();
     renderImagineSourceCards();
