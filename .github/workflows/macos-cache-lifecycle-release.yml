@@ -314,7 +314,7 @@ jobs:
             'def is_grok_preview_image_file_name(name: str) -> bool:',
             'target_parent = root / "created"',
             'def merged_post_source(posts: list[dict]) -> str:',
-            'saved_keys = imagine_saved_media_keys_cached(account, max_posts=1000)',
+            'saved_keys = imagine_saved_media_keys_cached(account, max_posts=0)',
             'def build_preview_dir(kind: str, root: Path | None = None) -> Path:',
             'def remove_build_previews_for_tree(root: Path, folder: Path) -> None:',
             'cleaned_items = remove_embedded_preview_files(target_dir, post.get("items") or [])',
@@ -686,7 +686,7 @@ jobs:
           grep -F 'def is_grok_preview_image_file_name(name: str) -> bool:' "$server_py"
           grep -F 'target_parent = root / "created"' "$server_py"
           grep -F 'def merged_post_source(posts: list[dict]) -> str:' "$server_py"
-          grep -F 'saved_keys = imagine_saved_media_keys_cached(account, max_posts=1000)' "$server_py"
+          grep -F 'saved_keys = imagine_saved_media_keys_cached(account, max_posts=0)' "$server_py"
           grep -F 'def build_preview_dir(kind: str, root: Path | None = None) -> Path:' "$server_py"
           grep -F 'def remove_build_previews_for_tree(root: Path, folder: Path) -> None:' "$server_py"
           grep -F 'cleaned_items = remove_embedded_preview_files(target_dir, post.get("items") or [])' "$server_py"
