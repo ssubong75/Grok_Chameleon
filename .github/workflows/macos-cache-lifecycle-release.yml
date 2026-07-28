@@ -63,7 +63,7 @@ jobs:
       RELEASE_TAG: v20260720-041036-win
       INPUT_ZIP: Win_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Win_Grok_Chameleon_a.zip
-      EXPECTED_INPUT_SHA256: 9ff7c7a21b0bf0ae8ce9d130ef7e15b5b89eba7e560dfe7205095dafbccfad56
+      EXPECTED_INPUT_SHA256: fbfd8d94168ceda088b4998e874950b30c008321bdc278f19659334246462368
 
     steps:
       - name: Check out the shared source commit
@@ -96,6 +96,7 @@ jobs:
           $innerExe = Join-Path $root "Resources\Grok Chameleon\Grok Chameleon.exe"
           $sourceMigration = Join-Path $env:GITHUB_WORKSPACE $env:COMMON_MIGRATION
           $sourceMigrationUi = Join-Path $env:GITHUB_WORKSPACE $env:WINDOWS_MIGRATION_UI
+          $windowsSvgArrowPatch = Join-Path $env:GITHUB_WORKSPACE "tools\patch_windows_svg_arrows.py"
           $targetMigration = Join-Path $migrationRoot "migration.py"
           $targetMigrationUi = Join-Path $migrationRoot "migration_windows.ps1"
           $sharedSources = @(
@@ -165,6 +166,7 @@ jobs:
           $targetDetailState = ($sharedSources | Where-Object Name -eq "detail_state").Target
           $targetDetailMedia = ($sharedSources | Where-Object Name -eq "detail_media").Target
           $targetDetailRender = ($sharedSources | Where-Object Name -eq "detail_render").Target
+          $targetDetailStyle = ($sharedSources | Where-Object Name -eq "detail_style").Target
           $targetISource = ($sharedSources | Where-Object Name -eq "i_source").Target
           $targetCollectionActions = ($sharedSources | Where-Object Name -eq "collection_actions").Target
           $targetPromptEvents = ($sharedSources | Where-Object Name -eq "prompt_events").Target
@@ -184,6 +186,7 @@ jobs:
             $innerExe,
             $sourceMigration,
             $sourceMigrationUi,
+            $windowsSvgArrowPatch,
             $targetMigration,
             $targetMigrationUi
           ))) {
@@ -213,6 +216,16 @@ jobs:
           }
           if ((Get-FileHash -Algorithm SHA256 -LiteralPath $targetMigrationUi).Hash -ne $migrationUiHash) {
             throw "Windows migration UI copy mismatch."
+          }
+          python $windowsSvgArrowPatch --app-root $appRoot
+          if ($LASTEXITCODE -ne 0) { throw "Windows SVG arrow patch failed." }
+          foreach ($patchedShared in @(
+            @{ Name = "index"; Target = $targetIndex },
+            @{ Name = "card_render"; Target = $targetCardRender },
+            @{ Name = "cards_prompt_style"; Target = $targetCardsPromptStyle },
+            @{ Name = "detail_style"; Target = $targetDetailStyle }
+          )) {
+            $sharedHashes[$patchedShared.Name] = (Get-FileHash -Algorithm SHA256 -LiteralPath $patchedShared.Target).Hash
           }
           foreach ($javascript in $sharedSources | Where-Object { $_.Relative.EndsWith(".js") }) {
             node --check $javascript.Target
@@ -966,7 +979,7 @@ jobs:
           MAC_TAG: v20260720-042100-mac
           WIN_ZIP: Win_Grok_Chameleon_a.zip
           MAC_ZIP: Mac_Grok_Chameleon_a.zip
-          WIN_INPUT_SHA256: 9ff7c7a21b0bf0ae8ce9d130ef7e15b5b89eba7e560dfe7205095dafbccfad56
+          WIN_INPUT_SHA256: fbfd8d94168ceda088b4998e874950b30c008321bdc278f19659334246462368
           MAC_INPUT_SHA256: 030cc126b2daa1d30c784ff450aaa8f8e809abd346cf9381ec214a0054a4127c
         run: |
           set -euo pipefail
