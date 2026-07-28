@@ -375,7 +375,7 @@ jobs:
           $composerEventsText = Get-Content -Raw -LiteralPath $targetComposerEvents
           foreach ($marker in @(
             "function syncComposerScrollClearance()",
-            ".i_discover_card_list, .i_unsaved_card_list, .prompt_card_list, .second_main_card_list",
+            ".i_discover_card_list, .prompt_card_list, .second_main_card_list",
             '"prompt_main"',
             '"2nd_main"'
           )) {
@@ -714,7 +714,7 @@ jobs:
           grep -F 'function restoreImagineListScrollForScreen(screenId, scrollTop)' "$i_detail_actions_js"
           grep -F 'restoreImagineListScrollForScreen(returnScreenId, returnScrollTop)' "$i_detail_actions_js"
           grep -F 'function syncComposerScrollClearance()' "$composer_events_js"
-          grep -F '.i_discover_card_list, .i_unsaved_card_list, .prompt_card_list, .second_main_card_list' "$composer_events_js"
+          grep -F '.i_discover_card_list, .prompt_card_list, .second_main_card_list' "$composer_events_js"
           grep -F '"prompt_main"' "$composer_events_js"
           grep -F '"2nd_main"' "$composer_events_js"
           grep -F -- '--composer-scroll-clearance' "$cards_prompt_css"
