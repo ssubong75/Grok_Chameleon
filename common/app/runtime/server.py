@@ -445,7 +445,6 @@ def default_library_json() -> dict:
             "collection_sort": {},
             "hidden_upload_keys": [],
             "hidden_imagine_item_keys": [],
-            "imagine_locally_unsaved_asset_ids": {},
             "imagine_local_heart_posts": {},
             "imagine_external_reference_asset_ids": {},
             "imagine_upload_asset_cache": {},
@@ -471,7 +470,6 @@ def merge_library_json(data) -> dict:
     settings.setdefault("collection_sort", {})
     settings.setdefault("hidden_upload_keys", [])
     settings.setdefault("hidden_imagine_item_keys", [])
-    settings.setdefault("imagine_locally_unsaved_asset_ids", {})
     settings.setdefault("imagine_local_heart_posts", {})
     settings.setdefault("imagine_external_reference_asset_ids", {})
     settings.setdefault("imagine_upload_asset_cache", {})
@@ -3128,29 +3126,6 @@ def imagine_item_asset_id(item: dict) -> str:
     ).strip()
 
 
-def filter_imagine_saved_post_items(post: dict, excluded_asset_ids: set[str]) -> dict | None:
-    if not isinstance(post, dict):
-        return None
-    items = [
-        item
-        for item in post.get("items") or []
-        if isinstance(item, dict) and imagine_item_asset_id(item) not in excluded_asset_ids
-    ]
-    if not items:
-        return None
-    representative = imagine_representative_item(items) or items[-1]
-    filtered = dict(post)
-    filtered["items"] = items
-    filtered["representative_item"] = representative
-    filtered["representative"] = (
-        representative.get("url")
-        or representative.get("remote_url")
-        or representative.get("item_id")
-        or ""
-    )
-    return filtered
-
-
 def imagine_flat_saved_post_from_asset(
     asset: dict,
     account: dict,
@@ -3464,7 +3439,6 @@ def list_imagine_saved(payload: dict) -> dict:
                         "error": str(exc)[:400],
                     })
     library = merge_library_json(read_json(root / "library.json", {}))
-    locally_unsaved = imagine_account_setting_ids(root, "imagine_locally_unsaved_asset_ids", account)
     external_reference_ids = imagine_account_setting_ids(root, "imagine_external_reference_asset_ids", account)
     local_heart_posts = [
         imagine_apply_generated_relations(local_post, root, account, library)
@@ -3476,9 +3450,7 @@ def list_imagine_saved(payload: dict) -> dict:
         post = imagine_saved_post_from_conversation(conversation, details.get(conversation_id, {}), account)
         if post:
             imagine_restore_generated_relation_resolutions(post, library)
-            filtered_post = filter_imagine_saved_post_items(post, locally_unsaved)
-            if filtered_post:
-                posts.append(filtered_post)
+            posts.append(post)
 
     asset_query = [
         ("pageSize", str(limit)),
@@ -3530,7 +3502,7 @@ def list_imagine_saved(payload: dict) -> dict:
         if not isinstance(asset, dict):
             continue
         asset_id = str(asset.get("assetId") or asset.get("id") or "").strip()
-        if not asset_id or asset_id in locally_unsaved:
+        if not asset_id:
             continue
         if asset_id in grouped_asset_ids or asset_id in grouped_source_ids:
             continue
@@ -4450,12 +4422,6 @@ def imagine_saved_media_keys(account: dict, max_posts: int = 160) -> set[str]:
     cursor = ""
     seen_cursors: set[str] = set()
     seen = 0
-    root = library_root()
-    locally_unsaved = imagine_account_setting_ids(
-        root,
-        "imagine_locally_unsaved_asset_ids",
-        account,
-    )
     while max_posts <= 0 or seen < max_posts:
         page_size = 40 if max_posts <= 0 else min(40, max_posts - seen)
         query_parts = [
@@ -4471,9 +4437,6 @@ def imagine_saved_media_keys(account: dict, max_posts: int = 160) -> set[str]:
             break
         for asset in assets:
             if not isinstance(asset, dict):
-                continue
-            asset_id = str(asset.get("assetId") or asset.get("id") or "").strip()
-            if asset_id and asset_id in locally_unsaved:
                 continue
             keys.update(imagine_asset_key_values(asset))
         seen += len(assets)
@@ -5399,12 +5362,6 @@ def _like_imagine_media_post(payload: dict) -> dict:
     if not local_post:
         raise RuntimeError("Imagine local heart data is missing.")
     update_imagine_local_heart_posts(root, account, add_post=local_post)
-    update_imagine_account_setting_ids(
-        root,
-        "imagine_locally_unsaved_asset_ids",
-        account,
-        remove=requested_ids,
-    )
     visits: list[dict] = []
     seen_visit_post_ids: set[str] = set()
     for target in targets:
@@ -5505,12 +5462,6 @@ def unsave_imagine_media_post(payload: dict) -> dict:
         account,
         remove_asset_ids=asset_ids,
         remove_entire_link_post=remove_entire_link_post,
-    )
-    update_imagine_account_setting_ids(
-        root,
-        "imagine_locally_unsaved_asset_ids",
-        account,
-        add=local_asset_ids,
     )
     update_imagine_account_setting_ids(
         root,

@@ -183,6 +183,12 @@ function imagineLinkRegistrationItem(post, fallbackItem = null) {
   return fallbackItem || representativeItem(items, post) || items[0] || null;
 }
 
+function isUnsavedImagineLinkPost(post, item = null) {
+  if (!isImagineLinkSourcePost(post, item)) return false;
+  const registrationItem = imagineLinkRegistrationItem(post, item);
+  return !registrationItem || !imaginePostLiked(post, registrationItem);
+}
+
 function imaginePostLiked(post, item = null) {
   const postMeta = imaginePostActionMetadata(post);
   const itemMeta = imaginePostActionMetadata(item);
@@ -860,18 +866,26 @@ async function deleteImagineSelectedDetailItem() {
     showErrorPanel("Delete unavailable", "Select an Imagine thumbnail to delete.");
     return;
   }
-  if (!imagineDeletePayloadForItem(post, item)) {
+  const localLinkOnly = isUnsavedImagineLinkPost(post, item);
+  if (!localLinkOnly && !imagineDeletePayloadForItem(post, item)) {
     showErrorPanel("Delete unavailable", "This Imagine item has no asset id.");
     return;
   }
   const ok = await confirmAction({
     title: "Delete Item",
-    message: isImagineExternalReferenceItem(post, item)
+    message: localLinkOnly
+      ? "Remove this temporary link item from the app?"
+      : isImagineExternalReferenceItem(post, item)
       ? "Remove this external Imagine item from your list? The original will not be deleted."
       : "Delete this Imagine Item?",
     confirmLabel: "Delete",
   });
   if (!ok) return;
+  if (localLinkOnly) {
+    removeImagineItemsFromPost(post, [item], { rememberHiddenItems: [] });
+    toast("Removed temporary link item.");
+    return;
+  }
   const result = await deleteImagineRemoteItem(post, item);
   removeImagineItemsFromPost(post, result.deletedItems, {
     rememberHiddenItems: result.hiddenItems,

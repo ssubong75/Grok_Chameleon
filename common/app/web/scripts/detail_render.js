@@ -313,9 +313,8 @@ function syncImagineDetailToolButtons(type, item = null, post = null) {
   const isImage = type === "image";
   const isVideo = type === "video";
   const isDiscover = typeof isImagineDiscoverPost === "function" && isImagineDiscoverPost(post, item);
-  const isLinkSource = detailIsImagineLinkSource(post, item);
   const deleteButton = document.querySelector(".i_detail_delete");
-  if (deleteButton) deleteButton.hidden = isDiscover || isLinkSource;
+  if (deleteButton) deleteButton.hidden = isDiscover;
   document.querySelectorAll(".i_detail_image_tool_btn").forEach((button) => {
     if (button.classList.contains("i_detail_crop_btn")) {
       button.hidden = true;
