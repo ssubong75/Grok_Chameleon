@@ -181,7 +181,11 @@
     }
     const ok = await confirmAction({
       title: "Delete Posts",
-      message: targets.length > 1 ? `Delete ${targets.length} selected Imagine posts?` : "Delete the selected Imagine post?",
+      message: (
+        targets.some((target) => target.items.some((item) => isImagineExternalReferenceItem(target.post, item)))
+          ? `${targets.length > 1 ? `Delete ${targets.length} selected Imagine posts?` : "Delete the selected Imagine post?"} External originals will only be removed from your list.`
+          : (targets.length > 1 ? `Delete ${targets.length} selected Imagine posts?` : "Delete the selected Imagine post?")
+      ),
       confirmLabel: "Delete",
     });
     if (!ok) return;
@@ -200,6 +204,7 @@
           deletedTargets.push({
             ...targets[index],
             items: deletedItems,
+            hiddenItems: result.value?.hiddenItems || [],
           });
         }
         failures.push(...(result.value?.failures || []));
@@ -208,18 +213,24 @@
       }
     }
     if (deletedTargets.length) {
-      await hideImagineRemoteItems(deletedTargets.flatMap((target) => target.items));
+      await hideImagineRemoteItems(deletedTargets.flatMap((target) => target.hiddenItems));
     }
     for (const target of deletedTargets) {
       removeImagineItemsFromPost(target.post, target.items, {
         keepListScreen: true,
         screenId,
         scrollTop,
+        rememberHiddenItems: target.hiddenItems,
       });
     }
     clearCardSelection();
     if (deletedTargets.length) {
-      toast(deletedTargets.length > 1 ? "Deleted Imagine posts." : "Deleted Imagine post.");
+      const removedExternalOnly = deletedTargets.every((target) => !target.hiddenItems.length);
+      toast(
+        removedExternalOnly
+          ? (deletedTargets.length > 1 ? "Removed external Imagine posts." : "Removed external Imagine post.")
+          : (deletedTargets.length > 1 ? "Deleted Imagine posts." : "Deleted Imagine post."),
+      );
     }
     if (failures.length) {
       showErrorPanel(
