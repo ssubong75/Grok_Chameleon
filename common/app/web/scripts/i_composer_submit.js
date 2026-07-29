@@ -566,7 +566,10 @@ function applyImagineDirectResult(result, options = {}) {
     }
     screen_state.detail_back.imagine = { screenId: "i_main", activeButtonId: screen_state.current_i_nav_btn || "i_imagine_nav_btn" };
     openScreen("i_detail", screen_state.current_i_nav_btn || "i_imagine_nav_btn");
-    if (String(result.action || "").toLowerCase() === "i2i" && typeof resetComposerAttachmentsToSelectedDetail === "function") {
+    if (
+      new Set(["i2i", "i2v"]).has(String(result.action || "").toLowerCase())
+      && typeof resetComposerAttachmentsToSelectedDetail === "function"
+    ) {
       resetComposerAttachmentsToSelectedDetail();
     }
   } else {

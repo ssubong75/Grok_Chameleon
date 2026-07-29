@@ -17,6 +17,7 @@ env:
   COMMON_INDEX: common/app/web/index.html
   COMMON_STATE: common/app/web/scripts/state.js
   COMMON_BUILD_MAIN: common/app/web/scripts/build_main.js
+  COMMON_B_SUBMIT: common/app/web/scripts/b_composer_submit.js
   COMMON_B_SOURCE: common/app/web/scripts/b_source_render.js
   COMMON_SIDEBAR_EVENTS: common/app/web/scripts/sidebar_events.js
   COMMON_SIDEBAR_STYLE: common/app/web/styles/sidebar.css
@@ -108,6 +109,7 @@ jobs:
             @{ Name = "index"; Relative = "web\index.html"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_INDEX) },
             @{ Name = "state"; Relative = "web\scripts\state.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_STATE) },
             @{ Name = "build_main"; Relative = "web\scripts\build_main.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_BUILD_MAIN) },
+            @{ Name = "b_submit"; Relative = "web\scripts\b_composer_submit.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_B_SUBMIT) },
             @{ Name = "b_source"; Relative = "web\scripts\b_source_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_B_SOURCE) },
             @{ Name = "sidebar_events"; Relative = "web\scripts\sidebar_events.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_SIDEBAR_EVENTS) },
             @{ Name = "sidebar_style"; Relative = "web\styles\sidebar.css"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_SIDEBAR_STYLE) },
@@ -152,6 +154,7 @@ jobs:
           $targetIndex = ($sharedSources | Where-Object Name -eq "index").Target
           $targetState = ($sharedSources | Where-Object Name -eq "state").Target
           $targetBuildMain = ($sharedSources | Where-Object Name -eq "build_main").Target
+          $targetBSubmit = ($sharedSources | Where-Object Name -eq "b_submit").Target
           $targetBSource = ($sharedSources | Where-Object Name -eq "b_source").Target
           $targetSidebarEvents = ($sharedSources | Where-Object Name -eq "sidebar_events").Target
           $targetMainStyle = ($sharedSources | Where-Object Name -eq "main_style").Target
@@ -413,6 +416,8 @@ jobs:
           if (-not (Get-Content -Raw -LiteralPath $targetMainStyle).Contains("gap: 70px;")) { throw "Build Collection text spacing missing." }
           if (-not (Get-Content -Raw -LiteralPath $targetAttachments).Contains("conversation_id: conversationId")) { throw "Attachment conversation lineage marker missing." }
           if (-not (Get-Content -Raw -LiteralPath $targetISubmit).Contains("source_conversation_id: sourceContext.conversation_id")) { throw "Submit conversation lineage marker missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetBSubmit).Contains('const completedMode = String(job.context?.mode || "").toLowerCase();')) { throw "Build attachment reset marker missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetISubmit).Contains('new Set(["i2i", "i2v"])')) { throw "Imagine attachment reset marker missing." }
           if (-not (Get-Content -Raw -LiteralPath $targetLibraryCore).Contains('if (type === "image" || type.startsWith("image/"))')) { throw "Sharp image preview marker missing." }
           if (-not (Get-Content -Raw -LiteralPath $targetDetailState).Contains("function detailItemPrompt(item)")) { throw "Detail prompt lineage marker missing." }
           if (-not (Get-Content -Raw -LiteralPath $targetDetailMedia).Contains('resolveLocalCardPreview(url, kind = "card")')) { throw "Persistent Build preview kind marker missing." }
@@ -551,6 +556,7 @@ jobs:
             web/index.html
             web/scripts/state.js
             web/scripts/build_main.js
+            web/scripts/b_composer_submit.js
             web/scripts/b_source_render.js
             web/scripts/sidebar_events.js
             web/styles/sidebar.css
@@ -593,6 +599,7 @@ jobs:
           index_html="$app_root/web/index.html"
           state_js="$app_root/web/scripts/state.js"
           build_main_js="$app_root/web/scripts/build_main.js"
+          b_submit_js="$app_root/web/scripts/b_composer_submit.js"
           b_source_js="$app_root/web/scripts/b_source_render.js"
           sidebar_events_js="$app_root/web/scripts/sidebar_events.js"
           main_css="$app_root/web/styles/main.css"
@@ -744,6 +751,8 @@ jobs:
           grep -F 'gap: 70px;' "$main_css"
           grep -F 'conversation_id: conversationId' "$attachments_js"
           grep -F 'source_conversation_id: sourceContext.conversation_id' "$i_submit_js"
+          grep -F 'const completedMode = String(job.context?.mode || "").toLowerCase();' "$b_submit_js"
+          grep -F 'new Set(["i2i", "i2v"])' "$i_submit_js"
           grep -F 'if (type === "image" || type.startsWith("image/"))' "$library_core_js"
           grep -F 'function detailItemPrompt(item)' "$detail_state_js"
           grep -F 'resolveLocalCardPreview(url, kind = "card")' "$detail_media_js"
@@ -840,6 +849,7 @@ jobs:
             web/index.html
             web/scripts/state.js
             web/scripts/build_main.js
+            web/scripts/b_composer_submit.js
             web/scripts/b_source_render.js
             web/scripts/sidebar_events.js
             web/scripts/collection_events.js
