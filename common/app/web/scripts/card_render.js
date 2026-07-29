@@ -136,7 +136,18 @@ function replaceCardListChildren(list, entries) {
     if (current && current.dataset.cardRenderHash === hash) return current;
     return typeof entry?.createCard === "function" ? entry.createCard() : entry;
   }).filter(Boolean);
-  list.replaceChildren(...nextNodes);
+  const nextNodeSet = new Set(nextNodes);
+  for (const child of Array.from(list.childNodes)) {
+    if (!nextNodeSet.has(child)) child.remove();
+  }
+  let referenceNode = list.firstChild;
+  for (const node of nextNodes) {
+    if (node === referenceNode) {
+      referenceNode = referenceNode.nextSibling;
+      continue;
+    }
+    list.insertBefore(node, referenceNode);
+  }
 }
 
 const VIRTUAL_CARD_OVERSCAN_SCREENS = 2;

@@ -139,6 +139,18 @@
     });
   }
 
+  function reconcileSecondMainAfterCardDelete(screenId) {
+    if (screenId !== "2nd_main") return;
+    const folder = typeof selectedCollectionFolderPost === "function"
+      ? selectedCollectionFolderPost()
+      : null;
+    const remainingCards = folder && typeof secondMainPostsFor === "function"
+      ? secondMainPostsFor(folder)
+      : [];
+    if (remainingCards.length) return;
+    openScreen("collection_main", "b_collection_nav_btn");
+  }
+
 
   function downloadSelectedCardItems() {
     const posts = selectedCardPosts();
@@ -205,6 +217,7 @@
             ...targets[index],
             items: deletedItems,
             hiddenItems: result.value?.hiddenItems || [],
+            externalOnly: targets[index].items.every((item) => isImagineExternalReferenceItem(targets[index].post, item)),
           });
         }
         failures.push(...(result.value?.failures || []));
@@ -225,7 +238,7 @@
     }
     clearCardSelection();
     if (deletedTargets.length) {
-      const removedExternalOnly = deletedTargets.every((target) => !target.hiddenItems.length);
+      const removedExternalOnly = deletedTargets.every((target) => target.externalOnly);
       toast(
         removedExternalOnly
           ? (deletedTargets.length > 1 ? "Removed external Imagine posts." : "Removed external Imagine post.")
@@ -256,6 +269,7 @@
     });
     if (!ok) return;
     let data = null;
+    const currentScreen = screen_state.current_screen;
     const scrollState = captureLibraryCardListScroll();
     try {
       for (const post of posts) {
@@ -265,6 +279,7 @@
       if (data) {
         applyLibrarySnapshot(data);
         restoreLibraryCardListScroll(scrollState);
+        reconcileSecondMainAfterCardDelete(currentScreen);
       }
     } catch (error) {
       showErrorPanel("Delete failed", error?.message || "Delete failed.");
@@ -284,17 +299,17 @@
       setLibraryMessage("Merge needs the local app launcher.");
       return;
     }
-    const ok = typeof openGalleryActionDialog === "function"
-      ? await openGalleryActionDialog({
-        title: "Merge Items",
-        message: "Merge selected cards into one Item.",
-        confirmLabel: "Merge",
-        cancelLabel: "Cancel",
-      })
-      : window.confirm("Merge selected cards into one Item?");
-    if (!ok) return;
+    if (typeof openMergeDestinationDialog !== "function") {
+      showErrorPanel("Merge unavailable", "The destination picker is unavailable.");
+      return;
+    }
+    const targetPath = await openMergeDestinationDialog({
+      postPaths: selectedPaths,
+    });
+    if (!targetPath) return;
     const data = await qApi("/api/library/merge-posts", {
       post_paths: selectedPaths,
+      target_path: targetPath,
     });
     library_state.selectedItems.clear();
     applyLibrarySnapshot(data);
@@ -337,11 +352,8 @@
       if (deletedCurrentPost && currentDetailType && backTarget) {
         openScreen(backTarget.screenId, backTarget.activeButtonId || "");
         restoreLibraryCardListScroll(captureLibraryCardListScroll(backTarget.screenId) || scrollState);
-      } else if (
-        currentScreen === "2nd_main"
-        && !(typeof selectedCollectionFolderPost === "function" && selectedCollectionFolderPost())
-      ) {
-        openScreen("collection_main", "b_collection_nav_btn");
+      } else {
+        reconcileSecondMainAfterCardDelete(currentScreen);
       }
       toast("Deleted local item.");
     } catch (error) {

@@ -18,6 +18,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 import uuid
 import urllib.error
 import urllib.request
@@ -344,26 +345,106 @@ def build_video_debug_event(event: str, payload: dict | None = None) -> None:
         pass
 
 
-def read_json(path: Path, fallback=None):
+def normalize_json_unicode(value):
+    if isinstance(value, str):
+        return unicodedata.normalize("NFC", value)
+    if isinstance(value, list):
+        return [normalize_json_unicode(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(normalize_json_unicode(item) for item in value)
+    if isinstance(value, dict):
+        return {
+            unicodedata.normalize("NFC", key) if isinstance(key, str) else key: normalize_json_unicode(child)
+            for key, child in value.items()
+        }
+    return value
+
+
+def read_json(path: Path, fallback=None, *, normalize_unicode: bool = True):
     try:
         text = path.read_text(encoding="utf-8")
-        return json.loads(text) if text.strip() else fallback
+        data = json.loads(text) if text.strip() else fallback
+        return normalize_json_unicode(data) if normalize_unicode else data
     except (OSError, json.JSONDecodeError):
         return fallback
 
 
-def write_json(path: Path, data) -> None:
+def write_json(path: Path, data, *, normalize_unicode: bool = True) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    value = normalize_json_unicode(data) if normalize_unicode else data
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+NORMALIZED_LIBRARY_JSON_ROOTS: set[Path] = set()
+
+
+def normalize_windows_library_path_names(root: Path) -> None:
+    if os.name != "nt":
+        return
+    candidates = sorted(
+        (
+            path
+            for path in root.rglob("*")
+            if path.name != unicodedata.normalize("NFC", path.name)
+        ),
+        key=lambda path: len(path.relative_to(root).parts),
+        reverse=True,
+    )
+    renames: list[tuple[Path, Path]] = []
+    targets: set[Path] = set()
+    for path in candidates:
+        target = path.with_name(unicodedata.normalize("NFC", path.name))
+        if target in targets:
+            raise RuntimeError(
+                f"Unicode-normalized path already exists: {target.relative_to(root).as_posix()}"
+            )
+        if os.path.lexists(target):
+            try:
+                if path.samefile(target):
+                    continue
+            except OSError:
+                pass
+            raise RuntimeError(
+                f"Unicode-normalized path already exists: {target.relative_to(root).as_posix()}"
+            )
+        targets.add(target)
+        renames.append((path, target))
+    for path, target in renames:
+        path.rename(target)
+
+
+def normalize_library_json_files(root: Path) -> None:
+    resolved_root = root.resolve()
+    if resolved_root in NORMALIZED_LIBRARY_JSON_ROOTS:
+        return
+    normalize_windows_library_path_names(resolved_root)
+    candidates = [
+        resolved_root / "library.json",
+        resolved_root / "account" / "build_auth.json",
+        resolved_root / "account" / "imagine_auth.json",
+        *resolved_root.rglob("post.json"),
+    ]
+    for path in candidates:
+        if path.name.startswith("._") or not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+            data = json.loads(text)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        normalized = normalize_json_unicode(data)
+        if normalized != data:
+            write_json(path, normalized)
+    NORMALIZED_LIBRARY_JSON_ROOTS.add(resolved_root)
 
 
 def read_settings() -> dict:
-    data = read_json(SETTINGS_PATH, {})
+    data = read_json(SETTINGS_PATH, {}, normalize_unicode=False)
     return data if isinstance(data, dict) else {}
 
 
 def write_settings(settings: dict) -> None:
-    write_json(SETTINGS_PATH, settings)
+    write_json(SETTINGS_PATH, settings, normalize_unicode=False)
 
 
 def library_root() -> Path | None:
@@ -2466,6 +2547,61 @@ def imagine_post_is_link_source(post: dict) -> bool:
     return False
 
 
+def imagine_hidden_item_keys(item: dict) -> set[str]:
+    if not isinstance(item, dict):
+        return set()
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
+    return {
+        str(value).strip()
+        for value in (
+            media_item_key(item),
+            item.get("item_id"),
+            item.get("id"),
+            item.get("post_id"),
+            metadata.get("post_id"),
+            imagine.get("post_id"),
+            item.get("asset_id"),
+            metadata.get("asset_id"),
+            metadata.get("root_asset_id"),
+            imagine.get("asset_id"),
+            imagine.get("root_asset_id"),
+            item.get("remote_url"),
+            item.get("url"),
+            item.get("object_url"),
+            item.get("thumbnail_url"),
+            metadata.get("remote_url"),
+            metadata.get("media_url"),
+            imagine.get("media_url"),
+        )
+        if str(value or "").strip()
+    }
+
+
+def unhide_explicit_imagine_link(root: Path, post: dict, requested_post_id: str) -> list[str]:
+    library_path = root / "library.json"
+    library = merge_library_json(read_json(library_path, {}))
+    settings = library.setdefault("settings", {})
+    relation_posts = settings.get("imagine_generated_relations")
+    relation_posts = relation_posts if isinstance(relation_posts, dict) else {}
+    post_id = str(post.get("post_id") or requested_post_id or "").strip()
+    relation = relation_posts.get(post_id) if isinstance(relation_posts.get(post_id), dict) else {}
+    relation_items = relation.get("items") if isinstance(relation.get("items"), list) else []
+    released_keys = {str(requested_post_id or "").strip(), post_id}
+    for item in [*(post.get("items") or []), *relation_items]:
+        released_keys.update(imagine_hidden_item_keys(item))
+    released_keys.discard("")
+    if not released_keys:
+        return []
+    hidden = [str(value).strip() for value in settings.get("hidden_imagine_item_keys", []) if str(value).strip()]
+    next_hidden = [key for key in hidden if key not in released_keys]
+    if len(next_hidden) != len(hidden):
+        settings["hidden_imagine_item_keys"] = next_hidden
+        library["updated_at"] = now_iso()
+        write_json(library_path, library)
+    return sorted(released_keys)
+
+
 def imagine_apply_generated_relations(post: dict, root: Path, account: dict, library: dict | None = None) -> dict:
     if not isinstance(post, dict):
         return post
@@ -3795,6 +3931,7 @@ def load_imagine_remote_link_post(payload: dict) -> dict:
         raise RuntimeError("Select or capture an Imagine account first.")
     raw_post = imagine_get_media_post_direct(post_id, account, timeout=12)
     post = imagine_saved_post_from_root(raw_post, account)
+    unhidden_keys = unhide_explicit_imagine_link(root, post, post_id) if post else []
     if post:
         post = imagine_apply_generated_relations(post, root, account)
     if not post:
@@ -3850,6 +3987,7 @@ def load_imagine_remote_link_post(payload: dict) -> dict:
         "url": link_url,
         "saved": link_is_saved,
         "saved_ids": sorted(saved_link_ids),
+        "unhidden_keys": unhidden_keys,
         "post": post,
         "posts": [post],
         "items": [post],
@@ -11419,6 +11557,7 @@ def scan_library(root: Path | None = None) -> dict:
     if not root:
         return empty_snapshot()
     ensure_library_root(root)
+    normalize_library_json_files(root)
     collections = scan_collection_folders(root)
     posts = [
         *scan_created_area(root, "created"),
@@ -11433,7 +11572,7 @@ def scan_library(root: Path | None = None) -> dict:
     library["collections"] = [collection_summary(collection) for collection in collections]
     library["prompts"] = [prompt_summary(prompt) for prompt in prompts]
     write_json(root / "library.json", library)
-    return {
+    snapshot = normalize_json_unicode({
         "ok": True,
         "library_root": str(root),
         "root_name": root.name,
@@ -11442,7 +11581,9 @@ def scan_library(root: Path | None = None) -> dict:
         "collections": collections,
         "prompts": prompts,
         "accounts": account_files(root),
-    }
+    })
+    snapshot["library_root"] = str(root)
+    return snapshot
 
 
 def applescript_string(value: str) -> str:
@@ -15634,11 +15775,25 @@ def clear_source_role_for_reassignment(item: dict) -> None:
         item.pop("source_type", None)
 
 
-def collection_selection_for_deleted_post(post: dict) -> tuple[str, str]:
+def collection_selection_for_deleted_post(post: dict, snapshot: dict) -> tuple[str, str]:
     folder_path = str(post.get("folder_path") or "")
     parts = Path(folder_path).parts
     if len(parts) >= 3 and parts[0] == "collection":
-        return "/".join(parts[:2]), ""
+        collection_path = "/".join(parts[:2])
+        if len(parts) < 4:
+            return collection_path, ""
+        second_folder_path = "/".join(parts[:3])
+        second_folder = find_post(snapshot, second_folder_path)
+        if not second_folder:
+            return collection_path, ""
+        second_folder_depth = len(Path(second_folder_path).parts)
+        has_remaining_cards = bool(second_folder.get("items")) or any(
+            candidate.get("items")
+            and str(candidate.get("folder_path") or "").startswith(f"{second_folder_path}/")
+            and len(Path(str(candidate.get("folder_path") or "")).parts) == second_folder_depth + 1
+            for candidate in snapshot.get("posts", [])
+        )
+        return collection_path, second_folder_path if has_remaining_cards else ""
     return "", ""
 
 
@@ -15655,7 +15810,7 @@ def delete_library_post(payload: dict) -> dict:
         remove_build_previews_for_items(root, target, post.get("items") or [])
     move_path_to_trash(target)
     data = scan_library(root)
-    collection_path, collection_post_path = collection_selection_for_deleted_post(post)
+    collection_path, collection_post_path = collection_selection_for_deleted_post(post, data)
     data["selected_path"] = ""
     data["selected_item_id"] = ""
     if collection_path:
@@ -16082,10 +16237,19 @@ def representative_for_merged_items(items: list[dict]) -> str:
     return selected.get("file") or selected.get("url") or media_item_key(selected)
 
 
-def merge_target_parent(root: Path, posts: list[dict]) -> tuple[Path, str | None]:
-    target_parent = root / "created"
-    target_parent.mkdir(parents=True, exist_ok=True)
-    return target_parent, None
+def merge_target_parent(root: Path, payload: dict) -> tuple[Path, str | None]:
+    target_path = str(payload.get("target_path") or "created").strip("/")
+    if target_path == "created":
+        target_parent = root / "created"
+        target_parent.mkdir(parents=True, exist_ok=True)
+        return target_parent, None
+
+    parts = Path(target_path).parts
+    if len(parts) < 2 or parts[0] != "collection":
+        raise RuntimeError("Select Build Main or a Collection folder.")
+    collection_path = "/".join(parts[:2])
+    target_parent = validate_collection_target_parent(root, collection_path, target_path)
+    return target_parent, parts[1]
 
 
 def merged_post_source(posts: list[dict]) -> str:
@@ -16121,12 +16285,10 @@ def merge_selected_posts(payload: dict) -> dict:
             raise RuntimeError("Selected post folder was not found.")
         posts.append(post)
 
-    target_parent, collection_id = merge_target_parent(root, posts)
+    target_parent, collection_id = merge_target_parent(root, payload)
     source_dirs = [safe_join(root, post.get("folder_path") or "") for post in posts]
     if any(source_dir.resolve() == target_parent.resolve() or path_inside(source_dir, target_parent) for source_dir in source_dirs):
-        target_parent = root / "created"
-        target_parent.mkdir(parents=True, exist_ok=True)
-        collection_id = None
+        raise RuntimeError("Select a destination outside the cards being merged.")
 
     target_name = unique_directory_name(target_parent, "merged-item")
     temp_dir = target_parent / f".merge-{uuid.uuid4().hex}.tmp"
@@ -16198,7 +16360,12 @@ def merge_selected_posts(payload: dict) -> dict:
     collection_path = collection_path_for_post_path(data["selected_path"])
     if collection_path:
         data["selected_collection_path"] = collection_path
-        data["selected_collection_post_path"] = data["selected_path"]
+        target_parent_path = target_parent.relative_to(root).as_posix()
+        data["selected_collection_post_path"] = (
+            data["selected_path"]
+            if target_parent_path == collection_path
+            else target_parent_path
+        )
     return data
 
 

@@ -106,6 +106,22 @@ function mergeImagineLinkPosts(posts) {
   return normalized;
 }
 
+function forgetHiddenImagineItemKeys(keys) {
+  const released = new Set(
+    (Array.isArray(keys) ? keys : []).map((value) => String(value || "").trim()).filter(Boolean),
+  );
+  if (!released.size) return;
+  if (library_state.imagineHiddenPostIds instanceof Set) {
+    for (const key of released) library_state.imagineHiddenPostIds.delete(key);
+  }
+  const settings = library_state.library?.settings;
+  if (settings && typeof settings === "object" && Array.isArray(settings.hidden_imagine_item_keys)) {
+    settings.hidden_imagine_item_keys = settings.hidden_imagine_item_keys
+      .map((value) => String(value || "").trim())
+      .filter((value) => value && !released.has(value));
+  }
+}
+
 function preferredImagineLinkItem(post, postId) {
   const items = Array.isArray(post?.items) ? post.items : [];
   const targetPostId = String(postId || "").toLowerCase();
@@ -132,6 +148,7 @@ async function openImagineLinkPost(value) {
       post_id: postId,
     });
     const posts = Array.isArray(data.posts) ? data.posts : [];
+    forgetHiddenImagineItemKeys(data.unhidden_keys);
     const normalized = mergeImagineLinkPosts(posts);
     const targetPost = normalized[0];
     if (!targetPost) throw new Error("Could not load the linked Imagine post.");

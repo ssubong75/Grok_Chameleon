@@ -483,6 +483,51 @@
   box-shadow: 0 28px 90px rgb(0 0 0 / 0.5);
 }
 
+.merge-destination-modal {
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.merge-destination-modal .primary-folder-card,
+.merge-destination-modal .secondary-folder-card {
+  cursor: pointer;
+}
+
+.merge-destination-modal .primary-folder-card:disabled,
+.merge-destination-modal .secondary-folder-card:disabled {
+  cursor: not-allowed;
+  opacity: 0.38;
+}
+
+.merge-destination-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 32px;
+}
+
+.merge-destination-selection {
+  overflow: hidden;
+  color: var(--soft);
+  font-size: 12px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.merge-destination-selection.blocked {
+  color: var(--folder-delete);
+}
+
+.merge-destination-buttons {
+  flex: 0 0 auto;
+}
+
+.merge-destination-buttons .gallery-action-confirm:disabled {
+  cursor: not-allowed;
+  opacity: 0.38;
+}
+
 .move-gallery-modal header {
   display: flex;
   align-items: center;

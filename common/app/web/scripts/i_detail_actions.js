@@ -698,10 +698,11 @@ async function deleteImagineRemoteItem(post, item) {
   }
   if (isImagineExternalReferenceItem(post, item) && !isImagineUnsavedPost(post, item)) {
     const unsaved = await unsaveImagineExternalItems(post, [item], { wholeCard: false });
+    await hideImagineRemoteItems(unsaved.removedItems);
     return {
       deletedItems: unsaved.removedItems,
       failures: [],
-      hiddenItems: [],
+      hiddenItems: unsaved.removedItems,
       data: unsaved.data,
       action: "external-unsave",
     };
@@ -742,6 +743,7 @@ async function deleteImagineCardAssets(post, items) {
     try {
       const unsaved = await unsaveImagineExternalItems(post, externalItems);
       deletedItems.push(...unsaved.removedItems);
+      hiddenItems.push(...unsaved.removedItems);
     } catch (error) {
       failures.push(error);
     }
@@ -815,6 +817,9 @@ async function deleteImagineRemoteCard(post, { hide = true } = {}) {
   const ownedItems = items.filter((item) => !isImagineExternalReferenceItem(post, item));
   if (!ownedItems.length) {
     const externalResult = await deleteImagineCardAssets(post, externalItems);
+    if (hide && externalResult.hiddenItems.length) {
+      await hideImagineRemoteItems(externalResult.hiddenItems);
+    }
     return {
       ...externalResult,
       data: {
@@ -849,6 +854,7 @@ async function deleteImagineRemoteCard(post, { hide = true } = {}) {
     try {
       const unsaved = await unsaveImagineExternalItems(post, externalItems);
       deletedItems.push(...unsaved.removedItems);
+      hiddenItems.push(...unsaved.removedItems);
     } catch (error) {
       failures.push(error);
     }

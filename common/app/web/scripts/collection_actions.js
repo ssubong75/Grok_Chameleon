@@ -122,10 +122,20 @@
 
   let moveToCollectionOverlay = null;
   let moveToCollectionRequestPending = false;
+  let mergeDestinationOverlay = null;
+  let mergeDestinationResolve = null;
 
   function closeMoveToCollectionDialog() {
     moveToCollectionOverlay?.remove();
     moveToCollectionOverlay = null;
+  }
+
+  function closeMergeDestinationDialog(result = null) {
+    mergeDestinationOverlay?.remove();
+    mergeDestinationOverlay = null;
+    const resolve = mergeDestinationResolve;
+    mergeDestinationResolve = null;
+    resolve?.(result);
   }
 
   function collectionForPostPath(postPath) {
@@ -190,6 +200,177 @@
     } finally {
       moveToCollectionRequestPending = false;
     }
+  }
+
+  function openMergeDestinationDialog({ postPaths = [] } = {}) {
+    closeMoveToCollectionDialog();
+    closeMergeDestinationDialog();
+    const sourcePaths = Array.from(new Set(
+      postPaths.map((path) => String(path || "").trim().replace(/^\/+|\/+$/g, "")).filter(Boolean),
+    ));
+    if (sourcePaths.length < 2) {
+      showErrorPanel("Merge unavailable", "Select two or more cards to merge.");
+      return Promise.resolve(null);
+    }
+
+    let targetPath = "created";
+    let activeCollectionPath = "";
+    const targetBlocked = (path) => sourcePaths.some((sourcePath) => (
+      path === sourcePath || path.startsWith(`${sourcePath}/`)
+    ));
+
+    return new Promise((resolve) => {
+      mergeDestinationResolve = resolve;
+      const overlay = document.createElement("div");
+      overlay.className = "move-gallery-overlay merge-destination-overlay";
+      overlay.innerHTML = `
+        <section class="move-gallery-modal merge-destination-modal" role="dialog" aria-modal="true" aria-label="Choose merge destination" tabindex="-1">
+          <header>
+            <div><span>Merge Items</span><h3>Choose a Destination</h3></div>
+          </header>
+          <div class="move-gallery-layout">
+            <section class="move-gallery-primary-panel primary-folder-panel" aria-label="Main folders">
+              <div class="folder-panel-heading"><strong>Folder</strong></div>
+              <div class="move-gallery-primary-list primary-folder-list"></div>
+            </section>
+            <section class="move-gallery-secondary-panel secondary-folder-panel" aria-label="Second folders">
+              <div class="folder-panel-heading"><strong>Item</strong></div>
+              <div class="move-gallery-secondary-list secondary-folder-grid"></div>
+            </section>
+          </div>
+          <footer class="merge-destination-footer">
+            <span class="merge-destination-selection"></span>
+            <div class="gallery-action-buttons merge-destination-buttons">
+              <button class="gallery-action-cancel" type="button">Cancel</button>
+              <button class="gallery-action-confirm gallery-action-merge" type="button">Merge</button>
+            </div>
+          </footer>
+        </section>
+      `;
+      document.body.append(overlay);
+      mergeDestinationOverlay = overlay;
+
+      const modal = overlay.querySelector(".merge-destination-modal");
+      const primaryList = overlay.querySelector(".move-gallery-primary-list");
+      const secondaryList = overlay.querySelector(".move-gallery-secondary-list");
+      const selectionLabel = overlay.querySelector(".merge-destination-selection");
+      const confirmButton = overlay.querySelector(".gallery-action-confirm");
+
+      const collections = () => (
+        typeof sortedCollections === "function" ? sortedCollections() : [...library_state.collections]
+      );
+      const directPosts = (collection) => (
+        typeof collectionPostsWithSlots === "function"
+          ? collectionPostsWithSlots(collection)
+          : (collection?.posts || [])
+      );
+      const targetLabel = () => {
+        if (targetPath === "created") return "Build Main";
+        const collection = library_state.collections.find((item) => item.path === activeCollectionPath);
+        if (!collection) return "Choose a folder";
+        if (targetPath === collection.path) return collection.name || readableName(collection.id);
+        const post = directPosts(collection).find((item) => item.folder_path === targetPath);
+        const itemName = readableName(post?.folderName) || post?.title || "Item";
+        return `${collection.name || readableName(collection.id)} / ${itemName}`;
+      };
+      const syncTarget = () => {
+        const blocked = !targetPath || targetBlocked(targetPath);
+        if (confirmButton) confirmButton.disabled = blocked;
+        if (selectionLabel) {
+          selectionLabel.textContent = blocked
+            ? "This folder is included in the merge."
+            : `Destination: ${targetLabel()}`;
+          selectionLabel.classList.toggle("blocked", blocked);
+        }
+      };
+      const selectTarget = (nextTargetPath, collectionPath = "") => {
+        targetPath = nextTargetPath;
+        activeCollectionPath = collectionPath;
+        renderPrimary();
+        renderSecondary();
+        syncTarget();
+      };
+      const folderCard = ({ path, label, active, disabled = false, primary = false }) => {
+        const card = document.createElement("button");
+        card.className = `${primary ? "primary" : "secondary"}-folder-card${active ? " active" : ""}`;
+        card.type = "button";
+        card.disabled = disabled;
+        card.setAttribute("aria-pressed", active ? "true" : "false");
+        card.innerHTML = `${collectionFolderCardIconHtml()}${primary ? '<span class="folder-card-copy"><strong></strong></span>' : "<strong></strong>"}`;
+        card.querySelector("strong").textContent = label;
+        return card;
+      };
+      const renderPrimary = () => {
+        primaryList.replaceChildren();
+        const buildCard = folderCard({
+          path: "created",
+          label: "Build Main",
+          active: targetPath === "created",
+          primary: true,
+        });
+        buildCard.addEventListener("click", () => selectTarget("created"));
+        primaryList.append(buildCard);
+
+        for (const collection of collections()) {
+          const card = folderCard({
+            path: collection.path,
+            label: collection.name || readableName(collection.id),
+            active: activeCollectionPath === collection.path,
+            disabled: targetBlocked(collection.path),
+            primary: true,
+          });
+          card.addEventListener("click", () => selectTarget(collection.path, collection.path));
+          primaryList.append(card);
+        }
+      };
+      const renderSecondary = () => {
+        secondaryList.replaceChildren();
+        const collection = library_state.collections.find((item) => item.path === activeCollectionPath);
+        if (!collection) {
+          secondaryList.append(moveDialogEmptyNode("Select a folder."));
+          return;
+        }
+        const posts = directPosts(collection);
+        if (!posts.length) {
+          secondaryList.append(moveDialogEmptyNode("No items yet."));
+          return;
+        }
+        for (const post of posts) {
+          const blocked = targetBlocked(post.folder_path);
+          const card = folderCard({
+            path: post.folder_path,
+            label: readableName(post.folderName) || post.title || "Item",
+            active: targetPath === post.folder_path,
+            disabled: blocked,
+          });
+          if (blocked) card.title = "A selected card cannot be its own destination.";
+          card.addEventListener("click", () => selectTarget(post.folder_path, collection.path));
+          secondaryList.append(card);
+        }
+      };
+      const settle = (result) => closeMergeDestinationDialog(result);
+
+      overlay.addEventListener("pointerdown", (event) => {
+        if (event.target === overlay) settle(null);
+      });
+      overlay.querySelector(".gallery-action-cancel")?.addEventListener("click", () => settle(null));
+      confirmButton?.addEventListener("click", () => {
+        if (!targetPath || targetBlocked(targetPath)) return;
+        settle(targetPath);
+      });
+      modal?.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") settle(null);
+        if (event.key === "Enter" && event.target === modal && targetPath && !targetBlocked(targetPath)) {
+          event.preventDefault();
+          settle(targetPath);
+        }
+      });
+
+      renderPrimary();
+      renderSecondary();
+      syncTarget();
+      window.setTimeout(() => modal?.focus({ preventScroll: true }), 0);
+    });
   }
 
   function openMoveToCollectionDialog({ postPath = "", postPaths = [], itemKey = "" } = {}) {
