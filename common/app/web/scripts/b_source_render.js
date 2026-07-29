@@ -57,8 +57,9 @@ function postHasBuildLocalMedia(post) {
 function isBuildPost(post) {
   if (isCollectionContainerPost(post)) return false;
   if (post.area === "collection") return postHasBuildLocalMedia(post);
+  if (post.area === "upload") return false;
   if (post.source === "imagine") return false;
-  if (!(post.source === "build" || post.area === "created" || post.area === "upload")) return false;
+  if (!(post.source === "build" || post.area === "created")) return false;
   return postHasBuildLocalMedia(post);
 }
 

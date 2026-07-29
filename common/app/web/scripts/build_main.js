@@ -753,22 +753,8 @@
   }
 
 
-  function postHasBuildResult(post) {
-    return (post?.items || []).some((item) => {
-      const role = [
-        item?.role || "",
-        item?.relation || "",
-        item?.source_type || "",
-        item?.kind || "",
-      ].join(" ").toLowerCase();
-      return !/(source|original|start|input|parent|reference|ref|upload)/.test(role);
-    });
-  }
-
-
   function buildMainPostVisible(post) {
     if (!isBuildPost(post)) return false;
-    if (post.area === "upload" && !postHasBuildResult(post)) return false;
     if (post.area === "collection") {
       return Boolean(library_state.buildIncludeCollections && post?.items?.length);
     }
