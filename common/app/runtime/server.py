@@ -10879,6 +10879,13 @@ def preview_key_for_source(root: Path, source: Path) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def cached_card_preview_key_for_source(root: Path, source: Path, kind: str) -> str:
+    source_key = preview_key_for_source(root, source)
+    preview_kind = normalize_build_preview_kind(kind)
+    raw = f"{source_key}\0{preview_kind}".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
 def remove_build_previews_for_source(root: Path, source: Path) -> None:
     if not source.is_file() or not build_preview_source(root, source):
         return
@@ -17367,13 +17374,18 @@ class Handler(SimpleHTTPRequestHandler):
                 preview_kind = normalize_build_preview_kind(query.get("preview_kind", ["card"])[0])
                 persistent_build_preview = build_preview_source(root, source)
                 preview_dir = build_preview_dir(preview_kind, root) if persistent_build_preview else cache_dir
+                preview_key = (
+                    preview_key_for_source(root, source)
+                    if persistent_build_preview
+                    else cached_card_preview_key_for_source(root, source, preview_kind)
+                )
                 preview_dir.mkdir(parents=True, exist_ok=True)
                 self.send_json({
                     "ok": True,
                     "source_path": str(source),
                     "cache_dir": str(cache_dir),
                     "preview_dir": str(preview_dir),
-                    "preview_key": preview_key_for_source(root, source),
+                    "preview_key": preview_key,
                     "preview_kind": preview_kind,
                     "storage": "build" if persistent_build_preview else "cache",
                     "library_root": str(root.resolve()),
