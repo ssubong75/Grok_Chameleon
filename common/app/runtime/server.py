@@ -2750,8 +2750,8 @@ def imagine_restore_generated_relation_resolutions(
     post_id = str(post.get("post_id") or "").strip()
     if not post_id:
         return False
-    ensure_imagine_state_migrated(root)
     if not isinstance(relations, dict):
+        ensure_imagine_state_migrated(root)
         relations = imagine_state.load_generated_relations(root)
     record = relations.get(post_id) if isinstance(relations.get(post_id), dict) else None
     if not record:
@@ -2825,8 +2825,8 @@ def imagine_apply_generated_relations(
     post_id = str(post.get("post_id") or "").strip()
     if not post_id:
         return post
-    ensure_imagine_state_migrated(root)
     if not isinstance(relations, dict):
+        ensure_imagine_state_migrated(root)
         relations = imagine_state.load_generated_relations(root)
     record = relations.get(post_id) if isinstance(relations.get(post_id), dict) else None
     if not record:
@@ -3839,17 +3839,17 @@ def list_imagine_saved_cache(payload: dict) -> dict:
         offset=offset,
         limit=limit,
     )
-    ensure_imagine_state_migrated(root)
-    hidden_remote_ids = (
-        imagine_pending_delete_ids(root, account)
-        | imagine_local_exclusion_ids(root, account)
+    card_view_state = imagine_state.load_card_view_state_readonly(
+        root,
+        imagine_account_settings_key(account),
     )
-    relations = imagine_state.load_generated_relations(root)
+    hidden_remote_ids = card_view_state["hidden_ids"]
+    relations = card_view_state["relations"]
     posts: list[dict] = []
     for raw_post in cached.get("posts") or []:
         if not isinstance(raw_post, dict):
             continue
-        post = json.loads(json.dumps(raw_post, ensure_ascii=False))
+        post = raw_post
         imagine_apply_generated_relations(post, root, account, relations)
         post["items"] = [
             item
@@ -3867,11 +3867,11 @@ def list_imagine_saved_cache(payload: dict) -> dict:
             or ""
         )
         posts.append(post)
+    normalized_posts = normalize_json_unicode(posts)
     return {
         "ok": True,
         "source": "saved_cache",
-        "posts": normalize_json_unicode(posts),
-        "items": normalize_json_unicode(posts),
+        "posts": normalized_posts,
         "total": int(cached.get("total") or 0),
         "offset": int(cached.get("offset") or 0),
         "next_offset": int(cached.get("next_offset") or 0),

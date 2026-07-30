@@ -396,7 +396,7 @@ const bridgeCommandQueues = new Map();
 const usageWindows = new Map();
 const CARD_PREVIEW_MAX_EDGE = 960;
 const THUMBNAIL_PREVIEW_MAX_EDGE = 320;
-const CARD_PREVIEW_MAX_ACTIVE = 2;
+const CARD_PREVIEW_MAX_ACTIVE = 4;
 const CARD_PREVIEW_MAX_FILES = 5000;
 const CARD_PREVIEW_MAX_BYTES = 512 * 1024 * 1024;
 const cardPreviewQueue = [];
@@ -667,8 +667,12 @@ async function ensureCardPreview(payload = {}) {
     info = await fetchJson(`${SERVER_BASE}/api/card-preview/cache-info`, {
       signal: AbortSignal.timeout(3000),
     });
+    const cacheIdentity = String(payload.cache_identity || "").trim().normalize("NFC");
+    const keySource = cacheIdentity && cacheIdentity.length <= 512
+      ? `remote\0${previewKind}\0identity\0${cacheIdentity}`
+      : `remote\0${previewKind}\0${source.pathname}${source.search}`;
     previewKey = crypto.createHash("sha256")
-      .update(`remote\0${previewKind}\0${source.pathname}${source.search}`)
+      .update(keySource)
       .digest("hex");
   } else {
     const infoUrl = new URL("/api/card-preview/source-info", SERVER_BASE);

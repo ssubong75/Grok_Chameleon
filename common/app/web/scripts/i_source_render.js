@@ -2,6 +2,10 @@
 const IMAGINE_VIRTUAL_LIST_KEY = "imagine-main";
 const IMAGINE_DISCOVER_VIRTUAL_LIST_KEY = "imagine-discover";
 const IMAGINE_UNSAVED_VIRTUAL_LIST_KEY = "imagine-unsaved";
+const IMAGINE_SAVED_BACKGROUND_SYNC_DELAY_MS = 900;
+let imagineSavedDisplayPostsMemoSource = null;
+let imagineSavedDisplayPostsMemoResult = [];
+let imagineSavedVisiblePostsMemoResult = [];
 
 function imagineViewValue(name, fallback) {
   return typeof IMAGINE_MAIN_VIEWS === "object" && IMAGINE_MAIN_VIEWS
@@ -301,29 +305,59 @@ function mergeImagineRemotePosts(existingPosts, nextPosts) {
   return Array.from(merged.values());
 }
 
+function imagineSavedPostMatchIndex(posts) {
+  const byPath = new Map();
+  const byKey = new Map();
+  for (let index = 0; index < posts.length; index += 1) {
+    const post = posts[index];
+    const path = String(post?.folder_path || "");
+    if (path) {
+      if (!byPath.has(path)) byPath.set(path, []);
+      byPath.get(path).push(index);
+    }
+    for (const key of imagineSavedPostMatchKeys(post)) {
+      if (!byKey.has(key)) byKey.set(key, []);
+      byKey.get(key).push(index);
+    }
+  }
+  return { byPath, byKey };
+}
+
+function takeImagineSavedPostMatch(index, post, matchedIndexes, acceptKeyMatch = null) {
+  const path = String(post?.folder_path || "");
+  for (const candidateIndex of index.byPath.get(path) || []) {
+    if (!matchedIndexes.has(candidateIndex)) return candidateIndex;
+  }
+  let matchedIndex = -1;
+  for (const key of imagineSavedPostMatchKeys(post)) {
+    for (const candidateIndex of index.byKey.get(key) || []) {
+      if (matchedIndexes.has(candidateIndex)) continue;
+      if (acceptKeyMatch && !acceptKeyMatch(candidateIndex)) continue;
+      if (matchedIndex < 0 || candidateIndex < matchedIndex) matchedIndex = candidateIndex;
+      break;
+    }
+  }
+  return matchedIndex;
+}
+
 function mergeImagineRefreshedPosts(existingPosts, refreshedPosts) {
   const existing = reconcileImagineSavedDisplayPosts(existingPosts || []);
   const refreshed = reconcileImagineSavedDisplayPosts(refreshedPosts || []);
   if (!existing.length) return refreshed;
   if (!refreshed.length) return [];
 
-  const existingKeys = existing.map(imagineSavedPostMatchKeys);
+  const existingIndex = imagineSavedPostMatchIndex(existing);
   const matchedExistingIndexes = new Set();
   const refreshedForExistingIndex = new Map();
   const newPosts = [];
 
   for (const post of refreshed) {
-    const exactIndex = existing.findIndex((candidate, index) => (
-      !matchedExistingIndexes.has(index)
-      && candidate?.folder_path
-      && candidate.folder_path === post?.folder_path
-    ));
-    const postKeys = imagineSavedPostMatchKeys(post);
-    const matchedIndex = exactIndex >= 0
-      ? exactIndex
-      : existingKeys.findIndex((keys, index) => (
-        !matchedExistingIndexes.has(index)
-        && !(
+    const matchedIndex = takeImagineSavedPostMatch(
+      existingIndex,
+      post,
+      matchedExistingIndexes,
+      (index) => (
+        !(
           isImagineT2iGroupContainer(post)
           && existing[index]?.metadata?.local_heart === true
         )
@@ -331,8 +365,8 @@ function mergeImagineRefreshedPosts(existingPosts, refreshedPosts) {
           post?.metadata?.local_heart === true
           && isImagineT2iGroupContainer(existing[index])
         )
-        && Array.from(postKeys).some((key) => keys.has(key))
-      ));
+      ),
+    );
     if (matchedIndex < 0) {
       newPosts.push(post);
       continue;
@@ -353,24 +387,17 @@ function mergeImagineSyncedPosts(existingPosts, refreshedPosts) {
   if (!existing.length) return refreshed;
   if (!refreshed.length) return existing;
 
-  const existingKeys = existing.map(imagineSavedPostMatchKeys);
+  const existingIndex = imagineSavedPostMatchIndex(existing);
   const matchedExistingIndexes = new Set();
   const refreshedForExistingIndex = new Map();
   const newPosts = [];
 
   for (const post of refreshed) {
-    const exactIndex = existing.findIndex((candidate, index) => (
-      !matchedExistingIndexes.has(index)
-      && candidate?.folder_path
-      && candidate.folder_path === post?.folder_path
-    ));
-    const postKeys = imagineSavedPostMatchKeys(post);
-    const matchedIndex = exactIndex >= 0
-      ? exactIndex
-      : existingKeys.findIndex((keys, index) => (
-        !matchedExistingIndexes.has(index)
-        && Array.from(postKeys).some((key) => keys.has(key))
-      ));
+    const matchedIndex = takeImagineSavedPostMatch(
+      existingIndex,
+      post,
+      matchedExistingIndexes,
+    );
     if (matchedIndex < 0) {
       newPosts.push(post);
       continue;
@@ -557,9 +584,21 @@ function newImagineSavedSyncToken() {
   return `saved-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
+function cancelScheduledImagineSavedSync() {
+  const hadTimer = Boolean(library_state.imagineRemoteSyncTimer);
+  if (hadTimer) {
+    window.clearTimeout(library_state.imagineRemoteSyncTimer);
+    library_state.imagineRemoteSyncTimer = 0;
+  }
+  library_state.imagineRemoteSyncTimerResolve?.();
+  library_state.imagineRemoteSyncTimerResolve = null;
+  if (hadTimer) library_state.imagineRemoteSyncing = false;
+}
+
 function beginImagineSavedRequest({ supersede = false } = {}) {
   if (supersede) {
     library_state.imagineRemoteRequestController?.abort?.();
+    cancelScheduledImagineSavedSync();
     library_state.imagineRemoteLoading = false;
     library_state.imagineRemoteSyncing = false;
     library_state.imagineRemoteSyncPromise = null;
@@ -675,9 +714,33 @@ async function syncImagineSavedCards(context, { append = false, force = false, s
   }
 }
 
+function scheduleImagineSavedSync(context) {
+  cancelScheduledImagineSavedSync();
+  library_state.imagineRemoteSyncing = true;
+  const syncPromise = new Promise((resolve) => {
+    library_state.imagineRemoteSyncTimerResolve = resolve;
+    library_state.imagineRemoteSyncTimer = window.setTimeout(() => {
+      library_state.imagineRemoteSyncTimer = 0;
+      library_state.imagineRemoteSyncTimerResolve = null;
+      if (!imagineSavedRequestIsCurrent(context) || !canLoadImagineSavedList()) {
+        library_state.imagineRemoteSyncing = false;
+        finishImagineSavedRequest(context);
+        resolve();
+        return;
+      }
+      Promise.resolve(
+        syncImagineSavedCards(context, { append: false, force: false, showLoading: false }),
+      ).then(resolve, resolve);
+    }, IMAGINE_SAVED_BACKGROUND_SYNC_DELAY_MS);
+  });
+  library_state.imagineRemoteSyncPromise = syncPromise;
+  return syncPromise;
+}
+
 async function loadImagineSavedCards({ force = false, append = false } = {}) {
   if (force && (library_state.imagineRemoteLoading || library_state.imagineRemoteSyncing)) {
     library_state.imagineRemoteRequestController?.abort?.();
+    cancelScheduledImagineSavedSync();
     library_state.imagineRemoteLoading = false;
     library_state.imagineRemoteSyncing = false;
     library_state.imagineRemoteSyncPromise = null;
@@ -774,10 +837,8 @@ async function loadImagineSavedCards({ force = false, append = false } = {}) {
     const backgroundSync = !force && !append && hasCachedCards;
     if (backgroundSync) {
       library_state.imagineRemoteLoading = false;
-      library_state.imagineRemoteSyncing = true;
       renderImagineSourceCards();
-      const syncPromise = syncImagineSavedCards(context, { append: false, force: false, showLoading: false });
-      library_state.imagineRemoteSyncPromise = syncPromise;
+      const syncPromise = scheduleImagineSavedSync(context);
       syncPromise.catch(() => {});
       return;
     }
@@ -930,9 +991,15 @@ function imagineSourcePosts() {
     ));
   }
   if (library_state.iMainView === imagineViewValue("IMAGINE", "imagine")) {
-    return reconcileImagineSavedDisplayPosts(library_state.imagineRemotePosts || []).filter((post) => (
-      !isImagineT2iPost(post) && !isImagineT2iGroupContainer(post)
-    ));
+    const sourcePosts = library_state.imagineRemotePosts || [];
+    if (imagineSavedDisplayPostsMemoSource !== sourcePosts) {
+      imagineSavedDisplayPostsMemoSource = sourcePosts;
+      imagineSavedDisplayPostsMemoResult = reconcileImagineSavedDisplayPosts(sourcePosts);
+      imagineSavedVisiblePostsMemoResult = imagineSavedDisplayPostsMemoResult.filter((post) => (
+        !isImagineT2iPost(post) && !isImagineT2iGroupContainer(post)
+      ));
+    }
+    return imagineSavedVisiblePostsMemoResult;
   }
   return [];
 }

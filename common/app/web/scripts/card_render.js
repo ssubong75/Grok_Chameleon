@@ -34,10 +34,15 @@ function buildCardVideoPosterUrl(post, item) {
 
 function cardDisplayItemForContext(post, item, className = "") {
   if (cardUsesImagineDetail(post, className)) {
+    const sourceItem = item || {};
+    const type = detailItemType(sourceItem);
+    const previewUrl = sourceItem.thumbnail_url || sourceItem.poster_url || "";
     return {
-      ...(item || {}),
+      ...sourceItem,
+      card_lazy_preview: true,
       card_local_preview: true,
       card_preview_retries: 2,
+      card_static_video_preview: type === "video" && Boolean(previewUrl),
     };
   }
   const localItem = typeof bLocalMediaItem === "function" ? bLocalMediaItem(item) : item;

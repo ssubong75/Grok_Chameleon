@@ -23,15 +23,26 @@ def database_path(root: Path) -> Path:
 
 
 def _lock_for(root: Path) -> threading.RLock:
-    key = str(database_path(root).resolve())
+    key = str((Path(root) / STATE_DIRECTORY / DATABASE_FILENAME).resolve())
     with _LOCKS_GUARD:
         return _LOCKS.setdefault(key, threading.RLock())
 
 
 @contextmanager
 def _connection(root: Path, *, write: bool = False):
-    path = database_path(root)
-    connection = sqlite3.connect(str(path), timeout=20.0)
+    path = (
+        database_path(root)
+        if write
+        else Path(root) / STATE_DIRECTORY / DATABASE_FILENAME
+    )
+    if write:
+        connection = sqlite3.connect(str(path), timeout=20.0)
+    else:
+        connection = sqlite3.connect(
+            path.resolve().as_uri() + "?mode=ro",
+            uri=True,
+            timeout=5.0,
+        )
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA busy_timeout = 20000")
     connection.execute("PRAGMA foreign_keys = ON")
@@ -699,27 +710,41 @@ def query_imagine_remote_posts(
             "has_more": False,
             "refreshed_at": 0,
         }
-    with _lock_for(root):
-        with _connection(root, write=True) as connection:
-            _create_schema(connection)
-            count_row = connection.execute(
-                """
-                SELECT COUNT(*) AS count, MAX(refreshed_at) AS refreshed_at
-                FROM imagine_remote_posts
-                WHERE account_key = ?
-                """,
-                (normalized_account,),
-            ).fetchone()
-            rows = connection.execute(
-                """
-                SELECT post_json
-                FROM imagine_remote_posts
-                WHERE account_key = ?
-                ORDER BY created_at DESC, post_key
-                LIMIT ? OFFSET ?
-                """,
-                (normalized_account, safe_limit, safe_offset),
-            ).fetchall()
+    empty_result = {
+        "posts": [],
+        "total": 0,
+        "offset": safe_offset,
+        "limit": safe_limit,
+        "next_offset": safe_offset,
+        "has_more": False,
+        "refreshed_at": 0,
+    }
+    path = Path(root) / STATE_DIRECTORY / DATABASE_FILENAME
+    if not path.is_file():
+        return empty_result
+    try:
+        with _lock_for(root):
+            with _connection(root) as connection:
+                count_row = connection.execute(
+                    """
+                    SELECT COUNT(*) AS count, MAX(refreshed_at) AS refreshed_at
+                    FROM imagine_remote_posts
+                    WHERE account_key = ?
+                    """,
+                    (normalized_account,),
+                ).fetchone()
+                rows = connection.execute(
+                    """
+                    SELECT post_json
+                    FROM imagine_remote_posts
+                    WHERE account_key = ?
+                    ORDER BY created_at DESC, post_key
+                    LIMIT ? OFFSET ?
+                    """,
+                    (normalized_account, safe_limit, safe_offset),
+                ).fetchall()
+    except sqlite3.Error:
+        return empty_result
     posts = [post for row in rows if (post := _json_dict(row["post_json"]))]
     total = int(count_row["count"] if count_row else 0)
     next_offset = safe_offset + len(rows)

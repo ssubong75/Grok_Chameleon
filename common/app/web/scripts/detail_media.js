@@ -11,6 +11,7 @@ const localCardPreviewObserver = typeof IntersectionObserver === "function"
   }, { root: null, rootMargin: "800px 0px", threshold: 0.01 })
   : null;
 const missingImagineCardPreviewChecks = new Map();
+const persistentCardPreviewLookupCache = new Map();
 let detailLastMediaAspect = "";
 let detailImageFullscreenListenerBound = false;
 
@@ -640,17 +641,47 @@ async function sha256Text(value) {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-async function existingPersistentCardPreview(rawUrl, kind = "card") {
+function cardPreviewStableIdentity(item) {
+  const metadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
+  const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
+  const accountId = String(item?.account_id || metadata.account_id || imagine.account_id || "").trim();
+  const assetId = String(
+    item?.asset_id
+    || metadata.asset_id
+    || imagine.asset_id
+    || item?.item_id
+    || item?.post_id
+    || imagine.post_id
+    || "",
+  ).trim();
+  const mediaType = String(item?.type || item?.mime_type || item?.mime || "").trim().toLowerCase();
+  const imageVariant = mediaType === "image" || mediaType.startsWith("image/")
+    ? ":image-original-v2"
+    : "";
+  return assetId ? `${accountId}:${assetId}${imageVariant}` : "";
+}
+
+async function lookupPersistentCardPreview(rawUrl, kind = "card", cacheIdentity = "") {
   try {
     const parsed = new URL(String(rawUrl || ""), location.origin);
     if (parsed.origin !== location.origin) return "";
     const previewKind = String(kind || "").toLowerCase() === "thumbnail" ? "thumbnail" : "card";
     if (parsed.pathname === "/api/imagine/remote/media") {
-      const key = await sha256Text(`remote\0${previewKind}\0${parsed.pathname}${parsed.search}`);
-      if (!key) return "";
-      const previewUrl = `/api/card-preview?key=${key}`;
-      const response = await fetch(previewUrl, { method: "HEAD", cache: "force-cache" });
-      return response.ok ? previewUrl : "";
+      const stableIdentity = String(cacheIdentity || "").trim();
+      const keySources = stableIdentity
+        ? [
+          `remote\0${previewKind}\0identity\0${stableIdentity}`,
+          `remote\0${previewKind}\0${parsed.pathname}${parsed.search}`,
+        ]
+        : [`remote\0${previewKind}\0${parsed.pathname}${parsed.search}`];
+      for (const keySource of keySources) {
+        const key = await sha256Text(keySource);
+        if (!key) continue;
+        const previewUrl = `/api/card-preview?key=${key}`;
+        const response = await fetch(previewUrl, { method: "HEAD", cache: "force-cache" });
+        if (response.ok) return previewUrl;
+      }
+      return "";
     }
     if (parsed.pathname !== "/api/media") return "";
     const mediaPath = String(parsed.searchParams.get("path") || "").replace(/^\/+/, "");
@@ -670,6 +701,22 @@ async function existingPersistentCardPreview(rawUrl, kind = "card") {
   }
 }
 
+async function existingPersistentCardPreview(rawUrl, kind = "card", cacheIdentity = "") {
+  const lookupKey = `${kind}\0${cacheIdentity}\0${rawUrl}`;
+  if (persistentCardPreviewLookupCache.has(lookupKey)) {
+    return persistentCardPreviewLookupCache.get(lookupKey);
+  }
+  const lookup = lookupPersistentCardPreview(rawUrl, kind, cacheIdentity);
+  persistentCardPreviewLookupCache.set(lookupKey, lookup);
+  const result = await lookup;
+  if (!result) {
+    persistentCardPreviewLookupCache.delete(lookupKey);
+  } else if (persistentCardPreviewLookupCache.size > 5000) {
+    persistentCardPreviewLookupCache.delete(persistentCardPreviewLookupCache.keys().next().value);
+  }
+  return result;
+}
+
 function isImagineRemoteCardPreview(url) {
   try {
     const parsed = new URL(String(url || ""), location.origin);
@@ -679,51 +726,49 @@ function isImagineRemoteCardPreview(url) {
   }
 }
 
-function resolveLocalCardPreview(url, kind = "card") {
+function resolveLocalCardPreview(url, kind = "card", cacheIdentity = "") {
   const key = String(url || "");
   if (!key) return Promise.resolve("");
   const nativePreview = window.grokChameleonNative?.cardPreview;
-  return existingPersistentCardPreview(key, kind).then((existingPreview) => {
+  return existingPersistentCardPreview(key, kind, cacheIdentity).then((existingPreview) => {
     if (existingPreview) return existingPreview;
     return typeof nativePreview === "function"
-      ? Promise.resolve(nativePreview({ url: key, kind }))
+      ? Promise.resolve(nativePreview({ url: key, kind, cache_identity: cacheIdentity }))
         .then((result) => String(result?.url || key))
         .catch(() => key)
       : key;
   });
 }
 
-function scheduleLocalCardPreview(preview, url, kind = "card") {
+function scheduleLocalCardPreview(preview, url, kind = "card", cacheIdentity = "") {
   if (!preview || !url) return;
   preview.cardPreviewLoad = () => {
     if (preview.dataset.cardPreviewStarted === "true") return;
     preview.dataset.cardPreviewStarted = "true";
     if (isImagineRemoteCardPreview(url)) {
-      existingPersistentCardPreview(url, kind).then((existingPreview) => {
+      existingPersistentCardPreview(url, kind, cacheIdentity).then((existingPreview) => {
         if (!preview.isConnected) return;
         if (existingPreview) {
           preview.src = existingPreview;
           return;
         }
-        preview.src = url;
         const nativePreview = window.grokChameleonNative?.cardPreview;
-        if (typeof nativePreview !== "function") return;
-        Promise.resolve(nativePreview({ url, kind })).then((result) => {
+        if (typeof nativePreview !== "function") {
+          preview.src = url;
+          return;
+        }
+        Promise.resolve(nativePreview({ url, kind, cache_identity: cacheIdentity })).then((result) => {
           const cachedUrl = String(result?.url || "");
-          if (
-            preview.isConnected
-            && cachedUrl
-            && (!preview.complete || preview.naturalWidth <= 0)
-          ) {
-            preview.src = cachedUrl;
-          }
-        }).catch(() => {});
+          if (preview.isConnected) preview.src = cachedUrl || url;
+        }).catch(() => {
+          if (preview.isConnected) preview.src = url;
+        });
       }).catch(() => {
         if (preview.isConnected) preview.src = url;
       });
       return;
     }
-    resolveLocalCardPreview(url, kind).then((resolvedUrl) => {
+    resolveLocalCardPreview(url, kind, cacheIdentity).then((resolvedUrl) => {
       if (preview.isConnected && resolvedUrl) preview.src = resolvedUrl;
     });
   };
@@ -731,12 +776,12 @@ function scheduleLocalCardPreview(preview, url, kind = "card") {
   else preview.cardPreviewLoad();
 }
 
-function scheduleLocalCardVideoPoster(preview, previewUrl, videoUrl) {
+function scheduleLocalCardVideoPoster(preview, previewUrl, videoUrl, cacheIdentity = "") {
   if (!preview || !previewUrl) return;
   preview.cardPreviewLoad = () => {
     if (preview.dataset.cardPreviewStarted === "true") return;
     preview.dataset.cardPreviewStarted = "true";
-    resolveLocalCardPreview(previewUrl, "card").then((resolvedUrl) => {
+    resolveLocalCardPreview(previewUrl, "card", cacheIdentity).then((resolvedUrl) => {
       if (preview.isConnected && resolvedUrl && resolvedUrl !== videoUrl) preview.poster = resolvedUrl;
     });
   };
@@ -823,7 +868,9 @@ function bindCardPreviewLoadState(media, preview, url, options = {}) {
 function appendCardImagePreview(host, media, preview, previewUrl, item) {
   bindCardPreviewLoadState(media, preview, previewUrl, cardPreviewLoadOptions(host, item, previewUrl));
   media.append(preview);
-  if (item?.card_local_preview) scheduleLocalCardPreview(preview, previewUrl);
+  if (item?.card_local_preview) {
+    scheduleLocalCardPreview(preview, previewUrl, "card", cardPreviewStableIdentity(item));
+  }
   else preview.src = previewUrl;
 }
 
@@ -838,6 +885,16 @@ function appendMediaPreview(host, media, item, type) {
   }
   const previewUrl = mediaPreviewUrl({ ...item, type });
   const videoUrl = videoPreviewUrl({ ...item, type });
+  if (videoUrl && previewUrl && item?.card_static_video_preview) {
+    media.classList.add("has_preview", "has_video_preview");
+    const preview = document.createElement("img");
+    preview.className = "card_preview card_video_preview";
+    preview.alt = "";
+    preview.loading = item?.card_lazy_preview ? "lazy" : "eager";
+    preview.decoding = "async";
+    appendCardImagePreview(host, media, preview, previewUrl, item);
+    return;
+  }
   if (videoUrl) {
     media.classList.add("has_preview", "has_video_preview");
     const preview = document.createElement("video");
@@ -850,7 +907,7 @@ function appendMediaPreview(host, media, item, type) {
     bindCardPreviewLoadState(media, preview, videoUrl, cardPreviewLoadOptions(host, item, videoUrl));
     media.append(preview);
     if (previewUrl && item?.card_local_preview) {
-      scheduleLocalCardVideoPoster(preview, previewUrl, videoUrl);
+      scheduleLocalCardVideoPoster(preview, previewUrl, videoUrl, cardPreviewStableIdentity(item));
     }
     bindHoverVideoPreview(host, preview);
     return;

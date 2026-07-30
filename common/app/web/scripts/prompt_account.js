@@ -509,6 +509,12 @@
     library_state.imagineRemoteRequestController?.abort?.();
     library_state.imagineRemoteRequestEpoch = Number(library_state.imagineRemoteRequestEpoch || 0) + 1;
     library_state.imagineRemoteRequestController = null;
+    if (library_state.imagineRemoteSyncTimer) {
+      clearTimeout(library_state.imagineRemoteSyncTimer);
+      library_state.imagineRemoteSyncTimer = 0;
+    }
+    library_state.imagineRemoteSyncTimerResolve?.();
+    library_state.imagineRemoteSyncTimerResolve = null;
     library_state.imagineRemoteSyncPromise = null;
     library_state.imagineRemoteAccountId = String(nextAccountId || "");
     library_state.imagineRemotePosts = [];

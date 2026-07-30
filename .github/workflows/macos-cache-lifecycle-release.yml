@@ -456,8 +456,8 @@ jobs:
           if (-not (Get-Content -Raw -LiteralPath $targetSearchRender).Contains("library_state.indexedSearchBuildHasMore")) { throw "Indexed search paging marker missing." }
           if (-not (Get-Content -Raw -LiteralPath $targetDetailState).Contains("function detailItemPrompt(item)")) { throw "Detail prompt lineage marker missing." }
           $detailMediaText = Get-Content -Raw -LiteralPath $targetDetailMedia
-          if (-not $detailMediaText.Contains('resolveLocalCardPreview(url, kind = "card")')) { throw "Persistent Build preview kind marker missing." }
-          if (-not $detailMediaText.Contains('async function existingPersistentCardPreview(rawUrl, kind = "card")')) { throw "Persistent Build preview reuse marker missing." }
+          if (-not $detailMediaText.Contains('resolveLocalCardPreview(url, kind = "card", cacheIdentity = "")')) { throw "Persistent Build preview kind marker missing." }
+          if (-not $detailMediaText.Contains('async function existingPersistentCardPreview(rawUrl, kind = "card", cacheIdentity = "")')) { throw "Persistent Build preview reuse marker missing." }
           $detailRenderText = Get-Content -Raw -LiteralPath $targetDetailRender
           if (-not $detailRenderText.Contains("const visible = !post?.is_job_post")) { throw "Build detail heart visibility marker missing." }
           if (-not $detailRenderText.Contains('resolveLocalCardPreview(buildPreviewSource, "thumbnail")')) { throw "Build detail thumbnail preview marker missing." }
@@ -479,7 +479,7 @@ jobs:
           if (-not (Get-Content -Raw -LiteralPath $targetUiFeedback).Contains('".workspace.i_detail_open .i_detail_media, .workspace.b_detail_open .b_detail_media"')) { throw "Lucky media center marker missing." }
           if (-not (Get-Content -Raw -LiteralPath $targetAccountStyle).Contains(".lucky_notice.in_detail_media")) { throw "Lucky media position marker missing." }
           if (-not (Get-Content -Raw -LiteralPath $targetDetailMedia).Contains("function scheduleLocalCardVideoPoster(")) { throw "Build video poster scheduling marker missing." }
-          if ((Get-Content -Raw -LiteralPath $targetCardRender).Contains("card_static_video_preview")) { throw "Static Build video card preview regression found." }
+          if (-not (Get-Content -Raw -LiteralPath $targetCardRender).Contains('card_static_video_preview: type === "video" && Boolean(previewUrl)')) { throw "Static Imagine video poster marker missing." }
           if (-not $mainText.Contains("const CARD_PREVIEW_MAX_EDGE = 960;")) { throw "Card preview size dropped below the 512x288 requirement." }
           if ((Test-Path -LiteralPath (Join-Path $root "Resources\Migration")) -or (Test-Path -LiteralPath (Join-Path $root "Migration.exe"))) {
             throw "Migration app remains in the Windows package."
@@ -884,8 +884,8 @@ jobs:
           grep -F 'async function navigateDetailPost(offset)' "$detail_navigation_js"
           grep -F 'library_state.indexedSearchBuildHasMore' "$search_render_js"
           grep -F 'function detailItemPrompt(item)' "$detail_state_js"
-          grep -F 'resolveLocalCardPreview(url, kind = "card")' "$detail_media_js"
-          grep -F 'async function existingPersistentCardPreview(rawUrl, kind = "card")' "$detail_media_js"
+          grep -F 'resolveLocalCardPreview(url, kind = "card", cacheIdentity = "")' "$detail_media_js"
+          grep -F 'async function existingPersistentCardPreview(rawUrl, kind = "card", cacheIdentity = "")' "$detail_media_js"
           grep -F 'const visible = !post?.is_job_post' "$detail_render_js"
           grep -F 'resolveLocalCardPreview(buildPreviewSource, "thumbnail")' "$detail_render_js"
           if grep -F 'Boolean(post?.is_job_post)' "$detail_render_js"; then
@@ -910,10 +910,7 @@ jobs:
           grep -F '".workspace.i_detail_open .i_detail_media, .workspace.b_detail_open .b_detail_media"' "$ui_feedback_js"
           grep -F '.lucky_notice.in_detail_media' "$account_css"
           grep -F 'function scheduleLocalCardVideoPoster(' "$detail_media_js"
-          if grep -F 'card_static_video_preview' "$card_render_js"; then
-            echo 'Static Build video card preview regression found.' >&2
-            exit 1
-          fi
+          grep -F 'card_static_video_preview: type === "video" && Boolean(previewUrl)' "$card_render_js"
           grep -F 'const CARD_PREVIEW_MAX_EDGE = 960;' "$main_js"
           grep -F 'RUNTIME_ROOT = Path(__file__).resolve().parent' "$server_py"
           grep -F 'APP_ROOT = RUNTIME_ROOT.parent' "$server_py"

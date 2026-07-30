@@ -823,6 +823,67 @@ def load_generated_relations(root: Path) -> dict[str, dict]:
     return relations
 
 
+def load_card_view_state_readonly(root: Path, account_key: str) -> dict:
+    result = {
+        "hidden_ids": set(),
+        "relations": {},
+    }
+    path = Path(root) / STATE_DIRECTORY / DATABASE_FILENAME
+    if not path.is_file():
+        return result
+    try:
+        connection = sqlite3.connect(
+            path.resolve().as_uri() + "?mode=ro",
+            uri=True,
+            timeout=2.0,
+        )
+        connection.row_factory = sqlite3.Row
+        try:
+            pending_rows = connection.execute(
+                """
+                SELECT asset_id
+                FROM imagine_pending_actions
+                WHERE account_key = ? AND action = 'delete' AND expires_at > ?
+                """,
+                (str(account_key), time.time()),
+            ).fetchall()
+            exclusion_rows = connection.execute(
+                """
+                SELECT asset_id
+                FROM imagine_local_exclusions
+                WHERE account_key = ?
+                """,
+                (str(account_key),),
+            ).fetchall()
+            relation_rows = connection.execute(
+                """
+                SELECT source_id, relation_json
+                FROM imagine_generated_relations
+                ORDER BY updated_at ASC, source_id ASC
+                """
+            ).fetchall()
+        finally:
+            connection.close()
+    except sqlite3.Error:
+        return result
+    hidden_ids = {
+        str(row["asset_id"])
+        for row in (*pending_rows, *exclusion_rows)
+    }
+    relations: dict[str, dict] = {}
+    for row in relation_rows:
+        try:
+            relation = json.loads(str(row["relation_json"]))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(relation, dict):
+            relations[str(row["source_id"])] = relation
+    return {
+        "hidden_ids": hidden_ids,
+        "relations": relations,
+    }
+
+
 def replace_generated_relations(root: Path, relations: dict[str, dict]) -> None:
     now = time.time()
     with _connect(root, write=True) as connection:

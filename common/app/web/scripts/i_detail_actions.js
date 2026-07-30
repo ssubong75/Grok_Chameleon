@@ -1248,6 +1248,9 @@ async function upscaleImagineSelectedDetailVideo(button = null) {
   };
   if (button) button.disabled = true;
   try {
+    if (typeof prepareActiveImagineBridgeSession === "function") {
+      await prepareActiveImagineBridgeSession({ force: false, silent: true, accountId: payload.account_id });
+    }
     const data = await qApi("/api/imagine/start", payload);
     if (!data?.job) throw new Error("Upscale job was not created.");
     upsertImagineJob(data.job);

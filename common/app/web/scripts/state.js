@@ -177,6 +177,8 @@
       imagineRemoteRequestEpoch: 0,
       imagineRemoteRequestController: null,
       imagineRemoteSyncPromise: null,
+      imagineRemoteSyncTimer: 0,
+      imagineRemoteSyncTimerResolve: null,
       imagineDiscoverPosts: [],
       imagineDiscoverLoaded: false,
       imagineDiscoverLoading: false,
@@ -470,7 +472,20 @@
     );
   }
 
+  let imagineRemoteLibrarySyncMemo = null;
+
   function syncImagineRemotePostsIntoLibrary() {
+    const memo = imagineRemoteLibrarySyncMemo;
+    if (
+      memo
+      && memo.posts === library_state.posts
+      && memo.remotePosts === library_state.imagineRemotePosts
+      && memo.discoverPosts === library_state.imagineDiscoverPosts
+      && memo.unsavedPosts === library_state.imagineUnsavedPosts
+      && memo.searchPosts === library_state.imagineSearchPosts
+    ) {
+      return;
+    }
     const localPosts = (library_state.posts || []).filter((post) => !isTransientImagineRemotePost(post));
     const remotePosts = Array.isArray(library_state.imagineRemotePosts)
       ? (typeof normalizeImagineRemotePosts === "function"
@@ -496,5 +511,13 @@
     library_state.imagineDiscoverPosts = discoverPosts;
     library_state.imagineUnsavedPosts = unsavedPosts;
     library_state.imagineSearchPosts = searchPosts;
-    library_state.posts = [...localPosts, ...remotePosts, ...discoverPosts, ...unsavedPosts, ...searchPosts];
+    const posts = [...localPosts, ...remotePosts, ...discoverPosts, ...unsavedPosts, ...searchPosts];
+    library_state.posts = posts;
+    imagineRemoteLibrarySyncMemo = {
+      posts,
+      remotePosts,
+      discoverPosts,
+      unsavedPosts,
+      searchPosts,
+    };
   }
