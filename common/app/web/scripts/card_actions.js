@@ -204,7 +204,7 @@
     const screenId = screen_state.current_screen;
     const scrollTop = imagineListScrollTopForScreen(screenId);
     const results = await Promise.allSettled(
-      targets.map((target) => deleteImagineRemoteCard(target.post, { hide: false })),
+      targets.map((target) => deleteImagineRemoteCard(target.post)),
     );
     const deletedTargets = [];
     const failures = [];
@@ -216,7 +216,6 @@
           deletedTargets.push({
             ...targets[index],
             items: deletedItems,
-            hiddenItems: result.value?.hiddenItems || [],
             externalOnly: targets[index].items.every((item) => isImagineExternalReferenceItem(targets[index].post, item)),
           });
         }
@@ -225,15 +224,11 @@
         failures.push(result.reason);
       }
     }
-    if (deletedTargets.length) {
-      await hideImagineRemoteItems(deletedTargets.flatMap((target) => target.hiddenItems));
-    }
     for (const target of deletedTargets) {
       removeImagineItemsFromPost(target.post, target.items, {
         keepListScreen: true,
         screenId,
         scrollTop,
-        rememberHiddenItems: target.hiddenItems,
       });
     }
     clearCardSelection();

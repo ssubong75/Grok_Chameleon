@@ -92,15 +92,13 @@ function normalizeBuildAccount(account) {
     status: normalizeAccountStatus(account?.status, account?.expires_at),
     oauth_error: String(account?.oauth_error || ""),
     oauth_error_at: String(account?.oauth_error_at || ""),
+    oauth_error_detail: String(account?.oauth_error_detail || ""),
     auth: auth && typeof auth === "object" ? auth : {},
   };
 }
 
 function isDeniedBuildAccount(account) {
-  return (
-    String(account?.status || "") === "oauth_error"
-    && String(account?.oauth_error || "").toLowerCase() === "access_denied"
-  );
+  return String(account?.status || "") === "oauth_error";
 }
 
 function firstSelectableBuildAccountId(accounts) {
@@ -262,7 +260,7 @@ async function persistAccountFiles() {
   };
   if (library_state.apiReady) {
     const data = await qApi("/api/accounts/save", { build, imagine });
-    applyLibrarySnapshot(data);
+    applyAccountSnapshot(data);
     return;
   }
   await writeAccountFile("build_auth.json", build);

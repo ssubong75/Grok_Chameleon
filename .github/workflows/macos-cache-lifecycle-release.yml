@@ -48,13 +48,12 @@ env:
   COMMON_ACCOUNT_STYLE: common/app/web/styles/account.css
   COMMON_PRELOAD: common/app/electron/preload-bridge.js
   COMMON_SERVER: common/app/runtime/server.py
+  COMMON_IMAGINE_STATE: common/app/runtime/imagine_state.py
   COMMON_IMAGINE_ACCOUNTS: common/app/runtime/imagine_accounts.py
   COMMON_IMAGINE_ROUTES: common/app/runtime/imagine_routes.py
   COMMON_PROMPT_ACCOUNT: common/app/web/scripts/prompt_account.js
   COMMON_ACCOUNT_CORE: common/app/web/scripts/account_core.js
-  COMMON_MIGRATION: common/migration/migration.py
-  WINDOWS_MIGRATION_UI: platform/windows/migration/migration_windows.ps1
-  MACOS_MIGRATION_UI: platform/macos/migration/Migration.swift
+  U_VARIANT_PATCH: variants/u.patch
 
 jobs:
   build-windows:
@@ -64,6 +63,7 @@ jobs:
       RELEASE_TAG: v20260720-041036-win
       INPUT_ZIP: Win_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Win_Grok_Chameleon_a.zip
+      OUTPUT_U_ZIP: Win_Grok_Chameleon_u.zip
       EXPECTED_INPUT_SHA256: 2847a59f03af58b9d8cd9c100a0d31a45d257162b3c83c2defa6f61fdade27e2
 
     steps:
@@ -85,25 +85,26 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $sevenZip = (Get-Command 7z.exe -ErrorAction Stop).Source
-          New-Item -ItemType Directory -Force unpack, output, verify | Out-Null
+          New-Item -ItemType Directory -Force unpack, output, verify, verify-u | Out-Null
           $inputZip = Join-Path $env:GITHUB_WORKSPACE "input\$env:INPUT_ZIP"
           $outputZip = Join-Path $env:GITHUB_WORKSPACE "output\$env:OUTPUT_ZIP"
+          $outputUZip = Join-Path $env:GITHUB_WORKSPACE "output\$env:OUTPUT_U_ZIP"
           $root = Join-Path $env:GITHUB_WORKSPACE "unpack\Grok Chameleon"
+          $uRoot = Join-Path $env:GITHUB_WORKSPACE "unpack\Grok Chameleon U"
           $appRoot = Join-Path $root "Resources\Grok Chameleon\resources\app"
+          $uAppRoot = Join-Path $uRoot "Resources\Grok Chameleon\resources\app"
           $migrationRoot = Join-Path $root "Resources\Migration"
           $state = Join-Path $appRoot "web\scripts\state.js"
           $outerExe = Join-Path $root "Grok Chameleon.exe"
           $migrationExe = Join-Path $root "Migration.exe"
           $innerExe = Join-Path $root "Resources\Grok Chameleon\Grok Chameleon.exe"
-          $sourceMigration = Join-Path $env:GITHUB_WORKSPACE $env:COMMON_MIGRATION
-          $sourceMigrationUi = Join-Path $env:GITHUB_WORKSPACE $env:WINDOWS_MIGRATION_UI
           $windowsSvgArrowPatch = Join-Path $env:GITHUB_WORKSPACE "tools\patch_windows_svg_arrows.py"
-          $targetMigration = Join-Path $migrationRoot "migration.py"
-          $targetMigrationUi = Join-Path $migrationRoot "migration_windows.ps1"
+          $variantPatch = Join-Path $env:GITHUB_WORKSPACE $env:U_VARIANT_PATCH
           $sharedSources = @(
             @{ Name = "main"; Relative = "electron\main.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_MAIN) },
             @{ Name = "preload"; Relative = "electron\preload-bridge.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_PRELOAD) },
             @{ Name = "server"; Relative = "runtime\server.py"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_SERVER) },
+            @{ Name = "imagine_state"; Relative = "runtime\imagine_state.py"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_IMAGINE_STATE) },
             @{ Name = "imagine_accounts"; Relative = "runtime\imagine_accounts.py"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_IMAGINE_ACCOUNTS) },
             @{ Name = "imagine_routes"; Relative = "runtime\imagine_routes.py"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_IMAGINE_ROUTES) },
             @{ Name = "index"; Relative = "web\index.html"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_INDEX) },
@@ -147,6 +148,7 @@ jobs:
           $targetMain = ($sharedSources | Where-Object Name -eq "main").Target
           $targetPreload = ($sharedSources | Where-Object Name -eq "preload").Target
           $targetServer = ($sharedSources | Where-Object Name -eq "server").Target
+          $targetImagineState = ($sharedSources | Where-Object Name -eq "imagine_state").Target
           $targetImagineAccounts = ($sharedSources | Where-Object Name -eq "imagine_accounts").Target
           $targetImagineRoutes = ($sharedSources | Where-Object Name -eq "imagine_routes").Target
           $targetPromptAccount = ($sharedSources | Where-Object Name -eq "prompt_account").Target
@@ -182,24 +184,19 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Windows input ZIP CRC check failed." }
           & $sevenZip x -y "-o$env:GITHUB_WORKSPACE\unpack" $inputZip
           if ($LASTEXITCODE -ne 0) { throw "Windows extraction failed." }
-          foreach ($required in @($sharedSources.Source + $sharedSources.Target + @(
+          foreach ($required in @($sharedSources.Source + @(
             $state,
             $outerExe,
             $migrationExe,
             $innerExe,
-            $sourceMigration,
-            $sourceMigrationUi,
             $windowsSvgArrowPatch,
-            $targetMigration,
-            $targetMigrationUi
+            $variantPatch
           ))) {
             if (-not (Test-Path -LiteralPath $required)) { throw "Missing required file: $required" }
           }
 
-          $fileCount = (Get-ChildItem -LiteralPath $root -Recurse -Force -File).Count
           $exeHashes = @{
             outer = (Get-FileHash -Algorithm SHA256 -LiteralPath $outerExe).Hash
-            migration = (Get-FileHash -Algorithm SHA256 -LiteralPath $migrationExe).Hash
             inner = (Get-FileHash -Algorithm SHA256 -LiteralPath $innerExe).Hash
           }
           $sharedHashes = @{}
@@ -210,15 +207,17 @@ jobs:
               throw "Windows shared source copy mismatch: $($shared.Name)"
             }
           }
-          Copy-Item -Force -LiteralPath $sourceMigration -Destination $targetMigration
-          Copy-Item -Force -LiteralPath $sourceMigrationUi -Destination $targetMigrationUi
-          $migrationHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $sourceMigration).Hash
-          $migrationUiHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $sourceMigrationUi).Hash
-          if ((Get-FileHash -Algorithm SHA256 -LiteralPath $targetMigration).Hash -ne $migrationHash) {
-            throw "Windows migration.py copy mismatch."
-          }
-          if ((Get-FileHash -Algorithm SHA256 -LiteralPath $targetMigrationUi).Hash -ne $migrationUiHash) {
-            throw "Windows migration UI copy mismatch."
+          Remove-Item -Recurse -Force -LiteralPath $migrationRoot
+          Remove-Item -Force -LiteralPath $migrationExe
+          foreach ($portableResidue in @(
+            (Join-Path $root ".library_path.json"),
+            (Join-Path $root "library_path.json"),
+            (Join-Path $root "runtime_data"),
+            (Join-Path $root "sql_data")
+          )) {
+            if (Test-Path -LiteralPath $portableResidue) {
+              Remove-Item -Recurse -Force -LiteralPath $portableResidue
+            }
           }
           python $windowsSvgArrowPatch --app-root $appRoot
           if ($LASTEXITCODE -ne 0) { throw "Windows SVG arrow patch failed." }
@@ -236,55 +235,12 @@ jobs:
           }
           python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" $targetServer
           if ($LASTEXITCODE -ne 0) { throw "Windows server.py syntax check failed." }
+          python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" $targetImagineState
+          if ($LASTEXITCODE -ne 0) { throw "Windows imagine_state.py syntax check failed." }
           python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" $targetImagineAccounts
           if ($LASTEXITCODE -ne 0) { throw "Windows imagine_accounts.py syntax check failed." }
           python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" $targetImagineRoutes
           if ($LASTEXITCODE -ne 0) { throw "Windows imagine_routes.py syntax check failed." }
-          python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" $targetMigration
-          if ($LASTEXITCODE -ne 0) { throw "Windows migration.py syntax check failed." }
-          $tokens = $null
-          $parseErrors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            $targetMigrationUi,
-            [ref]$tokens,
-            [ref]$parseErrors
-          ) | Out-Null
-          if ($parseErrors.Count) {
-            throw "Windows migration UI syntax check failed: $($parseErrors[0].Message)"
-          }
-          $migrationUiText = Get-Content -Raw -LiteralPath $targetMigrationUi
-          foreach ($marker in @(
-            '$title.Text = "Migration"',
-            '$accent = [System.Drawing.Color]::FromArgb(251, 173, 46)',
-            '$importLabel.Text = "+ Import other media"',
-            '$importBtn.Text = "Import"',
-            '"--import-media"',
-            'Select-Folder "Select a folder containing media to import"'
-          )) {
-            if (-not $migrationUiText.Contains($marker)) { throw "Windows migration UI marker missing: $marker" }
-          }
-          $migrationText = Get-Content -Raw -LiteralPath $targetMigration
-          foreach ($marker in @(
-            'def media_files_recursive(path: Path) -> list[Path]:',
-            'def import_external_media(self, media_root: Path) -> dict[str, Any]:',
-            'parser.add_argument("--import-media", action="store_true")'
-          )) {
-            if (-not $migrationText.Contains($marker)) { throw "Windows migration marker missing: $marker" }
-          }
-
-          $migrationTestRoot = Join-Path $env:GITHUB_WORKSPACE "migration-test"
-          $migrationTestSource = Join-Path $migrationTestRoot "source"
-          $migrationTestNested = Join-Path $migrationTestSource "nested"
-          $migrationTestTarget = Join-Path $migrationTestRoot "library"
-          New-Item -ItemType Directory -Force $migrationTestNested, $migrationTestTarget | Out-Null
-          Set-Content -LiteralPath (Join-Path $migrationTestSource "first.png") -Value "first" -NoNewline
-          Set-Content -LiteralPath (Join-Path $migrationTestNested "second.mp4") -Value "second" -NoNewline
-          python $targetMigration --import-media --source $migrationTestSource --target $migrationTestTarget
-          if ($LASTEXITCODE -ne 0) { throw "Windows migration import smoke test failed." }
-          $importedPosts = @(Get-ChildItem -LiteralPath (Join-Path $migrationTestTarget "created") -Recurse -File -Filter "post.json")
-          if ($importedPosts.Count -ne 2) { throw "Windows migration imported post count mismatch." }
-          $migrationLibrary = Get-Content -Raw -LiteralPath (Join-Path $migrationTestTarget "library.json") | ConvertFrom-Json
-          if (@($migrationLibrary.posts).Count -ne 2) { throw "Windows migration library post count mismatch." }
 
           $composerText = Get-Content -Raw -LiteralPath $targetComposer
           foreach ($marker in @(
@@ -317,6 +273,9 @@ jobs:
           }
           $serverText = Get-Content -Raw -LiteralPath $targetServer
           foreach ($marker in @(
+            'import imagine_state',
+            'def normalize_json_unicode(value):',
+            '"database": "sql_data/state.sqlite3"',
             'relation_recovery_action = action in {"i2i", "i2v", "t2v", "extend"}',
             'events, bridge_parent_ids, bridge_baseline_ids, canonical_container_id = native_bridge_fetch_events(',
             'def imagine_generated_relation_baseline_ids(root: Path, source_post_path: str, expected_type: str) -> set[str]:',
@@ -338,6 +297,15 @@ jobs:
           )) {
             if (-not $serverText.Contains($marker)) { throw "Windows relation recovery marker missing: $marker" }
           }
+          $imagineStateText = Get-Content -Raw -LiteralPath $targetImagineState
+          foreach ($marker in @(
+            'STATE_DIRECTORY = "sql_data"',
+            'unicodedata.normalize("NFC"',
+            'CREATE TABLE IF NOT EXISTS account_registry',
+            'def sync_snapshot(root: Path) -> bool:'
+          )) {
+            if (-not $imagineStateText.Contains($marker)) { throw "Windows SQLite state marker missing: $marker" }
+          }
           foreach ($marker in @(
             'ACCOUNT_TIER_SORT_ORDER = {"heavy": 0, "super": 1, "free": 2}',
             'def sort_accounts_by_priority(accounts: list[dict], active_id: str = "") -> list[dict]:',
@@ -345,7 +313,7 @@ jobs:
             'write_build_auth(root, store, preserve_order=True)',
             'def oauth_browser_error(target: dict | None) -> str:',
             'def build_account_is_denied(account: dict | None) -> bool:',
-            'denied_build_id = account_id(',
+            'failed_build_id = account_id(',
             'verify_imagine_saved_access(normalize_imagine_account({'
           )) {
             if (-not $serverText.Contains($marker)) { throw "Windows account ordering marker missing: $marker" }
@@ -361,7 +329,7 @@ jobs:
             'row.draggable = true;',
             'if (targetIndex >= 0 && from < targetIndex) to += 1;',
             'if (status === "denied") return "Denied";',
-            'Build account access denied.'
+            'if (provider === "build" && status === "denied") {'
           )) {
             if (-not $promptAccountText.Contains($marker)) { throw "Windows account card marker missing: $marker" }
           }
@@ -377,6 +345,9 @@ jobs:
             "payload.grokChameleonConversationId",
             'process.platform === "darwin"',
             "process.resourcesPath",
+            'const LIBRARY_POINTER_PATH = path.join(PORTABLE_ROOT, ".library_path.json");',
+            '? path.join(SELECTED_LIBRARY_ROOT, "runtime_data")',
+            'app.setPath("userData", RUNTIME_DIR);',
             "function verifiedLibraryCardPreviewCacheDir(info = {})",
             'function verifiedLibraryBuildPreviewDir(info = {}, kind = "card")',
             'const expectedCacheDir = path.resolve(resolvedLibraryRoot, "cache", "card-previews");',
@@ -444,7 +415,44 @@ jobs:
           if (-not (Get-Content -Raw -LiteralPath $targetDetailMedia).Contains("function scheduleLocalCardVideoPoster(")) { throw "Build video poster scheduling marker missing." }
           if ((Get-Content -Raw -LiteralPath $targetCardRender).Contains("card_static_video_preview")) { throw "Static Build video card preview regression found." }
           if (-not $mainText.Contains("const CARD_PREVIEW_MAX_EDGE = 960;")) { throw "Card preview size dropped below the 512x288 requirement." }
-          $metadata = Get-ChildItem -LiteralPath $root -Recurse -Force | Where-Object {
+          if ((Test-Path -LiteralPath $migrationRoot) -or (Test-Path -LiteralPath $migrationExe)) {
+            throw "Migration app remains in the Windows package."
+          }
+          foreach ($portableResidue in @(".library_path.json", "library_path.json", "runtime_data", "sql_data")) {
+            if (Test-Path -LiteralPath (Join-Path $root $portableResidue)) {
+              throw "Portable runtime residue remains in the Windows package: $portableResidue"
+            }
+          }
+
+          Copy-Item -Recurse -Force -LiteralPath $root -Destination $uRoot
+          $uAppRelative = "unpack/Grok Chameleon U/Resources/Grok Chameleon/resources/app"
+          git apply --check --ignore-space-change --unsafe-paths "--directory=$uAppRelative" $variantPatch
+          if ($LASTEXITCODE -ne 0) { throw "Windows U variant patch check failed." }
+          git apply --ignore-space-change --unsafe-paths "--directory=$uAppRelative" $variantPatch
+          if ($LASTEXITCODE -ne 0) { throw "Windows U variant patch failed." }
+          $uSharedHashes = @{}
+          foreach ($shared in $sharedSources) {
+            $uTarget = Join-Path $uAppRoot $shared.Relative
+            if ($shared.Relative.EndsWith(".js")) {
+              node --check $uTarget
+              if ($LASTEXITCODE -ne 0) { throw "Windows U JavaScript syntax check failed: $($shared.Relative)" }
+            }
+            $uSharedHashes[$shared.Name] = (Get-FileHash -Algorithm SHA256 -LiteralPath $uTarget).Hash
+          }
+          foreach ($pythonRelative in @(
+            "runtime\server.py",
+            "runtime\imagine_state.py",
+            "runtime\imagine_accounts.py",
+            "runtime\imagine_routes.py"
+          )) {
+            $uPython = Join-Path $uAppRoot $pythonRelative
+            python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" $uPython
+            if ($LASTEXITCODE -ne 0) { throw "Windows U Python syntax check failed: $pythonRelative" }
+          }
+          $fileCount = (Get-ChildItem -LiteralPath $root -Recurse -Force -File).Count
+          $uFileCount = (Get-ChildItem -LiteralPath $uRoot -Recurse -Force -File).Count
+          if ($uFileCount -ne $fileCount) { throw "Windows A/U file count mismatch." }
+          $metadata = Get-ChildItem -LiteralPath @($root, $uRoot) -Recurse -Force | Where-Object {
             $_.Name -eq "__MACOSX" -or $_.Name -like "._*" -or $_.Name -eq ".DS_Store"
           }
           if ($metadata) { throw "macOS metadata exists in the Windows package." }
@@ -453,40 +461,46 @@ jobs:
           try {
             & $sevenZip a -tzip -mx=7 $outputZip ".\Grok Chameleon"
             if ($LASTEXITCODE -ne 0) { throw "Windows ZIP creation failed." }
+            & $sevenZip a -tzip -mx=7 $outputUZip ".\Grok Chameleon U"
+            if ($LASTEXITCODE -ne 0) { throw "Windows U ZIP creation failed." }
           } finally {
             Pop-Location
           }
           & $sevenZip t $outputZip
           if ($LASTEXITCODE -ne 0) { throw "Windows output ZIP CRC check failed." }
+          & $sevenZip t $outputUZip
+          if ($LASTEXITCODE -ne 0) { throw "Windows U output ZIP CRC check failed." }
           & $sevenZip x -y "-o$env:GITHUB_WORKSPACE\verify" $outputZip
           if ($LASTEXITCODE -ne 0) { throw "Windows verification extraction failed." }
+          & $sevenZip x -y "-o$env:GITHUB_WORKSPACE\verify-u" $outputUZip
+          if ($LASTEXITCODE -ne 0) { throw "Windows U verification extraction failed." }
 
           $verifiedRoot = Join-Path $env:GITHUB_WORKSPACE "verify\Grok Chameleon"
           $verifiedAppRoot = Join-Path $verifiedRoot "Resources\Grok Chameleon\resources\app"
-          $verifiedMigration = Join-Path $verifiedRoot "Resources\Migration\migration.py"
-          $verifiedMigrationUi = Join-Path $verifiedRoot "Resources\Migration\migration_windows.ps1"
+          $verifiedURoot = Join-Path $env:GITHUB_WORKSPACE "verify-u\Grok Chameleon U"
+          $verifiedUAppRoot = Join-Path $verifiedURoot "Resources\Grok Chameleon\resources\app"
           if ((Get-ChildItem -LiteralPath $verifiedRoot -Recurse -Force -File).Count -ne $fileCount) {
             throw "Windows file count changed during packaging."
+          }
+          if ((Get-ChildItem -LiteralPath $verifiedURoot -Recurse -Force -File).Count -ne $uFileCount) {
+            throw "Windows U file count changed during packaging."
           }
           foreach ($shared in $sharedSources) {
             $verifiedPath = Join-Path $verifiedAppRoot $shared.Relative
             if ((Get-FileHash -Algorithm SHA256 -LiteralPath $verifiedPath).Hash -ne $sharedHashes[$shared.Name]) {
               throw "Windows packaged shared source mismatch: $($shared.Name)"
             }
+            $verifiedUPath = Join-Path $verifiedUAppRoot $shared.Relative
+            if ((Get-FileHash -Algorithm SHA256 -LiteralPath $verifiedUPath).Hash -ne $uSharedHashes[$shared.Name]) {
+              throw "Windows U packaged shared source mismatch: $($shared.Name)"
+            }
           }
           $verifiedExeHashes = @{
             outer = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $verifiedRoot "Grok Chameleon.exe")).Hash
-            migration = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $verifiedRoot "Migration.exe")).Hash
             inner = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $verifiedRoot "Resources\Grok Chameleon\Grok Chameleon.exe")).Hash
           }
-          foreach ($key in @("outer", "migration", "inner")) {
+          foreach ($key in @("outer", "inner")) {
             if ($verifiedExeHashes[$key] -ne $exeHashes[$key]) { throw "Windows executable changed: $key" }
-          }
-          if ((Get-FileHash -Algorithm SHA256 -LiteralPath $verifiedMigration).Hash -ne $migrationHash) {
-            throw "Packaged Windows migration.py mismatch."
-          }
-          if ((Get-FileHash -Algorithm SHA256 -LiteralPath $verifiedMigrationUi).Hash -ne $migrationUiHash) {
-            throw "Packaged Windows migration UI mismatch."
           }
           foreach ($javascript in $sharedSources | Where-Object { $_.Relative.EndsWith(".js") }) {
             node --check (Join-Path $verifiedAppRoot $javascript.Relative)
@@ -494,17 +508,22 @@ jobs:
           }
           python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" (Join-Path $verifiedAppRoot "runtime\server.py")
           if ($LASTEXITCODE -ne 0) { throw "Packaged Windows server syntax check failed." }
+          python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" (Join-Path $verifiedAppRoot "runtime\imagine_state.py")
+          if ($LASTEXITCODE -ne 0) { throw "Packaged Windows imagine_state syntax check failed." }
           python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" (Join-Path $verifiedAppRoot "runtime\imagine_accounts.py")
           if ($LASTEXITCODE -ne 0) { throw "Packaged Windows imagine_accounts syntax check failed." }
           python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" (Join-Path $verifiedAppRoot "runtime\imagine_routes.py")
           if ($LASTEXITCODE -ne 0) { throw "Packaged Windows imagine_routes syntax check failed." }
           "windows-output-sha256=" + (Get-FileHash -Algorithm SHA256 -LiteralPath $outputZip).Hash.ToLowerInvariant()
+          "windows-u-output-sha256=" + (Get-FileHash -Algorithm SHA256 -LiteralPath $outputUZip).Hash.ToLowerInvariant()
 
       - name: Retain the verified Windows build
         uses: actions/upload-artifact@v4
         with:
           name: windows-common-source-build
-          path: output/Win_Grok_Chameleon_a.zip
+          path: |
+            output/Win_Grok_Chameleon_a.zip
+            output/Win_Grok_Chameleon_u.zip
           if-no-files-found: error
           retention-days: 3
 
@@ -515,6 +534,7 @@ jobs:
       RELEASE_TAG: v20260720-042100-mac
       INPUT_ZIP: Mac_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Mac_Grok_Chameleon_a.zip
+      OUTPUT_U_ZIP: Mac_Grok_Chameleon_u.zip
       EXPECTED_INPUT_SHA256: 108844671de60513c113e7e9b249a3bb4f117d177d9f815d7c996fd42999bdee
 
     steps:
@@ -540,17 +560,19 @@ jobs:
           mkdir -p unpack output verify
           ditto -x -k "input/$INPUT_ZIP" unpack
           root="$PWD/unpack/Grok Chameleon"
+          u_root="$PWD/unpack/Grok Chameleon U"
           main_app="$root/Grok Chameleon.app"
+          u_main_app="$u_root/Grok Chameleon.app"
           migration_app="$root/Migration.app"
           app_root="$main_app/Contents/Resources/app"
+          u_app_root="$u_main_app/Contents/Resources/app"
           common_root="$GITHUB_WORKSPACE/common/app"
-          common_migration="$GITHUB_WORKSPACE/$COMMON_MIGRATION"
-          migration_swift="$GITHUB_WORKSPACE/$MACOS_MIGRATION_UI"
-          migration_py="$migration_app/Contents/Resources/migration.py"
+          variant_patch="$GITHUB_WORKSPACE/$U_VARIANT_PATCH"
           shared_relatives=(
             electron/main.js
             electron/preload-bridge.js
             runtime/server.py
+            runtime/imagine_state.py
             runtime/imagine_accounts.py
             runtime/imagine_routes.py
             web/index.html
@@ -592,6 +614,7 @@ jobs:
           main_js="$app_root/electron/main.js"
           preload_js="$app_root/electron/preload-bridge.js"
           server_py="$app_root/runtime/server.py"
+          imagine_state_py="$app_root/runtime/imagine_state.py"
           imagine_accounts_py="$app_root/runtime/imagine_accounts.py"
           imagine_routes_py="$app_root/runtime/imagine_routes.py"
           prompt_account_js="$app_root/web/scripts/prompt_account.js"
@@ -619,17 +642,12 @@ jobs:
           ui_feedback_js="$app_root/web/scripts/ui_feedback.js"
           account_css="$app_root/web/styles/account.css"
           main_exec="$main_app/Contents/MacOS/Grok Chameleon"
-          migration_exec="$migration_app/Contents/MacOS/Migration"
 
           for relative in "${shared_relatives[@]}"; do
             test -f "$common_root/$relative"
-            test -f "$app_root/$relative"
           done
           test -x "$main_exec"
-          test -x "$migration_exec"
-          test -f "$common_migration"
-          test -f "$migration_swift"
-          test -f "$migration_py"
+          test -f "$variant_patch"
           test -L "$main_app/Contents/Frameworks/Electron Framework.framework/Versions/Current"
           test -L "$main_app/Contents/Frameworks/Electron Framework.framework/Electron Framework"
           find "$app_root/vendor/python" -type f -name '*darwin.so' -print -quit | grep -q .
@@ -639,25 +657,21 @@ jobs:
           fi
 
           for relative in "${shared_relatives[@]}"; do
+            mkdir -p "$(dirname "$app_root/$relative")"
             cp "$common_root/$relative" "$app_root/$relative"
             cmp "$common_root/$relative" "$app_root/$relative"
             if [[ "$relative" == *.js ]]; then
               node --check "$app_root/$relative"
             fi
           done
-          cp "$common_migration" "$migration_py"
-          cmp "$common_migration" "$migration_py"
-          xcrun swiftc \
-            -parse-as-library \
-            -O \
-            -target arm64-apple-macos13.0 \
-            "$migration_swift" \
-            -o "$migration_exec"
-          chmod 755 "$migration_exec"
-          file "$migration_exec" | grep -F 'arm64'
-          strings "$migration_exec" | grep -Fx 'Migration'
-          strings "$migration_exec" | grep -Fx '+ Import other media'
           python3 - "$server_py" <<'PY'
+          import ast
+          import pathlib
+          import sys
+          path = pathlib.Path(sys.argv[1])
+          ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+          PY
+          python3 - "$imagine_state_py" <<'PY'
           import ast
           import pathlib
           import sys
@@ -693,6 +707,13 @@ jobs:
             echo 'Mac eight-second video handoff guard is missing.' >&2
             exit 1
           fi
+          grep -F 'import imagine_state' "$server_py"
+          grep -F 'def normalize_json_unicode(value):' "$server_py"
+          grep -F '"database": "sql_data/state.sqlite3"' "$server_py"
+          grep -F 'STATE_DIRECTORY = "sql_data"' "$imagine_state_py"
+          grep -F 'unicodedata.normalize("NFC"' "$imagine_state_py"
+          grep -F 'CREATE TABLE IF NOT EXISTS account_registry' "$imagine_state_py"
+          grep -F 'def sync_snapshot(root: Path) -> bool:' "$imagine_state_py"
           grep -F 'relation_recovery_action = action in {"i2i", "i2v", "t2v", "extend"}' "$server_py"
           grep -F 'events, bridge_parent_ids, bridge_baseline_ids, canonical_container_id = native_bridge_fetch_events(' "$server_py"
           grep -F 'def imagine_generated_relation_baseline_ids(root: Path, source_post_path: str, expected_type: str) -> set[str]:' "$server_py"
@@ -716,7 +737,7 @@ jobs:
           grep -F 'write_build_auth(root, store, preserve_order=True)' "$server_py"
           grep -F 'def oauth_browser_error(target: dict | None) -> str:' "$server_py"
           grep -F 'def build_account_is_denied(account: dict | None) -> bool:' "$server_py"
-          grep -F 'denied_build_id = account_id(' "$server_py"
+          grep -F 'failed_build_id = account_id(' "$server_py"
           grep -F 'verify_imagine_saved_access(normalize_imagine_account({' "$server_py"
           if grep -E 'supergrokheavy|freecreditswithsupergrok|supergrok포함무료크레딧' "$imagine_accounts_py"; then
             echo 'Account tier marketing fallback remains.' >&2
@@ -727,7 +748,7 @@ jobs:
           grep -F 'row.draggable = true;' "$prompt_account_js"
           grep -F 'if (targetIndex >= 0 && from < targetIndex) to += 1;' "$prompt_account_js"
           grep -F 'if (status === "denied") return "Denied";' "$prompt_account_js"
-          grep -F 'Build account access denied.' "$prompt_account_js"
+          grep -F 'if (provider === "build" && status === "denied") {' "$prompt_account_js"
           grep -F 'function isDeniedBuildAccount(account)' "$account_core_js"
           grep -F 'function firstSelectableBuildAccountId(accounts)' "$account_core_js"
           grep -F 'storedBackTarget.scrollTop = scrollTop' "$card_render_js"
@@ -794,6 +815,9 @@ jobs:
           grep -F 'process.platform === "darwin"' "$main_js"
           grep -F 'process.resourcesPath' "$main_js"
           grep -F 'path.join(resourceRoot, "Python", "bin", "python3")' "$main_js"
+          grep -F 'const LIBRARY_POINTER_PATH = path.join(PORTABLE_ROOT, ".library_path.json");' "$main_js"
+          grep -F '? path.join(SELECTED_LIBRARY_ROOT, "runtime_data")' "$main_js"
+          grep -F 'app.setPath("userData", RUNTIME_DIR);' "$main_js"
           grep -F 'function verifiedLibraryCardPreviewCacheDir(info = {})' "$main_js"
           grep -F 'function verifiedLibraryBuildPreviewDir(info = {}, kind = "card")' "$main_js"
           grep -F 'const expectedCacheDir = path.resolve(resolvedLibraryRoot, "cache", "card-previews");' "$main_js"
@@ -801,34 +825,43 @@ jobs:
           grep -F 'await clearCurrentCardPreviewCache("startup");' "$main_js"
           grep -F 'app.on("activate"' "$main_js"
           grep -F 'app.on("window-all-closed"' "$main_js"
-          python3 - "$migration_py" <<'PY'
+          rm -rf \
+            "$migration_app" \
+            "$root/.library_path.json" \
+            "$root/library_path.json" \
+            "$root/runtime_data" \
+            "$root/sql_data"
+          test ! -e "$migration_app"
+          test ! -e "$root/.library_path.json"
+          test ! -e "$root/library_path.json"
+          test ! -e "$root/runtime_data"
+          test ! -e "$root/sql_data"
+          ditto "$root" "$u_root"
+          u_app_relative="unpack/Grok Chameleon U/Grok Chameleon.app/Contents/Resources/app"
+          git apply --check --unsafe-paths --directory="$u_app_relative" "$variant_patch"
+          git apply --unsafe-paths --directory="$u_app_relative" "$variant_patch"
+          for relative in "${shared_relatives[@]}"; do
+            test -f "$u_app_root/$relative"
+            if [[ "$relative" == *.js ]]; then
+              node --check "$u_app_root/$relative"
+            fi
+          done
+          for relative in runtime/server.py runtime/imagine_state.py runtime/imagine_accounts.py runtime/imagine_routes.py; do
+            python3 - "$u_app_root/$relative" <<'PY'
           import ast
           import pathlib
           import sys
           path = pathlib.Path(sys.argv[1])
           ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
           PY
-          grep -F 'def media_files_recursive(path: Path) -> list[Path]:' "$migration_py"
-          grep -F 'def import_external_media(self, media_root: Path) -> dict[str, Any]:' "$migration_py"
-          grep -F 'parser.add_argument("--import-media", action="store_true")' "$migration_py"
-
-          migration_test="$(mktemp -d)"
-          mkdir -p "$migration_test/source/nested" "$migration_test/library"
-          printf first > "$migration_test/source/first.png"
-          printf second > "$migration_test/source/nested/second.mp4"
-          PYTHONDONTWRITEBYTECODE=1 python3 "$migration_py" \
-            --import-media \
-            --source "$migration_test/source" \
-            --target "$migration_test/library"
-          test "$(find "$migration_test/library/created" -type f -name post.json | wc -l | tr -d ' ')" = 2
-          python3 - "$migration_test/library/library.json" <<'PY'
-          import json
-          import pathlib
-          import sys
-          library = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-          if len(library.get("posts") or []) != 2:
-              raise SystemExit("Mac migration library post count mismatch.")
-          PY
+          done
+          test -x "$u_main_app/Contents/MacOS/Grok Chameleon"
+          test -L "$u_main_app/Contents/Frameworks/Electron Framework.framework/Versions/Current"
+          test -L "$u_main_app/Contents/Frameworks/Electron Framework.framework/Electron Framework"
+          if find "$root" "$u_root" \( -name '__MACOSX' -o -name '._*' -o -name '.DS_Store' \) -print | grep -q .; then
+            echo 'AppleDouble or Finder metadata found after A/U assembly.' >&2
+            exit 1
+          fi
 
       - name: Sign, package, and verify Mac without ZIP -47 regressions
         shell: bash
@@ -836,14 +869,17 @@ jobs:
           set -euo pipefail
           export COPYFILE_DISABLE=1
           root="$PWD/unpack/Grok Chameleon"
+          u_root="$PWD/unpack/Grok Chameleon U"
           main_app="$root/Grok Chameleon.app"
-          migration_app="$root/Migration.app"
+          u_main_app="$u_root/Grok Chameleon.app"
           app_root="$main_app/Contents/Resources/app"
+          u_app_root="$u_main_app/Contents/Resources/app"
           common_root="$GITHUB_WORKSPACE/common/app"
           shared_relatives=(
             electron/main.js
             electron/preload-bridge.js
             runtime/server.py
+            runtime/imagine_state.py
             runtime/imagine_accounts.py
             runtime/imagine_routes.py
             web/index.html
@@ -852,7 +888,9 @@ jobs:
             web/scripts/b_composer_submit.js
             web/scripts/b_source_render.js
             web/scripts/sidebar_events.js
+            web/styles/sidebar.css
             web/scripts/collection_events.js
+            web/styles/collection.css
             web/styles/main.css
             web/scripts/card_render.js
             web/scripts/card_actions.js
@@ -870,58 +908,84 @@ jobs:
             web/scripts/detail_render.js
             web/styles/detail.css
             web/scripts/i_source_render.js
+            web/scripts/imagine_main.js
+            web/scripts/render.js
             web/scripts/collection_actions.js
             web/scripts/prompt_events.js
             web/scripts/prompt_account.js
             web/scripts/account_core.js
+            web/scripts/ui_feedback.js
+            web/styles/account.css
           )
           if find "$root" -type d -name '__pycache__' -print | grep -q .; then
             echo 'Python cache found before Mac packaging.' >&2
             exit 1
           fi
-          xattr -cr "$root"
-          if xattr -lr "$root" 2>/dev/null | grep -q 'com.apple.quarantine'; then
+          if find "$u_root" -type d -name '__pycache__' -print | grep -q .; then
+            echo 'Python cache found in U before Mac packaging.' >&2
+            exit 1
+          fi
+          xattr -cr "$root" "$u_root"
+          if xattr -lr "$root" "$u_root" 2>/dev/null | grep -q 'com.apple.quarantine'; then
             echo 'Quarantine attribute remains before Mac signing.' >&2
             exit 1
           fi
-          codesign --force --sign - --timestamp=none "$migration_app"
           codesign --force --sign - --timestamp=none "$main_app"
-          codesign --verify --deep --strict --verbose=4 "$migration_app"
+          codesign --force --sign - --timestamp=none "$u_main_app"
           codesign --verify --deep --strict --verbose=4 "$main_app"
-          plutil -lint "$migration_app/Contents/Info.plist"
+          codesign --verify --deep --strict --verbose=4 "$u_main_app"
           plutil -lint "$main_app/Contents/Info.plist"
-          xattr -cr "$root"
+          plutil -lint "$u_main_app/Contents/Info.plist"
+          xattr -cr "$root" "$u_root"
           ditto -c -k --keepParent --norsrc --noextattr --noacl --noqtn "$root" "output/$OUTPUT_ZIP"
-          unzip -t "output/$OUTPUT_ZIP"
-          if zipinfo -1 "output/$OUTPUT_ZIP" | grep -E '(^|/)(__MACOSX|\._|\.DS_Store)(/|$)'; then
+          ditto -c -k --keepParent --norsrc --noextattr --noacl --noqtn "$u_root" "output/$OUTPUT_U_ZIP"
+          unzip -t "output/$OUTPUT_ZIP" >/dev/null
+          unzip -t "output/$OUTPUT_U_ZIP" >/dev/null
+          if {
+            zipinfo -1 "output/$OUTPUT_ZIP"
+            zipinfo -1 "output/$OUTPUT_U_ZIP"
+          } | grep -E '(^|/)(__MACOSX|\._|\.DS_Store)(/|$)'; then
             echo 'AppleDouble or Finder metadata found in Mac output.' >&2
             exit 1
           fi
 
-          ditto -x -k "output/$OUTPUT_ZIP" verify
-          verified_root="$PWD/verify/Grok Chameleon"
+          mkdir -p verify/a verify/u
+          ditto -x -k "output/$OUTPUT_ZIP" verify/a
+          ditto -x -k "output/$OUTPUT_U_ZIP" verify/u
+          verified_root="$PWD/verify/a/Grok Chameleon"
+          verified_u_root="$PWD/verify/u/Grok Chameleon U"
           verified_main="$verified_root/Grok Chameleon.app"
-          verified_migration="$verified_root/Migration.app"
+          verified_u_main="$verified_u_root/Grok Chameleon.app"
           verified_app="$verified_main/Contents/Resources/app"
+          verified_u_app="$verified_u_main/Contents/Resources/app"
           verified_server="$verified_app/runtime/server.py"
+          verified_imagine_state="$verified_app/runtime/imagine_state.py"
           verified_imagine_accounts="$verified_app/runtime/imagine_accounts.py"
           verified_imagine_routes="$verified_app/runtime/imagine_routes.py"
-          verified_migration_py="$verified_migration/Contents/Resources/migration.py"
           test -x "$verified_main/Contents/MacOS/Grok Chameleon"
-          test -x "$verified_migration/Contents/MacOS/Migration"
-          file "$verified_migration/Contents/MacOS/Migration" | grep -F 'arm64'
-          cmp "$GITHUB_WORKSPACE/$COMMON_MIGRATION" "$verified_migration_py"
+          test -x "$verified_u_main/Contents/MacOS/Grok Chameleon"
           test -L "$verified_main/Contents/Frameworks/Electron Framework.framework/Versions/Current"
           test -L "$verified_main/Contents/Frameworks/Electron Framework.framework/Electron Framework"
+          test -L "$verified_u_main/Contents/Frameworks/Electron Framework.framework/Versions/Current"
+          test -L "$verified_u_main/Contents/Frameworks/Electron Framework.framework/Electron Framework"
           codesign --verify --deep --strict --verbose=4 "$verified_main"
-          codesign --verify --deep --strict --verbose=4 "$verified_migration"
+          codesign --verify --deep --strict --verbose=4 "$verified_u_main"
           for relative in "${shared_relatives[@]}"; do
             cmp "$common_root/$relative" "$verified_app/$relative"
+            cmp "$u_app_root/$relative" "$verified_u_app/$relative"
             if [[ "$relative" == *.js ]]; then
               node --check "$verified_app/$relative"
+              node --check "$verified_u_app/$relative"
             fi
           done
           python3 - "$verified_server" <<'PY'
+          import ast
+          import pathlib
+          import sys
+          path = pathlib.Path(sys.argv[1])
+          ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+          PY
+          python3 - "$verified_imagine_state" <<'PY'
           import ast
           import pathlib
           import sys
@@ -942,22 +1006,26 @@ jobs:
           path = pathlib.Path(sys.argv[1])
           ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
           PY
-          if find "$verified_root" \( -name '__MACOSX' -o -name '._*' -o -name '.DS_Store' -o -name '__pycache__' \) -print | grep -q .; then
+          if find "$verified_root" "$verified_u_root" \( -name '__MACOSX' -o -name '._*' -o -name '.DS_Store' -o -name '__pycache__' \) -print | grep -q .; then
             echo 'Forbidden metadata found after final Mac extraction.' >&2
             exit 1
           fi
-          if xattr -lr "$verified_root" 2>/dev/null | grep -q 'com.apple.quarantine'; then
+          if xattr -lr "$verified_root" "$verified_u_root" 2>/dev/null | grep -q 'com.apple.quarantine'; then
             echo 'Quarantine attribute found after final Mac extraction.' >&2
             exit 1
           fi
           ELECTRON_RUN_AS_NODE=1 "$verified_main/Contents/MacOS/Grok Chameleon" -e 'console.log("MAC_ELECTRON_OK")'
+          ELECTRON_RUN_AS_NODE=1 "$verified_u_main/Contents/MacOS/Grok Chameleon" -e 'console.log("MAC_U_ELECTRON_OK")'
           shasum -a 256 "output/$OUTPUT_ZIP"
+          shasum -a 256 "output/$OUTPUT_U_ZIP"
 
       - name: Retain the verified Mac build
         uses: actions/upload-artifact@v4
         with:
           name: mac-common-source-build
-          path: output/Mac_Grok_Chameleon_a.zip
+          path: |
+            output/Mac_Grok_Chameleon_a.zip
+            output/Mac_Grok_Chameleon_u.zip
           if-no-files-found: error
           retention-days: 3
 
@@ -988,38 +1056,70 @@ jobs:
           WIN_TAG: v20260720-041036-win
           MAC_TAG: v20260720-042100-mac
           WIN_ZIP: Win_Grok_Chameleon_a.zip
+          WIN_U_ZIP: Win_Grok_Chameleon_u.zip
           MAC_ZIP: Mac_Grok_Chameleon_a.zip
+          MAC_U_ZIP: Mac_Grok_Chameleon_u.zip
           WIN_INPUT_SHA256: 2847a59f03af58b9d8cd9c100a0d31a45d257162b3c83c2defa6f61fdade27e2
           MAC_INPUT_SHA256: 108844671de60513c113e7e9b249a3bb4f117d177d9f815d7c996fd42999bdee
         run: |
           set -euo pipefail
-          mkdir -p current/win current/mac backups
+          mkdir -p current/win current/win-u current/mac current/mac-u backups
           gh release download "$WIN_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$WIN_ZIP" --dir current/win
           gh release download "$MAC_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$MAC_ZIP" --dir current/mac
+          gh release download "$WIN_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$WIN_U_ZIP" --dir current/win-u || true
+          gh release download "$MAC_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$MAC_U_ZIP" --dir current/mac-u || true
           test "$(sha256sum "current/win/$WIN_ZIP" | awk '{print $1}')" = "$WIN_INPUT_SHA256"
           test "$(sha256sum "current/mac/$MAC_ZIP" | awk '{print $1}')" = "$MAC_INPUT_SHA256"
           short_sha="$(printf '%s' "$GITHUB_SHA" | cut -c1-12)"
-          win_backup="Win_Grok_Chameleon_a.previous-before-imagine-saved-i2v-ui-$short_sha.zip"
-          mac_backup="Mac_Grok_Chameleon_a.previous-before-imagine-saved-i2v-ui-$short_sha.zip"
+          win_backup="Win_Grok_Chameleon_a.previous-before-portable-sqlite-u-$short_sha.zip"
+          mac_backup="Mac_Grok_Chameleon_a.previous-before-portable-sqlite-u-$short_sha.zip"
           cp "current/win/$WIN_ZIP" "backups/$win_backup"
           cp "current/mac/$MAC_ZIP" "backups/$mac_backup"
           gh release upload "$WIN_TAG" "backups/$win_backup" --repo "$GITHUB_REPOSITORY"
           gh release upload "$MAC_TAG" "backups/$mac_backup" --repo "$GITHUB_REPOSITORY"
+          if test -f "current/win-u/$WIN_U_ZIP"; then
+            cp "current/win-u/$WIN_U_ZIP" "backups/Win_Grok_Chameleon_u.previous-$short_sha.zip"
+            gh release upload "$WIN_TAG" "backups/Win_Grok_Chameleon_u.previous-$short_sha.zip" --repo "$GITHUB_REPOSITORY"
+          fi
+          if test -f "current/mac-u/$MAC_U_ZIP"; then
+            cp "current/mac-u/$MAC_U_ZIP" "backups/Mac_Grok_Chameleon_u.previous-$short_sha.zip"
+            gh release upload "$MAC_TAG" "backups/Mac_Grok_Chameleon_u.previous-$short_sha.zip" --repo "$GITHUB_REPOSITORY"
+          fi
 
           rollback() {
-            echo 'Rolling back both production assets.' >&2
+            echo 'Rolling back all production assets.' >&2
             gh release upload "$WIN_TAG" "current/win/$WIN_ZIP" --repo "$GITHUB_REPOSITORY" --clobber || true
             gh release upload "$MAC_TAG" "current/mac/$MAC_ZIP" --repo "$GITHUB_REPOSITORY" --clobber || true
+            if test -f "current/win-u/$WIN_U_ZIP"; then
+              gh release upload "$WIN_TAG" "current/win-u/$WIN_U_ZIP" --repo "$GITHUB_REPOSITORY" --clobber || true
+            else
+              gh release delete-asset "$WIN_TAG" "$WIN_U_ZIP" --repo "$GITHUB_REPOSITORY" --yes || true
+            fi
+            if test -f "current/mac-u/$MAC_U_ZIP"; then
+              gh release upload "$MAC_TAG" "current/mac-u/$MAC_U_ZIP" --repo "$GITHUB_REPOSITORY" --clobber || true
+            else
+              gh release delete-asset "$MAC_TAG" "$MAC_U_ZIP" --repo "$GITHUB_REPOSITORY" --yes || true
+            fi
           }
           trap rollback ERR
           gh release upload "$WIN_TAG" "release/windows/$WIN_ZIP" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$WIN_TAG" "release/windows/$WIN_U_ZIP" --repo "$GITHUB_REPOSITORY" --clobber
           gh release upload "$MAC_TAG" "release/macos/$MAC_ZIP" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$MAC_TAG" "release/macos/$MAC_U_ZIP" --repo "$GITHUB_REPOSITORY" --clobber
           win_local="sha256:$(sha256sum "release/windows/$WIN_ZIP" | awk '{print $1}')"
+          win_u_local="sha256:$(sha256sum "release/windows/$WIN_U_ZIP" | awk '{print $1}')"
           mac_local="sha256:$(sha256sum "release/macos/$MAC_ZIP" | awk '{print $1}')"
+          mac_u_local="sha256:$(sha256sum "release/macos/$MAC_U_ZIP" | awk '{print $1}')"
           win_remote="$(gh release view "$WIN_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | select(.name == "'"$WIN_ZIP"'") | .digest')"
+          win_u_remote="$(gh release view "$WIN_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | select(.name == "'"$WIN_U_ZIP"'") | .digest')"
           mac_remote="$(gh release view "$MAC_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | select(.name == "'"$MAC_ZIP"'") | .digest')"
+          mac_u_remote="$(gh release view "$MAC_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | select(.name == "'"$MAC_U_ZIP"'") | .digest')"
           test "$win_local" = "$win_remote"
+          test "$win_u_local" = "$win_u_remote"
           test "$mac_local" = "$mac_remote"
+          test "$mac_u_local" = "$mac_u_remote"
           trap - ERR
           echo "windows-production-digest=$win_remote"
+          echo "windows-u-production-digest=$win_u_remote"
           echo "mac-production-digest=$mac_remote"
+          echo "mac-u-production-digest=$mac_u_remote"

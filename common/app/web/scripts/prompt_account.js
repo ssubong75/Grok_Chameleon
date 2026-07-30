@@ -151,19 +151,9 @@
 
   async function refreshAccounts({ refreshStatuses = true } = {}) {
     if (location.protocol !== "file:") {
-      let buildCheckingStartedAt = 0;
-      if (refreshStatuses && account_state.build.accounts.length) {
-        buildCheckingStartedAt = Date.now();
-        account_state.buildStatuses = Object.fromEntries(account_state.build.accounts.map((account) => [account.id, { status: "checking" }]));
-        renderAccounts();
-      }
       const data = await tryQApi("/api/accounts");
-      if (buildCheckingStartedAt) {
-        const remaining = 2000 - (Date.now() - buildCheckingStartedAt);
-        if (remaining > 0) await new Promise((resolve) => setTimeout(resolve, remaining));
-      }
       if (data) {
-        applyLibrarySnapshot(data);
+        applyAccountSnapshot(data);
         account_state.buildStatuses = {};
       } else if (library_state.rootHandle) {
         await loadAccountFiles();
@@ -234,7 +224,7 @@
 
   function accountStatus(account, provider) {
     if (!account) return "unknown";
-    if (provider === "build" && String(account.oauth_error || "").toLowerCase() === "access_denied") {
+    if (provider === "build" && String(account.status || "") === "oauth_error") {
       return "denied";
     }
     if (provider === "imagine") {
@@ -355,7 +345,6 @@
 
     const choose = () => {
       if (provider === "build" && status === "denied") {
-        toastError("Build account access denied.");
         return Promise.resolve();
       }
       return selectAccount(provider, account.id);
@@ -517,7 +506,6 @@
     library_state.imagineUploadError = "";
     library_state.imagineJobs = [];
     library_state.selectedImagineJobId = "";
-    library_state.imagineHiddenPostIds = new Set();
     library_state.imagineHiddenRemotePostIds = new Set();
     for (let index = composerAttachments.length - 1; index >= 0; index -= 1) {
       const accountId = imagineAttachmentAccountId(composerAttachments[index]);
@@ -544,7 +532,7 @@
     const previousId = provider === "imagine" ? String(account_state.imagine.active_id || "") : "";
     if (library_state.apiReady) {
       const data = await qApi(provider === "imagine" ? "/api/imagine/select" : "/api/accounts/select", { id });
-      applyLibrarySnapshot(data);
+      applyAccountSnapshot(data);
       sortAccountCardsByPriority(provider);
       if (provider === "imagine" && previousId !== String(id || "")) clearImagineAccountScopedCache(String(id || ""));
       setComposerProvider(provider);
@@ -585,9 +573,14 @@
     if (!confirmed) return;
     if (library_state.apiReady) {
       const data = await qApi(provider === "imagine" ? "/api/imagine/delete" : "/api/accounts/delete", { id });
-      applyLibrarySnapshot(data);
+      applyAccountSnapshot(data);
       if (provider === "imagine" && previousImagineId === String(id || "")) {
-        clearImagineAccountScopedCache(String(account_state.imagine.active_id || ""));
+        const accountId = String(account_state.imagine.active_id || "");
+        clearImagineAccountScopedCache(accountId);
+        if (typeof invalidateImagineBridgePreparation === "function") invalidateImagineBridgePreparation(accountId);
+        if (accountId && typeof prepareActiveImagineBridgeSession === "function") {
+          prepareActiveImagineBridgeSession({ force: true, accountId }).catch((error) => console.warn(error));
+        }
       }
       renderAccounts();
       return;
@@ -662,7 +655,7 @@
     const next = normalizeAccountTier(tier);
     if (library_state.apiReady) {
       const data = await qApi("/api/accounts/tier", { provider, id, tier: next });
-      applyLibrarySnapshot(data);
+      applyAccountSnapshot(data);
       sortAccountCardsByPriority(provider);
       renderAccounts();
       return;
@@ -690,7 +683,7 @@
       const data = await qApi(provider === "imagine" ? "/api/imagine/reorder" : "/api/accounts/reorder", {
         ids: accounts.map((account) => account.id),
       });
-      applyLibrarySnapshot(data);
+      applyAccountSnapshot(data);
       renderAccounts();
       return;
     }
@@ -731,7 +724,7 @@
     if (library_state.apiReady) {
       const looksLikePath = /[\\/]/.test(pathText) || /\.json$/i.test(pathText) || pathText.startsWith("~");
       const data = await qApi("/api/accounts/register", looksLikePath ? { auth_file: pathText } : { label: pathText });
-      applyLibrarySnapshot(data);
+      applyAccountSnapshot(data);
       sortAccountCardsByPriority("build");
       renderAccounts();
       return;
@@ -766,26 +759,26 @@
       if (!library_state.rootPath && !library_state.rootHandle) return;
     }
     const button = document.getElementById("total_account_btn");
-    const previousText = button?.textContent || "Total Account";
     if (button) {
       button.disabled = true;
       button.textContent = "Total Account";
     }
     try {
       const data = await qApi("/api/accounts/total/register", {});
-      const totalResult = data?.total_account || {};
-      applyLibrarySnapshot(data);
+      applyAccountSnapshot(data);
       sortAccountCardsByPriority("build");
       sortAccountCardsByPriority("imagine");
       clearImagineAccountScopedCache(String(account_state.imagine.active_id || ""));
       renderAccounts();
-      if (totalResult.partial && totalResult.imagine_ok && totalResult.build_ok === false) {
-        toastError(totalResult.message || "Imagine registered. Build registration failed.");
+      const accountId = String(account_state.imagine.active_id || "");
+      if (typeof invalidateImagineBridgePreparation === "function") invalidateImagineBridgePreparation(accountId);
+      if (typeof prepareActiveImagineBridgeSession === "function") {
+        prepareActiveImagineBridgeSession({ force: true, accountId }).catch((error) => console.warn(error));
       }
     } finally {
       if (button) {
         button.disabled = false;
-        button.textContent = previousText;
+        button.textContent = "Total Account";
       }
     }
   }
@@ -793,7 +786,7 @@
   async function startImagineLogin() {
     if (library_state.apiReady) {
       const data = await qApi("/api/imagine/login/start", {});
-      applyLibrarySnapshot(data);
+      applyAccountSnapshot(data);
       return;
     }
     const bridge = window.grokStudioAccount || window.grokStudio;
@@ -811,7 +804,7 @@
     }
     if (library_state.apiReady) {
       const data = await qApi("/api/imagine/login/capture", {});
-      applyLibrarySnapshot(data);
+      applyAccountSnapshot(data);
       sortAccountCardsByPriority("imagine");
       const accountId = String(account_state.imagine.active_id || "");
       clearImagineAccountScopedCache(accountId);
@@ -847,7 +840,7 @@
   async function logoutImagineAccount() {
     if (library_state.apiReady) {
       const data = await qApi("/api/imagine/logout", {});
-      applyLibrarySnapshot(data);
+      applyAccountSnapshot(data);
       sortAccountCardsByPriority("imagine");
       clearImagineAccountScopedCache("");
       renderAccounts();

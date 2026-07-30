@@ -150,6 +150,58 @@ function replaceCardListChildren(list, entries) {
   }
 }
 
+function virtualCardCacheKey(entry) {
+  const key = String(entry?.cardRenderKey || entry?.dataset?.cardRenderKey || "");
+  return key.startsWith("virtual-spacer:") || key.startsWith("virtual-loading:") ? "" : key;
+}
+
+function pauseVirtualCardMedia(node) {
+  if (!node?.querySelectorAll) return;
+  for (const video of node.querySelectorAll("video")) {
+    try {
+      video.pause();
+    } catch {
+      // Ignore media elements that are not ready yet.
+    }
+  }
+}
+
+function replaceVirtualCardListChildren(list, entries, nodeCache) {
+  if (!list) return;
+  const existing = new Map();
+  for (const child of list.children) {
+    const key = child?.dataset?.cardRenderKey || "";
+    if (key && !existing.has(key)) existing.set(key, child);
+  }
+  const nextNodes = entries.map((entry) => {
+    const key = entry?.cardRenderKey || entry?.dataset?.cardRenderKey || "";
+    const hash = entry?.cardRenderHash || entry?.dataset?.cardRenderHash || "";
+    const cacheKey = virtualCardCacheKey(entry);
+    const current = key ? existing.get(key) || nodeCache?.get(cacheKey) : null;
+    const node = current && current.dataset.cardRenderHash === hash
+      ? current
+      : (typeof entry?.createCard === "function" ? entry.createCard() : entry);
+    if (cacheKey && node) nodeCache?.set(cacheKey, node);
+    return node;
+  }).filter(Boolean);
+  let referenceNode = list.firstChild;
+  for (const node of nextNodes) {
+    if (node === referenceNode) {
+      referenceNode = referenceNode.nextSibling;
+      continue;
+    }
+    list.insertBefore(node, referenceNode);
+  }
+  const nextNodeSet = new Set(nextNodes);
+  for (const child of Array.from(list.childNodes)) {
+    if (!nextNodeSet.has(child)) {
+      pauseVirtualCardMedia(child);
+      child.remove();
+    }
+  }
+  if (typeof syncCardSelectionControls === "function") syncCardSelectionControls();
+}
+
 const VIRTUAL_CARD_OVERSCAN_SCREENS = 2;
 const virtualCardListStates = new Map();
 const virtualCardListBindings = new Map();
@@ -284,22 +336,26 @@ function virtualCardLoadingEntry(listKey) {
 
 function prepareVirtualRemoteCardImages(list) {
   for (const image of list.querySelectorAll(".remote_card img.card_preview")) {
-    if (image.dataset.remotePreviewDecodeBound === "true") continue;
-    image.dataset.remotePreviewDecodeBound = "true";
     const reveal = () => {
       const decoded = typeof image.decode === "function" ? image.decode().catch(() => {}) : Promise.resolve();
       decoded.then(() => {
         if (image.isConnected && image.naturalWidth > 0) image.classList.add("remote_preview_decoded");
       });
     };
-    if (image.complete && image.naturalWidth > 0) reveal();
-    else image.addEventListener("load", reveal, { once: true });
+    if (image.complete && image.naturalWidth > 0) {
+      reveal();
+      continue;
+    }
+    if (image.dataset.remotePreviewDecodeBound === "true") continue;
+    image.dataset.remotePreviewDecodeBound = "true";
+    image.addEventListener("load", reveal, { once: true });
   }
 }
 
 function renderVirtualCardList(listKey, list, entries, options = {}) {
   if (!list) return;
   const state = virtualCardListStates.get(listKey) || { frame: 0, renderToken: "" };
+  if (!(state.nodeCache instanceof Map)) state.nodeCache = new Map();
   state.list = list;
   state.entries = (entries || []).filter(Boolean);
   state.options = { loading: Boolean(options.loading), remoteMedia: Boolean(options.remoteMedia) };
@@ -309,6 +365,10 @@ function renderVirtualCardList(listKey, list, entries, options = {}) {
   list.classList.toggle("remote_virtual_card_list", state.options.remoteMedia);
   if (list.closest("[hidden]")) return;
 
+  const validCacheKeys = new Set(state.entries.map(virtualCardCacheKey).filter(Boolean));
+  for (const key of state.nodeCache.keys()) {
+    if (!validCacheKeys.has(key)) state.nodeCache.delete(key);
+  }
   const styles = getComputedStyle(list);
   const columns = virtualCardGridColumnCount(list);
   const rowHeight = virtualCardGridRowHeight(list);
@@ -338,7 +398,7 @@ function renderVirtualCardList(listKey, list, entries, options = {}) {
     nextEntries.push(...visibleEntries);
     if (range.bottomRows) nextEntries.push(virtualCardSpacerEntry(listKey, "bottom", range.bottomHeight));
     if (state.options.loading) nextEntries.push(virtualCardLoadingEntry(listKey));
-    replaceCardListChildren(list, nextEntries);
+    replaceVirtualCardListChildren(list, nextEntries, state.nodeCache);
     state.renderToken = renderToken;
   }
   if (state.options.remoteMedia) prepareVirtualRemoteCardImages(list);
@@ -352,6 +412,8 @@ function disableVirtualCardList(listKey, list) {
     state.renderToken = "";
     if (state.frame && typeof cancelAnimationFrame === "function") cancelAnimationFrame(state.frame);
     state.frame = 0;
+    for (const node of state.nodeCache?.values?.() || []) pauseVirtualCardMedia(node);
+    state.nodeCache?.clear?.();
   }
   list?.classList.remove("virtual_card_list", "remote_virtual_card_list");
 }

@@ -7,6 +7,7 @@ const os = require("node:os");
 const net = require("node:net");
 
 const APP_NAME = "Grok Chameleon";
+const APP_BUNDLE_IDENTIFIER = "local.grokchameleon.app";
 const APP_ROOT = path.resolve(__dirname, "..");
 const CERTIFI_CA = path.join(APP_ROOT, "vendor", "python", "certifi", "cacert.pem");
 const VENDOR_PYTHON = path.join(APP_ROOT, "vendor", "python");
@@ -14,9 +15,334 @@ const PORT = String(process.env.GROK_CHAMELEON_PORT || "8797");
 const CDP_PORT = String(process.env.GROK_CHAMELEON_CDP_PORT || "0");
 const SERVER_BASE = `http://127.0.0.1:${PORT}`;
 const GROK_USAGE_URL = "https://grok.com/?_s=usage";
-const LOG_DIR = process.platform === "win32"
-  ? path.join(os.homedir(), "AppData", "Local", APP_NAME, "Logs")
-  : path.join(os.homedir(), "Library", "Logs", APP_NAME);
+
+function portableFileDigest(filePath) {
+  try {
+    return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+  } catch (_) {
+    return "";
+  }
+}
+
+function portableBundleFingerprint(bundlePath) {
+  const appRoot = path.join(bundlePath, "Contents", "Resources", "app");
+  const relativePaths = [
+    path.join("electron", "main.js"),
+    path.join("runtime", "server.py"),
+    path.join("web", "index.html"),
+  ];
+  const digests = relativePaths.map((relativePath) => portableFileDigest(path.join(appRoot, relativePath)));
+  return digests.every(Boolean) ? digests.join(":") : "";
+}
+
+function addMacBundleCandidates(candidates, root, depth = 1) {
+  if (!root || depth < 0) return;
+  let entries = [];
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch (_) {
+    return;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const candidate = path.join(root, entry.name);
+    if (entry.name.endsWith(".app")) {
+      candidates.add(candidate);
+      continue;
+    }
+    if (depth > 0) addMacBundleCandidates(candidates, candidate, depth - 1);
+  }
+}
+
+function macOriginalBundleCandidates(fingerprint = "") {
+  const candidates = new Set();
+  try {
+    const query = `kMDItemCFBundleIdentifier == "${APP_BUNDLE_IDENTIFIER}"`;
+    const output = execFileSync("/usr/bin/mdfind", [query], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    for (const candidate of output.split(/\r?\n/).map((value) => value.trim()).filter(Boolean)) {
+      if (candidate.endsWith(".app")) candidates.add(candidate);
+    }
+  } catch (_) {}
+  if (
+    fingerprint
+    && Array.from(candidates).some((candidate) => portableBundleFingerprint(candidate) === fingerprint)
+  ) {
+    return Array.from(candidates);
+  }
+  for (const root of [
+    path.join(os.homedir(), "Desktop"),
+    path.join(os.homedir(), "Downloads"),
+    path.join(os.homedir(), "Documents"),
+    path.join(os.homedir(), "Applications"),
+    "/Applications",
+  ]) {
+    addMacBundleCandidates(candidates, root, 1);
+  }
+  try {
+    for (const volume of fs.readdirSync("/Volumes", { withFileTypes: true })) {
+      if (volume.isDirectory()) addMacBundleCandidates(candidates, path.join("/Volumes", volume.name), 1);
+    }
+  } catch (_) {}
+  return Array.from(candidates);
+}
+
+function macQuarantineValue(bundlePath) {
+  try {
+    return execFileSync("/usr/bin/xattr", ["-p", "com.apple.quarantine", bundlePath], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch (_) {
+    return "";
+  }
+}
+
+function resolveTranslocatedMacBundle(currentBundlePath) {
+  const fingerprint = portableBundleFingerprint(currentBundlePath);
+  if (!fingerprint) throw new Error("Portable app identity could not be read.");
+  let matches = macOriginalBundleCandidates(fingerprint)
+    .filter((candidate) => !candidate.includes(`${path.sep}AppTranslocation${path.sep}`))
+    .filter((candidate) => portableBundleFingerprint(candidate) === fingerprint);
+  if (matches.length > 1) {
+    const quarantine = macQuarantineValue(currentBundlePath);
+    const quarantineMatches = quarantine
+      ? matches.filter((candidate) => macQuarantineValue(candidate) === quarantine)
+      : [];
+    if (quarantineMatches.length) matches = quarantineMatches;
+  }
+  if (matches.length > 1) {
+    const indexText = fs.readFileSync(path.join(APP_ROOT, "web", "index.html"), "utf8");
+    const expectedParent = indexText.includes('id="i_unsaved_nav_btn"') ? "Grok Chameleon U" : "Grok Chameleon";
+    const namedMatches = matches.filter((candidate) => path.basename(path.dirname(candidate)) === expectedParent);
+    if (namedMatches.length) matches = namedMatches;
+  }
+  const uniqueMatches = Array.from(new Set(matches.map((candidate) => {
+    try {
+      return fs.realpathSync(candidate);
+    } catch (_) {
+      return path.resolve(candidate);
+    }
+  })));
+  if (uniqueMatches.length !== 1) {
+    throw new Error("Portable app folder could not be identified uniquely. Keep one matching app copy or set GROK_CHAMELEON_PORTABLE_ROOT.");
+  }
+  return uniqueMatches[0];
+}
+
+function validatePortableRoot(rootPath) {
+  const resolved = path.resolve(rootPath);
+  if (resolved === path.parse(resolved).root) throw new Error("Refusing unsafe portable app root.");
+  fs.accessSync(resolved, fs.constants.R_OK | fs.constants.W_OK);
+  return resolved;
+}
+
+function resolvePortableRoot() {
+  const override = String(process.env.GROK_CHAMELEON_PORTABLE_ROOT || "").trim();
+  if (override) return validatePortableRoot(override);
+  const resourcesPath = path.resolve(process.resourcesPath || path.join(APP_ROOT, ".."));
+  if (process.platform === "darwin") {
+    const currentBundlePath = path.resolve(resourcesPath, "..", "..");
+    const bundlePath = currentBundlePath.includes(`${path.sep}AppTranslocation${path.sep}`)
+      ? resolveTranslocatedMacBundle(currentBundlePath)
+      : currentBundlePath;
+    return validatePortableRoot(path.dirname(bundlePath));
+  }
+  if (process.platform === "win32") {
+    return validatePortableRoot(path.resolve(resourcesPath, "..", "..", ".."));
+  }
+  return validatePortableRoot(path.resolve(resourcesPath, "..", "..", ".."));
+}
+
+function readPortableJson(filePath) {
+  try {
+    const value = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function portablePlatformKey() {
+  if (process.platform === "darwin") return "macos";
+  if (process.platform === "win32") return "windows";
+  return "linux";
+}
+
+function verifiedPortableLibraryRoot(value) {
+  const text = String(value || "").trim();
+  if (!text || !path.isAbsolute(text)) return "";
+  const root = path.resolve(text);
+  if (root === path.parse(root).root || !fs.existsSync(path.join(root, "library.json"))) return "";
+  try {
+    fs.accessSync(root, fs.constants.R_OK | fs.constants.W_OK);
+    return root;
+  } catch (_) {
+    return "";
+  }
+}
+
+function portableLibraryRootFromSettings(filePath) {
+  return verifiedPortableLibraryRoot(readPortableJson(filePath).library_root);
+}
+
+function atomicWritePortableJson(filePath, value) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const tempPath = path.join(
+    path.dirname(filePath),
+    `.${path.basename(filePath)}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`,
+  );
+  try {
+    fs.writeFileSync(tempPath, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    fs.renameSync(tempPath, filePath);
+  } finally {
+    try {
+      fs.unlinkSync(tempPath);
+    } catch (_) {}
+  }
+}
+
+function legacyPortableSettingsPaths(portableRoot, platformKey) {
+  const paths = [
+    path.join(portableRoot, "runtime_data", platformKey, "settings.json"),
+    path.join(portableRoot, "runtime_data", "settings.json"),
+    path.join(portableRoot, "runtime", platformKey, "settings.json"),
+    path.join(portableRoot, "runtime", "settings.json"),
+  ];
+  if (process.platform === "darwin") {
+    paths.push(path.join(os.homedir(), "Library", "Application Support", APP_NAME, "settings.json"));
+  } else if (process.platform === "win32") {
+    const appData = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
+    paths.push(path.join(appData, APP_NAME, "settings.json"));
+  }
+  return paths;
+}
+
+function resolvePortableLibraryRoot(portableRoot, pointerPaths, platformKey) {
+  const override = verifiedPortableLibraryRoot(process.env.GROK_CHAMELEON_LIBRARY_ROOT);
+  if (override) return override;
+  for (const pointerPath of pointerPaths) {
+    const pointer = readPortableJson(pointerPath);
+    const pointerRoot = verifiedPortableLibraryRoot(
+      pointer?.paths?.[platformKey] || pointer.library_root,
+    );
+    if (pointerRoot) return pointerRoot;
+  }
+  for (const settingsPath of legacyPortableSettingsPaths(portableRoot, platformKey)) {
+    const root = portableLibraryRootFromSettings(settingsPath);
+    if (root) return root;
+  }
+  return "";
+}
+
+function hidePortableFile(filePath) {
+  if (process.platform !== "win32") return;
+  try {
+    execFileSync("attrib", ["+H", filePath], {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+  } catch (_) {}
+}
+
+function writePortableLibraryPointer(pointerPath, platformKey, libraryRoot, legacyPointerPath = "") {
+  const current = readPortableJson(pointerPath);
+  const legacy = legacyPointerPath ? readPortableJson(legacyPointerPath) : {};
+  atomicWritePortableJson(pointerPath, {
+    version: 1,
+    paths: {
+      ...(legacy.paths && typeof legacy.paths === "object" ? legacy.paths : {}),
+      ...(current.paths && typeof current.paths === "object" ? current.paths : {}),
+      [platformKey]: libraryRoot,
+    },
+    updated_at: new Date().toISOString(),
+  });
+  hidePortableFile(pointerPath);
+}
+
+function removeLegacyPortableLibraryPointer(legacyPointerPath, pointerPath) {
+  if (path.resolve(legacyPointerPath) === path.resolve(pointerPath)) return;
+  try {
+    fs.unlinkSync(legacyPointerPath);
+  } catch (_) {}
+}
+
+function seedPortableLibrarySettings(runtimeDir, libraryRoot) {
+  const settingsPath = path.join(runtimeDir, "settings.json");
+  if (fs.existsSync(settingsPath)) return;
+  atomicWritePortableJson(settingsPath, {
+    library_root: libraryRoot,
+    updated_at: new Date().toISOString(),
+  });
+}
+
+function portablePathContains(parentPath, childPath) {
+  const relative = path.relative(path.resolve(parentPath), path.resolve(childPath));
+  return (
+    relative === ""
+    || (
+      !path.isAbsolute(relative)
+      && relative !== ".."
+      && !relative.startsWith(`..${path.sep}`)
+    )
+  );
+}
+
+function removeObsoletePortableRuntime(portableRoot, activeRuntimeRoot) {
+  for (const directoryName of ["runtime_data", "runtime"]) {
+    const obsolete = path.resolve(portableRoot, directoryName);
+    if (
+      portablePathContains(obsolete, activeRuntimeRoot)
+      || path.dirname(obsolete) !== path.resolve(portableRoot)
+      || path.basename(obsolete) !== directoryName
+    ) {
+      continue;
+    }
+    fs.rmSync(obsolete, { recursive: true, force: true });
+  }
+}
+
+const PORTABLE_ROOT = resolvePortableRoot();
+const PLATFORM_RUNTIME_KEY = portablePlatformKey();
+const LIBRARY_POINTER_PATH = path.join(PORTABLE_ROOT, ".library_path.json");
+const LEGACY_LIBRARY_POINTER_PATH = path.join(PORTABLE_ROOT, "library_path.json");
+const SELECTED_LIBRARY_ROOT = resolvePortableLibraryRoot(
+  PORTABLE_ROOT,
+  [LIBRARY_POINTER_PATH, LEGACY_LIBRARY_POINTER_PATH],
+  PLATFORM_RUNTIME_KEY,
+);
+const RUNTIME_ROOT = SELECTED_LIBRARY_ROOT
+  ? path.join(SELECTED_LIBRARY_ROOT, "runtime_data")
+  : path.join(PORTABLE_ROOT, "runtime_data");
+const RUNTIME_DIR = path.join(RUNTIME_ROOT, PLATFORM_RUNTIME_KEY);
+const LOG_DIR = path.join(RUNTIME_DIR, "logs");
+const TEMP_DIR = path.join(RUNTIME_DIR, "temp");
+const CRASH_DUMPS_DIR = path.join(RUNTIME_DIR, "crash_dumps");
+for (const directory of [RUNTIME_DIR, LOG_DIR, TEMP_DIR, CRASH_DUMPS_DIR]) {
+  fs.mkdirSync(directory, { recursive: true });
+}
+if (SELECTED_LIBRARY_ROOT) {
+  seedPortableLibrarySettings(RUNTIME_DIR, SELECTED_LIBRARY_ROOT);
+  writePortableLibraryPointer(
+    LIBRARY_POINTER_PATH,
+    PLATFORM_RUNTIME_KEY,
+    SELECTED_LIBRARY_ROOT,
+    LEGACY_LIBRARY_POINTER_PATH,
+  );
+  removeLegacyPortableLibraryPointer(
+    LEGACY_LIBRARY_POINTER_PATH,
+    LIBRARY_POINTER_PATH,
+  );
+  removeObsoletePortableRuntime(PORTABLE_ROOT, RUNTIME_ROOT);
+}
+app.setPath("userData", RUNTIME_DIR);
+app.setPath("sessionData", RUNTIME_DIR);
+app.setPath("temp", TEMP_DIR);
+app.setPath("crashDumps", CRASH_DUMPS_DIR);
+app.setAppLogsPath(LOG_DIR);
+
 const LOG_FILE = path.join(LOG_DIR, "grok_chameleon.log");
 const BRIDGE_WINDOW_WIDTH = 960;
 const BRIDGE_WINDOW_HEIGHT = 760;
@@ -526,7 +852,7 @@ function killServerPortPids(signal = "TERM") {
   execFileQuiet("/bin/kill", [`-${signal}`, ...pids.map(String)]);
 }
 
-function closeBridgeWindowsNow() {
+function closeAccountWindowsNow() {
   for (const win of bridgeWindows.values()) {
     if (!win || win.isDestroyed()) continue;
     try {
@@ -543,6 +869,10 @@ function closeBridgeWindowsNow() {
     } catch (_) {}
   }
   usageWindows.clear();
+}
+
+function closeBridgeWindowsNow() {
+  closeAccountWindowsNow();
   bridgeCommandQueues.clear();
 }
 
@@ -628,6 +958,13 @@ function pythonServerEnv() {
     ...process.env,
     GROK_CHAMELEON_PORT: PORT,
     GROK_CHAMELEON_NO_BROWSER: "1",
+    GROK_CHAMELEON_RUNTIME_DIR: RUNTIME_DIR,
+    GROK_CHAMELEON_PORTABLE_ROOT: PORTABLE_ROOT,
+    GROK_CHAMELEON_LIBRARY_POINTER_PATH: LIBRARY_POINTER_PATH,
+    GROK_CHAMELEON_PLATFORM_KEY: PLATFORM_RUNTIME_KEY,
+    ...(process.platform === "win32"
+      ? { TEMP: TEMP_DIR, TMP: TEMP_DIR }
+      : { TMPDIR: TEMP_DIR }),
     PYTHONNOUSERSITE: "1",
     PYTHONDONTWRITEBYTECODE: "1",
   };
@@ -787,15 +1124,19 @@ function bridgeCommandCanRunInParallel(command) {
   return ["t2i_ws"].includes(String(command?.type || ""));
 }
 
+function bridgeAccountKey(command) {
+  return `${command.account_id || "imagine"}::${command.store_id || "default"}`;
+}
+
 function bridgeKey(command) {
-  const baseKey = `${command.account_id || "imagine"}::${command.store_id || "default"}`;
+  const baseKey = bridgeAccountKey(command);
   if (String(command?.type || "") === "open_page") return `${baseKey}::open_page`;
   if (!bridgeCommandCanRunInParallel(command)) return baseKey;
   return `${baseKey}::${command.request_id || command.id || Date.now()}`;
 }
 
 function bridgeWindowKey(command) {
-  const baseKey = `${command.account_id || "imagine"}::${command.store_id || "default"}`;
+  const baseKey = bridgeAccountKey(command);
   if (String(command?.type || "") === "open_page") return `${baseKey}::open_page`;
   if (!bridgeCommandCanRunInParallel(command)) return baseKey;
   return `${baseKey}::${command.request_id || command.id || Date.now()}`;
@@ -803,7 +1144,29 @@ function bridgeWindowKey(command) {
 
 function bridgePartition(command) {
   const raw = String(command.store_id || command.account_id || "default").replace(/[^a-zA-Z0-9_.-]/g, "_");
-  return `persist:grok-chameleon-imagine-${raw}`;
+  return `grok-chameleon-imagine-${raw}`;
+}
+
+function closeInactiveAccountWindows(command) {
+  const activeKey = bridgeAccountKey(command);
+  for (const [key, win] of bridgeWindows.entries()) {
+    if (win?.__grokAccountKey === activeKey) continue;
+    bridgeWindows.delete(key);
+    if (!win || win.isDestroyed()) continue;
+    try {
+      win.removeAllListeners("close");
+      win.destroy();
+    } catch (_) {}
+  }
+  for (const [key, win] of usageWindows.entries()) {
+    if (win?.__grokAccountKey === activeKey) continue;
+    usageWindows.delete(key);
+    if (!win || win.isDestroyed()) continue;
+    try {
+      win.removeAllListeners("close");
+      win.destroy();
+    } catch (_) {}
+  }
 }
 
 function uuidV5Url(name) {
@@ -901,6 +1264,7 @@ function bridgeWindow(command) {
       autoplayPolicy: "no-user-gesture-required",
     },
   });
+  win.__grokAccountKey = bridgeAccountKey(command);
   win.on("closed", () => bridgeWindows.delete(key));
   bridgeWindows.set(key, win);
   return win;
@@ -917,6 +1281,7 @@ function usageWindowKey(command) {
 }
 
 function usageWindow(command) {
+  closeInactiveAccountWindows(command);
   const key = usageWindowKey(command);
   const existing = usageWindows.get(key);
   if (existing && !existing.isDestroyed()) return existing;
@@ -938,6 +1303,7 @@ function usageWindow(command) {
       backgroundThrottling: false,
     },
   });
+  win.__grokAccountKey = bridgeAccountKey(command);
   win.on("closed", () => {
     usageWindows.delete(key);
     if (!mainWindow || mainWindow.isDestroyed() || appTerminating) return;
@@ -960,24 +1326,13 @@ function usagePageReady(win, targetUrl) {
 
 async function warmUsagePage(command) {
   const targetUrl = command.url || GROK_USAGE_URL;
-  const win = usageWindow(command);
-  if (usagePageReady(win, targetUrl)) {
-    return { ok: true, status: "ready", url: win.webContents.getURL() || targetUrl };
-  }
-  await applyBridgeCookies(win, command, { clearExisting: false }).catch((error) => {
-    appendLog(`usage warm cookie warning account=${command?.account_id || ""} error=${error.message || String(error)}`);
-  });
-  if (!win.isDestroyed() && !grokUrlMatches(win.webContents.getURL() || "", targetUrl)) {
-    win.loadURL(targetUrl).catch((error) => {
-      appendLog(`usage warm load warning account=${command?.account_id || ""} error=${error.message || String(error)}`);
-    });
-  }
-  return { ok: true, status: "warming", url: targetUrl };
+  return { ok: true, status: "deferred", url: targetUrl };
 }
 
 async function showUsagePage(command) {
   const targetUrl = command.url || GROK_USAGE_URL;
   const win = usageWindow(command);
+  await applyBridgeCookies(win, command, { clearExisting: false });
   showUsageWindow(win, `${APP_NAME} Usage`);
   if (usagePageReady(win, targetUrl)) {
     return { ok: true, status: "shown", url: win.webContents.getURL() || targetUrl };
@@ -1410,6 +1765,11 @@ async function handleBridgeCommand(command) {
   if (!id) return;
   let win = null;
   try {
+    if (command.type === "release_all") {
+      closeAccountWindowsNow();
+      await sendBridgeResult(id, true, { ok: true, status: "released" });
+      return;
+    }
     if (command.type === "open_page") {
       const value = await openBridgePage(command);
       await sendBridgeResult(id, true, value);
@@ -1420,6 +1780,7 @@ async function handleBridgeCommand(command) {
       await sendBridgeResult(id, true, value);
       return;
     }
+    if (command.type === "prepare") closeInactiveAccountWindows(command);
     win = await ensureBridgeReady(command);
     if (command.type === "prepare") {
       await sendBridgeResult(id, true, { ok: true, status: "ready" });

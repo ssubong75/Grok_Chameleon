@@ -106,22 +106,6 @@ function mergeImagineLinkPosts(posts) {
   return normalized;
 }
 
-function forgetHiddenImagineItemKeys(keys) {
-  const released = new Set(
-    (Array.isArray(keys) ? keys : []).map((value) => String(value || "").trim()).filter(Boolean),
-  );
-  if (!released.size) return;
-  if (library_state.imagineHiddenPostIds instanceof Set) {
-    for (const key of released) library_state.imagineHiddenPostIds.delete(key);
-  }
-  const settings = library_state.library?.settings;
-  if (settings && typeof settings === "object" && Array.isArray(settings.hidden_imagine_item_keys)) {
-    settings.hidden_imagine_item_keys = settings.hidden_imagine_item_keys
-      .map((value) => String(value || "").trim())
-      .filter((value) => value && !released.has(value));
-  }
-}
-
 function preferredImagineLinkItem(post, postId) {
   const items = Array.isArray(post?.items) ? post.items : [];
   const targetPostId = String(postId || "").toLowerCase();
@@ -148,7 +132,6 @@ async function openImagineLinkPost(value) {
       post_id: postId,
     });
     const posts = Array.isArray(data.posts) ? data.posts : [];
-    forgetHiddenImagineItemKeys(data.unhidden_keys);
     const normalized = mergeImagineLinkPosts(posts);
     const targetPost = normalized[0];
     if (!targetPost) throw new Error("Could not load the linked Imagine post.");
@@ -169,25 +152,6 @@ async function openImagineLinkPost(value) {
     if (button) button.disabled = false;
     if (input) input.disabled = false;
   }
-}
-
-function rememberHiddenImagineItem(item) {
-  if (!(library_state.imagineHiddenPostIds instanceof Set)) {
-    library_state.imagineHiddenPostIds = new Set();
-  }
-  const settings = library_state.library?.settings && typeof library_state.library.settings === "object"
-    ? library_state.library.settings
-    : {};
-  const stored = new Set(Array.isArray(settings.hidden_imagine_item_keys)
-    ? settings.hidden_imagine_item_keys.map((value) => String(value || "")).filter(Boolean)
-    : []);
-  for (const key of imaginePostIdKeysForItem(item)) {
-    library_state.imagineHiddenPostIds.add(key);
-    stored.add(key);
-  }
-  settings.hidden_imagine_item_keys = Array.from(stored);
-  library_state.library = library_state.library && typeof library_state.library === "object" ? library_state.library : {};
-  library_state.library.settings = settings;
 }
 
 function imaginePostIdKeysForPost(post) {
@@ -229,12 +193,6 @@ function imaginePostHidden(post) {
   return imaginePostIdKeysForPost(post).some((key) => hidden.has(key));
 }
 
-function imagineItemHidden(item) {
-  const hidden = library_state.imagineHiddenPostIds;
-  if (!(hidden instanceof Set) || !hidden.size) return false;
-  return imaginePostIdKeysForItem(item).some((key) => hidden.has(key));
-}
-
 function postUsesImagineRemoteHiddenFilter(post) {
   return Boolean(
     post?.remote
@@ -247,15 +205,7 @@ function postUsesImagineRemoteHiddenFilter(post) {
 function withoutHiddenImagineItems(post) {
   if (!post || !postUsesImagineRemoteHiddenFilter(post)) return normalizeServerPost(post);
   if (imaginePostHidden(post)) return null;
-  const items = (post.items || []).filter((item) => !imagineItemHidden(item));
-  if (!items.length) return null;
-  const representative = representativeItem(items, { ...post, items }) || items[0];
-  return normalizeServerPost({
-    ...post,
-    items,
-    representative: representative?.file || representative?.url || representative?.item_id || "",
-    representative_item: representative,
-  });
+  return normalizeServerPost(post);
 }
 
 function normalizeImagineRemotePosts(posts) {

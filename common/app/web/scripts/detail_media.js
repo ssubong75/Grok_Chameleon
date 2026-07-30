@@ -543,7 +543,6 @@ function removeUnavailableImagineItem(postPath, url, host = null) {
   if (!path || typeof library_state !== "object" || !library_state) return false;
   let changed = false;
   let keptPost = null;
-  const removedKeys = new Set();
   for (const stateKey of [
     "imagineRemotePosts",
     "imagineDiscoverPosts",
@@ -556,9 +555,6 @@ function removeUnavailableImagineItem(postPath, url, host = null) {
       const items = Array.isArray(post?.items) ? post.items : [];
       const remaining = items.filter((item) => {
         if (!imagineItemUsesPreviewUrl(item, url)) return true;
-        if (typeof imaginePostIdKeysForItem === "function") {
-          for (const key of imaginePostIdKeysForItem(item)) removedKeys.add(String(key || ""));
-        }
         return false;
       });
       if (remaining.length === items.length) return [post];
@@ -576,11 +572,6 @@ function removeUnavailableImagineItem(postPath, url, host = null) {
     });
   }
   if (!changed) return false;
-  if (removedKeys.size && typeof qApi === "function") {
-    Promise.resolve(qApi("/api/imagine/item/hide", {
-      keys: Array.from(removedKeys).filter(Boolean),
-    })).catch(() => {});
-  }
   if (!keptPost) {
     library_state.sessionImagineT2iPaths?.delete?.(path);
     library_state.selectedItems?.delete?.(path);

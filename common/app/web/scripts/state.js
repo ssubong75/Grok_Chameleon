@@ -160,7 +160,6 @@
       imagineSearchLoaded: false,
       imagineSearchLoading: false,
       imagineSearchError: "",
-      imagineHiddenPostIds: new Set(),
       imagineHiddenRemotePostIds: new Set(),
       imagineUploadPosts: [],
       imagineUploadLoaded: false,
@@ -249,30 +248,12 @@
     };
   }
 
-  function applyLibrarySnapshot(data) {
+  function applyAccountSnapshot(data) {
     if (!data) return;
-    library_state.rootPath = data.library_root || "";
-    library_state.rootName = data.root_name || (library_state.rootPath.split(/[\\/]/).filter(Boolean).pop() || "");
-    library_state.library = mergeLibraryJson(data.library || {});
-    const settings = library_state.library.settings || {};
-    library_state.imagineHiddenPostIds = new Set(Array.isArray(settings.hidden_imagine_item_keys)
-      ? settings.hidden_imagine_item_keys.map((value) => String(value || "")).filter(Boolean)
-      : []);
-    library_state.posts = Array.isArray(data.posts) ? data.posts.map(normalizeServerPost) : [];
-    library_state.collections = Array.isArray(data.collections)
-      ? data.collections.map((collection) => ({
-        ...collection,
-        posts: Array.isArray(collection.posts) ? collection.posts.map(normalizeServerPost) : [],
-      }))
-      : [];
-    const selectablePaths = new Set([
-      ...library_state.posts.map((post) => post.folder_path).filter(Boolean),
-      ...library_state.collections.flatMap((collection) => (collection.posts || []).map((post) => post.folder_path)).filter(Boolean),
-    ]);
-    for (const selectedPath of Array.from(library_state.selectedItems || [])) {
-      if (!selectablePaths.has(selectedPath)) library_state.selectedItems.delete(selectedPath);
+    if (data.library_root) {
+      library_state.rootPath = data.library_root;
+      library_state.rootName = data.root_name || (library_state.rootPath.split(/[\\/]/).filter(Boolean).pop() || "");
     }
-    library_state.prompts = Array.isArray(data.prompts) ? data.prompts : [];
     if (data.accounts?.build) {
       account_state.build = {
         ...defaultBuildAuthJson(),
@@ -295,6 +276,29 @@
       account_state.imagine.active_id = "";
     }
     if (typeof warmActiveImagineUsage === "function") warmActiveImagineUsage();
+  }
+
+  function applyLibrarySnapshot(data) {
+    if (!data) return;
+    library_state.rootPath = data.library_root || "";
+    library_state.rootName = data.root_name || (library_state.rootPath.split(/[\\/]/).filter(Boolean).pop() || "");
+    library_state.library = mergeLibraryJson(data.library || {});
+    library_state.posts = Array.isArray(data.posts) ? data.posts.map(normalizeServerPost) : [];
+    library_state.collections = Array.isArray(data.collections)
+      ? data.collections.map((collection) => ({
+        ...collection,
+        posts: Array.isArray(collection.posts) ? collection.posts.map(normalizeServerPost) : [],
+      }))
+      : [];
+    const selectablePaths = new Set([
+      ...library_state.posts.map((post) => post.folder_path).filter(Boolean),
+      ...library_state.collections.flatMap((collection) => (collection.posts || []).map((post) => post.folder_path)).filter(Boolean),
+    ]);
+    for (const selectedPath of Array.from(library_state.selectedItems || [])) {
+      if (!selectablePaths.has(selectedPath)) library_state.selectedItems.delete(selectedPath);
+    }
+    library_state.prompts = Array.isArray(data.prompts) ? data.prompts : [];
+    applyAccountSnapshot(data);
     if (data.selected_path) library_state.selectedPostPath = data.selected_path;
     if (data.selected_item_id) library_state.selectedDetailItemId = data.selected_item_id;
     if ("selected_collection_path" in data) library_state.selectedCollectionPath = data.selected_collection_path || "";

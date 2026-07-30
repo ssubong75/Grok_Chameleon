@@ -554,10 +554,6 @@ function removeImagineItemsFromPost(post, removedItems, options = {}) {
   const screenId = options.screenId || screen_state.current_screen;
   const keepListScreen = Boolean(options.keepListScreen);
   const scrollTop = options.scrollTop;
-  const rememberHiddenItems = Array.isArray(options.rememberHiddenItems)
-    ? options.rememberHiddenItems.filter(Boolean)
-    : itemsToRemove;
-  for (const item of rememberHiddenItems) rememberHiddenImagineItem(item);
   const removedKeys = new Set(itemsToRemove.flatMap((item) => imaginePostIdKeysForItem(item)));
   const stripPost = (candidate) => {
     if (!candidate || candidate.folder_path !== post.folder_path) return candidate;
@@ -682,15 +678,6 @@ function imagineConversationDeletePayloadForPost(post) {
   };
 }
 
-async function hideImagineRemoteItems(items) {
-  const hiddenKeys = Array.from(new Set(
-    (items || []).flatMap((item) => imaginePostIdKeysForItem(item)),
-  ));
-  if (hiddenKeys.length) {
-    await qApi("/api/imagine/item/hide", { keys: hiddenKeys });
-  }
-}
-
 async function deleteImagineRemoteItem(post, item) {
   const deletePayload = imagineDeletePayloadForItem(post, item);
   if (!deletePayload) {
@@ -698,11 +685,9 @@ async function deleteImagineRemoteItem(post, item) {
   }
   if (isImagineExternalReferenceItem(post, item) && !isImagineUnsavedPost(post, item)) {
     const unsaved = await unsaveImagineExternalItems(post, [item], { wholeCard: false });
-    await hideImagineRemoteItems(unsaved.removedItems);
     return {
       deletedItems: unsaved.removedItems,
       failures: [],
-      hiddenItems: unsaved.removedItems,
       data: unsaved.data,
       action: "external-unsave",
     };
@@ -711,11 +696,9 @@ async function deleteImagineRemoteItem(post, item) {
     ? "/api/imagine/asset-metadata/delete"
     : "/api/imagine/asset/delete";
   const data = await qApi(endpoint, deletePayload);
-  await hideImagineRemoteItems([item]);
   return {
     deletedItems: [item],
     failures: [],
-    hiddenItems: [item],
     data,
     action: endpoint.includes("asset-metadata") ? "asset-metadata-delete" : "asset-delete",
   };
@@ -735,7 +718,6 @@ function isImagineConversationDeleteFallbackError(error) {
 async function deleteImagineCardAssets(post, items) {
   const deletedItems = [];
   const failures = [];
-  const hiddenItems = [];
   const candidates = (items || []).filter(Boolean);
   const externalItems = candidates.filter((item) => isImagineExternalReferenceItem(post, item));
   const ownedItems = candidates.filter((item) => !isImagineExternalReferenceItem(post, item));
@@ -743,7 +725,6 @@ async function deleteImagineCardAssets(post, items) {
     try {
       const unsaved = await unsaveImagineExternalItems(post, externalItems);
       deletedItems.push(...unsaved.removedItems);
-      hiddenItems.push(...unsaved.removedItems);
     } catch (error) {
       failures.push(error);
     }
@@ -757,12 +738,11 @@ async function deleteImagineCardAssets(post, items) {
     try {
       await qApi("/api/imagine/asset/delete", payload);
       deletedItems.push(item);
-      hiddenItems.push(item);
     } catch (error) {
       failures.push(error);
     }
   }
-  return { deletedItems, failures, hiddenItems };
+  return { deletedItems, failures };
 }
 
 async function unsaveImagineExternalItems(post, items, { wholeCard = true } = {}) {
@@ -793,7 +773,7 @@ async function unsaveImagineExternalItems(post, items, { wholeCard = true } = {}
   };
 }
 
-async function deleteImagineRemoteCard(post, { hide = true } = {}) {
+async function deleteImagineRemoteCard(post) {
   const items = (post?.items || []).filter(Boolean);
   if (isImagineUnsavedPost(post)) {
     const results = await Promise.allSettled(items.map((item) => {
@@ -808,18 +788,12 @@ async function deleteImagineRemoteCard(post, { hide = true } = {}) {
       if (result.status === "fulfilled") deletedItems.push(items[index]);
       else failures.push(result.reason);
     }
-    if (hide && deletedItems.length) {
-      await hideImagineRemoteItems(deletedItems);
-    }
-    return { deletedItems, failures, hiddenItems: deletedItems };
+    return { deletedItems, failures };
   }
   const externalItems = items.filter((item) => isImagineExternalReferenceItem(post, item));
   const ownedItems = items.filter((item) => !isImagineExternalReferenceItem(post, item));
   if (!ownedItems.length) {
     const externalResult = await deleteImagineCardAssets(post, externalItems);
-    if (hide && externalResult.hiddenItems.length) {
-      await hideImagineRemoteItems(externalResult.hiddenItems);
-    }
     return {
       ...externalResult,
       data: {
@@ -836,9 +810,6 @@ async function deleteImagineRemoteCard(post, { hide = true } = {}) {
   } catch (error) {
     if (!isImagineConversationDeleteFallbackError(error)) throw error;
     const assetResult = await deleteImagineCardAssets(post, items);
-    if (hide && assetResult.hiddenItems.length) {
-      await hideImagineRemoteItems(assetResult.hiddenItems);
-    }
     return {
       ...assetResult,
       data: {
@@ -848,21 +819,16 @@ async function deleteImagineRemoteCard(post, { hide = true } = {}) {
     };
   }
   const deletedItems = [...ownedItems];
-  const hiddenItems = [...ownedItems];
   const failures = [];
   if (externalItems.length) {
     try {
       const unsaved = await unsaveImagineExternalItems(post, externalItems);
       deletedItems.push(...unsaved.removedItems);
-      hiddenItems.push(...unsaved.removedItems);
     } catch (error) {
       failures.push(error);
     }
   }
-  if (hide && hiddenItems.length) {
-    await hideImagineRemoteItems(hiddenItems);
-  }
-  return { deletedItems, failures, hiddenItems, data };
+  return { deletedItems, failures, data };
 }
 
 async function deleteImagineSelectedDetailItem() {
@@ -888,14 +854,12 @@ async function deleteImagineSelectedDetailItem() {
   });
   if (!ok) return;
   if (localLinkOnly) {
-    removeImagineItemsFromPost(post, [item], { rememberHiddenItems: [] });
+    removeImagineItemsFromPost(post, [item]);
     toast("Removed temporary link item.");
     return;
   }
   const result = await deleteImagineRemoteItem(post, item);
-  removeImagineItemsFromPost(post, result.deletedItems, {
-    rememberHiddenItems: result.hiddenItems,
-  });
+  removeImagineItemsFromPost(post, result.deletedItems);
   toast(result.action === "external-unsave" ? "Removed external Imagine item." : "Deleted Imagine item.");
 }
 
@@ -923,7 +887,6 @@ async function deleteImagineCardPost(post, button = null) {
         keepListScreen: true,
         screenId,
         scrollTop,
-        rememberHiddenItems: result.hiddenItems,
       });
       toast(result.data?.action === "external-unsave" ? "Removed external Imagine post." : "Deleted Imagine post.");
     }

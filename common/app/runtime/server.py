@@ -41,10 +41,11 @@ if VENDOR_PYTHON.exists():
 try:
     from build_routes import build_post_routes
     import imagine_accounts
+    import imagine_state
     from imagine_routes import imagine_post_routes
 except ImportError:
     from runtime.build_routes import build_post_routes
-    from runtime import imagine_accounts
+    from runtime import imagine_accounts, imagine_state
     from runtime.imagine_routes import imagine_post_routes
 
 try:
@@ -135,9 +136,13 @@ IMAGINE_SAVED_MEDIA_KEYS_CACHE_SECONDS = 45
 IMAGINE_SAVED_MEDIA_KEYS_CACHE: dict[str, tuple[float, set[str]]] = {}
 IMAGINE_SAVED_MEDIA_KEYS_CACHE_LOCK = threading.Lock()
 IMAGINE_OWNER_USER_ID_CACHE: dict[str, str] = {}
+IMAGINE_ACCOUNT_USER_ID_CACHE: dict[str, str] = {}
 IMAGINE_OWNER_USER_ID_CACHE_LOCK = threading.Lock()
 IMAGINE_SAVE_ACTIVE_KEYS: set[str] = set()
 IMAGINE_SAVE_ACTIVE_LOCK = threading.Lock()
+IMAGINE_STATE_MIGRATION_LOCK = threading.Lock()
+IMAGINE_RELATION_STATE_LOCK = threading.Lock()
+IMAGINE_STATE_READY_ROOTS: set[str] = set()
 
 BUILD_VIDEO_TERMINAL_STATUSES = {"failed", "expired", "cancelled", "canceled"}
 IMAGE_ASPECT_RATIOS = {"auto", "1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "2:1", "1:2", "19.5:9", "9:19.5", "20:9", "9:20"}
@@ -160,7 +165,7 @@ XAI_OAUTH_REDIRECT_PATH = "/callback"
 XAI_OAUTH_REDIRECT_PORT = 56121
 
 
-def app_support_dir() -> Path:
+def legacy_app_support_dir() -> Path:
     if sys.platform == "darwin":
         return Path.home() / "Library" / "Application Support" / "Grok Chameleon"
     if os.name == "nt":
@@ -168,14 +173,77 @@ def app_support_dir() -> Path:
     return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "grok-chameleon"
 
 
+def app_support_dir() -> Path:
+    raw = str(os.environ.get("GROK_CHAMELEON_RUNTIME_DIR") or "").strip()
+    if not raw:
+        raise RuntimeError("GROK_CHAMELEON_RUNTIME_DIR is required.")
+    runtime_dir = Path(raw).expanduser()
+    if not runtime_dir.is_absolute():
+        raise RuntimeError("Portable runtime directory must be absolute.")
+    runtime_dir = runtime_dir.resolve()
+    if runtime_dir == Path(runtime_dir.anchor):
+        raise RuntimeError("Refusing unsafe portable runtime directory.")
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    return runtime_dir
+
+
+def portable_root_dir() -> Path:
+    raw = str(os.environ.get("GROK_CHAMELEON_PORTABLE_ROOT") or "").strip()
+    if not raw:
+        raise RuntimeError("GROK_CHAMELEON_PORTABLE_ROOT is required.")
+    portable_root = Path(raw).expanduser()
+    if not portable_root.is_absolute():
+        raise RuntimeError("Portable app root must be absolute.")
+    portable_root = portable_root.resolve()
+    if portable_root == Path(portable_root.anchor):
+        raise RuntimeError("Refusing unsafe portable app root.")
+    return portable_root
+
+
+def portable_platform_key() -> str:
+    key = str(os.environ.get("GROK_CHAMELEON_PLATFORM_KEY") or "").strip().lower()
+    if key not in {"macos", "windows", "linux"}:
+        raise RuntimeError("Portable platform key is invalid.")
+    return key
+
+
+def library_pointer_path() -> Path:
+    raw = str(os.environ.get("GROK_CHAMELEON_LIBRARY_POINTER_PATH") or "").strip()
+    if not raw:
+        raise RuntimeError("GROK_CHAMELEON_LIBRARY_POINTER_PATH is required.")
+    pointer = Path(raw).expanduser()
+    if not pointer.is_absolute():
+        raise RuntimeError("Portable library pointer must be absolute.")
+    pointer = pointer.resolve()
+    portable_root = portable_root_dir()
+    if pointer.parent != portable_root or pointer.name != ".library_path.json":
+        raise RuntimeError("Refusing unsafe portable library pointer.")
+    return pointer
+
+
+def library_runtime_dir(root: Path) -> Path:
+    resolved_root = Path(root).expanduser().resolve()
+    if resolved_root == Path(resolved_root.anchor) or not (resolved_root / "library.json").is_file():
+        raise RuntimeError("Refusing unsafe library runtime root.")
+    runtime_root = (resolved_root / "runtime_data").resolve()
+    runtime_dir = (runtime_root / portable_platform_key()).resolve()
+    if runtime_root.parent != resolved_root or runtime_root.name != "runtime_data":
+        raise RuntimeError("Refusing unsafe library runtime path.")
+    if runtime_dir.parent != runtime_root:
+        raise RuntimeError("Refusing unsafe platform runtime path.")
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    return runtime_dir
+
+
 SETTINGS_PATH = app_support_dir() / "settings.json"
+LEGACY_SETTINGS_PATH = legacy_app_support_dir() / "settings.json"
 IMAGINE_PROFILE_DIR = app_support_dir() / "imagine_chrome_profile"
 IMAGINE_BRIDGE_BASE_PORT = int(os.environ.get("GROK_STUDIO_IMAGINE_BRIDGE_BASE_PORT", "9230"))
 IMAGINE_BRIDGE_PORT_SPAN = 1000
 IMAGINE_BRIDGE_READY_WAIT_SECONDS = 20
 IMAGINE_BRIDGE_LOGIN_WAIT_SECONDS = 180
 IMAGINE_BRIDGE_LOGIN_SAVE_DELAY_SECONDS = 2
-IMAGINE_DEBUG_LOG_PATH = Path.home() / "Library" / "Logs" / "Grok Chameleon" / "imagine_debug.jsonl"
+IMAGINE_DEBUG_LOG_PATH = app_support_dir() / "logs" / "imagine_debug.jsonl"
 SHUTDOWN_TIMER: threading.Timer | None = None
 SHUTDOWN_LOCK = threading.Lock()
 TOTAL_ACCOUNT_SESSION_LOCK = threading.Lock()
@@ -325,8 +393,6 @@ def log_event(message: str) -> None:
 
 
 def app_log_dir() -> Path:
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Logs" / "Grok Chameleon"
     return app_support_dir() / "logs"
 
 
@@ -440,11 +506,49 @@ def normalize_library_json_files(root: Path) -> None:
 
 def read_settings() -> dict:
     data = read_json(SETTINGS_PATH, {}, normalize_unicode=False)
+    if not data and not SETTINGS_PATH.exists():
+        legacy = read_json(LEGACY_SETTINGS_PATH, {}, normalize_unicode=False)
+        if isinstance(legacy, dict) and legacy:
+            write_json(SETTINGS_PATH, legacy, normalize_unicode=False)
+            data = legacy
     return data if isinstance(data, dict) else {}
 
 
 def write_settings(settings: dict) -> None:
     write_json(SETTINGS_PATH, settings, normalize_unicode=False)
+
+
+def write_library_pointer(root: Path) -> None:
+    pointer = library_pointer_path()
+    legacy_pointer = portable_root_dir() / "library_path.json"
+    data = read_json(pointer, {}, normalize_unicode=False)
+    data = data if isinstance(data, dict) else {}
+    legacy_data = read_json(legacy_pointer, {}, normalize_unicode=False)
+    legacy_data = legacy_data if isinstance(legacy_data, dict) else {}
+    legacy_paths = legacy_data.get("paths") if isinstance(legacy_data.get("paths"), dict) else {}
+    current_paths = data.get("paths") if isinstance(data.get("paths"), dict) else {}
+    paths = {**legacy_paths, **current_paths}
+    paths[portable_platform_key()] = str(root)
+    write_json(pointer, {
+        "version": 1,
+        "paths": paths,
+        "updated_at": now_iso(),
+    }, normalize_unicode=False)
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["attrib", "+H", str(pointer)],
+                check=False,
+                capture_output=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except OSError:
+            pass
+    if legacy_pointer != pointer:
+        try:
+            legacy_pointer.unlink()
+        except OSError:
+            pass
 
 
 def library_root() -> Path | None:
@@ -462,6 +566,10 @@ def set_library_root(path_text: str) -> Path:
     settings["library_root"] = str(root)
     settings["updated_at"] = now_iso()
     write_settings(settings)
+    target_settings = library_runtime_dir(root) / "settings.json"
+    if target_settings.resolve() != SETTINGS_PATH.resolve():
+        write_json(target_settings, settings, normalize_unicode=False)
+    write_library_pointer(root)
     return root
 
 
@@ -525,11 +633,6 @@ def default_library_json() -> dict:
             "collection_order": [],
             "collection_sort": {},
             "hidden_upload_keys": [],
-            "hidden_imagine_item_keys": [],
-            "imagine_local_heart_posts": {},
-            "imagine_external_reference_asset_ids": {},
-            "imagine_upload_asset_cache": {},
-            "imagine_generated_relations": {},
         },
         "posts": [],
         "collections": [],
@@ -550,11 +653,6 @@ def merge_library_json(data) -> dict:
     settings.setdefault("collection_order", [])
     settings.setdefault("collection_sort", {})
     settings.setdefault("hidden_upload_keys", [])
-    settings.setdefault("hidden_imagine_item_keys", [])
-    settings.setdefault("imagine_local_heart_posts", {})
-    settings.setdefault("imagine_external_reference_asset_ids", {})
-    settings.setdefault("imagine_upload_asset_cache", {})
-    settings.setdefault("imagine_generated_relations", {})
     base["settings"] = settings
     return base
 
@@ -925,8 +1023,8 @@ def wait_oauth_callback(
             return {
                 "code": "",
                 "state": "",
-                "error": "access_denied",
-                "error_description": browser_error,
+                "error": "browser_authorization_error",
+                "error_description": f"Browser authorization page error: {browser_error}",
             }
     raise RuntimeError("Timed out waiting for xAI account authorization.")
 
@@ -1054,6 +1152,16 @@ def build_account_status(expires_at: str) -> str:
     return "ok" if expires > datetime.now(timezone.utc) else "expired"
 
 
+def build_auth_can_refresh(auth: dict) -> bool:
+    return any(
+        isinstance(item.get("refresh_token"), str)
+        and bool(item.get("refresh_token"))
+        and isinstance(item.get("oidc_client_id"), str)
+        and bool(item.get("oidc_client_id"))
+        for item in valid_auth_candidates(auth_candidates(auth))
+    )
+
+
 def normalize_build_account(account) -> dict:
     auth = account.get("auth") if isinstance(account, dict) and isinstance(account.get("auth"), dict) else {}
     email = str((account or {}).get("email") or find_email_in_value(auth) or "").strip()
@@ -1063,6 +1171,8 @@ def normalize_build_account(account) -> dict:
     status = str((account or {}).get("status") or "").strip()
     if status not in {"login_required", "oauth_error"}:
         status = build_account_status(expires_at)
+        if status == "expired" and build_auth_can_refresh(auth):
+            status = "ok"
     return {
         "id": str((account or {}).get("id") or account_id("build", key)),
         "provider": "build",
@@ -1075,16 +1185,37 @@ def normalize_build_account(account) -> dict:
         "status": status,
         "oauth_error": str((account or {}).get("oauth_error") or ""),
         "oauth_error_at": str((account or {}).get("oauth_error_at") or ""),
+        "oauth_error_detail": str((account or {}).get("oauth_error_detail") or ""),
         "auth": auth,
     }
 
 
-def build_account_is_denied(account: dict | None) -> bool:
+def build_account_is_failed(account: dict | None) -> bool:
     return (
         isinstance(account, dict)
         and str(account.get("status") or "") == "oauth_error"
-        and str(account.get("oauth_error") or "").lower() == "access_denied"
     )
+
+
+def build_account_is_denied(account: dict | None) -> bool:
+    return build_account_is_failed(account)
+
+
+def build_registration_error_code(message: str) -> str:
+    lowered = str(message or "").lower()
+    if "failed to generate authentication code" in lowered:
+        return "authorization_code_failed"
+    if "state mismatch" in lowered:
+        return "state_mismatch"
+    if "accounts do not match" in lowered:
+        return "account_mismatch"
+    if "token exchange failed" in lowered:
+        return "token_exchange_failed"
+    if "timed out" in lowered or "timeout" in lowered:
+        return "timeout"
+    if "network" in lowered or "connection" in lowered:
+        return "network_error"
+    return "registration_failed"
 
 
 def build_account_from_auth(raw, source_name: str = "", label: str = "") -> dict:
@@ -1122,11 +1253,11 @@ def normalize_build_auth(data) -> dict:
     accounts = [normalize_build_account(item) for item in raw_accounts if isinstance(item, dict)]
     active_id = str(data.get("active_id") or "") if isinstance(data, dict) else ""
     active = next((account for account in accounts if account["id"] == active_id), None)
-    if active_id and (not active or build_account_is_denied(active)):
+    if active_id and (not active or build_account_is_failed(active)):
         active_id = ""
     if not active_id:
         active_id = next(
-            (account["id"] for account in accounts if not build_account_is_denied(account)),
+            (account["id"] for account in accounts if not build_account_is_failed(account)),
             "",
         )
     return {
@@ -1179,6 +1310,35 @@ def account_files(root: Path) -> dict:
     }
 
 
+def sync_account_registry(root: Path, provider: str, store: dict) -> None:
+    ensure_imagine_state_migrated(root)
+    imagine_state.sync_account_registry(
+        root,
+        provider,
+        store.get("accounts") if isinstance(store.get("accounts"), list) else [],
+        str(store.get("active_id") or ""),
+    )
+
+
+def sync_account_registries(root: Path, accounts: dict) -> None:
+    sync_account_registry(root, "build", accounts["build"])
+    sync_account_registry(root, "imagine", accounts["imagine"])
+
+
+def account_snapshot(root: Path, *, sync_registry: bool = True) -> dict:
+    accounts = account_files(root)
+    if sync_registry:
+        sync_account_registries(root, accounts)
+    data = normalize_json_unicode({
+        "ok": True,
+        "library_root": str(root),
+        "root_name": root.name,
+        "accounts": accounts,
+    })
+    data["library_root"] = str(root)
+    return data
+
+
 def active_imagine_account(root: Path | None = None, account_id_value: str = "") -> dict:
     root = root or library_root()
     if not root:
@@ -1218,6 +1378,7 @@ def write_build_auth(root: Path, data: dict, *, preserve_order: bool = False) ->
         normalized["accounts"] = sort_accounts_by_priority(normalized["accounts"], normalized["active_id"])
     normalized["updated_at"] = now_iso()
     write_json(root / "account" / "build_auth.json", normalized)
+    sync_account_registry(root, "build", normalized)
 
 
 def write_imagine_auth(root: Path, data: dict, *, preserve_order: bool = False) -> None:
@@ -1226,6 +1387,7 @@ def write_imagine_auth(root: Path, data: dict, *, preserve_order: bool = False) 
         normalized["accounts"] = sort_accounts_by_priority(normalized["accounts"], normalized["active_id"])
     normalized["updated_at"] = now_iso()
     write_json(root / "account" / "imagine_auth.json", normalized)
+    sync_account_registry(root, "imagine", normalized)
 
 
 def upsert_account(accounts: list[dict], account: dict) -> list[dict]:
@@ -1292,16 +1454,25 @@ def register_build_account(payload: dict) -> dict:
         account["tier"] = previous_tier
     build["accounts"] = upsert_account(build.get("accounts") or [], account)
     build["active_id"] = account["id"]
-    tier_result = fetch_build_usage_tier_for_account(root, build, account)
-    if tier_result.get("ok"):
-        account["tier"] = normalize_account_tier(tier_result.get("tier"))
-        account["tier_checked_at"] = now_iso()
-        log_event(f"Build usage tier {account['tier']} for {account.get('email') or account.get('label') or account.get('id')}: {tier_result.get('message') or ''}")
-    elif previous_tier:
-        account["tier"] = previous_tier
-        log_event(f"Build usage tier kept {previous_tier} for {account.get('email') or account.get('label') or account.get('id')}: {tier_result.get('message') or ''}")
-    write_build_auth(root, build)
-    return scan_library(root)
+    prepare_build_account(root, build, account)
+    return account_snapshot(root)
+
+
+def finish_total_account_session(
+    root: Path,
+    session_id: str,
+    target: dict | None,
+    debug_port: int,
+    process: subprocess.Popen | None,
+    profile_dir: Path,
+    reason: str,
+) -> None:
+    closed = close_total_account_browser(target, debug_port, process)
+    if closed:
+        remove_total_account_profile(root, profile_dir, reason)
+        remove_total_account_cache(total_account_cache_dir(session_id), reason)
+        with TOTAL_ACCOUNT_SESSION_LOCK:
+            TOTAL_ACCOUNT_SESSIONS.pop(session_id, None)
 
 
 def register_total_account(payload: dict) -> dict:
@@ -1311,20 +1482,50 @@ def register_total_account(payload: dict) -> dict:
     ensure_library_root(root)
     session_id = uuid.uuid4().hex
     profile_dir = total_account_profile_dir(root, session_id)
+    cache_dir = total_account_cache_dir(session_id)
     debug_port = available_loopback_port()
     target: dict | None = None
     callback_server: ThreadingHTTPServer | None = None
+    browser_process: subprocess.Popen | None = None
+    imagine_account: dict = {}
+    imagine_email = ""
+    build_account: dict = {}
+    build_failed = False
+    build_error = ""
+    build_error_code = ""
+    email = ""
+    request_started_at = time.monotonic()
     log_event(f"total_account_start session={session_id} debug_port={debug_port}")
     with TOTAL_ACCOUNT_SESSION_LOCK:
         TOTAL_ACCOUNT_SESSIONS[session_id] = {
             "root": str(root.resolve()),
             "profile_dir": str(profile_dir),
+            "cache_dir": str(cache_dir),
             "debug_port": debug_port,
             "target": None,
+            "process": None,
+            "stage": "imagine",
         }
+
     try:
-        launch_total_account_browser(IMAGINE_BASE + "/imagine", profile_dir, debug_port)
+        browser_process = launch_total_account_browser(
+            IMAGINE_BASE + "/imagine",
+            profile_dir,
+            cache_dir,
+            debug_port,
+        )
+        with TOTAL_ACCOUNT_SESSION_LOCK:
+            if session_id in TOTAL_ACCOUNT_SESSIONS:
+                TOTAL_ACCOUNT_SESSIONS[session_id]["process"] = browser_process
+        log_event(
+            f"total_account_browser_launched session={session_id} "
+            f"elapsed_ms={int((time.monotonic() - request_started_at) * 1000)}"
+        )
         target = wait_total_account_imagine_login(debug_port)
+        log_event(
+            f"total_account_imagine_ready session={session_id} "
+            f"elapsed_ms={int((time.monotonic() - request_started_at) * 1000)}"
+        )
         with TOTAL_ACCOUNT_SESSION_LOCK:
             if session_id in TOTAL_ACCOUNT_SESSIONS:
                 TOTAL_ACCOUNT_SESSIONS[session_id]["target"] = target
@@ -1342,15 +1543,16 @@ def register_total_account(payload: dict) -> dict:
             "label": imagine_email or identity.get("label") or "Imagine",
         })
         verify_imagine_saved_access(imagine_account)
-        files = account_files(root)
-        previous_imagine_tier = matching_account_tier(files["imagine"].get("accounts") or [], imagine_account)
-        if previous_imagine_tier:
-            imagine_account["tier"] = previous_imagine_tier
-        apply_imagine_account_tier(imagine_account)
-        files["imagine"]["accounts"] = upsert_account(files["imagine"].get("accounts") or [], imagine_account)
-        files["imagine"]["active_id"] = imagine_account["id"]
-        write_imagine_auth(root, files["imagine"])
+        with TOTAL_ACCOUNT_SESSION_LOCK:
+            if session_id in TOTAL_ACCOUNT_SESSIONS:
+                TOTAL_ACCOUNT_SESSIONS[session_id].update({
+                    "target": target,
+                    "stage": "build",
+                    "imagine_id": imagine_account["id"],
+                    "imagine_email": imagine_email,
+                })
 
+        build_denied = False
         try:
             verifier, challenge = oauth_pkce_pair()
             state = secrets.token_hex(16)
@@ -1359,9 +1561,29 @@ def register_total_account(payload: dict) -> dict:
             redirect_uri = f"http://127.0.0.1:{callback_port}{XAI_OAUTH_REDIRECT_PATH}"
             oauth_url = build_oauth_authorize_url(redirect_uri, challenge, state, nonce)
             navigate_cdp_target(target, oauth_url)
+            log_event(
+                f"total_account_oauth_opened session={session_id} "
+                f"elapsed_ms={int((time.monotonic() - request_started_at) * 1000)}"
+            )
             callback_result = wait_oauth_callback(callback_server, timeout_seconds=300, target=target)
+            log_event(
+                f"total_account_oauth_returned session={session_id} "
+                f"elapsed_ms={int((time.monotonic() - request_started_at) * 1000)} "
+                f"error={str(callback_result.get('error') or '')[:80]}"
+            )
             if callback_result.get("error"):
-                raise RuntimeError(callback_result.get("error_description") or callback_result.get("error") or "xAI authorization failed.")
+                oauth_error = str(callback_result.get("error") or "").strip().lower()
+                error_description = str(
+                    callback_result.get("error_description")
+                    or callback_result.get("error")
+                    or "xAI authorization failed."
+                ).strip()
+                build_denied = (
+                    oauth_error == "access_denied"
+                    and "failed to generate authentication code" not in error_description.lower()
+                )
+                build_error_code = "access_denied" if build_denied else (oauth_error or "")
+                raise RuntimeError(error_description)
             if callback_result.get("state") != state:
                 raise RuntimeError("xAI authorization state mismatch.")
             code = str(callback_result.get("code") or "")
@@ -1376,57 +1598,83 @@ def register_total_account(payload: dict) -> dict:
 
             build_auth = build_auth_from_oauth(tokens, userinfo, email)
             build_account = build_account_from_auth(build_auth, "xai_oauth", email)
-            previous_build_tier = matching_account_tier(files["build"].get("accounts") or [], build_account)
-            if previous_build_tier:
-                build_account["tier"] = previous_build_tier
-            files["build"]["accounts"] = upsert_account(files["build"].get("accounts") or [], build_account)
-            files["build"]["active_id"] = build_account["id"]
-            tier_result = fetch_build_usage_tier_for_account(root, files["build"], build_account)
-            if tier_result.get("ok"):
-                build_account["tier"] = normalize_account_tier(tier_result.get("tier"))
-                build_account["tier_checked_at"] = now_iso()
-            elif previous_build_tier:
-                build_account["tier"] = previous_build_tier
-            write_build_auth(root, files["build"])
         except Exception as exc:
+            build_failed = True
             build_error = str(exc).strip() or "Unknown Build registration error."
-            build_error_lower = build_error.lower()
-            build_denied = (
-                "access denied" in build_error_lower
-                or "failed to generate authentication code" in build_error_lower
-            )
-            denied_build_id = ""
-            if "access denied" in build_error_lower:
-                build_error = "Access denied"
             if build_denied:
-                denied_build_id = account_id(
-                    "build_denied",
-                    imagine_email or imagine_account["id"],
-                )
-                denied_build_account = normalize_build_account({
-                    "id": denied_build_id,
-                    "provider": "build",
-                    "label": imagine_email or imagine_account.get("label") or "Build",
-                    "email": imagine_email,
-                    "tier": imagine_account.get("tier"),
-                    "source_name": "xai_oauth",
-                    "registered_at": now_iso(),
-                    "status": "oauth_error",
-                    "oauth_error": "access_denied",
-                    "oauth_error_at": now_iso(),
-                    "auth": {},
-                })
-                existing_build_accounts = files["build"].get("accounts") or []
-                files["build"]["accounts"] = [
-                    denied_build_account,
-                    *[
-                        account
-                        for account in existing_build_accounts
-                        if str(account.get("id") or "") != denied_build_id
-                    ],
-                ]
-                write_build_auth(root, files["build"])
-            data = scan_library(root)
+                build_error = "Access denied"
+            build_error_code = build_error_code or build_registration_error_code(build_error)
+
+        if callback_server:
+            try:
+                callback_server.server_close()
+            except Exception:
+                pass
+            callback_server = None
+
+        browser_closed = close_total_account_browser(
+            target,
+            debug_port,
+            browser_process,
+        )
+        with TOTAL_ACCOUNT_SESSION_LOCK:
+            if session_id in TOTAL_ACCOUNT_SESSIONS:
+                TOTAL_ACCOUNT_SESSIONS[session_id]["stage"] = "saving"
+        if not browser_closed:
+            log_event(
+                f"total_account_save_after_close_failure session={session_id} "
+                f"debug_port={debug_port}"
+            )
+
+        files = account_files(root)
+        previous_imagine_tier = matching_account_tier(
+            files["imagine"].get("accounts") or [],
+            imagine_account,
+        )
+        if previous_imagine_tier:
+            imagine_account["tier"] = previous_imagine_tier
+        apply_imagine_account_tier(imagine_account)
+        files["imagine"]["accounts"] = upsert_account(
+            files["imagine"].get("accounts") or [],
+            imagine_account,
+        )
+        files["imagine"]["active_id"] = imagine_account["id"]
+        write_imagine_auth(root, files["imagine"])
+        log_event(
+            f"total_account_imagine_saved session={session_id} "
+            f"elapsed_ms={int((time.monotonic() - request_started_at) * 1000)}"
+        )
+
+        if build_failed:
+            failed_build_id = account_id(
+                "build_failed",
+                imagine_email or imagine_account["id"],
+            )
+            failed_build_account = normalize_build_account({
+                "id": failed_build_id,
+                "provider": "build",
+                "label": imagine_email or imagine_account.get("label") or "Build",
+                "email": imagine_email,
+                "tier": imagine_account.get("tier"),
+                "source_name": "xai_oauth",
+                "registered_at": now_iso(),
+                "status": "oauth_error",
+                "oauth_error": build_error_code,
+                "oauth_error_at": now_iso(),
+                "oauth_error_detail": build_error[:500],
+                "auth": {},
+            })
+            existing_build_accounts = files["build"].get("accounts") or []
+            files["build"]["accounts"] = [
+                failed_build_account,
+                *[
+                    account
+                    for account in existing_build_accounts
+                    if str(account.get("id") or "") != failed_build_id
+                ],
+            ]
+            write_build_auth(root, files["build"])
+            data = account_snapshot(root, sync_registry=False)
             data["total_account"] = {
                 "ok": True,
                 "partial": True,
@@ -1434,7 +1682,7 @@ def register_total_account(payload: dict) -> dict:
                 "build_ok": False,
                 "email": imagine_email,
                 "imagine_id": imagine_account["id"],
-                "build_id": denied_build_id,
+                "build_id": failed_build_id,
                 "build_error": build_error[:500],
                 "message": f"Imagine registered. Build registration failed: {build_error[:300]}",
             }
@@ -1444,7 +1692,19 @@ def register_total_account(payload: dict) -> dict:
             )
             return data
 
-        data = scan_library(root)
+        previous_build_tier = matching_account_tier(
+            files["build"].get("accounts") or [],
+            build_account,
+        )
+        if previous_build_tier:
+            build_account["tier"] = previous_build_tier
+        files["build"]["accounts"] = upsert_account(
+            files["build"].get("accounts") or [],
+            build_account,
+        )
+        files["build"]["active_id"] = build_account["id"]
+        prepare_build_account(root, files["build"], build_account)
+        data = account_snapshot(root, sync_registry=False)
         data["total_account"] = {
             "ok": True,
             "partial": False,
@@ -1462,10 +1722,15 @@ def register_total_account(payload: dict) -> dict:
                 callback_server.server_close()
             except Exception:
                 pass
-        close_total_account_browser(target, debug_port)
-        remove_total_account_profile(root, profile_dir, "registration-finished")
-        with TOTAL_ACCOUNT_SESSION_LOCK:
-            TOTAL_ACCOUNT_SESSIONS.pop(session_id, None)
+        finish_total_account_session(
+            root,
+            session_id,
+            target,
+            debug_port,
+            browser_process,
+            profile_dir,
+            "registration-finished",
+        )
 
 
 def select_build_account(payload: dict) -> dict:
@@ -1477,21 +1742,12 @@ def select_build_account(payload: dict) -> dict:
     account = next((account for account in build.get("accounts") or [] if account.get("id") == account_id_value), None)
     if not account:
         raise RuntimeError("Build account not found.")
-    if build_account_is_denied(account):
+    if build_account_is_failed(account):
         raise RuntimeError("Denied Build account cannot be selected.")
     build["accounts"] = reorder_accounts_by_ids(build.get("accounts") or [], [account_id_value])
     build["active_id"] = account_id_value
-    previous_tier = normalize_account_tier(account.get("tier"))
-    tier_result = fetch_build_usage_tier_for_account(root, build, account)
-    if tier_result.get("ok"):
-        account["tier"] = normalize_account_tier(tier_result.get("tier"))
-        account["tier_checked_at"] = now_iso()
-        log_event(f"Build usage tier {account['tier']} for {account.get('email') or account.get('label') or account.get('id')}: {tier_result.get('message') or ''}")
-    else:
-        account["tier"] = previous_tier
-        log_event(f"Build usage tier kept {previous_tier} for {account.get('email') or account.get('label') or account.get('id')}: {tier_result.get('message') or ''}")
-    write_build_auth(root, build)
-    return scan_library(root)
+    prepare_build_account(root, build, account)
+    return account_snapshot(root)
 
 
 def delete_build_account(payload: dict) -> dict:
@@ -1504,13 +1760,21 @@ def delete_build_account(payload: dict) -> dict:
     if len(accounts) == len(build.get("accounts") or []):
         raise RuntimeError("Build account not found.")
     build["accounts"] = accounts
-    if build.get("active_id") == account_id_value:
+    active_changed = build.get("active_id") == account_id_value
+    if active_changed:
         build["active_id"] = next(
-            (str(account.get("id") or "") for account in accounts if not build_account_is_denied(account)),
+            (str(account.get("id") or "") for account in accounts if not build_account_is_failed(account)),
             "",
         )
-    write_build_auth(root, build)
-    return scan_library(root)
+    next_account = next(
+        (account for account in accounts if str(account.get("id") or "") == str(build.get("active_id") or "")),
+        None,
+    )
+    if active_changed and next_account:
+        prepare_build_account(root, build, next_account)
+    else:
+        write_build_auth(root, build)
+    return account_snapshot(root)
 
 
 def update_account_tier(payload: dict) -> dict:
@@ -1535,7 +1799,7 @@ def update_account_tier(payload: dict) -> dict:
         write_imagine_auth(root, store)
     else:
         write_build_auth(root, store)
-    return scan_library(root)
+    return account_snapshot(root)
 
 
 def reorder_account_store(payload: dict, provider: str) -> dict:
@@ -1551,7 +1815,7 @@ def reorder_account_store(payload: dict, provider: str) -> dict:
         write_imagine_auth(root, store, preserve_order=True)
     else:
         write_build_auth(root, store, preserve_order=True)
-    return scan_library(root)
+    return account_snapshot(root)
 
 
 def cookie_header(cookies: list[dict]) -> str:
@@ -2434,41 +2698,28 @@ def imagine_persist_generated_relation(
     stored_items = [stored for stored in (imagine_relation_stored_item(item) for item in items or []) if stored]
     if not source_id or not stored_items:
         return
-    library_path = root / "library.json"
-    library = merge_library_json(read_json(library_path, {}))
-    settings = library.setdefault("settings", {})
-    relations = settings.get("imagine_generated_relations")
-    if not isinstance(relations, dict):
-        relations = {}
-    record = relations.get(source_id) if isinstance(relations.get(source_id), dict) else {}
-    merged: dict[str, dict] = {}
-    for candidate in record.get("items") if isinstance(record.get("items"), list) else []:
-        key = imagine_relation_item_key(candidate)
-        if key:
-            merged[key] = imagine_relation_stored_item(candidate)
-    for candidate in stored_items:
-        key = imagine_relation_item_key(candidate)
-        if key:
-            merged[key] = candidate
-    relations[source_id] = {
-        "source_post_id": source_id,
-        "source_post_path": str(source_post_path or ""),
-        "source_item_id": str(source_item_id or ""),
-        "action": str(action or ""),
-        "request_id": str(request_id or ""),
-        "updated_at": now_iso(),
-        "items": list(merged.values())[-120:],
-    }
-    if len(relations) > 500:
-        ordered = sorted(
-            relations.items(),
-            key=lambda pair: str((pair[1] if isinstance(pair[1], dict) else {}).get("updated_at") or ""),
-            reverse=True,
-        )[:500]
-        relations = dict(ordered)
-    settings["imagine_generated_relations"] = relations
-    library["updated_at"] = now_iso()
-    write_json(library_path, library)
+    ensure_imagine_state_migrated(root)
+    with IMAGINE_RELATION_STATE_LOCK:
+        relations = imagine_state.load_generated_relations(root)
+        record = relations.get(source_id) if isinstance(relations.get(source_id), dict) else {}
+        merged: dict[str, dict] = {}
+        for candidate in record.get("items") if isinstance(record.get("items"), list) else []:
+            key = imagine_relation_item_key(candidate)
+            if key:
+                merged[key] = imagine_relation_stored_item(candidate)
+        for candidate in stored_items:
+            key = imagine_relation_item_key(candidate)
+            if key:
+                merged[key] = candidate
+        imagine_state.upsert_generated_relation(root, source_id, {
+            "source_post_id": source_id,
+            "source_post_path": str(source_post_path or ""),
+            "source_item_id": str(source_item_id or ""),
+            "action": str(action or ""),
+            "request_id": str(request_id or ""),
+            "updated_at": now_iso(),
+            "items": list(merged.values())[-120:],
+        })
     imagine_debug_event("generated_relation_persisted", {
         "request_id": request_id,
         "action": action,
@@ -2478,14 +2729,19 @@ def imagine_persist_generated_relation(
     })
 
 
-def imagine_restore_generated_relation_resolutions(post: dict, library: dict) -> bool:
-    if not isinstance(post, dict) or not isinstance(library, dict):
+def imagine_restore_generated_relation_resolutions(
+    post: dict,
+    root: Path,
+    relations: dict[str, dict] | None = None,
+) -> bool:
+    if not isinstance(post, dict):
         return False
     post_id = str(post.get("post_id") or "").strip()
     if not post_id:
         return False
-    settings = library.get("settings") if isinstance(library.get("settings"), dict) else {}
-    relations = settings.get("imagine_generated_relations") if isinstance(settings.get("imagine_generated_relations"), dict) else {}
+    ensure_imagine_state_migrated(root)
+    if not isinstance(relations, dict):
+        relations = imagine_state.load_generated_relations(root)
     record = relations.get(post_id) if isinstance(relations.get(post_id), dict) else None
     if not record:
         return False
@@ -2547,76 +2803,24 @@ def imagine_post_is_link_source(post: dict) -> bool:
     return False
 
 
-def imagine_hidden_item_keys(item: dict) -> set[str]:
-    if not isinstance(item, dict):
-        return set()
-    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-    imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
-    return {
-        str(value).strip()
-        for value in (
-            media_item_key(item),
-            item.get("item_id"),
-            item.get("id"),
-            item.get("post_id"),
-            metadata.get("post_id"),
-            imagine.get("post_id"),
-            item.get("asset_id"),
-            metadata.get("asset_id"),
-            metadata.get("root_asset_id"),
-            imagine.get("asset_id"),
-            imagine.get("root_asset_id"),
-            item.get("remote_url"),
-            item.get("url"),
-            item.get("object_url"),
-            item.get("thumbnail_url"),
-            metadata.get("remote_url"),
-            metadata.get("media_url"),
-            imagine.get("media_url"),
-        )
-        if str(value or "").strip()
-    }
-
-
-def unhide_explicit_imagine_link(root: Path, post: dict, requested_post_id: str) -> list[str]:
-    library_path = root / "library.json"
-    library = merge_library_json(read_json(library_path, {}))
-    settings = library.setdefault("settings", {})
-    relation_posts = settings.get("imagine_generated_relations")
-    relation_posts = relation_posts if isinstance(relation_posts, dict) else {}
-    post_id = str(post.get("post_id") or requested_post_id or "").strip()
-    relation = relation_posts.get(post_id) if isinstance(relation_posts.get(post_id), dict) else {}
-    relation_items = relation.get("items") if isinstance(relation.get("items"), list) else []
-    released_keys = {str(requested_post_id or "").strip(), post_id}
-    for item in [*(post.get("items") or []), *relation_items]:
-        released_keys.update(imagine_hidden_item_keys(item))
-    released_keys.discard("")
-    if not released_keys:
-        return []
-    hidden = [str(value).strip() for value in settings.get("hidden_imagine_item_keys", []) if str(value).strip()]
-    next_hidden = [key for key in hidden if key not in released_keys]
-    if len(next_hidden) != len(hidden):
-        settings["hidden_imagine_item_keys"] = next_hidden
-        library["updated_at"] = now_iso()
-        write_json(library_path, library)
-    return sorted(released_keys)
-
-
-def imagine_apply_generated_relations(post: dict, root: Path, account: dict, library: dict | None = None) -> dict:
+def imagine_apply_generated_relations(
+    post: dict,
+    root: Path,
+    account: dict,
+    relations: dict[str, dict] | None = None,
+) -> dict:
     if not isinstance(post, dict):
         return post
     post_id = str(post.get("post_id") or "").strip()
     if not post_id:
         return post
-    if not isinstance(library, dict):
-        library = merge_library_json(read_json(root / "library.json", {}))
-    settings = library.get("settings") if isinstance(library.get("settings"), dict) else {}
-    relations = settings.get("imagine_generated_relations") if isinstance(settings.get("imagine_generated_relations"), dict) else {}
+    ensure_imagine_state_migrated(root)
+    if not isinstance(relations, dict):
+        relations = imagine_state.load_generated_relations(root)
     record = relations.get(post_id) if isinstance(relations.get(post_id), dict) else None
     if not record:
         return post
-    enriched_existing = imagine_restore_generated_relation_resolutions(post, library)
-    hidden = {str(value) for value in settings.get("hidden_imagine_item_keys", []) if str(value)}
+    enriched_existing = imagine_restore_generated_relation_resolutions(post, root, relations)
     existing_items = [dict(item) for item in post.get("items") or [] if isinstance(item, dict)]
     existing_keys = {imagine_relation_item_key(item) for item in existing_items}
     link_source = imagine_post_is_link_source(post)
@@ -2643,8 +2847,6 @@ def imagine_apply_generated_relations(post: dict, root: Path, account: dict, lib
         item = imagine_relation_materialized_item(stored, account)
         key = imagine_relation_item_key(item)
         if not key or key in existing_keys:
-            continue
-        if key in hidden or str(item.get("url") or "") in hidden or str(item.get("remote_url") or "") in hidden:
             continue
         existing_items.append(item)
         existing_keys.add(key)
@@ -3511,6 +3713,7 @@ def list_imagine_saved(payload: dict) -> dict:
     account = active_imagine_account(root, str((payload or {}).get("account_id") or ""))
     if not account:
         raise RuntimeError("Select or capture an Imagine account first.")
+    current_owner_user_id = imagine_current_owner_user_id(account)
     try:
         limit = int((payload or {}).get("limit") or 20)
     except (TypeError, ValueError):
@@ -3574,10 +3777,18 @@ def list_imagine_saved(payload: dict) -> dict:
                         "conversation_id": conversation_id,
                         "error": str(exc)[:400],
                     })
-    library = merge_library_json(read_json(root / "library.json", {}))
-    external_reference_ids = imagine_account_setting_ids(root, "imagine_external_reference_asset_ids", account)
+    ensure_imagine_state_migrated(root)
+    relations = imagine_state.load_generated_relations(root)
+    pending_delete_ids = imagine_pending_delete_ids(root, account)
+    local_exclusion_ids = imagine_local_exclusion_ids(root, account)
+    hidden_remote_ids = pending_delete_ids | local_exclusion_ids
+    external_reference_ids = imagine_account_setting_ids(
+        root,
+        "imagine_external_reference_asset_ids",
+        account,
+    )
     local_heart_posts = [
-        imagine_apply_generated_relations(local_post, root, account, library)
+        imagine_apply_generated_relations(local_post, root, account, relations)
         for local_post in imagine_account_local_heart_posts(root, account)
     ]
     posts = []
@@ -3585,7 +3796,17 @@ def list_imagine_saved(payload: dict) -> dict:
         conversation_id = str(conversation.get("conversationId") or "")
         post = imagine_saved_post_from_conversation(conversation, details.get(conversation_id, {}), account)
         if post:
-            imagine_restore_generated_relation_resolutions(post, library)
+            post["items"] = [
+                item
+                for item in post.get("items") or []
+                if imagine_item_asset_id(item) not in hidden_remote_ids
+            ]
+            if not post["items"]:
+                continue
+            representative = imagine_representative_item(post["items"]) or post["items"][-1]
+            post["representative_item"] = representative
+            post["representative"] = representative.get("url") or representative.get("item_id") or ""
+            imagine_restore_generated_relation_resolutions(post, root, relations)
             posts.append(post)
 
     asset_query = [
@@ -3601,12 +3822,6 @@ def list_imagine_saved(payload: dict) -> dict:
         else imagine_get_json("/rest/assets?" + urlencode(asset_query), account, timeout=20)
     )
     assets = asset_data.get("assets") if isinstance(asset_data.get("assets"), list) else []
-    current_owner_user_id = remember_imagine_owner_user_id(account, next((
-        imagine_asset_owner_user_id(conversation.get("latestAssetMetadata") or {})
-        for conversation in conversations
-        if isinstance(conversation.get("latestAssetMetadata"), dict)
-        and imagine_asset_owner_user_id(conversation.get("latestAssetMetadata") or {})
-    ), ""))
     grouped_asset_ids = {
         imagine_item_asset_id(item)
         for post in [*posts, *local_heart_posts]
@@ -3635,18 +3850,25 @@ def list_imagine_saved(payload: dict) -> dict:
         if str(post.get("folder_path") or "")
     }
     for asset in assets:
-        if not isinstance(asset, dict):
+        if not isinstance(asset, dict) or imagine_asset_upload_only(asset):
             continue
         asset_id = str(asset.get("assetId") or asset.get("id") or "").strip()
-        if not asset_id:
-            continue
-        if asset_id in grouped_asset_ids or asset_id in grouped_source_ids:
+        if (
+            not asset_id
+            or asset_id in hidden_remote_ids
+            or asset_id in grouped_asset_ids
+            or asset_id in grouped_source_ids
+        ):
             continue
         owner_user_id = imagine_asset_owner_user_id(asset)
-        external_reference = (
+        external_reference = bool(
             asset_id in external_reference_ids
             or imagine_asset_is_public_reference(asset)
-            or bool(owner_user_id and current_owner_user_id and owner_user_id != current_owner_user_id)
+            or (
+                owner_user_id
+                and current_owner_user_id
+                and owner_user_id != current_owner_user_id
+            )
         )
         flat_post = imagine_flat_saved_post_from_asset(
             asset,
@@ -3666,7 +3888,11 @@ def list_imagine_saved(payload: dict) -> dict:
     posts.sort(key=lambda post: str(post.get("created_at") or ""), reverse=True)
 
     next_conversation_cursor = str(data.get("nextPageToken") or "").strip()
-    next_asset_cursor = str(asset_data.get("nextPageToken") or asset_data.get("nextCursor") or "").strip()
+    next_asset_cursor = str(
+        asset_data.get("nextPageToken")
+        or asset_data.get("nextCursor")
+        or ""
+    ).strip()
     next_conversations_done = conversations_done or not next_conversation_cursor
     next_assets_done = assets_done or not next_asset_cursor
     has_more = not (next_conversations_done and next_assets_done)
@@ -3931,7 +4157,6 @@ def load_imagine_remote_link_post(payload: dict) -> dict:
         raise RuntimeError("Select or capture an Imagine account first.")
     raw_post = imagine_get_media_post_direct(post_id, account, timeout=12)
     post = imagine_saved_post_from_root(raw_post, account)
-    unhidden_keys = unhide_explicit_imagine_link(root, post, post_id) if post else []
     if post:
         post = imagine_apply_generated_relations(post, root, account)
     if not post:
@@ -3942,6 +4167,13 @@ def load_imagine_remote_link_post(payload: dict) -> dict:
         if imagine_item_asset_id(item)
     }
     link_asset_ids.add(post_id)
+    released_exclusions = link_asset_ids & imagine_local_exclusion_ids(root, account)
+    if released_exclusions:
+        imagine_state.remove_local_exclusions(
+            root,
+            imagine_account_settings_key(account),
+            released_exclusions,
+        )
     saved_link_ids = link_asset_ids & imagine_local_heart_asset_ids(root, account)
     link_is_saved = bool(saved_link_ids)
     metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
@@ -3987,7 +4219,6 @@ def load_imagine_remote_link_post(payload: dict) -> dict:
         "url": link_url,
         "saved": link_is_saved,
         "saved_ids": sorted(saved_link_ids),
-        "unhidden_keys": unhidden_keys,
         "post": post,
         "posts": [post],
         "items": [post],
@@ -4246,6 +4477,278 @@ def imagine_account_settings_key(account: dict) -> str:
     return str(account.get("id") or account.get("email") or "").strip().lower()
 
 
+def imagine_local_state_group_id(post: dict) -> str:
+    metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+    return str(
+        metadata.get("local_saved_group_id")
+        or metadata.get("group_id")
+        or metadata.get("conversation_id")
+        or post.get("post_id")
+        or Path(str(post.get("folder_path") or "")).name
+        or ""
+    ).strip()
+
+
+def imagine_local_state_group_keys(post: dict) -> set[str]:
+    metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+    imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
+    values = {
+        imagine_local_state_group_id(post),
+        str(post.get("post_id") or "").strip(),
+        Path(str(post.get("folder_path") or "")).name,
+        str(metadata.get("conversation_id") or "").strip(),
+        str(imagine.get("conversation_id") or "").strip(),
+    }
+    for item in post.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        item_metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        item_imagine = (
+            item_metadata.get("imagine")
+            if isinstance(item_metadata.get("imagine"), dict)
+            else {}
+        )
+        values.update({
+            str(item.get("conversation_id") or "").strip(),
+            str(item_metadata.get("conversation_id") or "").strip(),
+            str(item_imagine.get("conversation_id") or "").strip(),
+        })
+    values.discard("")
+    return values
+
+
+def imagine_item_is_external_reference(item: dict) -> bool:
+    if not isinstance(item, dict):
+        return False
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
+    return bool(
+        item.get("external_reference")
+        or metadata.get("external_reference")
+        or imagine.get("external_reference")
+        or metadata.get("link_source")
+        or imagine.get("link_source")
+    )
+
+
+def imagine_local_state_records(
+    posts: list[dict],
+    legacy_external_ids: set[str] | None = None,
+) -> list[dict]:
+    legacy_external_ids = legacy_external_ids or set()
+    records: list[dict] = []
+    for post in posts:
+        if not isinstance(post, dict):
+            continue
+        group_id = imagine_local_state_group_id(post)
+        if not group_id:
+            continue
+        asset_ids: set[str] = set()
+        external_ids: set[str] = set()
+        for item in post.get("items") or []:
+            asset_id = imagine_item_asset_id(item)
+            if not asset_id:
+                continue
+            asset_ids.add(asset_id)
+            if asset_id in legacy_external_ids or imagine_item_is_external_reference(item):
+                external_ids.add(asset_id)
+        if not asset_ids:
+            continue
+        records.append({
+            "group_id": group_id,
+            "post": post,
+            "asset_ids": sorted(asset_ids),
+            "external_asset_ids": sorted(external_ids),
+        })
+    return records
+
+
+def ensure_imagine_state_migrated(root: Path) -> None:
+    root_key = str(root.resolve())
+    if root_key in IMAGINE_STATE_READY_ROOTS:
+        return
+    with IMAGINE_STATE_MIGRATION_LOCK:
+        if root_key in IMAGINE_STATE_READY_ROOTS:
+            return
+        library_path = root / "library.json"
+        library = merge_library_json(read_json(library_path, {}))
+        identity = imagine_state.library_id(root)
+        if str(library.get("library_id") or "").strip() != identity:
+            library["library_id"] = identity
+            library["updated_at"] = now_iso()
+            write_json(library_path, library)
+        settings = library.setdefault("settings", {})
+        migrated = imagine_state.metadata_value(root, "legacy_library_json_migrated_v2") == "1"
+        legacy_keys = {
+            "hidden_imagine_item_keys",
+            "imagine_local_heart_posts",
+            "imagine_external_reference_asset_ids",
+            "imagine_generated_relations",
+            "imagine_upload_asset_cache",
+            "imagine_locally_unsaved_asset_ids",
+        }
+        has_legacy_state = bool(legacy_keys & set(settings))
+        if not migrated:
+            if has_legacy_state:
+                legacy_posts = (
+                    settings.get("imagine_local_heart_posts")
+                    if isinstance(settings.get("imagine_local_heart_posts"), dict)
+                    else {}
+                )
+                legacy_external = (
+                    settings.get("imagine_external_reference_asset_ids")
+                    if isinstance(settings.get("imagine_external_reference_asset_ids"), dict)
+                    else {}
+                )
+                legacy_relations = (
+                    settings.get("imagine_generated_relations")
+                    if isinstance(settings.get("imagine_generated_relations"), dict)
+                    else {}
+                )
+                legacy_upload_cache = (
+                    settings.get("imagine_upload_asset_cache")
+                    if isinstance(settings.get("imagine_upload_asset_cache"), dict)
+                    else {}
+                )
+                for account_key in sorted(set(legacy_posts) | set(legacy_external)):
+                    posts = [
+                        dict(post)
+                        for post in (
+                            legacy_posts.get(account_key)
+                            if isinstance(legacy_posts.get(account_key), list)
+                            else []
+                        )
+                        if isinstance(post, dict)
+                    ]
+                    external_ids = {
+                        str(value).strip()
+                        for value in (
+                            legacy_external.get(account_key)
+                            if isinstance(legacy_external.get(account_key), list)
+                            else []
+                        )
+                        if str(value).strip()
+                    }
+                    imagine_state.replace_saved_posts(
+                        root,
+                        str(account_key),
+                        imagine_local_state_records(posts, external_ids),
+                    )
+                imagine_state.replace_generated_relations(root, legacy_relations)
+                imagine_state.replace_upload_cache(root, legacy_upload_cache)
+            imagine_state.set_metadata_value(
+                root,
+                "legacy_library_json_migrated_v2",
+                "1",
+            )
+        if not imagine_state.sync_snapshot(root):
+            raise RuntimeError("Library state snapshot could not be synchronized.")
+        changed = False
+        for legacy_key in legacy_keys:
+            if legacy_key in settings:
+                settings.pop(legacy_key, None)
+                changed = True
+        state_descriptor = {
+            "version": 3,
+            "working_copy": "library",
+            "database": "sql_data/state.sqlite3",
+            "backup": "sql_data/state.backup.sqlite3",
+        }
+        if settings.get("imagine_state") != state_descriptor:
+            settings["imagine_state"] = state_descriptor
+            changed = True
+        if changed:
+            library["updated_at"] = now_iso()
+            write_json(library_path, library)
+        IMAGINE_STATE_READY_ROOTS.add(root_key)
+
+
+def imagine_pending_delete_ids(root: Path | None, account: dict) -> set[str]:
+    if not root:
+        return set()
+    ensure_imagine_state_migrated(root)
+    return imagine_state.pending_delete_ids(root, imagine_account_settings_key(account))
+
+
+def imagine_local_exclusion_ids(root: Path | None, account: dict) -> set[str]:
+    if not root:
+        return set()
+    ensure_imagine_state_migrated(root)
+    return imagine_state.local_exclusion_ids(
+        root,
+        imagine_account_settings_key(account),
+    )
+
+
+def remove_imagine_generated_relation_state(
+    root: Path,
+    *,
+    asset_ids: set[str] | None = None,
+    group_ids: set[str] | None = None,
+) -> None:
+    remove_assets = {
+        str(value).strip()
+        for value in (asset_ids or set())
+        if str(value).strip()
+    }
+    remove_groups = {
+        str(value).strip()
+        for value in (group_ids or set())
+        if str(value).strip()
+    }
+    if not remove_assets and not remove_groups:
+        return
+    ensure_imagine_state_migrated(root)
+    with IMAGINE_RELATION_STATE_LOCK:
+        relations = imagine_state.load_generated_relations(root)
+        next_relations: dict[str, dict] = {}
+        changed = False
+        for source_id, raw_record in relations.items():
+            if not isinstance(raw_record, dict):
+                changed = True
+                continue
+            record = dict(raw_record)
+            record_keys = {
+                str(source_id).strip(),
+                str(record.get("source_post_id") or "").strip(),
+                str(record.get("source_item_id") or "").strip(),
+                Path(str(record.get("source_post_path") or "")).name,
+            }
+            if record_keys & (remove_assets | remove_groups):
+                changed = True
+                continue
+            items: list[dict] = []
+            for item in record.get("items") if isinstance(record.get("items"), list) else []:
+                if not isinstance(item, dict):
+                    changed = True
+                    continue
+                metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+                imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
+                item_asset_keys = {
+                    imagine_relation_item_key(item),
+                    imagine_item_asset_id(item),
+                    str(item.get("item_id") or "").strip(),
+                    str(item.get("id") or "").strip(),
+                    str(item.get("post_id") or "").strip(),
+                }
+                item_group_keys = {
+                    str(item.get("conversation_id") or "").strip(),
+                    str(metadata.get("conversation_id") or "").strip(),
+                    str(imagine.get("conversation_id") or "").strip(),
+                }
+                if (item_asset_keys & remove_assets) or (item_group_keys & remove_groups):
+                    changed = True
+                    continue
+                items.append(item)
+            if not items:
+                changed = True
+                continue
+            record["items"] = items
+            next_relations[source_id] = record
+        if changed:
+            imagine_state.replace_generated_relations(root, next_relations)
+
+
 def imagine_asset_owner_user_id(asset: dict, media_url: str = "") -> str:
     if not isinstance(asset, dict):
         return ""
@@ -4286,14 +4789,52 @@ def remember_imagine_owner_user_id(account: dict, owner_user_id: str = "") -> st
     if not account_key:
         return owner_id
     with IMAGINE_OWNER_USER_ID_CACHE_LOCK:
+        account_user_id = IMAGINE_ACCOUNT_USER_ID_CACHE.get(account_key, "")
+        if account_user_id:
+            IMAGINE_OWNER_USER_ID_CACHE[account_key] = account_user_id
+            return account_user_id
         if owner_id:
             IMAGINE_OWNER_USER_ID_CACHE[account_key] = owner_id
         return owner_id or IMAGINE_OWNER_USER_ID_CACHE.get(account_key, "")
 
 
+def imagine_current_owner_user_id(account: dict) -> str:
+    account_key = imagine_account_settings_key(account)
+    if account_key:
+        with IMAGINE_OWNER_USER_ID_CACHE_LOCK:
+            owner_user_id = IMAGINE_ACCOUNT_USER_ID_CACHE.get(account_key, "")
+        if owner_user_id:
+            return owner_user_id
+    try:
+        data = imagine_get_json(
+            "/api/auth/session",
+            account,
+            timeout=8,
+            referer=IMAGINE_BASE + "/imagine",
+        )
+    except Exception:
+        return ""
+    session = data.get("session") if isinstance(data.get("session"), dict) else {}
+    owner_user_id = str(
+        session.get("userId")
+        or session.get("user_id")
+        or data.get("userId")
+        or data.get("user_id")
+        or ""
+    ).strip()
+    if owner_user_id and account_key:
+        with IMAGINE_OWNER_USER_ID_CACHE_LOCK:
+            IMAGINE_ACCOUNT_USER_ID_CACHE[account_key] = owner_user_id
+            IMAGINE_OWNER_USER_ID_CACHE[account_key] = owner_user_id
+    return owner_user_id
+
+
 def imagine_account_setting_ids(root: Path | None, setting_name: str, account: dict) -> set[str]:
     if not root:
         return set()
+    if setting_name == "imagine_external_reference_asset_ids":
+        ensure_imagine_state_migrated(root)
+        return imagine_state.external_reference_ids(root, imagine_account_settings_key(account))
     library = merge_library_json(read_json(root / "library.json", {}))
     settings = library.get("settings") if isinstance(library.get("settings"), dict) else {}
     by_account = settings.get(setting_name) if isinstance(settings.get(setting_name), dict) else {}
@@ -4310,6 +4851,14 @@ def update_imagine_account_setting_ids(
     add: set[str] | None = None,
     remove: set[str] | None = None,
 ) -> set[str]:
+    if setting_name == "imagine_external_reference_asset_ids":
+        ensure_imagine_state_migrated(root)
+        return imagine_state.update_external_reference_ids(
+            root,
+            imagine_account_settings_key(account),
+            add=add,
+            remove=remove,
+        )
     ensure_library_root(root)
     library_path = root / "library.json"
     library = merge_library_json(read_json(library_path, {}))
@@ -4333,12 +4882,8 @@ def update_imagine_account_setting_ids(
 def imagine_account_local_heart_posts(root: Path | None, account: dict) -> list[dict]:
     if not root:
         return []
-    library = merge_library_json(read_json(root / "library.json", {}))
-    settings = library.get("settings") if isinstance(library.get("settings"), dict) else {}
-    by_account = settings.get("imagine_local_heart_posts") if isinstance(settings.get("imagine_local_heart_posts"), dict) else {}
-    account_key = imagine_account_settings_key(account)
-    posts = by_account.get(account_key) if isinstance(by_account.get(account_key), list) else []
-    return [dict(post) for post in posts if isinstance(post, dict)]
+    ensure_imagine_state_migrated(root)
+    return imagine_state.load_saved_posts(root, imagine_account_settings_key(account))
 
 
 def imagine_local_heart_asset_ids(root: Path | None, account: dict) -> set[str]:
@@ -4466,20 +5011,26 @@ def update_imagine_local_heart_posts(
     *,
     add_post: dict | None = None,
     remove_asset_ids: set[str] | None = None,
+    remove_group_ids: set[str] | None = None,
     remove_entire_link_post: bool = True,
 ) -> list[dict]:
     ensure_library_root(root)
-    library_path = root / "library.json"
+    ensure_imagine_state_migrated(root)
     with IMAGINE_SAVE_ACTIVE_LOCK:
-        library = merge_library_json(read_json(library_path, {}))
-        settings = library.setdefault("settings", {})
-        by_account = settings.get("imagine_local_heart_posts") if isinstance(settings.get("imagine_local_heart_posts"), dict) else {}
         account_key = imagine_account_settings_key(account)
-        posts = [
-            dict(post)
-            for post in (by_account.get(account_key) if isinstance(by_account.get(account_key), list) else [])
-            if isinstance(post, dict)
-        ]
+        posts = imagine_state.load_saved_posts(root, account_key)
+        known_external_ids = imagine_state.external_reference_ids(root, account_key)
+        remove_groups = {
+            str(value).strip()
+            for value in (remove_group_ids or set())
+            if str(value).strip()
+        }
+        if remove_groups:
+            posts = [
+                post
+                for post in posts
+                if not (imagine_local_state_group_keys(post) & remove_groups)
+            ]
         remove_ids = {str(value).strip() for value in (remove_asset_ids or set()) if str(value).strip()}
         if remove_ids:
             remaining_posts: list[dict] = []
@@ -4540,10 +5091,11 @@ def update_imagine_local_heart_posts(
                 representative = imagine_representative_item(destination["items"]) or destination["items"][-1]
                 destination["representative_item"] = representative
                 destination["representative"] = representative.get("url") or representative.get("remote_url") or representative.get("item_id") or ""
-        by_account[account_key] = posts
-        settings["imagine_local_heart_posts"] = by_account
-        library["updated_at"] = now_iso()
-        write_json(library_path, library)
+        imagine_state.replace_saved_posts(
+            root,
+            account_key,
+            imagine_local_state_records(posts, known_external_ids),
+        )
     return posts
 
 
@@ -4569,16 +5121,23 @@ def imagine_saved_media_keys(account: dict, max_posts: int = 160) -> set[str]:
         ]
         if cursor:
             query_parts.append(("pageToken", cursor))
-        data = imagine_get_json("/rest/assets?" + urlencode(query_parts), account, timeout=20)
+        data = imagine_get_json(
+            "/rest/assets?" + urlencode(query_parts),
+            account,
+            timeout=20,
+        )
         assets = data.get("assets") if isinstance(data.get("assets"), list) else []
         if not assets:
             break
         for asset in assets:
-            if not isinstance(asset, dict):
-                continue
-            keys.update(imagine_asset_key_values(asset))
+            if isinstance(asset, dict):
+                keys.update(imagine_asset_key_values(asset))
         seen += len(assets)
-        next_cursor = str(data.get("nextPageToken") or data.get("nextCursor") or "").strip()
+        next_cursor = str(
+            data.get("nextPageToken")
+            or data.get("nextCursor")
+            or ""
+        ).strip()
         if not next_cursor or next_cursor in seen_cursors:
             break
         seen_cursors.add(next_cursor)
@@ -4917,6 +5476,7 @@ def list_imagine_unsaved(payload: dict) -> dict:
     cursor = str((payload or {}).get("cursor") or "").strip()
     saved_keys = imagine_saved_media_keys_cached(account, max_posts=0)
     saved_keys.update(imagine_local_heart_media_keys(root, account))
+    pending_delete_ids = imagine_pending_delete_ids(root, account)
     grouped_posts: dict[str, dict] = {}
     current_cursor, current_offset, current_anchor = decode_imagine_unsaved_cursor(cursor)
     response_cursor = ""
@@ -4951,6 +5511,9 @@ def list_imagine_unsaved(payload: dict) -> dict:
         for asset_index in range(start_offset, len(assets)):
             asset = assets[asset_index]
             if not isinstance(asset, dict) or imagine_asset_upload_only(asset):
+                continue
+            asset_id = str(asset.get("assetId") or asset.get("id") or "").strip()
+            if asset_id in pending_delete_ids:
                 continue
             asset_keys = imagine_asset_key_values(asset)
             if asset_keys & saved_keys:
@@ -5287,6 +5850,13 @@ def delete_imagine_asset(payload: dict) -> dict:
     )
     root = library_root()
     if root:
+        update_imagine_local_heart_posts(
+            root,
+            account,
+            remove_asset_ids={asset_id},
+            remove_entire_link_post=False,
+        )
+        remove_imagine_generated_relation_state(root, asset_ids={asset_id})
         update_imagine_account_setting_ids(
             root,
             "imagine_external_reference_asset_ids",
@@ -5309,6 +5879,9 @@ def delete_imagine_asset_metadata(payload: dict) -> dict:
         timeout=15,
         referer=IMAGINE_BASE + "/files",
     )
+    root = library_root()
+    if root:
+        remove_imagine_generated_relation_state(root, asset_ids={asset_id})
     return {"ok": True, "asset_id": asset_id, "result": result}
 
 
@@ -5330,6 +5903,15 @@ def delete_imagine_conversation(payload: dict) -> dict:
         raise RuntimeError("Imagine conversation id could not be resolved.")
     path = f"/rest/app-chat/conversations/{quote(conversation_id, safe='')}?{urlencode({'deleteMedia': 'true'})}"
     result = imagine_delete_json(path, account, timeout=45, referer=IMAGINE_BASE + "/imagine/saved")
+    root = library_root()
+    if root:
+        update_imagine_local_heart_posts(
+            root,
+            account,
+            remove_group_ids={conversation_id},
+        )
+        remove_imagine_generated_relation_state(root, group_ids={conversation_id})
+        invalidate_imagine_saved_media_keys_cache(account)
     return {"ok": True, "conversation_id": conversation_id, "result": result}
 
 
@@ -5449,7 +6031,7 @@ def sync_imagine_official_saved_registration(
         except Exception as exc:
             errors.append(f"{visit_post_id}: {str(exc)[:240]}")
     if not requested_ids.issubset(imagine_local_heart_asset_ids(root, account)):
-        sync_imagine_official_saved_deletion(account, requested_ids)
+        sync_imagine_official_saved_deletion(root, account, requested_ids)
         return
     imagine_debug_event("local_heart_official_registration", {
         "requested_ids": sorted(requested_ids),
@@ -5464,7 +6046,7 @@ def sync_imagine_official_saved_registration(
     })
 
 
-def sync_imagine_official_saved_deletion(account: dict, asset_ids: set[str]) -> None:
+def sync_imagine_official_saved_deletion(root: Path, account: dict, asset_ids: set[str]) -> None:
     deleted_ids: list[str] = []
     errors: list[str] = []
     for asset_id in asset_ids:
@@ -5476,6 +6058,11 @@ def sync_imagine_official_saved_deletion(account: dict, asset_ids: set[str]) -> 
                 referer=f"{IMAGINE_BASE}/imagine/post/{quote(asset_id, safe='')}",
             )
             deleted_ids.append(asset_id)
+            imagine_state.resolve_pending_deletes(
+                root,
+                imagine_account_settings_key(account),
+                {asset_id},
+            )
         except Exception as exc:
             errors.append(f"{asset_id}: {str(exc)[:240]}")
     imagine_debug_event("local_heart_official_deleted", {
@@ -5499,6 +6086,18 @@ def _like_imagine_media_post(payload: dict) -> dict:
     local_post = normalize_imagine_local_heart_post(payload or {}, targets, account)
     if not local_post:
         raise RuntimeError("Imagine local heart data is missing.")
+    local_post_asset_ids = {
+        imagine_item_asset_id(item)
+        for item in local_post.get("items") or []
+        if imagine_item_asset_id(item)
+    }
+    released_exclusions = local_post_asset_ids & imagine_local_exclusion_ids(root, account)
+    if released_exclusions:
+        imagine_state.remove_local_exclusions(
+            root,
+            imagine_account_settings_key(account),
+            released_exclusions,
+        )
     update_imagine_local_heart_posts(root, account, add_post=local_post)
     visits: list[dict] = []
     seen_visit_post_ids: set[str] = set()
@@ -5607,11 +6206,26 @@ def unsave_imagine_media_post(payload: dict) -> dict:
         account,
         remove=local_asset_ids,
     )
+    if external_asset_ids:
+        ensure_imagine_state_migrated(root)
+        imagine_state.add_local_exclusions(
+            root,
+            imagine_account_settings_key(account),
+            local_asset_ids,
+        )
+    if owned_asset_ids:
+        remove_imagine_generated_relation_state(root, asset_ids=owned_asset_ids)
     invalidate_imagine_saved_media_keys_cache(account)
     if owned_asset_ids:
+        ensure_imagine_state_migrated(root)
+        imagine_state.add_pending_deletes(
+            root,
+            imagine_account_settings_key(account),
+            owned_asset_ids,
+        )
         threading.Thread(
             target=sync_imagine_official_saved_deletion,
-            args=(dict(account), set(owned_asset_ids)),
+            args=(root, dict(account), set(owned_asset_ids)),
             daemon=True,
         ).start()
     return {
@@ -6090,23 +6704,18 @@ def imagine_local_upload_cache_key(data: bytes, mime_type: str) -> str:
 
 
 def imagine_upload_asset_cache(root: Path) -> dict:
-    library = merge_library_json(read_json(root / "library.json", {}))
-    settings = library.get("settings") if isinstance(library.get("settings"), dict) else {}
-    cache = settings.get("imagine_upload_asset_cache")
-    return cache if isinstance(cache, dict) else {}
+    ensure_imagine_state_migrated(root)
+    return imagine_state.load_upload_cache(root)
 
 
 def remember_imagine_upload_asset_cache(root: Path, key: str, record: dict) -> None:
     if not key:
         return
-    library_path = root / "library.json"
-    library = merge_library_json(read_json(library_path, {}))
-    settings = library.setdefault("settings", {})
-    cache = settings.get("imagine_upload_asset_cache") if isinstance(settings.get("imagine_upload_asset_cache"), dict) else {}
     upload_hash = str(record.get("upload_hash") or "").strip()
     if not upload_hash and ":" in key:
         upload_hash = key.split(":", 1)[1].strip()
-    cache[key] = {
+    ensure_imagine_state_migrated(root)
+    imagine_state.upsert_upload_cache(root, key, {
         "file_id": str(record.get("file_id") or ""),
         "file_url": str(record.get("file_url") or ""),
         "post_id": str(record.get("post_id") or ""),
@@ -6114,10 +6723,7 @@ def remember_imagine_upload_asset_cache(root: Path, key: str, record: dict) -> N
         "name": str(record.get("name") or ""),
         "upload_hash": upload_hash,
         "updated_at": now_iso(),
-    }
-    settings["imagine_upload_asset_cache"] = cache
-    library["updated_at"] = now_iso()
-    write_json(library_path, library)
+    })
 
 
 def apply_cached_imagine_upload_asset(attachment: dict, account: dict, request_id: str, action: str, cache_key: str, promote_post: bool = True) -> bool:
@@ -8559,9 +9165,8 @@ def imagine_generated_relation_baseline_ids(root: Path, source_post_path: str, e
     source_id = imagine_relation_source_id(source_post_path)
     if not source_id:
         return set()
-    library = merge_library_json(read_json(root / "library.json", {}))
-    settings = library.get("settings") if isinstance(library.get("settings"), dict) else {}
-    relations = settings.get("imagine_generated_relations") if isinstance(settings.get("imagine_generated_relations"), dict) else {}
+    ensure_imagine_state_migrated(root)
+    relations = imagine_state.load_generated_relations(root)
     record = relations.get(source_id) if isinstance(relations.get(source_id), dict) else {}
     ids: set[str] = set()
     for item in record.get("items") if isinstance(record.get("items"), list) else []:
@@ -10305,7 +10910,7 @@ def start_imagine_login(payload: dict) -> dict:
     if not root:
         raise RuntimeError("Library path is not set.")
     fallback = launch_imagine_browser(IMAGINE_BASE + "/imagine")
-    data = scan_library(root)
+    data = account_snapshot(root)
     data["imagine_window"] = {
         "ok": True,
         "fallback": fallback,
@@ -10422,7 +11027,7 @@ def capture_imagine_login(payload: dict) -> dict:
     imagine["active_id"] = account["id"]
     write_imagine_auth(root, imagine)
     close_imagine_browser()
-    return scan_library(root)
+    return account_snapshot(root)
 
 
 def select_imagine_account(payload: dict) -> dict:
@@ -10436,7 +11041,7 @@ def select_imagine_account(payload: dict) -> dict:
     imagine["accounts"] = reorder_accounts_by_ids(imagine.get("accounts") or [], [account_id_value])
     imagine["active_id"] = account_id_value
     write_imagine_auth(root, imagine)
-    return scan_library(root)
+    return account_snapshot(root)
 
 
 def logout_imagine_account(payload: dict) -> dict:
@@ -10447,7 +11052,7 @@ def logout_imagine_account(payload: dict) -> dict:
     imagine = account_files(root)["imagine"]
     imagine["active_id"] = ""
     write_imagine_auth(root, imagine)
-    return scan_library(root)
+    return account_snapshot(root)
 
 
 def delete_imagine_account(payload: dict) -> dict:
@@ -10463,7 +11068,7 @@ def delete_imagine_account(payload: dict) -> dict:
     if imagine.get("active_id") == account_id_value:
         imagine["active_id"] = accounts[0].get("id") if accounts else ""
     write_imagine_auth(root, imagine)
-    return scan_library(root)
+    return account_snapshot(root)
 
 
 def imagine_account_status(account: dict) -> dict:
@@ -10546,9 +11151,9 @@ def active_build_account(root: Path) -> dict | None:
     accounts = build.get("accounts") if isinstance(build.get("accounts"), list) else []
     active_id = str(build.get("active_id") or "")
     active = next((account for account in accounts if str(account.get("id") or "") == active_id), None)
-    if active_id and active and not build_account_is_denied(active):
+    if active_id and active and not build_account_is_failed(active):
         return active
-    return next((account for account in accounts if not build_account_is_denied(account)), None)
+    return next((account for account in accounts if not build_account_is_failed(account)), None)
 
 
 def active_build_store_and_account(root: Path) -> tuple[dict, dict]:
@@ -10556,10 +11161,10 @@ def active_build_store_and_account(root: Path) -> tuple[dict, dict]:
     accounts = build.get("accounts") if isinstance(build.get("accounts"), list) else []
     active_id = str(build.get("active_id") or "")
     account = next((item for item in accounts if str(item.get("id") or "") == active_id), None)
-    if active_id and (not isinstance(account, dict) or build_account_is_denied(account)):
+    if active_id and (not isinstance(account, dict) or build_account_is_failed(account)):
         raise RuntimeError("Selected Build account is missing. Choose a Build account again.")
     account = account or next(
-        (item for item in accounts if not build_account_is_denied(item)),
+        (item for item in accounts if not build_account_is_failed(item)),
         None,
     )
     if not isinstance(account, dict):
@@ -10665,14 +11270,25 @@ def refresh_build_oauth_token(root: Path, force: bool = False) -> str | None:
     return build_oauth_token_for_account(root, build, account, force)
 
 
-def fetch_build_usage_tier_for_account(root: Path, build: dict, account: dict) -> dict:
+def fetch_build_usage_tier_for_account(
+    root: Path,
+    build: dict,
+    account: dict,
+    *,
+    persist_invalid_grant: bool = False,
+) -> dict:
     result = {
         "ok": False,
         "tier": normalize_account_tier(account.get("tier")),
         "message": "Usage tier unavailable",
     }
     try:
-        token = build_oauth_token_for_account(root, build, account, persist_invalid_grant=False)
+        token = build_oauth_token_for_account(
+            root,
+            build,
+            account,
+            persist_invalid_grant=persist_invalid_grant,
+        )
     except RuntimeError as exc:
         result["message"] = str(exc).splitlines()[0]
         return result
@@ -10707,6 +11323,33 @@ def fetch_build_usage_tier_for_account(root: Path, build: dict, account: dict) -
         "tier": normalize_account_tier(tier),
         "message": f"Usage tier detected: {tier}",
     }
+
+
+def prepare_build_account(root: Path, build: dict, account: dict) -> dict:
+    previous_tier = normalize_account_tier(account.get("tier"))
+    result = fetch_build_usage_tier_for_account(
+        root,
+        build,
+        account,
+        persist_invalid_grant=True,
+    )
+    if result.get("ok"):
+        account["tier"] = normalize_account_tier(result.get("tier"))
+        account["tier_checked_at"] = now_iso()
+        log_event(
+            f"Build usage tier {account['tier']} for "
+            f"{account.get('email') or account.get('label') or account.get('id')}: "
+            f"{result.get('message') or ''}"
+        )
+    else:
+        account["tier"] = previous_tier
+        log_event(
+            f"Build usage tier kept {previous_tier} for "
+            f"{account.get('email') or account.get('label') or account.get('id')}: "
+            f"{result.get('message') or ''}"
+        )
+    write_build_auth(root, build)
+    return result
 
 
 def refresh_build_account_tiers(root: Path) -> None:
@@ -11579,6 +12222,8 @@ def scan_library(root: Path | None = None) -> dict:
     library["collections"] = [collection_summary(collection) for collection in collections]
     library["prompts"] = [prompt_summary(prompt) for prompt in prompts]
     write_json(root / "library.json", library)
+    accounts = account_files(root)
+    sync_account_registries(root, accounts)
     snapshot = normalize_json_unicode({
         "ok": True,
         "library_root": str(root),
@@ -11587,7 +12232,7 @@ def scan_library(root: Path | None = None) -> dict:
         "posts": posts,
         "collections": collections,
         "prompts": prompts,
-        "accounts": account_files(root),
+        "accounts": accounts,
     })
     snapshot["library_root"] = str(root)
     return snapshot
@@ -12803,6 +13448,12 @@ def imagine_browser_executable() -> str | None:
                     str(Path(root) / "Microsoft" / "Edge" / "Application" / "msedge.exe"),
                 ])
         names = ("chrome.exe", "msedge.exe", "chromium.exe")
+    elif sys.platform == "darwin":
+        candidates.extend([
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            str(Path.home() / "Applications" / "Google Chrome.app" / "Contents" / "MacOS" / "Google Chrome"),
+        ])
+        names = ("google-chrome", "chrome", "chromium", "chromium-browser")
     else:
         names = ("google-chrome", "chrome", "chromium", "chromium-browser", "microsoft-edge")
     for name in names:
@@ -12938,6 +13589,78 @@ def total_account_profile_dir(root: Path, session_id: str) -> Path:
     return total_account_sessions_dir(root) / safe_name(session_id, "session")
 
 
+def total_account_cache_root() -> Path:
+    return (app_support_dir() / "temp" / "total-account-cache").resolve()
+
+
+def total_account_cache_dir(session_id: str) -> Path:
+    return total_account_cache_root() / safe_name(session_id, "session")
+
+
+def remove_total_account_cache(cache_dir: Path, reason: str) -> bool:
+    cache_root = total_account_cache_root()
+    resolved_cache = Path(cache_dir).resolve()
+    if resolved_cache == cache_root or resolved_cache.parent != cache_root:
+        log_event(
+            f"total_account_cache_cleanup refused reason={reason} "
+            f"path={resolved_cache}"
+        )
+        return False
+    if not resolved_cache.exists() and not resolved_cache.is_symlink():
+        return True
+    try:
+        if resolved_cache.is_symlink() or resolved_cache.is_file():
+            resolved_cache.unlink()
+        else:
+            shutil.rmtree(resolved_cache)
+        return not resolved_cache.exists()
+    except OSError as exc:
+        log_event(
+            f"total_account_cache_cleanup failed reason={reason} "
+            f"path={resolved_cache} detail={str(exc)[:240]}"
+        )
+        return False
+
+
+def cleanup_total_account_caches(reason: str, include_active: bool = False) -> dict:
+    cache_root = total_account_cache_root()
+    if not cache_root.exists():
+        return {"deleted": 0, "skipped": 0, "failed": 0, "reason": reason}
+    with TOTAL_ACCOUNT_SESSION_LOCK:
+        active_cache_dirs = {
+            Path(str(item.get("cache_dir") or "")).resolve()
+            for item in TOTAL_ACCOUNT_SESSIONS.values()
+            if str(item.get("cache_dir") or "")
+        }
+    deleted = 0
+    skipped = 0
+    failed = 0
+    try:
+        entries = list(cache_root.iterdir())
+    except OSError:
+        entries = []
+        failed += 1
+    for entry in entries:
+        resolved_entry = entry.resolve()
+        if resolved_entry in active_cache_dirs and not include_active:
+            skipped += 1
+            continue
+        if remove_total_account_cache(resolved_entry, reason):
+            deleted += 1
+        else:
+            failed += 1
+    try:
+        cache_root.rmdir()
+    except OSError:
+        pass
+    return {
+        "deleted": deleted,
+        "skipped": skipped,
+        "failed": failed,
+        "reason": reason,
+    }
+
+
 def total_account_profile_debug_port(profile_dir: Path) -> int:
     try:
         first_line = (profile_dir / "DevToolsActivePort").read_text(
@@ -13045,16 +13768,23 @@ def cleanup_total_account_login_sessions(
             continue
         debug_port = int((active or {}).get("debug_port") or 0)
         if active and include_active:
-            close_total_account_browser(active.get("target"), debug_port)
+            closed = close_total_account_browser(
+                active.get("target"),
+                debug_port,
+                active.get("process"),
+            )
         elif not active:
             debug_port = total_account_profile_debug_port(resolved_entry)
-            if debug_port and cdp_targets_optional(debug_port):
-                skipped += 1
-                log_event(
-                    f"total_account_profile_cleanup skipped reason={reason} "
-                    f"detail=profile-in-use path={resolved_entry}"
-                )
-                continue
+            closed = close_total_account_browser(None, debug_port) if debug_port else True
+        else:
+            closed = True
+        if not closed:
+            skipped += 1
+            log_event(
+                f"total_account_profile_cleanup skipped reason={reason} "
+                f"detail=browser-still-running path={resolved_entry}"
+            )
+            continue
         if remove_total_account_profile(
             target_root,
             resolved_entry,
@@ -13082,8 +13812,14 @@ def cleanup_total_account_login_sessions(
     return result
 
 
-def launch_total_account_browser(url: str, profile_dir: Path, debug_port: int) -> None:
+def launch_total_account_browser(
+    url: str,
+    profile_dir: Path,
+    cache_dir: Path,
+    debug_port: int,
+) -> subprocess.Popen:
     profile_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir.mkdir(parents=True, exist_ok=True)
     width, height = 960, 760
     left, top = 120, 80
     if sys.platform == "darwin":
@@ -13091,23 +13827,34 @@ def launch_total_account_browser(url: str, profile_dir: Path, debug_port: int) -
     args = [
         f"--remote-debugging-port={debug_port}",
         f"--user-data-dir={profile_dir}",
+        f"--disk-cache-dir={cache_dir}",
+        "--disk-cache-size=268435456",
+        "--media-cache-size=67108864",
         "--no-first-run",
         "--no-default-browser-check",
+        "--disable-background-networking",
         "--disable-background-timer-throttling",
+        "--disable-component-update",
+        "--disable-default-apps",
+        "--disable-extensions",
+        "--disable-gpu-shader-disk-cache",
         "--disable-renderer-backgrounding",
+        "--disable-sync",
+        "--disable-translate",
+        "--no-pings",
+        "--disable-features=OptimizationGuideModelDownloading",
         f"--window-size={width},{height}",
         f"--window-position={left},{top}",
         "--new-window",
         url,
     ]
-    if sys.platform == "darwin":
-        subprocess.Popen(["/usr/bin/open", "-na", "Google Chrome", "--args", *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        fit_chrome_front_window(left, top, width, height)
-        return
     browser = imagine_browser_executable()
     if not browser:
         raise RuntimeError("Chrome is required for Total Account registration.")
-    subprocess.Popen([browser, *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    process = subprocess.Popen([browser, *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if sys.platform == "darwin":
+        fit_chrome_front_window(left, top, width, height)
+    return process
 
 
 def find_total_account_target(debug_port: int, host_fragment: str = "grok.com") -> dict | None:
@@ -13174,23 +13921,77 @@ def close_cdp_browser(target: dict | None) -> None:
         pass
 
 
+def total_account_browser_websocket_url(debug_port: int) -> str:
+    port = int(debug_port or 0)
+    if port <= 0:
+        return ""
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/json/version",
+            timeout=2,
+        ) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return ""
+    return str(data.get("webSocketDebuggerUrl") or "") if isinstance(data, dict) else ""
+
+
+def total_account_process_running(process: subprocess.Popen | None) -> bool:
+    return bool(process is not None and process.poll() is None)
+
+
 def close_total_account_browser(
     target: dict | None,
     debug_port: int,
+    process: subprocess.Popen | None = None,
     timeout_seconds: float = 5.0,
 ) -> bool:
-    close_cdp_browser(target)
     port = int(debug_port or 0)
-    if port <= 0:
-        return True
+    browser_ws_url = total_account_browser_websocket_url(port)
+    if browser_ws_url:
+        try:
+            cdp_call(browser_ws_url, "Browser.close", timeout=2)
+        except Exception:
+            pass
+    else:
+        close_cdp_browser(target)
+
     deadline = time.monotonic() + max(0.5, timeout_seconds)
     while time.monotonic() < deadline:
-        targets = cdp_targets_optional(port)
-        if not targets:
+        port_active = bool(total_account_browser_websocket_url(port))
+        process_active = total_account_process_running(process)
+        if not port_active and not process_active:
             return True
-        close_cdp_browser(targets[0])
         time.sleep(0.2)
-    log_event(f"total_account_browser_close timeout debug_port={port}")
+
+    if total_account_process_running(process):
+        try:
+            process.terminate()
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            try:
+                process.kill()
+                process.wait(timeout=2)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    browser_ws_url = total_account_browser_websocket_url(port)
+    if browser_ws_url:
+        try:
+            cdp_call(browser_ws_url, "Browser.close", timeout=2)
+        except Exception:
+            pass
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if not total_account_browser_websocket_url(port) and not total_account_process_running(process):
+            return True
+        time.sleep(0.2)
+    log_event(
+        f"total_account_browser_close failed debug_port={port} "
+        f"pid={int(process.pid) if process is not None else 0}"
+    )
     return False
 
 
@@ -15496,7 +16297,7 @@ def save_accounts(payload: dict) -> dict:
     imagine = payload.get("imagine") if isinstance(payload.get("imagine"), dict) else default_imagine_auth()
     write_build_auth(root, build)
     write_imagine_auth(root, imagine)
-    return scan_library(root)
+    return account_snapshot(root)
 
 
 def create_collection(payload: dict) -> dict:
@@ -16996,30 +17797,6 @@ def remove_upload_from_composer_list(payload: dict) -> dict:
     return scan_library(root)
 
 
-def hide_imagine_item_from_remote_lists(payload: dict) -> dict:
-    root = library_root()
-    if not root:
-        raise RuntimeError("Library path is not set.")
-    ensure_library_root(root)
-    raw_keys = payload.get("keys") if isinstance(payload.get("keys"), list) else []
-    keys = [str(value).strip() for value in raw_keys if str(value).strip()]
-    if not keys:
-        raise RuntimeError("Imagine item key is missing.")
-    library_path = root / "library.json"
-    library = merge_library_json(read_json(library_path, {}))
-    settings = library.setdefault("settings", {})
-    hidden = [str(value) for value in settings.get("hidden_imagine_item_keys", []) if str(value)]
-    seen = set(hidden)
-    for key in keys:
-        if key not in seen:
-            hidden.append(key)
-            seen.add(key)
-    settings["hidden_imagine_item_keys"] = hidden
-    library["updated_at"] = now_iso()
-    write_json(library_path, library)
-    return {"ok": True, "keys": keys}
-
-
 POST_JSON_ROUTES = {
     "/api/library/scan": lambda payload: scan_library(),
     "/api/open-library-folder": open_library_folder,
@@ -17028,7 +17805,6 @@ POST_JSON_ROUTES = {
     "/api/translate": translate_prompt,
     "/api/uploads/save": save_composer_uploads,
     "/api/uploads/remove-from-list": remove_upload_from_composer_list,
-    "/api/imagine/item/hide": hide_imagine_item_from_remote_lists,
     "/api/accounts/save": save_accounts,
     "/api/accounts/total/register": register_total_account,
     "/api/accounts/register": register_build_account,
@@ -17325,9 +18101,7 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             if parsed.path == "/api/accounts":
                 root = library_root()
-                if root:
-                    refresh_build_account_tiers(root)
-                self.send_json(scan_library(root))
+                self.send_json(account_snapshot(root) if root else empty_snapshot())
                 return
             if parsed.path == "/api/build/jobs":
                 self.send_json(list_build_jobs())
@@ -17494,6 +18268,14 @@ class Handler(SimpleHTTPRequestHandler):
                     if event == "electron-shutdown"
                     else None
                 )
+                login_cache_cleanup = (
+                    cleanup_total_account_caches(
+                        reason="electron-shutdown",
+                        include_active=True,
+                    )
+                    if event == "electron-shutdown"
+                    else None
+                )
                 self.send_json({
                     "ok": True,
                     "delay": 0.3 if event == "restart-cleanup" else 2.0,
@@ -17501,6 +18283,11 @@ class Handler(SimpleHTTPRequestHandler):
                     **(
                         {"login_sessions_cleanup": login_sessions_cleanup}
                         if login_sessions_cleanup is not None
+                        else {}
+                    ),
+                    **(
+                        {"login_cache_cleanup": login_cache_cleanup}
+                        if login_cache_cleanup is not None
                         else {}
                     ),
                 })
@@ -17528,6 +18315,10 @@ class Handler(SimpleHTTPRequestHandler):
 def main() -> None:
     port = int(os.environ.get("GROK_CHAMELEON_PORT") or "8797")
     cleanup_total_account_login_sessions(
+        reason="startup",
+        include_active=False,
+    )
+    cleanup_total_account_caches(
         reason="startup",
         include_active=False,
     )
