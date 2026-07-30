@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import unicodedata
 from contextlib import contextmanager
 from pathlib import Path
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 STATE_DIRECTORY = "sql_data"
 DATABASE_FILENAME = "library_index.sqlite3"
 _LOCKS_GUARD = threading.Lock()
@@ -58,7 +59,9 @@ def _create_schema(connection: sqlite3.Connection) -> None:
 
         CREATE TABLE IF NOT EXISTS library_posts (
             path TEXT PRIMARY KEY,
+            path_key TEXT NOT NULL,
             parent_path TEXT NOT NULL,
+            parent_path_key TEXT NOT NULL,
             area TEXT NOT NULL,
             collection_name TEXT NOT NULL,
             source TEXT NOT NULL,
@@ -80,13 +83,16 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             ON library_posts(area, created_at DESC, path);
         CREATE INDEX IF NOT EXISTS library_posts_build_idx
             ON library_posts(build_visible, area, created_at DESC, path);
+        CREATE INDEX IF NOT EXISTS library_posts_path_key_idx
+            ON library_posts(path_key);
         CREATE INDEX IF NOT EXISTS library_posts_collection_idx
-            ON library_posts(collection_name, parent_path, grid_slot, order_value, created_at, path);
+            ON library_posts(collection_name, parent_path_key, grid_slot, order_value, created_at, path);
         CREATE INDEX IF NOT EXISTS library_posts_parent_idx
-            ON library_posts(area, parent_path, grid_slot, order_value, created_at, path);
+            ON library_posts(area, parent_path_key, grid_slot, order_value, created_at, path);
 
         CREATE TABLE IF NOT EXISTS library_collections (
             path TEXT PRIMARY KEY,
+            path_key TEXT NOT NULL,
             name TEXT NOT NULL,
             order_value INTEGER NOT NULL DEFAULT 0,
             sort_mode TEXT NOT NULL,
@@ -96,6 +102,8 @@ def _create_schema(connection: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS library_collections_order_idx
             ON library_collections(order_value, name, path);
+        CREATE INDEX IF NOT EXISTS library_collections_path_key_idx
+            ON library_collections(path_key);
         """
     )
     connection.execute(
@@ -122,6 +130,11 @@ def _json_dict(value: str) -> dict:
 def _parent_path(path: str) -> str:
     value = str(path or "").replace("\\", "/").strip("/")
     return value.rsplit("/", 1)[0] if "/" in value else ""
+
+
+def _path_key(path: str) -> str:
+    value = str(path or "").replace("\\", "/").strip("/")
+    return unicodedata.normalize("NFC", value)
 
 
 def _safe_int(value, fallback: int = 0) -> int:
@@ -233,9 +246,12 @@ def _post_list_summary(post: dict) -> dict:
 
 def _post_row(post: dict) -> tuple:
     path = str(post.get("folder_path") or "").replace("\\", "/").strip("/")
+    parent_path = _parent_path(path)
     return (
         path,
-        _parent_path(path),
+        _path_key(path),
+        parent_path,
+        _path_key(parent_path),
         str(post.get("area") or ""),
         str(post.get("collection") or ""),
         str(post.get("source") or ""),
@@ -256,8 +272,10 @@ def _collection_row(collection: dict, post_count: int | None = None) -> tuple:
     summary = {key: value for key, value in collection.items() if key != "posts"}
     count = len(collection.get("posts") or []) if post_count is None else max(0, int(post_count))
     summary["post_count"] = count
+    path = str(collection.get("path") or "").replace("\\", "/").strip("/")
     return (
-        str(collection.get("path") or "").replace("\\", "/").strip("/"),
+        path,
+        _path_key(path),
         str(collection.get("name") or ""),
         _safe_int(collection.get("order"), 0),
         str(collection.get("sort_mode") or ""),
@@ -273,11 +291,14 @@ def _insert_posts(connection: sqlite3.Connection, posts: list[dict]) -> None:
     connection.executemany(
         """
         INSERT INTO library_posts(
-            path, parent_path, area, collection_name, source, mode, title, prompt,
+            path, path_key, parent_path, parent_path_key,
+            area, collection_name, source, mode, title, prompt,
             created_at, build_visible, favorite, order_value, grid_slot, list_json, data_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(path) DO UPDATE SET
+            path_key = excluded.path_key,
             parent_path = excluded.parent_path,
+            parent_path_key = excluded.parent_path_key,
             area = excluded.area,
             collection_name = excluded.collection_name,
             source = excluded.source,
@@ -312,8 +333,8 @@ def rebuild(root: Path, posts: list[dict], collections: list[dict], *, updated_a
                 connection.executemany(
                     """
                     INSERT INTO library_collections(
-                        path, name, order_value, sort_mode, post_count, data_json
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                        path, path_key, name, order_value, sort_mode, post_count, data_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     [_collection_row(collection) for collection in collections],
                 )
@@ -380,7 +401,7 @@ def replace_posts(root: Path, posts: list[dict]) -> None:
 
 def delete_paths(root: Path, paths: list[str], *, recursive: bool = False) -> None:
     normalized = [
-        str(path or "").replace("\\", "/").strip("/")
+        _path_key(path)
         for path in paths
         if str(path or "").strip()
     ]
@@ -391,11 +412,11 @@ def delete_paths(root: Path, paths: list[str], *, recursive: bool = False) -> No
             for path in normalized:
                 if recursive:
                     connection.execute(
-                        "DELETE FROM library_posts WHERE path = ? OR path LIKE ?",
+                        "DELETE FROM library_posts WHERE path_key = ? OR path_key LIKE ?",
                         (path, f"{path}/%"),
                     )
                 else:
-                    connection.execute("DELETE FROM library_posts WHERE path = ?", (path,))
+                    connection.execute("DELETE FROM library_posts WHERE path_key = ?", (path,))
 
 
 def replace_collections(root: Path, collections: list[dict]) -> None:
@@ -404,14 +425,14 @@ def replace_collections(root: Path, collections: list[dict]) -> None:
     with _lock_for(root):
         with _connection(root, write=True) as connection:
             current_paths = {
-                str(collection.get("path") or "").replace("\\", "/").strip("/")
+                _path_key(collection.get("path"))
                 for collection in collections
                 if str(collection.get("path") or "").strip()
             }
             if current_paths:
                 placeholders = ",".join("?" for _ in current_paths)
                 connection.execute(
-                    f"DELETE FROM library_collections WHERE path NOT IN ({placeholders})",
+                    f"DELETE FROM library_collections WHERE path_key NOT IN ({placeholders})",
                     tuple(current_paths),
                 )
             else:
@@ -420,17 +441,19 @@ def replace_collections(root: Path, collections: list[dict]) -> None:
                 path = str(collection.get("path") or "").replace("\\", "/").strip("/")
                 if not path:
                     continue
+                path_key = _path_key(path)
                 row = connection.execute(
-                    "SELECT COUNT(*) AS count FROM library_posts WHERE path = ? OR path LIKE ?",
-                    (path, f"{path}/%"),
+                    "SELECT COUNT(*) AS count FROM library_posts WHERE path_key = ? OR path_key LIKE ?",
+                    (path_key, f"{path_key}/%"),
                 ).fetchone()
                 count = int(row["count"] if row else 0)
                 connection.execute(
                     """
                     INSERT INTO library_collections(
-                        path, name, order_value, sort_mode, post_count, data_json
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                        path, path_key, name, order_value, sort_mode, post_count, data_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(path) DO UPDATE SET
+                        path_key = excluded.path_key,
                         name = excluded.name,
                         order_value = excluded.order_value,
                         sort_mode = excluded.sort_mode,
@@ -444,12 +467,12 @@ def replace_collections(root: Path, collections: list[dict]) -> None:
 def get_post(root: Path, path: str) -> dict | None:
     if not ready(root):
         return None
-    normalized = str(path or "").replace("\\", "/").strip("/")
+    normalized = _path_key(path)
     if not normalized:
         return None
     with _connection(root) as connection:
         row = connection.execute(
-            "SELECT data_json FROM library_posts WHERE path = ?",
+            "SELECT data_json FROM library_posts WHERE path_key = ?",
             (normalized,),
         ).fetchone()
     if not row:
@@ -520,28 +543,28 @@ def query_posts(
         clauses.append("area = 'created'")
     elif normalized_scope == "collection":
         clauses.append("area = 'collection'")
-    collection_value = str(collection_path or "").replace("\\", "/").strip("/")
+    collection_value = _path_key(collection_path)
     if collection_value:
-        clauses.append("(path = ? OR path LIKE ?)")
+        clauses.append("(path_key = ? OR path_key LIKE ?)")
         parameters.extend((collection_value, f"{collection_value}/%"))
-    parent_value = str(parent_path or "").replace("\\", "/").strip("/")
+    parent_value = _path_key(parent_path)
     if parent_value:
         if recursive:
-            clauses.append("(path = ? OR path LIKE ?)")
+            clauses.append("(path_key = ? OR path_key LIKE ?)")
             parameters.extend((parent_value, f"{parent_value}/%"))
         else:
-            clauses.append("parent_path = ?")
+            clauses.append("parent_path_key = ?")
             parameters.append(parent_value)
     search = str(query or "").strip().lower()
     if search:
         pattern = f"%{search}%"
         clauses.append(
-            "(LOWER(title) LIKE ? OR LOWER(prompt) LIKE ? OR LOWER(path) LIKE ?)"
+            "(LOWER(title) LIKE ? OR LOWER(prompt) LIKE ? OR LOWER(path_key) LIKE ?)"
         )
         parameters.extend((pattern, pattern, pattern))
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     order = (
-        "parent_path, grid_slot, order_value, created_at, path"
+        "parent_path_key, grid_slot, order_value, created_at, path"
         if normalized_scope == "collection" or collection_value or parent_value
         else "created_at DESC, path"
     )

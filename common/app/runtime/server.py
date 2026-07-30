@@ -18155,11 +18155,11 @@ def query_library_posts(payload: dict) -> dict:
         offset=safe_int((payload or {}).get("offset"), 0),
         limit=safe_int((payload or {}).get("limit"), 60),
     )
-    return {
+    return normalize_json_unicode({
         "ok": True,
         **result,
         "counts": library_index.counts(root),
-    }
+    })
 
 
 def get_library_post(payload: dict) -> dict:
@@ -18172,7 +18172,7 @@ def get_library_post(payload: dict) -> dict:
     post = library_index.get_post(root, path)
     if not post:
         raise RuntimeError("Library post was not found.")
-    return {"ok": True, "post": post}
+    return normalize_json_unicode({"ok": True, "post": post})
 
 
 POST_JSON_ROUTES = {

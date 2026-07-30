@@ -71,7 +71,7 @@ jobs:
       INPUT_ZIP: Win_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Win_Grok_Chameleon_a.zip
       OUTPUT_U_ZIP: Win_Grok_Chameleon_u.zip
-      EXPECTED_INPUT_SHA256: fd7ccb4b36d75a89141928dd63ed47a5f7424648a5a23f5ee546fc2d06a0187a
+      EXPECTED_INPUT_SHA256: b5ee68da31052c839cfaefbf3ea8eda96c7b9f7efe8ad518e1fbb1d7ccdda927
 
     steps:
       - name: Check out the shared source commit
@@ -329,7 +329,7 @@ jobs:
           }
           $libraryIndexText = Get-Content -Raw -LiteralPath $targetLibraryIndex
           foreach ($marker in @(
-            'SCHEMA_VERSION = 2',
+            'SCHEMA_VERSION = 3',
             'list_json TEXT NOT NULL',
             'CREATE INDEX IF NOT EXISTS library_posts_parent_idx',
             'def query_posts(',
@@ -597,7 +597,7 @@ jobs:
       INPUT_ZIP: Mac_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Mac_Grok_Chameleon_a.zip
       OUTPUT_U_ZIP: Mac_Grok_Chameleon_u.zip
-      EXPECTED_INPUT_SHA256: 61d624740534d70e998d97ba4e8d05d6c3aaf7d4b881f94bcc16bb030980fb15
+      EXPECTED_INPUT_SHA256: c6dcde241c2a127a4124475e459bef013bfc2f60654e0a4393e07daaf6637127
 
     steps:
       - name: Check out the shared source commit
@@ -819,7 +819,7 @@ jobs:
           grep -F 'def query_library_posts(payload: dict) -> dict:' "$server_py"
           grep -F '"/api/library/posts": query_library_posts' "$server_py"
           grep -F '"/api/library/post": get_library_post' "$server_py"
-          grep -F 'SCHEMA_VERSION = 2' "$library_index_py"
+          grep -F 'SCHEMA_VERSION = 3' "$library_index_py"
           grep -F 'list_json TEXT NOT NULL' "$library_index_py"
           grep -F 'CREATE INDEX IF NOT EXISTS library_posts_parent_idx' "$library_index_py"
           grep -F 'def query_posts(' "$library_index_py"
