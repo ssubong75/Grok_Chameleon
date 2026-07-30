@@ -93,10 +93,8 @@ jobs:
           $uRoot = Join-Path $env:GITHUB_WORKSPACE "unpack\Grok Chameleon U"
           $appRoot = Join-Path $root "Resources\Grok Chameleon\resources\app"
           $uAppRoot = Join-Path $uRoot "Resources\Grok Chameleon\resources\app"
-          $migrationRoot = Join-Path $root "Resources\Migration"
           $state = Join-Path $appRoot "web\scripts\state.js"
           $outerExe = Join-Path $root "Grok Chameleon.exe"
-          $migrationExe = Join-Path $root "Migration.exe"
           $innerExe = Join-Path $root "Resources\Grok Chameleon\Grok Chameleon.exe"
           $windowsSvgArrowPatch = Join-Path $env:GITHUB_WORKSPACE "tools\patch_windows_svg_arrows.py"
           $variantPatch = Join-Path $env:GITHUB_WORKSPACE $env:U_VARIANT_PATCH
@@ -187,7 +185,6 @@ jobs:
           foreach ($required in @($sharedSources.Source + @(
             $state,
             $outerExe,
-            $migrationExe,
             $innerExe,
             $windowsSvgArrowPatch,
             $variantPatch
@@ -207,8 +204,14 @@ jobs:
               throw "Windows shared source copy mismatch: $($shared.Name)"
             }
           }
-          Remove-Item -Recurse -Force -LiteralPath $migrationRoot
-          Remove-Item -Force -LiteralPath $migrationExe
+          foreach ($migrationPath in @(
+            (Join-Path $root "Resources\Migration"),
+            (Join-Path $root "Migration.exe")
+          )) {
+            if (Test-Path -LiteralPath $migrationPath) {
+              Remove-Item -Recurse -Force -LiteralPath $migrationPath
+            }
+          }
           foreach ($portableResidue in @(
             (Join-Path $root ".library_path.json"),
             (Join-Path $root "library_path.json"),
@@ -415,7 +418,10 @@ jobs:
           if (-not (Get-Content -Raw -LiteralPath $targetDetailMedia).Contains("function scheduleLocalCardVideoPoster(")) { throw "Build video poster scheduling marker missing." }
           if ((Get-Content -Raw -LiteralPath $targetCardRender).Contains("card_static_video_preview")) { throw "Static Build video card preview regression found." }
           if (-not $mainText.Contains("const CARD_PREVIEW_MAX_EDGE = 960;")) { throw "Card preview size dropped below the 512x288 requirement." }
-          if ((Test-Path -LiteralPath $migrationRoot) -or (Test-Path -LiteralPath $migrationExe)) {
+          if (
+            (Test-Path -LiteralPath (Join-Path $root "Resources\Migration"))
+            -or (Test-Path -LiteralPath (Join-Path $root "Migration.exe"))
+          ) {
             throw "Migration app remains in the Windows package."
           }
           foreach ($portableResidue in @(".library_path.json", "library_path.json", "runtime_data", "sql_data")) {
