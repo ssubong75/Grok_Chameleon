@@ -169,6 +169,7 @@ async function openImagineLinkPost(value) {
 
 function imaginePostIdKeysForPost(post) {
   const metadata = post?.metadata && typeof post.metadata === "object" ? post.metadata : {};
+  const flatOnly = metadata.flat_only === true;
   const representative = post?.representative_item || representativeItem(post?.items || [], post) || post?.items?.[0] || {};
   const representativeMetadata = representative?.metadata && typeof representative.metadata === "object" ? representative.metadata : {};
   const representativeImagine = representativeMetadata.imagine && typeof representativeMetadata.imagine === "object"
@@ -178,10 +179,12 @@ function imaginePostIdKeysForPost(post) {
     post?.folder_path,
     post?.post_id,
     metadata.imagine_root_post_id,
-    metadata.raw_root_post_id,
-    representative?.root_post_id,
-    representativeMetadata.root_post_id,
-    representativeImagine.root_post_id,
+    ...(flatOnly ? [] : [
+      metadata.raw_root_post_id,
+      representative?.root_post_id,
+      representativeMetadata.root_post_id,
+      representativeImagine.root_post_id,
+    ]),
   ].map((value) => String(value || "").trim()).filter(Boolean);
 }
 
@@ -445,30 +448,244 @@ function imagineSavedItemSourceIds(item) {
   ].map((value) => String(value || "").trim()).filter(Boolean);
 }
 
-function reconcileImagineSavedDisplayPosts(posts) {
-  const merged = mergeImagineRemotePosts([], posts || []);
-  const groupedPosts = merged.filter((post) => post?.metadata?.flat_only !== true);
-  const groupedAssetIds = new Set(groupedPosts.flatMap((post) => (
-    (post.items || []).map(imagineSavedItemAssetId).filter(Boolean)
-  )));
-  const groupedSourceIds = new Set(groupedPosts.flatMap((post) => (
-    (post.items || []).flatMap(imagineSavedItemSourceIds)
-  )));
-  return merged.map((post) => {
-    if (post?.metadata?.flat_only !== true) return post;
-    const items = (post.items || []).filter((item) => {
-      const assetId = imagineSavedItemAssetId(item);
-      return assetId && !groupedAssetIds.has(assetId) && !groupedSourceIds.has(assetId);
+function imagineSavedItemSourceId(item) {
+  const metadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
+  const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
+  return String(
+    item?.source_item_id
+    || item?.parent_post_id
+    || item?.original_post_id
+    || metadata.source_item_id
+    || metadata.parent_post_id
+    || metadata.original_post_id
+    || imagine.source_item_id
+    || imagine.parent_post_id
+    || imagine.original_post_id
+    || "",
+  ).trim();
+}
+
+function imagineSavedItemIsSource(item) {
+  const role = String(item?.role || item?.relation || "").trim().toLowerCase();
+  return role === "source" || role === "upload";
+}
+
+function imagineSavedLineageCards(post) {
+  if (!post) return [];
+  const metadata = post?.metadata && typeof post.metadata === "object" ? post.metadata : {};
+  const items = (post.items || []).filter((item) => imagineSavedItemAssetId(item));
+  if (!items.length) return [post];
+
+  const itemsById = new Map(items.map((item) => [imagineSavedItemAssetId(item), item]));
+  const resultItems = items.filter((item) => !imagineSavedItemIsSource(item));
+  const lineageItems = resultItems.length ? resultItems : items;
+  const resultIds = new Set(lineageItems.map(imagineSavedItemAssetId));
+  const rootById = new Map();
+  for (const item of lineageItems) {
+    const itemId = imagineSavedItemAssetId(item);
+    let currentId = itemId;
+    const seen = new Set();
+    while (resultIds.has(currentId) && !seen.has(currentId)) {
+      seen.add(currentId);
+      const parentId = imagineSavedItemSourceId(itemsById.get(currentId));
+      if (!resultIds.has(parentId)) break;
+      currentId = parentId;
+    }
+    rootById.set(itemId, currentId);
+  }
+  const rootIds = lineageItems
+    .map(imagineSavedItemAssetId)
+    .filter((itemId) => rootById.get(itemId) === itemId);
+  if (!rootIds.length) return [post];
+
+  return rootIds.map((rootId) => {
+    const memberIds = new Set(
+      Array.from(rootById.entries())
+        .filter(([, candidateRootId]) => candidateRootId === rootId)
+        .map(([itemId]) => itemId),
+    );
+    const ancestorIds = new Set();
+    const pendingIds = Array.from(memberIds);
+    while (pendingIds.length) {
+      const currentId = pendingIds.pop();
+      const parentId = imagineSavedItemSourceId(itemsById.get(currentId));
+      if (
+        parentId
+        && itemsById.has(parentId)
+        && !memberIds.has(parentId)
+        && !ancestorIds.has(parentId)
+      ) {
+        ancestorIds.add(parentId);
+        pendingIds.push(parentId);
+      }
+    }
+    const cardItems = items.filter((item) => {
+      const itemId = imagineSavedItemAssetId(item);
+      return memberIds.has(itemId) || ancestorIds.has(itemId);
     });
-    if (!items.length) return null;
-    const representative = representativeItem(items, { ...post, items }) || items[0];
+    const rootItem = cardItems.find((item) => imagineSavedItemAssetId(item) === rootId) || cardItems[0];
+    const rootMetadata = rootItem?.metadata && typeof rootItem.metadata === "object" ? rootItem.metadata : {};
+    const rootImagine = rootMetadata.imagine && typeof rootMetadata.imagine === "object" ? rootMetadata.imagine : {};
+    const conversationId = String(
+      rootItem?.conversation_id
+      || rootMetadata.conversation_id
+      || rootImagine.conversation_id
+      || metadata.conversation_id
+      || "",
+    ).trim();
+    const representative = representativeItem(cardItems, { ...post, items: cardItems }) || rootItem;
+    const title = String(
+      rootItem?.title
+      || rootItem?.prompt
+      || post.title
+      || "Imagine",
+    ).trim().split(/\r?\n/, 1)[0].slice(0, 80);
     return normalizeServerPost({
       ...post,
+      post_id: rootId,
+      mode: "saved",
+      title: title || "Imagine",
+      prompt: String(rootItem?.prompt || post.prompt || ""),
+      created_at: String(rootItem?.created_at || post.created_at || ""),
+      folder_path: `imagine_saved/${rootId}`,
+      folderName: title || rootId,
+      representative: representative?.url || representative?.remote_url || representative?.item_id || "",
+      representative_item: representative,
+      items: cardItems,
+      t2i_group_container: false,
+      metadata: {
+        ...metadata,
+        imagine_root_post_id: rootId,
+        raw_root_post_id: rootId,
+        conversation_id: conversationId,
+        saved_content_view: "assets",
+        flat_only: true,
+        grouped: false,
+        t2i_group_container: false,
+        lineage_root_asset_id: rootId,
+        lineage_source_post_id: String(post.post_id || ""),
+      },
+    });
+  });
+}
+
+function mergeImagineSavedLineageCards(cards) {
+  const active = (cards || []).filter(Boolean).map((card) => normalizeServerPost({
+    ...card,
+    items: [...(card.items || [])],
+    metadata: { ...(card.metadata || {}) },
+  }));
+  if (active.length < 2) return active;
+
+  const rootIds = [];
+  const rootOwnerById = new Map();
+  active.forEach((card, index) => {
+    const rootId = String(
+      card?.metadata?.lineage_root_asset_id
+      || card?.post_id
+      || "",
+    ).trim();
+    rootIds.push(rootId);
+    if (rootId && !rootOwnerById.has(rootId)) rootOwnerById.set(rootId, index);
+  });
+
+  const ownerByItemId = new Map(rootOwnerById);
+  active.forEach((card, index) => {
+    for (const item of card.items || []) {
+      if (imagineSavedItemIsSource(item)) continue;
+      const itemId = imagineSavedItemAssetId(item);
+      if (itemId && !ownerByItemId.has(itemId)) ownerByItemId.set(itemId, index);
+    }
+  });
+
+  const parentIndexes = active.map((_, index) => index);
+  active.forEach((candidate, index) => {
+    const rootId = rootIds[index];
+    const duplicateOwner = rootId ? rootOwnerById.get(rootId) : undefined;
+    if (duplicateOwner !== undefined && duplicateOwner !== index) {
+      parentIndexes[index] = duplicateOwner;
+      return;
+    }
+    const rootItem = (candidate.items || [])
+      .find((item) => imagineSavedItemAssetId(item) === rootId);
+    const parentId = imagineSavedItemSourceId(rootItem);
+    const parentOwner = ownerByItemId.get(parentId);
+    if (parentId && parentOwner !== undefined && parentOwner !== index) {
+      parentIndexes[index] = parentOwner;
+    }
+  });
+
+  const resolvedRoots = new Map();
+  for (let startIndex = 0; startIndex < active.length; startIndex += 1) {
+    if (resolvedRoots.has(startIndex)) continue;
+    const path = [];
+    const positions = new Map();
+    let currentIndex = startIndex;
+    while (
+      !resolvedRoots.has(currentIndex)
+      && parentIndexes[currentIndex] !== currentIndex
+      && !positions.has(currentIndex)
+    ) {
+      positions.set(currentIndex, path.length);
+      path.push(currentIndex);
+      currentIndex = parentIndexes[currentIndex];
+    }
+    let rootIndex;
+    if (resolvedRoots.has(currentIndex)) {
+      rootIndex = resolvedRoots.get(currentIndex);
+    } else if (positions.has(currentIndex)) {
+      rootIndex = Math.min(...path.slice(positions.get(currentIndex)));
+    } else {
+      rootIndex = currentIndex;
+    }
+    resolvedRoots.set(currentIndex, rootIndex);
+    for (let pathIndex = path.length - 1; pathIndex >= 0; pathIndex -= 1) {
+      resolvedRoots.set(path[pathIndex], rootIndex);
+    }
+  }
+
+  const membersByRoot = new Map();
+  active.forEach((_, index) => {
+    const rootIndex = resolvedRoots.get(index) ?? index;
+    if (!membersByRoot.has(rootIndex)) membersByRoot.set(rootIndex, []);
+    membersByRoot.get(rootIndex).push(index);
+  });
+
+  return Array.from(membersByRoot.keys()).sort((left, right) => left - right).map((rootIndex) => {
+    const memberIndexes = membersByRoot.get(rootIndex);
+    const anchor = active[rootIndex];
+    if (memberIndexes.length === 1) return anchor;
+    const knownItemIds = new Set();
+    const items = [];
+    const orderedIndexes = [
+      rootIndex,
+      ...memberIndexes.filter((index) => index !== rootIndex),
+    ];
+    for (const memberIndex of orderedIndexes) {
+      for (const item of active[memberIndex].items || []) {
+        const itemId = imagineSavedItemAssetId(item);
+        if (itemId && knownItemIds.has(itemId)) continue;
+        items.push(item);
+        if (itemId) knownItemIds.add(itemId);
+      }
+    }
+    const representative = representativeItem(items, { ...anchor, items }) || items[0];
+    return normalizeServerPost({
+      ...anchor,
       items,
       representative: representative?.file || representative?.url || representative?.item_id || "",
       representative_item: representative,
     });
-  }).filter(Boolean);
+  });
+}
+
+function reconcileImagineSavedDisplayPosts(posts) {
+  return mergeImagineSavedLineageCards(
+    mergeImagineRemotePosts(
+      [],
+      (posts || []).flatMap(imagineSavedLineageCards),
+    ),
+  );
 }
 
 const IMAGINE_PENDING_SAVED_STORAGE_PREFIX = "grok-chameleon:imagine-pending-saved:";

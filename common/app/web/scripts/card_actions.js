@@ -184,9 +184,8 @@
       .map((post) => ({
         post,
         items: (post.items || []).filter(Boolean),
-        payload: imagineConversationDeletePayloadForPost(post),
       }))
-      .filter((target) => target.items.length && target.payload);
+      .filter((target) => target.items.length && imagineCardHasDeleteTarget(target.post));
     if (!targets.length) {
       showErrorPanel("Delete unavailable", "The selected Imagine cards have no deletion target.");
       return;
@@ -203,25 +202,41 @@
     if (!ok) return;
     const screenId = screen_state.current_screen;
     const scrollTop = imagineListScrollTopForScreen(screenId);
-    const results = await Promise.allSettled(
-      targets.map((target) => deleteImagineRemoteCard(target.post)),
-    );
     const deletedTargets = [];
     const failures = [];
-    for (let index = 0; index < results.length; index += 1) {
-      const result = results[index];
-      if (result.status === "fulfilled") {
-        const deletedItems = result.value?.deletedItems || [];
-        if (deletedItems.length) {
-          deletedTargets.push({
-            ...targets[index],
-            items: deletedItems,
-            externalOnly: targets[index].items.every((item) => isImagineExternalReferenceItem(targets[index].post, item)),
+    const deletedItemKeys = new Set();
+    for (const target of targets) {
+      const alreadyDeletedItems = target.items.filter((item) => {
+        const key = imagineDeleteAssetIdForItem(item) || mediaItemKey(item);
+        return key && deletedItemKeys.has(key);
+      });
+      const pendingItems = target.items.filter((item) => {
+        const key = imagineDeleteAssetIdForItem(item) || mediaItemKey(item);
+        return !key || !deletedItemKeys.has(key);
+      });
+      let deletedItems = [...alreadyDeletedItems];
+      if (pendingItems.length) {
+        try {
+          const result = await deleteImagineRemoteCard({
+            ...target.post,
+            items: pendingItems,
           });
+          deletedItems = [...deletedItems, ...(result.deletedItems || [])];
+          failures.push(...(result.failures || []));
+        } catch (error) {
+          failures.push(error);
         }
-        failures.push(...(result.value?.failures || []));
-      } else {
-        failures.push(result.reason);
+      }
+      for (const item of deletedItems) {
+        const key = imagineDeleteAssetIdForItem(item) || mediaItemKey(item);
+        if (key) deletedItemKeys.add(key);
+      }
+      if (deletedItems.length) {
+        deletedTargets.push({
+          ...target,
+          items: deletedItems,
+          externalOnly: target.items.every((item) => isImagineExternalReferenceItem(target.post, item)),
+        });
       }
     }
     for (const target of deletedTargets) {

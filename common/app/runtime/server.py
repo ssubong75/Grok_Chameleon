@@ -3475,6 +3475,277 @@ def imagine_item_asset_id(item: dict) -> str:
     ).strip()
 
 
+def imagine_item_source_id(item: dict) -> str:
+    if not isinstance(item, dict):
+        return ""
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
+    return str(
+        item.get("source_item_id")
+        or item.get("parent_post_id")
+        or item.get("original_post_id")
+        or metadata.get("source_item_id")
+        or metadata.get("parent_post_id")
+        or metadata.get("original_post_id")
+        or imagine.get("source_item_id")
+        or imagine.get("parent_post_id")
+        or imagine.get("original_post_id")
+        or ""
+    ).strip()
+
+
+def imagine_item_is_source(item: dict) -> bool:
+    if not isinstance(item, dict):
+        return False
+    return str(item.get("role") or item.get("relation") or "").strip().lower() in {
+        "source",
+        "upload",
+    }
+
+
+def imagine_saved_lineage_cards(post: dict) -> list[dict]:
+    if not isinstance(post, dict):
+        return []
+    metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+    items = [
+        item
+        for item in post.get("items") or []
+        if isinstance(item, dict) and imagine_item_asset_id(item)
+    ]
+    if not items:
+        return [post]
+
+    items_by_id = {imagine_item_asset_id(item): item for item in items}
+    result_items = [item for item in items if not imagine_item_is_source(item)] or items
+    result_ids = {imagine_item_asset_id(item) for item in result_items}
+    root_by_id: dict[str, str] = {}
+    for item in result_items:
+        item_id = imagine_item_asset_id(item)
+        current_id = item_id
+        seen: set[str] = set()
+        while current_id in result_ids and current_id not in seen:
+            seen.add(current_id)
+            parent_id = imagine_item_source_id(items_by_id[current_id])
+            if parent_id not in result_ids:
+                break
+            current_id = parent_id
+        root_by_id[item_id] = current_id
+
+    root_ids = [
+        item_id
+        for item_id in (imagine_item_asset_id(item) for item in result_items)
+        if root_by_id.get(item_id) == item_id
+    ]
+    if not root_ids:
+        return [post]
+
+    cards: list[dict] = []
+    for root_id in root_ids:
+        member_ids = {
+            item_id
+            for item_id, candidate_root_id in root_by_id.items()
+            if candidate_root_id == root_id
+        }
+        ancestor_ids: set[str] = set()
+        pending_ids = list(member_ids)
+        while pending_ids:
+            current_id = pending_ids.pop()
+            parent_id = imagine_item_source_id(items_by_id.get(current_id, {}))
+            if (
+                parent_id
+                and parent_id in items_by_id
+                and parent_id not in member_ids
+                and parent_id not in ancestor_ids
+            ):
+                ancestor_ids.add(parent_id)
+                pending_ids.append(parent_id)
+
+        card_items = [
+            dict(item)
+            for item in items
+            if imagine_item_asset_id(item) in member_ids | ancestor_ids
+        ]
+        root_item = next((
+            item
+            for item in card_items
+            if imagine_item_asset_id(item) == root_id
+        ), card_items[0])
+        root_metadata = (
+            root_item.get("metadata")
+            if isinstance(root_item.get("metadata"), dict)
+            else {}
+        )
+        root_imagine = (
+            root_metadata.get("imagine")
+            if isinstance(root_metadata.get("imagine"), dict)
+            else {}
+        )
+        conversation_id = str(
+            root_item.get("conversation_id")
+            or root_metadata.get("conversation_id")
+            or root_imagine.get("conversation_id")
+            or metadata.get("conversation_id")
+            or ""
+        ).strip()
+        card_metadata = dict(metadata)
+        card_metadata.update({
+            "imagine_root_post_id": root_id,
+            "raw_root_post_id": root_id,
+            "conversation_id": conversation_id,
+            "saved_content_view": "assets",
+            "flat_only": True,
+            "grouped": False,
+            "t2i_group_container": False,
+            "lineage_root_asset_id": root_id,
+            "lineage_source_post_id": str(post.get("post_id") or ""),
+        })
+        representative = imagine_representative_item(card_items) or root_item
+        title = str(
+            root_item.get("title")
+            or root_item.get("prompt")
+            or post.get("title")
+            or "Imagine"
+        ).strip().splitlines()[0][:80]
+        card = dict(post)
+        card.update({
+            "post_id": root_id,
+            "mode": "saved",
+            "title": title or "Imagine",
+            "prompt": str(root_item.get("prompt") or post.get("prompt") or ""),
+            "created_at": str(root_item.get("created_at") or post.get("created_at") or ""),
+            "folder_path": f"imagine_saved/{root_id}",
+            "folderName": title or root_id,
+            "representative": (
+                representative.get("url")
+                or representative.get("remote_url")
+                or representative.get("item_id")
+                or ""
+            ),
+            "representative_item": representative,
+            "items": card_items,
+            "t2i_group_container": False,
+            "metadata": card_metadata,
+        })
+        cards.append(card)
+    return cards
+
+
+def merge_imagine_saved_lineage_cards(cards: list[dict]) -> list[dict]:
+    active = [
+        card
+        for card in cards
+        if isinstance(card, dict)
+    ]
+    if len(active) < 2:
+        return active
+
+    root_ids: list[str] = []
+    root_owner_by_id: dict[str, int] = {}
+    for index, card in enumerate(active):
+        metadata = card.get("metadata") if isinstance(card.get("metadata"), dict) else {}
+        root_id = str(
+            metadata.get("lineage_root_asset_id")
+            or card.get("post_id")
+            or ""
+        ).strip()
+        root_ids.append(root_id)
+        if root_id:
+            root_owner_by_id.setdefault(root_id, index)
+
+    owner_by_item_id = dict(root_owner_by_id)
+    for index, card in enumerate(active):
+        for item in card.get("items") or []:
+            if imagine_item_is_source(item):
+                continue
+            item_id = imagine_item_asset_id(item)
+            if item_id:
+                owner_by_item_id.setdefault(item_id, index)
+
+    parent_indexes = list(range(len(active)))
+    for index, candidate in enumerate(active):
+        root_id = root_ids[index]
+        duplicate_owner = root_owner_by_id.get(root_id) if root_id else None
+        if duplicate_owner is not None and duplicate_owner != index:
+            parent_indexes[index] = duplicate_owner
+            continue
+        root_item = next((
+            item
+            for item in candidate.get("items") or []
+            if imagine_item_asset_id(item) == root_id
+        ), None)
+        parent_id = imagine_item_source_id(root_item or {})
+        parent_owner = owner_by_item_id.get(parent_id)
+        if parent_id and parent_owner is not None and parent_owner != index:
+            parent_indexes[index] = parent_owner
+
+    resolved_roots: dict[int, int] = {}
+    for start_index in range(len(active)):
+        if start_index in resolved_roots:
+            continue
+        path: list[int] = []
+        positions: dict[int, int] = {}
+        current_index = start_index
+        while (
+            current_index not in resolved_roots
+            and parent_indexes[current_index] != current_index
+            and current_index not in positions
+        ):
+            positions[current_index] = len(path)
+            path.append(current_index)
+            current_index = parent_indexes[current_index]
+        if current_index in resolved_roots:
+            root_index = resolved_roots[current_index]
+        elif current_index in positions:
+            root_index = min(path[positions[current_index]:])
+        else:
+            root_index = current_index
+        resolved_roots[current_index] = root_index
+        for path_index in reversed(path):
+            resolved_roots[path_index] = root_index
+
+    members_by_root: dict[int, list[int]] = {}
+    for index in range(len(active)):
+        root_index = resolved_roots.get(index, index)
+        members_by_root.setdefault(root_index, []).append(index)
+
+    merged_cards: list[dict] = []
+    for root_index in sorted(members_by_root):
+        member_indexes = members_by_root[root_index]
+        anchor = active[root_index]
+        if len(member_indexes) == 1:
+            merged_cards.append(anchor)
+            continue
+        known_item_ids: set[str] = set()
+        merged_items: list[dict] = []
+        ordered_indexes = [
+            root_index,
+            *(index for index in member_indexes if index != root_index),
+        ]
+        for member_index in ordered_indexes:
+            for item in active[member_index].get("items") or []:
+                if not isinstance(item, dict):
+                    continue
+                item_id = imagine_item_asset_id(item)
+                if item_id and item_id in known_item_ids:
+                    continue
+                merged_items.append(dict(item))
+                if item_id:
+                    known_item_ids.add(item_id)
+        representative = imagine_representative_item(merged_items)
+        anchor["items"] = merged_items
+        if representative:
+            anchor["representative_item"] = representative
+            anchor["representative"] = (
+                representative.get("url")
+                or representative.get("remote_url")
+                or representative.get("item_id")
+                or anchor.get("representative")
+                or ""
+            )
+        merged_cards.append(anchor)
+    return merged_cards
+
+
 def imagine_flat_saved_post_from_asset(
     asset: dict,
     account: dict,
@@ -3491,10 +3762,11 @@ def imagine_flat_saved_post_from_asset(
         or asset.get("conversationId")
         or ""
     ).strip()
-    group_id = conversation_id or asset_id
+    group_id = asset_id
     metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
     metadata.update({
         "imagine_root_post_id": group_id,
+        "raw_root_post_id": group_id,
         "conversation_id": conversation_id,
         "remote_view": "saved",
         "saved_content_view": "assets",
@@ -3720,12 +3992,19 @@ def merge_imagine_local_heart_post(
 def imagine_remote_cache_post_key(post: dict) -> str:
     metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
     imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
-    for value in (
-        metadata.get("conversation_id"),
-        imagine.get("conversation_id"),
-        post.get("post_id"),
-        post.get("folder_path"),
-    ):
+    if metadata.get("flat_only") is True:
+        candidates = (
+            post.get("post_id"),
+            post.get("folder_path"),
+        )
+    else:
+        candidates = (
+            metadata.get("conversation_id"),
+            imagine.get("conversation_id"),
+            post.get("post_id"),
+            post.get("folder_path"),
+        )
+    for value in candidates:
         key = str(value or "").strip()
         if key:
             return key
@@ -3747,7 +4026,11 @@ def imagine_remote_cache_records(posts: list[dict]) -> list[dict]:
         asset_ids = {
             imagine_item_asset_id(item)
             for item in post.get("items") or []
-            if isinstance(item, dict) and imagine_item_asset_id(item)
+            if (
+                isinstance(item, dict)
+                and not imagine_item_is_source(item)
+                and imagine_item_asset_id(item)
+            )
         }
         records.append({
             "post_key": post_key,
@@ -3866,7 +4149,8 @@ def list_imagine_saved_cache(payload: dict) -> dict:
             or representative.get("item_id")
             or ""
         )
-        posts.append(post)
+        posts.extend(imagine_saved_lineage_cards(post))
+    posts = merge_imagine_saved_lineage_cards(posts)
     normalized_posts = normalize_json_unicode(posts)
     return {
         "ok": True,
@@ -3969,8 +4253,11 @@ def list_imagine_saved(payload: dict) -> dict:
         account,
     )
     local_heart_posts = [
-        imagine_apply_generated_relations(local_post, root, account, relations)
+        flat_post
         for local_post in imagine_account_local_heart_posts(root, account)
+        for flat_post in imagine_saved_lineage_cards(
+            imagine_apply_generated_relations(local_post, root, account, relations)
+        )
     ]
     posts = []
     for conversation in conversations:
@@ -3988,7 +4275,7 @@ def list_imagine_saved(payload: dict) -> dict:
             post["representative_item"] = representative
             post["representative"] = representative.get("url") or representative.get("item_id") or ""
             imagine_restore_generated_relation_resolutions(post, root, relations)
-            posts.append(post)
+            posts.extend(imagine_saved_lineage_cards(post))
 
     asset_query = [
         ("pageSize", str(limit)),
@@ -4065,7 +4352,7 @@ def list_imagine_saved(payload: dict) -> dict:
                 local_post,
                 insert_if_missing=not bool(cursor),
             )
-    posts = list(saved_groups.values())
+    posts = merge_imagine_saved_lineage_cards(list(saved_groups.values()))
     posts.sort(key=lambda post: str(post.get("created_at") or ""), reverse=True)
     try:
         cache_imagine_remote_posts(root, account, posts, sync_token=sync_token)

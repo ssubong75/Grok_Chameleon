@@ -790,45 +790,20 @@ async function deleteImagineRemoteCard(post) {
     }
     return { deletedItems, failures };
   }
-  const externalItems = items.filter((item) => isImagineExternalReferenceItem(post, item));
-  const ownedItems = items.filter((item) => !isImagineExternalReferenceItem(post, item));
-  if (!ownedItems.length) {
-    const externalResult = await deleteImagineCardAssets(post, externalItems);
-    return {
-      ...externalResult,
-      data: {
-        ok: externalResult.failures.length === 0,
-        action: "external-unsave",
-      },
-    };
-  }
-  const deletePayload = imagineConversationDeletePayloadForPost(post);
-  if (!deletePayload) throw new Error("This Imagine card has no deletion target.");
-  let data;
-  try {
-    data = await qApi("/api/imagine/conversation/delete", deletePayload);
-  } catch (error) {
-    if (!isImagineConversationDeleteFallbackError(error)) throw error;
-    const assetResult = await deleteImagineCardAssets(post, items);
-    return {
-      ...assetResult,
-      data: {
-        ok: assetResult.failures.length === 0,
-        action: "asset-delete-fallback",
-      },
-    };
-  }
-  const deletedItems = [...ownedItems];
-  const failures = [];
-  if (externalItems.length) {
-    try {
-      const unsaved = await unsaveImagineExternalItems(post, externalItems);
-      deletedItems.push(...unsaved.removedItems);
-    } catch (error) {
-      failures.push(error);
-    }
-  }
-  return { deletedItems, failures, data };
+  const result = await deleteImagineCardAssets(post, items);
+  return {
+    ...result,
+    data: {
+      ok: result.failures.length === 0,
+      action: items.every((item) => isImagineExternalReferenceItem(post, item))
+        ? "external-unsave"
+        : "asset-delete",
+    },
+  };
+}
+
+function imagineCardHasDeleteTarget(post) {
+  return (post?.items || []).some((item) => imagineDeletePayloadForItem(post, item));
 }
 
 async function deleteImagineSelectedDetailItem() {
@@ -865,7 +840,7 @@ async function deleteImagineSelectedDetailItem() {
 
 async function deleteImagineCardPost(post, button = null) {
   const items = (post?.items || []).filter(Boolean);
-  if (!post || !items.length || !imagineConversationDeletePayloadForPost(post)) {
+  if (!post || !items.length || !imagineCardHasDeleteTarget(post)) {
     showErrorPanel("Delete unavailable", "This Imagine card has no deletion target.");
     return;
   }
