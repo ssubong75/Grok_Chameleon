@@ -5,14 +5,16 @@
     const promptInput = promptSave.querySelector(".prompt_save_original");
     const translationInput = promptSave.querySelector(".prompt_save_translation");
     const translateButton = promptSave.querySelector(".prompt_save_translate");
-    const currentPrompt = prompt ? prompt.text || "" : document.getElementById("composer_input")?.value || "";
+    const currentPrompt = normalizeNfcText(
+      prompt ? prompt.text || "" : document.getElementById("composer_input")?.value || "",
+    );
     promptSave.dataset.editFileName = prompt?.file_name || "";
     promptSave.dataset.editPromptId = prompt?.id || "";
     promptSave.classList.toggle("editing_prompt", Boolean(prompt));
     promptSave.setAttribute("aria-label", prompt ? "Edit prompt" : "New prompt");
-    if (titleInput) titleInput.value = prompt?.title || "";
+    if (titleInput) titleInput.value = normalizeNfcText(prompt?.title || "");
     if (promptInput) promptInput.value = currentPrompt;
-    if (translationInput) translationInput.value = prompt?.translation || "";
+    if (translationInput) translationInput.value = normalizeNfcText(prompt?.translation || "");
     setPromptTranslationDirection(translateButton, promptTranslationDirection(prompt?.translation || currentPrompt), prompt?.translation ? "translation" : "original");
     promptSave.hidden = false;
     requestAnimationFrame(() => {

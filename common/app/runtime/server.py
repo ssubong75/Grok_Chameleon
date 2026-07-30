@@ -415,16 +415,20 @@ def build_video_debug_event(event: str, payload: dict | None = None) -> None:
         pass
 
 
+def normalize_unicode_text(value) -> str:
+    return unicodedata.normalize("NFC", str(value or ""))
+
+
 def normalize_json_unicode(value):
     if isinstance(value, str):
-        return unicodedata.normalize("NFC", value)
+        return normalize_unicode_text(value)
     if isinstance(value, list):
         return [normalize_json_unicode(item) for item in value]
     if isinstance(value, tuple):
         return tuple(normalize_json_unicode(item) for item in value)
     if isinstance(value, dict):
         return {
-            unicodedata.normalize("NFC", key) if isinstance(key, str) else key: normalize_json_unicode(child)
+            normalize_unicode_text(key) if isinstance(key, str) else key: normalize_json_unicode(child)
             for key, child in value.items()
         }
     return value
@@ -578,7 +582,10 @@ def set_library_root(path_text: str) -> Path:
 
 
 def safe_name(name: str, fallback: str = "item") -> str:
-    cleaned = "".join("-" if char in '/:\\*?"<>|\x00' else char for char in str(name or "")).strip()
+    cleaned = "".join(
+        "-" if char in '/:\\*?"<>|\x00' else char
+        for char in normalize_unicode_text(name)
+    ).strip()
     return cleaned or fallback
 
 
@@ -3710,6 +3717,175 @@ def merge_imagine_local_heart_post(
     destination["representative"] = representative.get("url") or representative.get("remote_url") or representative.get("item_id") or ""
 
 
+def imagine_remote_cache_post_key(post: dict) -> str:
+    metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+    imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
+    for value in (
+        metadata.get("conversation_id"),
+        imagine.get("conversation_id"),
+        post.get("post_id"),
+        post.get("folder_path"),
+    ):
+        key = str(value or "").strip()
+        if key:
+            return key
+    for item in post.get("items") or []:
+        asset_id = imagine_item_asset_id(item)
+        if asset_id:
+            return asset_id
+    return ""
+
+
+def imagine_remote_cache_records(posts: list[dict]) -> list[dict]:
+    records: list[dict] = []
+    for post in posts if isinstance(posts, list) else []:
+        if not isinstance(post, dict):
+            continue
+        post_key = imagine_remote_cache_post_key(post)
+        if not post_key:
+            continue
+        asset_ids = {
+            imagine_item_asset_id(item)
+            for item in post.get("items") or []
+            if isinstance(item, dict) and imagine_item_asset_id(item)
+        }
+        records.append({
+            "post_key": post_key,
+            "created_at": str(post.get("created_at") or ""),
+            "asset_ids": sorted(asset_ids),
+            "post": normalize_json_unicode(post),
+        })
+    return records
+
+
+def cache_imagine_remote_posts(
+    root: Path | None,
+    account: dict,
+    posts: list[dict],
+    *,
+    sync_token: str = "",
+) -> None:
+    if not root:
+        return
+    records = imagine_remote_cache_records(posts)
+    if not records:
+        return
+    library_index.upsert_imagine_remote_posts(
+        root,
+        imagine_account_settings_key(account),
+        records,
+        sync_token=sync_token,
+    )
+
+
+def remove_imagine_remote_cache_assets(
+    root: Path | None,
+    account: dict,
+    asset_ids: set[str],
+) -> None:
+    if not root or not asset_ids:
+        return
+    try:
+        library_index.delete_imagine_remote_assets(
+            root,
+            imagine_account_settings_key(account),
+            asset_ids,
+        )
+    except Exception as exc:
+        imagine_debug_event("saved_cache_asset_delete_failed", {
+            "account_id": str(account.get("id") or ""),
+            "error": str(exc)[:400],
+        })
+
+
+def remove_imagine_remote_cache_post_keys(
+    root: Path | None,
+    account: dict,
+    post_keys: set[str],
+) -> None:
+    if not root or not post_keys:
+        return
+    try:
+        library_index.delete_imagine_remote_post_keys(
+            root,
+            imagine_account_settings_key(account),
+            post_keys,
+        )
+    except Exception as exc:
+        imagine_debug_event("saved_cache_post_delete_failed", {
+            "account_id": str(account.get("id") or ""),
+            "error": str(exc)[:400],
+        })
+
+
+def list_imagine_saved_cache(payload: dict) -> dict:
+    root = library_root()
+    if not root:
+        raise RuntimeError("Library path is not set.")
+    account = active_imagine_account(root, str((payload or {}).get("account_id") or ""))
+    if not account:
+        raise RuntimeError("Select or capture an Imagine account first.")
+    try:
+        offset = max(0, int((payload or {}).get("offset") or 0))
+    except (TypeError, ValueError):
+        offset = 0
+    try:
+        limit = min(200, max(1, int((payload or {}).get("limit") or 60)))
+    except (TypeError, ValueError):
+        limit = 60
+    cached = library_index.query_imagine_remote_posts(
+        root,
+        imagine_account_settings_key(account),
+        offset=offset,
+        limit=limit,
+    )
+    ensure_imagine_state_migrated(root)
+    hidden_remote_ids = (
+        imagine_pending_delete_ids(root, account)
+        | imagine_local_exclusion_ids(root, account)
+    )
+    relations = imagine_state.load_generated_relations(root)
+    posts: list[dict] = []
+    for raw_post in cached.get("posts") or []:
+        if not isinstance(raw_post, dict):
+            continue
+        post = json.loads(json.dumps(raw_post, ensure_ascii=False))
+        imagine_apply_generated_relations(post, root, account, relations)
+        post["items"] = [
+            item
+            for item in post.get("items") or []
+            if imagine_item_asset_id(item) not in hidden_remote_ids
+        ]
+        if not post["items"]:
+            continue
+        representative = imagine_representative_item(post["items"]) or post["items"][-1]
+        post["representative_item"] = representative
+        post["representative"] = (
+            representative.get("url")
+            or representative.get("remote_url")
+            or representative.get("item_id")
+            or ""
+        )
+        posts.append(post)
+    return {
+        "ok": True,
+        "source": "saved_cache",
+        "posts": normalize_json_unicode(posts),
+        "items": normalize_json_unicode(posts),
+        "total": int(cached.get("total") or 0),
+        "offset": int(cached.get("offset") or 0),
+        "next_offset": int(cached.get("next_offset") or 0),
+        "has_more": bool(cached.get("has_more")),
+        "refreshed_at": float(cached.get("refreshed_at") or 0),
+        "imagine": {
+            "id": account.get("id") or "",
+            "email": account.get("email") or "",
+            "label": account.get("label") or "",
+            "tier": account.get("tier") or "",
+        },
+    }
+
+
 def list_imagine_saved(payload: dict) -> dict:
     root = library_root()
     if not root:
@@ -3724,6 +3900,7 @@ def list_imagine_saved(payload: dict) -> dict:
         limit = 20
     limit = min(40, max(1, limit))
     cursor = str((payload or {}).get("cursor") or "").strip()
+    sync_token = str((payload or {}).get("sync_token") or "").strip()[:128]
     conversation_cursor, asset_cursor, conversations_done, assets_done = decode_imagine_saved_cursor(cursor)
     query_params = {
         "pageSize": str(limit),
@@ -3890,6 +4067,13 @@ def list_imagine_saved(payload: dict) -> dict:
             )
     posts = list(saved_groups.values())
     posts.sort(key=lambda post: str(post.get("created_at") or ""), reverse=True)
+    try:
+        cache_imagine_remote_posts(root, account, posts, sync_token=sync_token)
+    except Exception as exc:
+        imagine_debug_event("saved_cache_update_failed", {
+            "account_id": str(account.get("id") or ""),
+            "error": str(exc)[:400],
+        })
 
     next_conversation_cursor = str(data.get("nextPageToken") or "").strip()
     next_asset_cursor = str(
@@ -3910,6 +4094,18 @@ def list_imagine_saved(payload: dict) -> dict:
         if has_more
         else ""
     )
+    if not has_more and sync_token:
+        try:
+            library_index.finalize_imagine_remote_sync(
+                root,
+                imagine_account_settings_key(account),
+                sync_token,
+            )
+        except Exception as exc:
+            imagine_debug_event("saved_cache_finalize_failed", {
+                "account_id": str(account.get("id") or ""),
+                "error": str(exc)[:400],
+            })
     return {
         "ok": True,
         "source": "saved",
@@ -3919,6 +4115,7 @@ def list_imagine_saved(payload: dict) -> dict:
         "cursor": cursor,
         "next_cursor": next_cursor,
         "has_more": has_more,
+        "sync_token": sync_token,
         "imagine": {
             "id": account.get("id") or "",
             "email": account.get("email") or "",
@@ -5804,7 +6001,19 @@ def imagine_media_post_action(payload: dict, action: str) -> dict:
 
 
 def delete_imagine_media_post(payload: dict) -> dict:
-    return imagine_media_post_action(payload, "delete")
+    result = imagine_media_post_action(payload, "delete")
+    root = library_root()
+    account = active_imagine_account(root, str((payload or {}).get("account_id") or "")) if root else None
+    if root and account:
+        remove_imagine_remote_cache_assets(
+            root,
+            account,
+            {
+                str(result.get("id") or "").strip(),
+                str(result.get("requested_id") or "").strip(),
+            },
+        )
+    return result
 
 
 def imagine_delete_target_id(payload: dict) -> str:
@@ -5867,6 +6076,7 @@ def delete_imagine_asset(payload: dict) -> dict:
             account,
             remove={asset_id},
         )
+        remove_imagine_remote_cache_assets(root, account, {asset_id})
     invalidate_imagine_saved_media_keys_cache(account)
     return {"ok": True, "asset_id": asset_id, "result": result}
 
@@ -5915,6 +6125,7 @@ def delete_imagine_conversation(payload: dict) -> dict:
             remove_group_ids={conversation_id},
         )
         remove_imagine_generated_relation_state(root, group_ids={conversation_id})
+        remove_imagine_remote_cache_post_keys(root, account, {conversation_id})
         invalidate_imagine_saved_media_keys_cache(account)
     return {"ok": True, "conversation_id": conversation_id, "result": result}
 
@@ -6103,6 +6314,13 @@ def _like_imagine_media_post(payload: dict) -> dict:
             released_exclusions,
         )
     update_imagine_local_heart_posts(root, account, add_post=local_post)
+    try:
+        cache_imagine_remote_posts(root, account, [local_post])
+    except Exception as exc:
+        imagine_debug_event("saved_cache_local_upsert_failed", {
+            "account_id": str(account.get("id") or ""),
+            "error": str(exc)[:400],
+        })
     visits: list[dict] = []
     seen_visit_post_ids: set[str] = set()
     for target in targets:
@@ -6219,6 +6437,7 @@ def unsave_imagine_media_post(payload: dict) -> dict:
         )
     if owned_asset_ids:
         remove_imagine_generated_relation_state(root, asset_ids=owned_asset_ids)
+    remove_imagine_remote_cache_assets(root, account, local_asset_ids)
     invalidate_imagine_saved_media_keys_cache(account)
     if owned_asset_ids:
         ensure_imagine_state_migrated(root)
@@ -10715,6 +10934,8 @@ def classify_imagine_job_error(message: str) -> str:
 
 
 def start_imagine_job(payload: dict) -> dict:
+    payload = dict(payload or {})
+    payload["prompt"] = normalize_unicode_text(payload.get("prompt")).strip()
     job_id = uuid.uuid4().hex[:16]
     now = now_iso()
     action = imagine_direct_action(payload)
@@ -11092,32 +11313,60 @@ def imagine_account_statuses(payload: dict) -> dict:
         if not requested or str(account.get("id") or "") in requested
     ]
     statuses_by_index: dict[int, dict] = {}
-    changed = False
-
-    def check_one(index: int, account: dict) -> tuple[int, dict, bool]:
+    def check_one(index: int, account: dict) -> tuple[int, dict]:
         account_id_value = str(account.get("id") or "")
         try:
             status = imagine_account_status(account)
         except Exception as exc:
             status = {"id": account_id_value, "status": "unknown", "message": str(exc)[:240]}
-        account_changed = False
-        if status.get("status") == "ok":
-            account_changed = apply_imagine_account_tier(account)
         status["tier"] = normalize_account_tier(account.get("tier"))
-        return index, status, account_changed
+        return index, status
 
     if selected_accounts:
         max_workers = min(6, len(selected_accounts))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(check_one, index, account) for index, account in selected_accounts]
             for future in as_completed(futures):
-                index, status, account_changed = future.result()
+                index, status = future.result()
                 statuses_by_index[index] = status
-                changed = account_changed or changed
-    if changed:
-        write_imagine_auth(root, imagine)
     statuses = [statuses_by_index[index] for index, _account in selected_accounts if index in statuses_by_index]
     return {"ok": True, "statuses": statuses}
+
+
+def refresh_imagine_account_tier(payload: dict) -> dict:
+    root = library_root()
+    if not root:
+        raise RuntimeError("Library path is not set.")
+    account_id_value = str((payload or {}).get("id") or (payload or {}).get("account_id") or "")
+    imagine = account_files(root)["imagine"]
+    account = next(
+        (
+            item
+            for item in imagine.get("accounts") or []
+            if str(item.get("id") or "") == account_id_value
+        ),
+        None,
+    )
+    if not account:
+        raise RuntimeError("Imagine account not found.")
+    result = fetch_imagine_usage_tier(account)
+    refreshed = bool(result.get("ok"))
+    if refreshed:
+        account["tier"] = normalize_account_tier(result.get("tier"))
+        account["tier_checked_at"] = now_iso()
+        account.pop("tier_check_attempted_at", None)
+        write_imagine_auth(root, imagine)
+    return {
+        "ok": True,
+        "refreshed": refreshed,
+        "message": str(result.get("message") or ""),
+        "imagine": {
+            "id": account.get("id") or "",
+            "email": account.get("email") or "",
+            "label": account.get("label") or "",
+            "tier": normalize_account_tier(account.get("tier")),
+        },
+    }
 
 
 def find_secret_value(value, names: set[str], depth: int = 0, allow_plain_string: bool = False) -> str:
@@ -16251,6 +16500,8 @@ def classify_build_job_error(message: str) -> str:
 
 
 def start_build_job(payload: dict) -> dict:
+    payload = dict(payload or {})
+    payload["prompt"] = normalize_unicode_text(payload.get("prompt")).strip()
     job_id = uuid.uuid4().hex[:16]
     now = now_iso()
     job = {
@@ -16497,10 +16748,10 @@ def save_prompt(payload: dict) -> dict:
     if not root:
         raise RuntimeError("Library path is not set.")
     ensure_library_root(root)
-    text = str(payload.get("text") or "").strip()
+    text = normalize_unicode_text(payload.get("text")).strip()
     if not text:
         raise RuntimeError("Prompt text is empty.")
-    title = str(payload.get("title") or "").strip() or text[:48].strip() or "Prompt"
+    title = normalize_unicode_text(payload.get("title")).strip() or text[:48].strip() or "Prompt"
     prompt_dir = root / "prompt"
     current_name = Path(str(payload.get("file_name") or "")).name
     file_name = unique_file_name_for_update(prompt_dir, title, "txt", current_name) if current_name else unique_file_name(prompt_dir, title, "txt")
@@ -18198,6 +18449,7 @@ POST_JSON_ROUTES = {
     **imagine_post_routes(
         start_imagine_login=start_imagine_login,
         open_imagine_usage_page=open_imagine_usage_page,
+        list_imagine_saved_cache=list_imagine_saved_cache,
         list_imagine_saved=list_imagine_saved,
         list_imagine_discover=list_imagine_discover,
         list_imagine_unsaved=list_imagine_unsaved,
@@ -18222,6 +18474,7 @@ POST_JSON_ROUTES = {
         delete_imagine_account=delete_imagine_account,
         reorder_imagine_accounts=lambda payload: reorder_account_store(payload, "imagine"),
         imagine_account_statuses=imagine_account_statuses,
+        refresh_imagine_account_tier=refresh_imagine_account_tier,
     ),
     "/api/image-editor/save": save_image_editor_result,
     **build_post_routes(

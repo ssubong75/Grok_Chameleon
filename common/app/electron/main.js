@@ -578,8 +578,19 @@ function localCardPreviewSource(rawUrl) {
   const source = String(rawUrl || "").trim();
   if (!source || source.length > 4096) throw new Error("Invalid card preview URL.");
   const parsed = new URL(source, SERVER_BASE);
-  if (parsed.origin !== new URL(SERVER_BASE).origin || parsed.pathname !== "/api/media") {
+  const localOrigin = new URL(SERVER_BASE).origin;
+  if (
+    parsed.origin !== localOrigin
+    || !["/api/media", "/api/imagine/remote/media"].includes(parsed.pathname)
+  ) {
     throw new Error("Unsupported card preview URL.");
+  }
+  if (parsed.pathname === "/api/imagine/remote/media") {
+    const remoteUrl = String(parsed.searchParams.get("url") || "").trim();
+    const remote = new URL(remoteUrl);
+    if (!["http:", "https:"].includes(remote.protocol)) {
+      throw new Error("Unsupported remote card preview URL.");
+    }
   }
   return parsed;
 }
@@ -593,14 +604,10 @@ function usablePreviewFile(filePath) {
   }
 }
 
-async function generateCardPreview(sourcePath, targetPath, kind = "card") {
+function writeCardPreviewImage(sourceImage, targetPath, kind = "card") {
   const normalizedKind = normalizedPreviewKind(kind);
   const maxPreviewEdge = normalizedKind === "thumbnail" ? THUMBNAIL_PREVIEW_MAX_EDGE : CARD_PREVIEW_MAX_EDGE;
   const jpegQuality = normalizedKind === "thumbnail" ? 78 : 82;
-  const isVideo = /\.(?:m4v|mov|mp4|webm)$/i.test(sourcePath);
-  const sourceImage = isVideo
-    ? await nativeImage.createThumbnailFromPath(sourcePath, { width: maxPreviewEdge, height: maxPreviewEdge })
-    : nativeImage.createFromBuffer(fs.readFileSync(sourcePath));
   if (sourceImage.isEmpty()) throw new Error("Card preview source is not a supported image.");
   const sourceSize = sourceImage.getSize();
   const maxEdge = Math.max(sourceSize.width, sourceSize.height);
@@ -625,23 +632,60 @@ async function generateCardPreview(sourcePath, targetPath, kind = "card") {
   }
 }
 
+async function generateCardPreview(sourcePath, targetPath, kind = "card") {
+  const normalizedKind = normalizedPreviewKind(kind);
+  const maxPreviewEdge = normalizedKind === "thumbnail" ? THUMBNAIL_PREVIEW_MAX_EDGE : CARD_PREVIEW_MAX_EDGE;
+  const isVideo = /\.(?:m4v|mov|mp4|webm)$/i.test(sourcePath);
+  const sourceImage = isVideo
+    ? await nativeImage.createThumbnailFromPath(sourcePath, { width: maxPreviewEdge, height: maxPreviewEdge })
+    : nativeImage.createFromBuffer(fs.readFileSync(sourcePath));
+  writeCardPreviewImage(sourceImage, targetPath, normalizedKind);
+}
+
+async function generateRemoteCardPreview(sourceUrl, targetPath, kind = "card") {
+  const response = await fetch(sourceUrl, { signal: AbortSignal.timeout(30000) });
+  if (!response.ok) throw new Error(`Remote card preview HTTP ${response.status}`);
+  const declaredSize = Number(response.headers.get("content-length") || 0);
+  const maxSourceBytes = 64 * 1024 * 1024;
+  if (declaredSize > maxSourceBytes) throw new Error("Remote card preview source is too large.");
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (!bytes.length || bytes.length > maxSourceBytes) {
+    throw new Error("Remote card preview source is empty or too large.");
+  }
+  writeCardPreviewImage(nativeImage.createFromBuffer(bytes), targetPath, kind);
+}
+
 async function ensureCardPreview(payload = {}) {
   const source = localCardPreviewSource(payload.url);
   const previewKind = normalizedPreviewKind(payload.kind);
-  const infoUrl = new URL("/api/card-preview/source-info", SERVER_BASE);
-  infoUrl.search = source.search;
-  infoUrl.searchParams.set("preview_kind", previewKind);
-  const info = await fetchJson(infoUrl, { signal: AbortSignal.timeout(3000) });
-  const sourcePath = String(info?.source_path || "").trim();
-  const storage = info?.storage === "build" ? "build" : "cache";
-  const previewKey = String(info?.preview_key || "").trim().toLowerCase();
+  const remoteSource = source.pathname === "/api/imagine/remote/media";
+  let info;
+  let sourcePath = "";
+  let storage = "cache";
+  let previewKey = "";
+  if (remoteSource) {
+    info = await fetchJson(`${SERVER_BASE}/api/card-preview/cache-info`, {
+      signal: AbortSignal.timeout(3000),
+    });
+    previewKey = crypto.createHash("sha256")
+      .update(`remote\0${previewKind}\0${source.pathname}${source.search}`)
+      .digest("hex");
+  } else {
+    const infoUrl = new URL("/api/card-preview/source-info", SERVER_BASE);
+    infoUrl.search = source.search;
+    infoUrl.searchParams.set("preview_kind", previewKind);
+    info = await fetchJson(infoUrl, { signal: AbortSignal.timeout(3000) });
+    sourcePath = String(info?.source_path || "").trim();
+    storage = info?.storage === "build" ? "build" : "cache";
+    previewKey = String(info?.preview_key || "").trim().toLowerCase();
+  }
   if (!/^[a-f0-9]{64}$/.test(previewKey)) {
     throw new Error("Card preview key is invalid.");
   }
   const previewDir = storage === "build"
     ? verifiedLibraryBuildPreviewDir(info, previewKind)
     : verifiedLibraryCardPreviewCacheDir(info);
-  if (!path.isAbsolute(sourcePath)) {
+  if (!remoteSource && !path.isAbsolute(sourcePath)) {
     throw new Error("Card preview source path is invalid.");
   }
   const targetPath = path.join(previewDir, `${previewKey}.jpg`);
@@ -669,7 +713,8 @@ async function ensureCardPreview(payload = {}) {
     try {
       fs.unlinkSync(targetPath);
     } catch (_) {}
-    await generateCardPreview(sourcePath, targetPath, previewKind);
+    if (remoteSource) await generateRemoteCardPreview(source.href, targetPath, previewKind);
+    else await generateCardPreview(sourcePath, targetPath, previewKind);
     if (storage === "cache") scheduleCardPreviewCachePrune(previewDir, targetPath);
     return cardPreviewResult(previewKey, storage, previewKind);
   });

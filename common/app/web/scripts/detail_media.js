@@ -643,7 +643,16 @@ async function sha256Text(value) {
 async function existingPersistentCardPreview(rawUrl, kind = "card") {
   try {
     const parsed = new URL(String(rawUrl || ""), location.origin);
-    if (parsed.origin !== location.origin || parsed.pathname !== "/api/media") return "";
+    if (parsed.origin !== location.origin) return "";
+    const previewKind = String(kind || "").toLowerCase() === "thumbnail" ? "thumbnail" : "card";
+    if (parsed.pathname === "/api/imagine/remote/media") {
+      const key = await sha256Text(`remote\0${previewKind}\0${parsed.pathname}${parsed.search}`);
+      if (!key) return "";
+      const previewUrl = `/api/card-preview?key=${key}`;
+      const response = await fetch(previewUrl, { method: "HEAD", cache: "force-cache" });
+      return response.ok ? previewUrl : "";
+    }
+    if (parsed.pathname !== "/api/media") return "";
     const mediaPath = String(parsed.searchParams.get("path") || "").replace(/^\/+/, "");
     if (!/^(created|collection)\//.test(mediaPath)) return "";
     const version = String(parsed.searchParams.get("v") || "");
@@ -653,12 +662,20 @@ async function existingPersistentCardPreview(rawUrl, kind = "card") {
     const size = BigInt(`0x${match[2]}`).toString(10);
     const key = await sha256Text(`${mediaPath}\0${modifiedNs}\0${size}`);
     if (!key) return "";
-    const previewKind = String(kind || "").toLowerCase() === "thumbnail" ? "thumbnail" : "card";
     const previewUrl = `/api/build-preview?kind=${previewKind}&key=${key}`;
     const response = await fetch(previewUrl, { method: "HEAD", cache: "force-cache" });
     return response.ok ? previewUrl : "";
   } catch (_) {
     return "";
+  }
+}
+
+function isImagineRemoteCardPreview(url) {
+  try {
+    const parsed = new URL(String(url || ""), location.origin);
+    return parsed.origin === location.origin && parsed.pathname === "/api/imagine/remote/media";
+  } catch (_) {
+    return false;
   }
 }
 
@@ -681,6 +698,31 @@ function scheduleLocalCardPreview(preview, url, kind = "card") {
   preview.cardPreviewLoad = () => {
     if (preview.dataset.cardPreviewStarted === "true") return;
     preview.dataset.cardPreviewStarted = "true";
+    if (isImagineRemoteCardPreview(url)) {
+      existingPersistentCardPreview(url, kind).then((existingPreview) => {
+        if (!preview.isConnected) return;
+        if (existingPreview) {
+          preview.src = existingPreview;
+          return;
+        }
+        preview.src = url;
+        const nativePreview = window.grokChameleonNative?.cardPreview;
+        if (typeof nativePreview !== "function") return;
+        Promise.resolve(nativePreview({ url, kind })).then((result) => {
+          const cachedUrl = String(result?.url || "");
+          if (
+            preview.isConnected
+            && cachedUrl
+            && (!preview.complete || preview.naturalWidth <= 0)
+          ) {
+            preview.src = cachedUrl;
+          }
+        }).catch(() => {});
+      }).catch(() => {
+        if (preview.isConnected) preview.src = url;
+      });
+      return;
+    }
     resolveLocalCardPreview(url, kind).then((resolvedUrl) => {
       if (preview.isConnected && resolvedUrl) preview.src = resolvedUrl;
     });

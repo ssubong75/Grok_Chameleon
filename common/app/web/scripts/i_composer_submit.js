@@ -673,7 +673,7 @@ async function submitImagineComposer() {
     return;
   }
   const input = document.getElementById("composer_input");
-  const prompt = String(input?.value || "").trim();
+  const prompt = normalizeNfcText(input?.value || "").trim();
   if (!prompt) {
     input?.focus();
     return;

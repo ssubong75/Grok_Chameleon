@@ -165,9 +165,18 @@
       imagineRemotePosts: [],
       imagineRemoteLoaded: false,
       imagineRemoteLoading: false,
+      imagineRemoteSyncing: false,
       imagineRemoteError: "",
       imagineRemoteCursor: "",
       imagineRemoteHasMore: false,
+      imagineRemoteCacheLoaded: false,
+      imagineRemoteCacheOffset: 0,
+      imagineRemoteCacheHasMore: false,
+      imagineRemoteSyncToken: "",
+      imagineRemoteAccountId: "",
+      imagineRemoteRequestEpoch: 0,
+      imagineRemoteRequestController: null,
+      imagineRemoteSyncPromise: null,
       imagineDiscoverPosts: [],
       imagineDiscoverLoaded: false,
       imagineDiscoverLoading: false,
@@ -229,7 +238,7 @@
     scheduleCollectionRows();
   }
 
-  async function qApi(path, payload = null) {
+  async function qApi(path, payload = null, requestOptions = {}) {
     const options = payload === null
       ? { method: "GET" }
       : {
@@ -237,6 +246,7 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       };
+    if (requestOptions?.signal) options.signal = requestOptions.signal;
     const response = await fetch(path, options);
     const data = await response.json().catch(() => ({}));
     if (!response.ok || data?.ok === false) {

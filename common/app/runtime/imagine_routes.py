@@ -12,6 +12,7 @@ def imagine_post_routes(
     *,
     start_imagine_login: JsonHandler,
     open_imagine_usage_page: JsonHandler,
+    list_imagine_saved_cache: JsonHandler,
     list_imagine_saved: JsonHandler,
     list_imagine_discover: JsonHandler,
     list_imagine_unsaved: JsonHandler,
@@ -36,10 +37,12 @@ def imagine_post_routes(
     delete_imagine_account: JsonHandler,
     reorder_imagine_accounts: JsonHandler,
     imagine_account_statuses: JsonHandler,
+    refresh_imagine_account_tier: JsonHandler,
 ) -> dict[str, JsonHandler]:
     return {
         "/api/imagine/login/start": start_imagine_login,
         "/api/imagine/usage-page": open_imagine_usage_page,
+        "/api/imagine/saved/cache": list_imagine_saved_cache,
         "/api/imagine/saved": list_imagine_saved,
         "/api/imagine/remote/list": list_imagine_saved,
         "/api/imagine/discover": list_imagine_discover,
@@ -66,4 +69,5 @@ def imagine_post_routes(
         "/api/imagine/delete": delete_imagine_account,
         "/api/imagine/reorder": reorder_imagine_accounts,
         "/api/imagine/accounts/status": imagine_account_statuses,
+        "/api/imagine/account/tier": refresh_imagine_account_tier,
     }

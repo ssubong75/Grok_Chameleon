@@ -33,7 +33,13 @@ function buildCardVideoPosterUrl(post, item) {
 }
 
 function cardDisplayItemForContext(post, item, className = "") {
-  if (cardUsesImagineDetail(post, className)) return item;
+  if (cardUsesImagineDetail(post, className)) {
+    return {
+      ...(item || {}),
+      card_local_preview: true,
+      card_preview_retries: 2,
+    };
+  }
   const localItem = typeof bLocalMediaItem === "function" ? bLocalMediaItem(item) : item;
   const cardItem = {
     ...(localItem || {}),

@@ -28,8 +28,8 @@
     const titleInput = promptSave?.querySelector(".prompt_save_title");
     const promptInput = promptSave?.querySelector(".prompt_save_original");
     const translationInput = promptSave?.querySelector(".prompt_save_translation");
-    const promptText = (promptInput?.value || "").trim();
-    const translationText = (translationInput?.value || "").trim();
+    const promptText = normalizeNfcText(promptInput?.value || "").trim();
+    const translationText = normalizeNfcText(translationInput?.value || "").trim();
     if (!promptText) {
       promptInput?.focus();
       return;
@@ -39,7 +39,7 @@
         await chooseLibraryPath();
         if (!library_state.rootPath) return;
       }
-      const title = (titleInput?.value || "").trim() || promptTitleFromText(promptText);
+      const title = normalizeNfcText(titleInput?.value || "").trim() || promptTitleFromText(promptText);
       const data = await qApi("/api/prompts/save", {
         file_name: promptSave?.dataset.editFileName || "",
         title,
@@ -56,7 +56,7 @@
       if (!library_state.rootHandle) return;
     }
     const promptHandle = await library_state.rootHandle.getDirectoryHandle("prompt", { create: true });
-    const title = (titleInput?.value || "").trim() || promptTitleFromText(promptText);
+    const title = normalizeNfcText(titleInput?.value || "").trim() || promptTitleFromText(promptText);
     const currentFileName = promptSave?.dataset.editFileName || "";
     const fileName = currentFileName
       ? await promptFileNameForSave(promptHandle, title, currentFileName)
@@ -212,6 +212,30 @@
     }
     sortAccountCardsByPriority("imagine");
     renderAccounts();
+  }
+
+  const imagineTierRefreshTasks = new Map();
+
+  function refreshSelectedImagineAccountTier(accountId) {
+    const id = String(accountId || "");
+    if (!id || !library_state.apiReady) return Promise.resolve();
+    if (imagineTierRefreshTasks.has(id)) return imagineTierRefreshTasks.get(id);
+    const task = qApi("/api/imagine/account/tier", { account_id: id }).then((data) => {
+      if (
+        String(account_state.imagine.active_id || "") !== id
+        || String(data?.imagine?.id || "") !== id
+        || !data?.refreshed
+      ) return;
+      const account = account_state.imagine.accounts.find((item) => String(item.id || "") === id);
+      if (!account) return;
+      account.tier = normalizeAccountTier(data.imagine.tier);
+      sortAccountCardsByPriority("imagine");
+      renderAccounts();
+    }).finally(() => {
+      if (imagineTierRefreshTasks.get(id) === task) imagineTierRefreshTasks.delete(id);
+    });
+    imagineTierRefreshTasks.set(id, task);
+    return task;
   }
 
   function activeAccount(provider) {
@@ -482,12 +506,22 @@
       || selectedPost?.area === "imagine_remote"
       || selectedPost?.folder_path?.startsWith?.("imagine_")
     );
+    library_state.imagineRemoteRequestController?.abort?.();
+    library_state.imagineRemoteRequestEpoch = Number(library_state.imagineRemoteRequestEpoch || 0) + 1;
+    library_state.imagineRemoteRequestController = null;
+    library_state.imagineRemoteSyncPromise = null;
+    library_state.imagineRemoteAccountId = String(nextAccountId || "");
     library_state.imagineRemotePosts = [];
     library_state.imagineRemoteLoaded = false;
     library_state.imagineRemoteLoading = false;
+    library_state.imagineRemoteSyncing = false;
     library_state.imagineRemoteError = "";
     library_state.imagineRemoteCursor = "";
     library_state.imagineRemoteHasMore = false;
+    library_state.imagineRemoteCacheLoaded = false;
+    library_state.imagineRemoteCacheOffset = 0;
+    library_state.imagineRemoteCacheHasMore = false;
+    library_state.imagineRemoteSyncToken = "";
     library_state.imagineDiscoverPosts = [];
     library_state.imagineDiscoverLoaded = false;
     library_state.imagineDiscoverLoading = false;
@@ -537,7 +571,9 @@
       if (provider === "imagine" && previousId !== String(id || "")) clearImagineAccountScopedCache(String(id || ""));
       setComposerProvider(provider);
       renderAccounts();
-      if (provider === "imagine") refreshImagineAccountStatuses().catch((error) => setLibraryMessage(error.message || "Imagine status failed."));
+      if (provider === "imagine") {
+        refreshSelectedImagineAccountTier(String(id || "")).catch((error) => console.warn(error));
+      }
       if (provider === "imagine" && typeof prepareActiveImagineBridgeSession === "function") {
         prepareActiveImagineBridgeSession({ force: false, accountId: String(id || "") }).catch((error) => console.warn(error));
       }
@@ -553,7 +589,6 @@
     if (provider === "imagine" && previousId !== String(id || "")) clearImagineAccountScopedCache(String(id || ""));
     setComposerProvider(provider);
     renderAccounts();
-    if (provider === "imagine") refreshImagineAccountStatuses().catch((error) => setLibraryMessage(error.message || "Imagine status failed."));
     if (provider === "imagine" && typeof prepareActiveImagineBridgeSession === "function") {
       prepareActiveImagineBridgeSession({ force: false, accountId: String(id || "") }).catch((error) => console.warn(error));
     }

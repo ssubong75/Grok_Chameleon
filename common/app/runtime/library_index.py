@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import time
 import unicodedata
 from contextlib import contextmanager
 from pathlib import Path
@@ -104,8 +105,42 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             ON library_collections(order_value, name, path);
         CREATE INDEX IF NOT EXISTS library_collections_path_key_idx
             ON library_collections(path_key);
+
+        CREATE TABLE IF NOT EXISTS imagine_remote_posts (
+            account_key TEXT NOT NULL,
+            post_key TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT '',
+            post_json TEXT NOT NULL,
+            refreshed_at REAL NOT NULL,
+            sync_token TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (account_key, post_key)
+        );
+
+        CREATE INDEX IF NOT EXISTS imagine_remote_posts_order_idx
+            ON imagine_remote_posts(account_key, created_at DESC, post_key);
+
+        CREATE TABLE IF NOT EXISTS imagine_remote_assets (
+            account_key TEXT NOT NULL,
+            asset_id TEXT NOT NULL,
+            post_key TEXT NOT NULL,
+            PRIMARY KEY (account_key, asset_id),
+            FOREIGN KEY (account_key, post_key)
+                REFERENCES imagine_remote_posts(account_key, post_key)
+                ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS imagine_remote_assets_post_idx
+            ON imagine_remote_assets(account_key, post_key);
         """
     )
+    imagine_remote_columns = {
+        str(row["name"])
+        for row in connection.execute("PRAGMA table_info(imagine_remote_posts)").fetchall()
+    }
+    if "sync_token" not in imagine_remote_columns:
+        connection.execute(
+            "ALTER TABLE imagine_remote_posts ADD COLUMN sync_token TEXT NOT NULL DEFAULT ''"
+        )
     connection.execute(
         """
         INSERT INTO index_metadata(key, value) VALUES('schema_version', ?)
@@ -642,3 +677,253 @@ def counts(root: Path) -> dict:
         "upload": int(row["upload"] or 0),
         "collection": int(row["collection_count"] or 0),
     }
+
+
+def query_imagine_remote_posts(
+    root: Path,
+    account_key: str,
+    *,
+    offset: int = 0,
+    limit: int = 60,
+) -> dict:
+    normalized_account = str(account_key or "").strip().lower()
+    safe_offset = max(0, int(offset or 0))
+    safe_limit = min(500, max(1, int(limit or 60)))
+    if not normalized_account:
+        return {
+            "posts": [],
+            "total": 0,
+            "offset": safe_offset,
+            "limit": safe_limit,
+            "next_offset": safe_offset,
+            "has_more": False,
+            "refreshed_at": 0,
+        }
+    with _lock_for(root):
+        with _connection(root, write=True) as connection:
+            _create_schema(connection)
+            count_row = connection.execute(
+                """
+                SELECT COUNT(*) AS count, MAX(refreshed_at) AS refreshed_at
+                FROM imagine_remote_posts
+                WHERE account_key = ?
+                """,
+                (normalized_account,),
+            ).fetchone()
+            rows = connection.execute(
+                """
+                SELECT post_json
+                FROM imagine_remote_posts
+                WHERE account_key = ?
+                ORDER BY created_at DESC, post_key
+                LIMIT ? OFFSET ?
+                """,
+                (normalized_account, safe_limit, safe_offset),
+            ).fetchall()
+    posts = [post for row in rows if (post := _json_dict(row["post_json"]))]
+    total = int(count_row["count"] if count_row else 0)
+    next_offset = safe_offset + len(rows)
+    return {
+        "posts": posts,
+        "total": total,
+        "offset": safe_offset,
+        "limit": safe_limit,
+        "next_offset": next_offset,
+        "has_more": next_offset < total,
+        "refreshed_at": float(count_row["refreshed_at"] or 0) if count_row else 0,
+    }
+
+
+def upsert_imagine_remote_posts(
+    root: Path,
+    account_key: str,
+    records: list[dict],
+    *,
+    sync_token: str = "",
+) -> int:
+    normalized_account = str(account_key or "").strip().lower()
+    normalized_sync_token = str(sync_token or "").strip()
+    normalized_records = []
+    for record in records if isinstance(records, list) else []:
+        if not isinstance(record, dict):
+            continue
+        post_key = str(record.get("post_key") or "").strip()
+        post = record.get("post")
+        if not post_key or not isinstance(post, dict):
+            continue
+        asset_ids = sorted({
+            str(asset_id).strip()
+            for asset_id in (record.get("asset_ids") or [])
+            if str(asset_id).strip()
+        })
+        normalized_records.append((
+            post_key,
+            str(record.get("created_at") or post.get("created_at") or ""),
+            post,
+            asset_ids,
+        ))
+    if not normalized_account or not normalized_records:
+        return 0
+    refreshed_at = time.time()
+    with _lock_for(root):
+        with _connection(root, write=True) as connection:
+            _create_schema(connection)
+            for post_key, created_at, post, asset_ids in normalized_records:
+                conflicting_keys: set[str] = set()
+                if asset_ids:
+                    placeholders = ",".join("?" for _ in asset_ids)
+                    rows = connection.execute(
+                        f"""
+                        SELECT DISTINCT post_key
+                        FROM imagine_remote_assets
+                        WHERE account_key = ? AND asset_id IN ({placeholders})
+                        """,
+                        (normalized_account, *asset_ids),
+                    ).fetchall()
+                    conflicting_keys = {
+                        str(row["post_key"])
+                        for row in rows
+                        if str(row["post_key"]) != post_key
+                    }
+                if conflicting_keys:
+                    placeholders = ",".join("?" for _ in conflicting_keys)
+                    connection.execute(
+                        f"""
+                        DELETE FROM imagine_remote_posts
+                        WHERE account_key = ? AND post_key IN ({placeholders})
+                        """,
+                        (normalized_account, *sorted(conflicting_keys)),
+                    )
+                connection.execute(
+                    """
+                    INSERT INTO imagine_remote_posts(
+                        account_key, post_key, created_at, post_json, refreshed_at,
+                        sync_token
+                    ) VALUES(?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(account_key, post_key) DO UPDATE SET
+                        created_at = excluded.created_at,
+                        post_json = excluded.post_json,
+                        refreshed_at = excluded.refreshed_at,
+                        sync_token = CASE
+                            WHEN excluded.sync_token != '' THEN excluded.sync_token
+                            ELSE imagine_remote_posts.sync_token
+                        END
+                    """,
+                    (
+                        normalized_account,
+                        post_key,
+                        created_at,
+                        _json_text(post),
+                        refreshed_at,
+                        normalized_sync_token,
+                    ),
+                )
+                connection.execute(
+                    """
+                    DELETE FROM imagine_remote_assets
+                    WHERE account_key = ? AND post_key = ?
+                    """,
+                    (normalized_account, post_key),
+                )
+                if asset_ids:
+                    connection.executemany(
+                        """
+                        INSERT INTO imagine_remote_assets(account_key, asset_id, post_key)
+                        VALUES(?, ?, ?)
+                        ON CONFLICT(account_key, asset_id) DO UPDATE SET
+                            post_key = excluded.post_key
+                        """,
+                        [
+                            (normalized_account, asset_id, post_key)
+                            for asset_id in asset_ids
+                        ],
+                    )
+    return len(normalized_records)
+
+
+def finalize_imagine_remote_sync(
+    root: Path,
+    account_key: str,
+    sync_token: str,
+) -> int:
+    normalized_account = str(account_key or "").strip().lower()
+    normalized_sync_token = str(sync_token or "").strip()
+    if not normalized_account or not normalized_sync_token:
+        return 0
+    with _lock_for(root):
+        with _connection(root, write=True) as connection:
+            _create_schema(connection)
+            cursor = connection.execute(
+                """
+                DELETE FROM imagine_remote_posts
+                WHERE account_key = ? AND sync_token != ?
+                """,
+                (normalized_account, normalized_sync_token),
+            )
+            return max(0, int(cursor.rowcount or 0))
+
+
+def delete_imagine_remote_assets(
+    root: Path,
+    account_key: str,
+    asset_ids: set[str],
+) -> int:
+    normalized_account = str(account_key or "").strip().lower()
+    normalized_ids = sorted({
+        str(asset_id).strip()
+        for asset_id in (asset_ids or set())
+        if str(asset_id).strip()
+    })
+    if not normalized_account or not normalized_ids:
+        return 0
+    with _lock_for(root):
+        with _connection(root, write=True) as connection:
+            _create_schema(connection)
+            placeholders = ",".join("?" for _ in normalized_ids)
+            rows = connection.execute(
+                f"""
+                SELECT DISTINCT post_key
+                FROM imagine_remote_assets
+                WHERE account_key = ? AND asset_id IN ({placeholders})
+                """,
+                (normalized_account, *normalized_ids),
+            ).fetchall()
+            post_keys = sorted({str(row["post_key"]) for row in rows if str(row["post_key"])})
+            if not post_keys:
+                return 0
+            placeholders = ",".join("?" for _ in post_keys)
+            connection.execute(
+                f"""
+                DELETE FROM imagine_remote_posts
+                WHERE account_key = ? AND post_key IN ({placeholders})
+                """,
+                (normalized_account, *post_keys),
+            )
+    return len(post_keys)
+
+
+def delete_imagine_remote_post_keys(
+    root: Path,
+    account_key: str,
+    post_keys: set[str],
+) -> int:
+    normalized_account = str(account_key or "").strip().lower()
+    normalized_keys = sorted({
+        str(post_key).strip()
+        for post_key in (post_keys or set())
+        if str(post_key).strip()
+    })
+    if not normalized_account or not normalized_keys:
+        return 0
+    with _lock_for(root):
+        with _connection(root, write=True) as connection:
+            _create_schema(connection)
+            placeholders = ",".join("?" for _ in normalized_keys)
+            cursor = connection.execute(
+                f"""
+                DELETE FROM imagine_remote_posts
+                WHERE account_key = ? AND post_key IN ({placeholders})
+                """,
+                (normalized_account, *normalized_keys),
+            )
+            return max(0, int(cursor.rowcount or 0))

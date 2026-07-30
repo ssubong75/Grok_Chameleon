@@ -238,7 +238,7 @@ async function submitBuildComposer() {
     return;
   }
   const input = document.getElementById("composer_input");
-  const prompt = String(input?.value || "").trim();
+  const prompt = normalizeNfcText(input?.value || "").trim();
   if (composerState.mode === "analyze") {
     await submitBuildAnalyze();
     return;
