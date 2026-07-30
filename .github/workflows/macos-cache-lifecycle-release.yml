@@ -418,10 +418,7 @@ jobs:
           if (-not (Get-Content -Raw -LiteralPath $targetDetailMedia).Contains("function scheduleLocalCardVideoPoster(")) { throw "Build video poster scheduling marker missing." }
           if ((Get-Content -Raw -LiteralPath $targetCardRender).Contains("card_static_video_preview")) { throw "Static Build video card preview regression found." }
           if (-not $mainText.Contains("const CARD_PREVIEW_MAX_EDGE = 960;")) { throw "Card preview size dropped below the 512x288 requirement." }
-          if (
-            (Test-Path -LiteralPath (Join-Path $root "Resources\Migration"))
-            -or (Test-Path -LiteralPath (Join-Path $root "Migration.exe"))
-          ) {
+          if ((Test-Path -LiteralPath (Join-Path $root "Resources\Migration")) -or (Test-Path -LiteralPath (Join-Path $root "Migration.exe"))) {
             throw "Migration app remains in the Windows package."
           }
           foreach ($portableResidue in @(".library_path.json", "library_path.json", "runtime_data", "sql_data")) {
