@@ -27,8 +27,24 @@ promptSave?.querySelector(".prompt_save_original")?.addEventListener("input", (e
   setPromptTranslationDirection(translateButton, promptTranslationDirection(event.target.value), "original");
 });
 
-promptSave?.addEventListener("click", (event) => {
-  if (event.target === promptSave) closePromptSave();
+let promptBackdropPointer = null;
+
+promptSave?.addEventListener("pointerdown", (event) => {
+  promptBackdropPointer = event.target === promptSave
+    ? { id: event.pointerId, x: event.clientX, y: event.clientY }
+    : null;
+});
+
+promptSave?.addEventListener("pointerup", (event) => {
+  const pointer = promptBackdropPointer;
+  promptBackdropPointer = null;
+  if (!pointer || pointer.id !== event.pointerId || event.target !== promptSave) return;
+  if (Math.hypot(event.clientX - pointer.x, event.clientY - pointer.y) > 5) return;
+  closePromptSave();
+});
+
+promptSave?.addEventListener("pointercancel", () => {
+  promptBackdropPointer = null;
 });
 
 document.addEventListener("keydown", (event) => {

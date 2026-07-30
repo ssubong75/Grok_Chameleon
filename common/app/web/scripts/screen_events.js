@@ -78,4 +78,9 @@ restoreLibraryRoot().then(() => {
   if (typeof prepareActiveImagineBridgeSession === "function") {
     prepareActiveImagineBridgeSession().catch((error) => console.warn(error));
   }
+  if (library_state.apiReady && library_state.rootPath && typeof scanLibrary === "function") {
+    setTimeout(() => {
+      scanLibrary().catch((error) => console.warn(error));
+    }, 100);
+  }
 });

@@ -58,7 +58,7 @@ function showMainRefreshLoading(screenId) {
 }
 
 async function refreshLocalLibrarySnapshot() {
-  if (typeof restoreLibraryRoot === "function") await restoreLibraryRoot();
+  if (typeof scanLibrary === "function") await scanLibrary();
 }
 
 async function refreshCurrentMainView() {

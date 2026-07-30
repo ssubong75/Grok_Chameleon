@@ -143,6 +143,8 @@ IMAGINE_SAVE_ACTIVE_LOCK = threading.Lock()
 IMAGINE_STATE_MIGRATION_LOCK = threading.Lock()
 IMAGINE_RELATION_STATE_LOCK = threading.Lock()
 IMAGINE_STATE_READY_ROOTS: set[str] = set()
+LIBRARY_SCAN_LOCK = threading.Lock()
+LIBRARY_STATE_CACHE_VERSION = 1
 
 BUILD_VIDEO_TERMINAL_STATUSES = {"failed", "expired", "cancelled", "canceled"}
 IMAGE_ASPECT_RATIOS = {"auto", "1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "2:1", "1:2", "19.5:9", "9:19.5", "20:9", "9:20"}
@@ -12202,10 +12204,73 @@ def health_snapshot() -> dict:
     return {"ok": True, "status": "ready", "pid": os.getpid()}
 
 
+def library_state_cache_path(root: Path) -> Path:
+    return root / "runtime_data" / "library_state.json"
+
+
+def cache_library_snapshot(root: Path, snapshot: dict) -> None:
+    path = library_state_cache_path(root)
+    cache_snapshot = dict(snapshot)
+    cache_snapshot.pop("accounts", None)
+    cache_snapshot.pop("library_root", None)
+    envelope = {
+        "version": LIBRARY_STATE_CACHE_VERSION,
+        "snapshot": cache_snapshot,
+    }
+    temporary = path.with_name(
+        f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(
+            json.dumps(normalize_json_unicode(envelope), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, path)
+    except (OSError, TypeError, ValueError):
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def startup_library_snapshot(root: Path | None = None) -> dict:
+    root = root or library_root()
+    if not root:
+        return empty_snapshot()
+    library = merge_library_json(read_json(root / "library.json", {}))
+    cached = read_json(library_state_cache_path(root), {})
+    snapshot = (
+        cached.get("snapshot")
+        if (
+            isinstance(cached, dict)
+            and cached.get("version") == LIBRARY_STATE_CACHE_VERSION
+            and isinstance(cached.get("snapshot"), dict)
+        )
+        else {}
+    )
+    result = {
+        **empty_snapshot(),
+        **snapshot,
+        "ok": True,
+        "library_root": str(root),
+        "root_name": root.name,
+        "library": library,
+        "accounts": account_files(root),
+        "scan_pending": True,
+    }
+    return normalize_json_unicode(result)
+
+
 def scan_library(root: Path | None = None) -> dict:
     root = root or library_root()
     if not root:
         return empty_snapshot()
+    with LIBRARY_SCAN_LOCK:
+        return scan_library_unlocked(root)
+
+
+def scan_library_unlocked(root: Path) -> dict:
     ensure_library_root(root)
     normalize_library_json_files(root)
     collections = scan_collection_folders(root)
@@ -12235,6 +12300,7 @@ def scan_library(root: Path | None = None) -> dict:
         "accounts": accounts,
     })
     snapshot["library_root"] = str(root)
+    cache_library_snapshot(root, snapshot)
     return snapshot
 
 
@@ -18096,7 +18162,10 @@ class Handler(SimpleHTTPRequestHandler):
             if parsed.path == "/api/health":
                 self.send_json(health_snapshot())
                 return
-            if parsed.path == "/api/state" or parsed.path == "/api/library/scan":
+            if parsed.path == "/api/state":
+                self.send_json(startup_library_snapshot())
+                return
+            if parsed.path == "/api/library/scan":
                 self.send_json(scan_library())
                 return
             if parsed.path == "/api/accounts":
