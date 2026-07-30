@@ -1180,8 +1180,8 @@ jobs:
           WIN_U_ZIP: Win_Grok_Chameleon_u.zip
           MAC_ZIP: Mac_Grok_Chameleon_a.zip
           MAC_U_ZIP: Mac_Grok_Chameleon_u.zip
-          WIN_INPUT_SHA256: fd7ccb4b36d75a89141928dd63ed47a5f7424648a5a23f5ee546fc2d06a0187a
-          MAC_INPUT_SHA256: 61d624740534d70e998d97ba4e8d05d6c3aaf7d4b881f94bcc16bb030980fb15
+          WIN_INPUT_SHA256: b5ee68da31052c839cfaefbf3ea8eda96c7b9f7efe8ad518e1fbb1d7ccdda927
+          MAC_INPUT_SHA256: c6dcde241c2a127a4124475e459bef013bfc2f60654e0a4393e07daaf6637127
         run: |
           set -euo pipefail
           mkdir -p current/win current/win-u current/mac current/mac-u backups
