@@ -135,7 +135,14 @@ function showBuildT2iViewNow() {
   renderSourceCards("build");
 }
 
-function shouldSwitchBuildT2iBeforeSubmit() {
+function showBuildMainNow() {
+  library_state.selectedJobId = "";
+  library_state.bMainView = "build";
+  openScreen("b_main", "b_build_btn");
+  renderSourceCards("build");
+}
+
+function shouldShowBuildMainBeforeSubmit() {
   if (composerState.provider !== "build" || composerState.mode !== "image") return false;
   if (screen_state.current_screen === "b_detail") return false;
   return !composerAttachments.length;
@@ -174,7 +181,7 @@ function finishBuildJob(job) {
         resetComposerAttachmentsToSelectedDetail();
       }
     } else {
-      if (stayOnBuildMain) library_state.bMainView = "t2i";
+      if (stayOnBuildMain) library_state.bMainView = "build";
       openScreen("b_main", "b_build_btn");
       renderSourceCards("build");
     }
@@ -247,8 +254,8 @@ async function submitBuildComposer() {
     input?.focus();
     return;
   }
-  const switchedToT2iView = shouldSwitchBuildT2iBeforeSubmit();
-  if (switchedToT2iView) showBuildT2iViewNow();
+  const movedToBuildMain = shouldShowBuildMainBeforeSubmit();
+  if (movedToBuildMain) showBuildMainNow();
   const initialSourcePost = screen_state.current_screen === "b_detail" ? selectedLibraryPost() : null;
   const initialSourceItem = initialSourcePost ? selectedDetailItem(initialSourcePost) : null;
   const initialPreview = buildSubmissionPreview(initialSourcePost, initialSourceItem);
@@ -288,7 +295,7 @@ async function submitBuildComposer() {
       throw new Error("Video Edit needs one source video.");
     }
     const isTextToImage = composerState.mode === "image" && !useInitialDetailSource && !attachments.length;
-    if (isTextToImage && !switchedToT2iView) showBuildT2iViewNow();
+    if (isTextToImage && !movedToBuildMain) showBuildMainNow();
     const preview = useInitialDetailSource ? initialPreview : buildSubmissionPreview();
     const sourcePost = useInitialDetailSource ? initialSourcePost : (screen_state.current_screen === "b_detail" ? selectedLibraryPost() : null);
     const sourceItem = useInitialDetailSource ? initialSourceItem : (sourcePost ? selectedDetailItem(sourcePost) : null);
@@ -308,7 +315,7 @@ async function submitBuildComposer() {
       if (pendingJob) discardPendingBuildJob(pendingJob.id, false);
       upsertBuildJob(data.job);
       if (isTextToImage) {
-        showBuildT2iViewNow();
+        showBuildMainNow();
       } else {
         selectBuildJob(data.job.id, { keepDetailPost: screen_state.current_screen === "b_detail", focusJobThumb: screen_state.current_screen === "b_detail" });
       }

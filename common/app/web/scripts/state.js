@@ -165,6 +165,10 @@ function normalizeNfcText(value = "") {
       imagineJobs: [],
       selectedImagineJobId: "",
       sessionImagineT2iPaths: new Set(),
+      mainGenerationActivity: {
+        imagine: [],
+        build: [],
+      },
       dismissedJobSlots: new Set(),
       imagineRemotePosts: [],
       imagineRemoteLoaded: false,
@@ -207,6 +211,48 @@ function normalizeNfcText(value = "") {
       imagineUploadLoading: false,
       imagineUploadError: "",
   };
+
+  function mainGenerationActivityKey(kind, id) {
+    const normalizedKind = String(kind || "").trim();
+    const normalizedId = String(id || "").trim();
+    return normalizedKind && normalizedId ? `${normalizedKind}:${normalizedId}` : "";
+  }
+
+  function noteMainGenerationActivity(provider, kind, id) {
+    const providerKey = String(provider || "").toLowerCase();
+    const key = mainGenerationActivityKey(kind, id);
+    if (!key || !library_state.mainGenerationActivity?.[providerKey]) return;
+    const activity = library_state.mainGenerationActivity[providerKey];
+    library_state.mainGenerationActivity[providerKey] = [
+      key,
+      ...activity.filter((candidate) => candidate !== key),
+    ];
+  }
+
+  function forgetMainGenerationActivity(provider, kind, id) {
+    const providerKey = String(provider || "").toLowerCase();
+    const key = mainGenerationActivityKey(kind, id);
+    if (!key || !library_state.mainGenerationActivity?.[providerKey]) return;
+    library_state.mainGenerationActivity[providerKey] = library_state.mainGenerationActivity[providerKey]
+      .filter((candidate) => candidate !== key);
+  }
+
+  function orderedMainGenerationCards(provider, entries) {
+    const providerKey = String(provider || "").toLowerCase();
+    const normalizedEntries = (entries || []).filter((entry) => entry?.key && Array.isArray(entry.cards));
+    const byKey = new Map(normalizedEntries.map((entry) => [entry.key, entry]));
+    const activity = (library_state.mainGenerationActivity?.[providerKey] || [])
+      .filter((key) => byKey.has(key));
+    if (library_state.mainGenerationActivity?.[providerKey]) {
+      library_state.mainGenerationActivity[providerKey] = activity;
+    }
+    const promoted = new Set(activity);
+    return [
+      ...activity.map((key) => byKey.get(key)),
+      ...normalizedEntries.filter((entry) => !promoted.has(entry.key)),
+    ].flatMap((entry) => entry.cards);
+  }
+
   const account_state = {
     build: { active_id: "", accounts: [] },
     imagine: { active_id: "", accounts: [] },
@@ -496,6 +542,9 @@ function normalizeNfcText(value = "") {
         ? normalizeImagineRemotePosts(library_state.imagineRemotePosts)
         : library_state.imagineRemotePosts.map(normalizeServerPost))
       : [];
+    const savedDisplayPosts = typeof reconcileImagineSavedDisplayPosts === "function"
+      ? reconcileImagineSavedDisplayPosts(remotePosts)
+      : remotePosts;
     const discoverPosts = Array.isArray(library_state.imagineDiscoverPosts)
       ? (typeof normalizeImagineDiscoverPosts === "function"
         ? normalizeImagineDiscoverPosts(library_state.imagineDiscoverPosts)
@@ -515,7 +564,7 @@ function normalizeNfcText(value = "") {
     library_state.imagineDiscoverPosts = discoverPosts;
     library_state.imagineUnsavedPosts = unsavedPosts;
     library_state.imagineSearchPosts = searchPosts;
-    const posts = [...localPosts, ...remotePosts, ...discoverPosts, ...unsavedPosts, ...searchPosts];
+    const posts = [...localPosts, ...savedDisplayPosts, ...discoverPosts, ...unsavedPosts, ...searchPosts];
     library_state.posts = posts;
     imagineRemoteLibrarySyncMemo = {
       posts,

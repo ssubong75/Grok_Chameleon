@@ -695,10 +695,7 @@ function mediaCardForPost(post, className, backTargetOverride = null) {
     if (remoteOnly) {
       const unsavedPost = typeof isImagineUnsavedPost === "function" && isImagineUnsavedPost(post);
       const imagineCardScreenId = backTargetOverride?.screenId || "i_main";
-      const saveSource = (
-        (typeof isImagineDiscoverPost === "function" && isImagineDiscoverPost(post))
-        || (typeof isImagineT2iPost === "function" && isImagineT2iPost(post))
-      );
+      const saveSource = typeof isImagineDiscoverPost === "function" && isImagineDiscoverPost(post);
       const saved = typeof imaginePostLiked === "function" && imaginePostLiked(post);
       const showSaveButton = saveSource && !saved;
       if (showSaveButton) article.append(imagineCardSaveButton(post));
@@ -728,6 +725,8 @@ function mediaCardForPost(post, className, backTargetOverride = null) {
   if (attachedJob && typeof buildJobActionButton === "function") article.append(buildJobActionButton(attachedJob));
 
   const activate = () => {
+    const representativeId = mediaItemKey(rawRepresentative);
+    if (representativeId) library_state.selectedDetailItemId = representativeId;
     selectLibraryPost(post.folder_path);
     if (attachedJob && typeof generationJobProvider === "function" && generationJobProvider(attachedJob) === "imagine") {
       library_state.selectedImagineJobId = String(attachedJob.id || "");

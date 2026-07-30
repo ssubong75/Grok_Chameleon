@@ -579,8 +579,6 @@ def query_posts(
     normalized_scope = str(scope or "all").lower()
     if normalized_scope in {"build", "build_main"}:
         clauses.append("build_visible = 1")
-        if normalized_scope == "build_main":
-            clauses.append("(NOT (source = 'build' AND LOWER(mode) = 't2i') OR favorite = 1)")
         if not include_collections:
             clauses.append("area != 'collection'")
     elif normalized_scope == "upload":
@@ -663,7 +661,6 @@ def counts(root: Path) -> dict:
                 SUM(
                     CASE
                         WHEN build_visible = 1
-                            AND (NOT (source = 'build' AND LOWER(mode) = 't2i') OR favorite = 1)
                         THEN 1 ELSE 0
                     END
                 ) AS build_main_with_collections,
@@ -671,7 +668,6 @@ def counts(root: Path) -> dict:
                     CASE
                         WHEN build_visible = 1
                             AND area != 'collection'
-                            AND (NOT (source = 'build' AND LOWER(mode) = 't2i') OR favorite = 1)
                         THEN 1 ELSE 0
                     END
                 ) AS build_main,

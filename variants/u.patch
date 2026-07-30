@@ -99,14 +99,14 @@
              <h2>Collection</h2>
 --- a/web/scripts/i_source_render.js
 +++ b/web/scripts/i_source_render.js
-@@ -742,6 +742,7 @@
+@@ -1300,6 +1300,7 @@
    }
    document.getElementById("i_imagine_tab_btn")?.classList.toggle("active", library_state.iMainView === imagineViewValue("IMAGINE", "imagine"));
    document.getElementById("i_t2i_btn")?.classList.toggle("active", t2iView);
 +  document.getElementById("i_unsaved_nav_btn")?.classList.toggle("active", library_state.iMainView === imagineViewValue("UNSAVED", "unsaved"));
    const count = document.querySelector(".i_main_header p");
-   const jobSlots = t2iView
-     ? visibleJobs.reduce((total, job) => total + (typeof visibleGenerationJobSlots === "function" ? visibleGenerationJobSlots(job).length : buildJobT2iSlotCount(job)), 0)
+   const jobSlots = visibleJobs.reduce((total, job) => total + (
+     typeof isTextToImageBuildJob === "function" && isTextToImageBuildJob(job)
 @@ -866,7 +867,29 @@
    maybeLoadMoreImagineDiscoverCards,
  );

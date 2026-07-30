@@ -87,7 +87,12 @@ function buildSourcePosts() {
       loadIndexedBuildPosts({ force: true }).catch((error) => console.warn(error));
       return [];
     }
-    return library_state.indexedBuildPosts || [];
+    const indexedPosts = library_state.indexedBuildPosts || [];
+    const byPath = new Map(indexedPosts.map((post) => [post?.folder_path, post]));
+    for (const post of library_state.posts.filter(isSessionBuildT2iPost)) {
+      if (post?.folder_path) byPath.set(post.folder_path, post);
+    }
+    return Array.from(byPath.values());
   }
   return library_state.posts.filter(buildMainPostVisible);
 }
@@ -98,7 +103,7 @@ function buildVisibleJobs() {
     && (typeof generationJobHasVisibleSlots !== "function" || generationJobHasVisibleSlots(job))
     && (library_state.bMainView === "t2i"
       ? isTextToImageBuildJob(job)
-      : !isTextToImageBuildJob(job) && !(typeof generationJobHasSourcePost === "function" && generationJobHasSourcePost(job)))
+      : !(typeof generationJobHasSourcePost === "function" && generationJobHasSourcePost(job)))
   ));
 }
 
@@ -108,6 +113,18 @@ function renderBuildSourceCards() {
   const list = document.querySelector(".b_card_list");
   const t2iView = library_state.bMainView === "t2i";
   const visiblePosts = pagedBuildPosts(posts, list);
+  const mainJobEntries = visibleJobs.map((job) => ({
+    key: mainGenerationActivityKey("job", job?.id),
+    cards: (
+      isTextToImageBuildJob(job)
+        ? visibleGenerationJobSlots(job).map((slotIndex) => mediaCardForBuildJob(job, slotIndex))
+        : [mediaCardForBuildJob(job)]
+    ).filter(Boolean),
+  }));
+  const mainPostEntries = visiblePosts.map((post) => ({
+    key: mainGenerationActivityKey("post", post?.folder_path || post?.post_id),
+    cards: [buildPostCardEntry(post, false)],
+  }));
   if (list) {
     if (library_state.libraryIndexEnabled && library_state.indexedBuildLoading && !posts.length && !visibleJobs.length) {
       disableVirtualCardList(BUILD_VIRTUAL_LIST_KEY, list);
@@ -116,10 +133,16 @@ function renderBuildSourceCards() {
       disableVirtualCardList(BUILD_VIRTUAL_LIST_KEY, list);
       list.replaceChildren(emptyLibraryNode(t2iView ? "No T2I items." : "No build items."));
     } else {
-      renderVirtualCardList(BUILD_VIRTUAL_LIST_KEY, list, [
-        ...(t2iView ? visiblePosts.map((post) => buildPostCardEntry(post, true)) : visibleJobs.map((job) => mediaCardForBuildJob(job))),
-        ...(t2iView ? visibleJobs.flatMap(mediaCardsForBuildJob) : visiblePosts.map((post) => buildPostCardEntry(post, false))),
-      ]);
+      renderVirtualCardList(
+        BUILD_VIRTUAL_LIST_KEY,
+        list,
+        t2iView
+          ? [
+            ...visiblePosts.map((post) => buildPostCardEntry(post, true)),
+            ...visibleJobs.flatMap(mediaCardsForBuildJob),
+          ]
+          : orderedMainGenerationCards("build", [...mainJobEntries, ...mainPostEntries]),
+      );
     }
   }
   document.getElementById("b_t2i_view_btn")?.classList.toggle("active", t2iView);
@@ -128,9 +151,11 @@ function renderBuildSourceCards() {
   collectionButton?.classList.toggle("active", collectionActive);
   collectionButton?.setAttribute("aria-pressed", String(collectionActive));
   const count = document.querySelector(".b_main_header p");
-  const jobSlots = t2iView
-    ? visibleJobs.reduce((total, job) => total + (typeof visibleGenerationJobSlots === "function" ? visibleGenerationJobSlots(job).length : buildJobT2iSlotCount(job)), 0)
-    : visibleJobs.length;
+  const jobSlots = visibleJobs.reduce((total, job) => total + (
+    isTextToImageBuildJob(job)
+      ? (typeof visibleGenerationJobSlots === "function" ? visibleGenerationJobSlots(job).length : buildJobT2iSlotCount(job))
+      : 1
+  ), 0);
   const postCount = library_state.libraryIndexEnabled && !t2iView
     ? Number(library_state.indexedBuildTotal || 0)
     : posts.length;

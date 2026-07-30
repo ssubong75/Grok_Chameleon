@@ -1213,7 +1213,7 @@ function imagineSourcePosts() {
       imagineSavedDisplayPostsMemoSource = sourcePosts;
       imagineSavedDisplayPostsMemoResult = reconcileImagineSavedDisplayPosts(sourcePosts);
       imagineSavedVisiblePostsMemoResult = imagineSavedDisplayPostsMemoResult.filter((post) => (
-        !isImagineT2iPost(post) && !isImagineT2iGroupContainer(post)
+        !isImagineT2iGroupContainer(post)
       ));
     }
     return imagineSavedVisiblePostsMemoResult;
@@ -1229,9 +1229,8 @@ function imagineVisibleJobs() {
     return jobs.filter((job) => typeof isTextToImageBuildJob === "function" && isTextToImageBuildJob(job));
   }
   if (library_state.iMainView === imagineViewValue("IMAGINE", "imagine")) {
-    return jobs.filter((job) => (
-      !(typeof isTextToImageBuildJob === "function" && isTextToImageBuildJob(job))
-      && !(typeof generationJobHasSourcePost === "function" && generationJobHasSourcePost(job))
+    return jobs.filter((job) => !(
+      typeof generationJobHasSourcePost === "function" && generationJobHasSourcePost(job)
     ));
   }
   return [];
@@ -1255,6 +1254,18 @@ function renderImagineSourceCards() {
   const posts = filterPostsBySearch(imagineSourcePosts());
   const visibleJobs = imagineVisibleJobs();
   const t2iView = library_state.iMainView === imagineViewValue("T2I", "t2i");
+  const mainJobEntries = visibleJobs.map((job) => ({
+    key: mainGenerationActivityKey("job", job?.id),
+    cards: (
+      typeof isTextToImageBuildJob === "function" && isTextToImageBuildJob(job)
+        ? visibleGenerationJobSlots(job).map((slotIndex) => mediaCardForBuildJob(job, slotIndex))
+        : [mediaCardForBuildJob(job)]
+    ).filter(Boolean),
+  }));
+  const mainPostEntries = posts.map((post) => ({
+    key: mainGenerationActivityKey("post", post?.folder_path || post?.post_id),
+    cards: [virtualCardRenderSpecForPost(post, "i_card")],
+  }));
   const list = document.querySelector(".i_card_list");
   if (list) {
     if (library_state.imagineRemoteLoading && !posts.length && !visibleJobs.length && library_state.iMainView === imagineViewValue("IMAGINE", "imagine")) {
@@ -1270,10 +1281,10 @@ function renderImagineSourceCards() {
       disableVirtualCardList(IMAGINE_VIRTUAL_LIST_KEY, list);
       list.replaceChildren(emptyLibraryNode(t2iView ? "No T2I items." : ""));
     } else if (library_state.iMainView === imagineViewValue("IMAGINE", "imagine")) {
-      renderVirtualCardList(IMAGINE_VIRTUAL_LIST_KEY, list, [
-        ...visibleJobs.map((job) => mediaCardForBuildJob(job)),
-        ...posts.map((post) => virtualCardRenderSpecForPost(post, "i_card")),
-      ], {
+      renderVirtualCardList(IMAGINE_VIRTUAL_LIST_KEY, list, orderedMainGenerationCards(
+        "imagine",
+        [...mainJobEntries, ...mainPostEntries],
+      ), {
         loading: library_state.imagineRemoteLoading,
         remoteMedia: true,
       });
@@ -1289,9 +1300,11 @@ function renderImagineSourceCards() {
   document.getElementById("i_imagine_tab_btn")?.classList.toggle("active", library_state.iMainView === imagineViewValue("IMAGINE", "imagine"));
   document.getElementById("i_t2i_btn")?.classList.toggle("active", t2iView);
   const count = document.querySelector(".i_main_header p");
-  const jobSlots = t2iView
-    ? visibleJobs.reduce((total, job) => total + (typeof visibleGenerationJobSlots === "function" ? visibleGenerationJobSlots(job).length : buildJobT2iSlotCount(job)), 0)
-    : visibleJobs.length;
+  const jobSlots = visibleJobs.reduce((total, job) => total + (
+    typeof isTextToImageBuildJob === "function" && isTextToImageBuildJob(job)
+      ? (typeof visibleGenerationJobSlots === "function" ? visibleGenerationJobSlots(job).length : buildJobT2iSlotCount(job))
+      : 1
+  ), 0);
   if (count) count.textContent = `${posts.length + jobSlots} items`;
   if (library_state.iMainView === imagineViewValue("IMAGINE", "imagine")) {
     requestAnimationFrame(maybeLoadMoreImagineSavedCards);

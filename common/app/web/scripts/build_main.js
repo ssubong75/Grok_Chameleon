@@ -337,7 +337,12 @@
     if (!job?.id) return;
     const index = library_state.jobs.findIndex((candidate) => String(candidate.id) === String(job.id));
     if (index >= 0) library_state.jobs.splice(index, 1, { ...library_state.jobs[index], ...job });
-    else library_state.jobs.unshift(job);
+    else {
+      library_state.jobs.unshift(job);
+      if (typeof isTextToImageBuildJob === "function" && isTextToImageBuildJob(job)) {
+        noteMainGenerationActivity("build", "job", job.id);
+      }
+    }
     if (options.progressOnly && !buildJobTerminal(job)) {
       updateBuildJobProgressDom(job);
       return;
@@ -353,6 +358,7 @@
     const id = String(jobId || "");
     const wasSelected = library_state.selectedJobId === id;
     const detailPost = selectedLibraryPost();
+    forgetMainGenerationActivity("build", "job", id);
     library_state.jobs = (library_state.jobs || []).filter((job) => String(job.id || "") !== id);
     if (wasSelected) {
       library_state.selectedJobId = "";
@@ -743,7 +749,10 @@
       : [result?.selected_path].filter(Boolean);
     if (!library_state.sessionBuildT2iPaths) library_state.sessionBuildT2iPaths = new Set();
     paths.forEach((path) => {
-      if (path) library_state.sessionBuildT2iPaths.add(path);
+      if (!path) return;
+      const alreadyTracked = library_state.sessionBuildT2iPaths.has(path);
+      library_state.sessionBuildT2iPaths.add(path);
+      if (!alreadyTracked) noteMainGenerationActivity("build", "post", path);
     });
   }
 
@@ -758,7 +767,6 @@
     if (post.area === "collection") {
       return Boolean(library_state.buildIncludeCollections && post?.items?.length);
     }
-    if (isBuildT2iPost(post)) return postBuildFavorite(post);
     return true;
   }
 

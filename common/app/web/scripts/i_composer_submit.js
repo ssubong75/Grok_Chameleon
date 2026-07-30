@@ -20,6 +20,7 @@ function applyImagineT2iPartialJobResult(job) {
     if (path) {
       appliedPaths.add(path);
       library_state.sessionImagineT2iPaths.add(path);
+      noteMainGenerationActivity("imagine", "post", path);
       changed = true;
     }
   }
@@ -156,7 +157,12 @@ function upsertImagineJob(job, options = {}) {
   const list = Array.isArray(library_state.imagineJobs) ? library_state.imagineJobs : [];
   const index = list.findIndex((candidate) => String(candidate.id) === String(job.id));
   if (index >= 0) list.splice(index, 1, { ...list[index], ...job });
-  else list.unshift(job);
+  else {
+    list.unshift(job);
+    if (typeof isTextToImageBuildJob === "function" && isTextToImageBuildJob(job)) {
+      noteMainGenerationActivity("imagine", "job", job.id);
+    }
+  }
   library_state.imagineJobs = list;
   if (options.progressOnly && !imagineJobTerminal(job)) {
     updateImagineJobProgressDom(job);
@@ -171,6 +177,7 @@ function removeImagineJob(jobId, options = {}) {
   const id = String(jobId || "");
   const wasSelected = library_state.selectedImagineJobId === id;
   const detailPost = selectedLibraryPost();
+  forgetMainGenerationActivity("imagine", "job", id);
   library_state.imagineJobs = (library_state.imagineJobs || []).filter((job) => String(job.id || "") !== id);
   if (wasSelected) {
     library_state.selectedImagineJobId = "";
@@ -543,15 +550,17 @@ function applyImagineDirectResult(result, options = {}) {
       if (selectedPath) upsertedPaths.push(selectedPath);
     }
   }
-  if (options.stayOnImagineT2i) {
+  if (options.stayOnImagineMain) {
     if (!library_state.sessionImagineT2iPaths) library_state.sessionImagineT2iPaths = new Set();
     upsertedPaths.forEach((path) => {
-      if (path) library_state.sessionImagineT2iPaths.add(path);
+      if (!path) return;
+      library_state.sessionImagineT2iPaths.add(path);
+      noteMainGenerationActivity("imagine", "post", path);
     });
   }
   renderImagineSourceCards();
-  if (options.stayOnImagineT2i) {
-    showImagineT2iViewNow();
+  if (options.stayOnImagineMain) {
+    showImagineMainNow();
     return;
   }
   if (selectedPath) {
@@ -585,7 +594,15 @@ function showImagineT2iViewNow() {
   renderImagineSourceCards();
 }
 
-function shouldSwitchImagineT2iBeforeSubmit() {
+function showImagineMainNow() {
+  library_state.selectedImagineJobId = "";
+  library_state.iMainView = typeof imagineViewValue === "function" ? imagineViewValue("IMAGINE", "imagine") : "imagine";
+  if (typeof setImagineTab === "function") setImagineTab("i_imagine_tab_btn");
+  openScreen("i_main", "i_imagine_nav_btn");
+  renderImagineSourceCards();
+}
+
+function shouldShowImagineMainBeforeSubmit() {
   if (composerState.provider !== "imagine" || composerState.mode !== "image") return false;
   if (screen_state.current_screen === "i_detail") return false;
   return !composerAttachments.some((attachment) => composerMediaKind(attachment) === "image");
@@ -611,9 +628,9 @@ function finishImagineJob(job) {
       qApi("/api/imagine/dismiss", { id: job.id }).catch(() => {});
       return;
     }
-    const stayOnImagineT2i = typeof isTextToImageBuildJob === "function" && isTextToImageBuildJob(job);
+    const stayOnImagineMain = typeof isTextToImageBuildJob === "function" && isTextToImageBuildJob(job);
     removeImagineJob(job.id, { skipRender: true });
-    applyImagineDirectResult(job.result, { stayOnImagineT2i, skipPaths: appliedT2iPaths });
+    applyImagineDirectResult(job.result, { stayOnImagineMain, skipPaths: appliedT2iPaths });
     if (typeof resultHasLucky === "function" && resultHasLucky(job.result)) showLuckyNotice();
     qApi("/api/imagine/dismiss", { id: job.id }).catch(() => {});
     return;
@@ -678,9 +695,9 @@ async function submitImagineComposer() {
     input?.focus();
     return;
   }
-  const switchedToT2iView = shouldSwitchImagineT2iBeforeSubmit();
+  const movedToImagineMain = shouldShowImagineMainBeforeSubmit();
   const submissionAccountId = activeImagineAccountId();
-  if (switchedToT2iView) showImagineT2iViewNow();
+  if (movedToImagineMain) showImagineMainNow();
   const isExtendSubmit = composerState.mode === "extend";
   const initialPost = screen_state.current_screen === "i_detail" ? selectedLibraryPost() : null;
   const initialItem = initialPost ? selectedDetailItem(initialPost) : null;
@@ -778,7 +795,7 @@ async function submitImagineComposer() {
     const isTextToImage = composerState.mode === "image"
       && !useInitialDetailSource
       && !attachments.some((attachment) => composerMediaKind(attachment) === "image");
-    if (isTextToImage && !switchedToT2iView) showImagineT2iViewNow();
+    if (isTextToImage && !movedToImagineMain) showImagineMainNow();
     const data = await qApi("/api/imagine/start", {
       provider: "imagine",
       mode: composerState.mode,
