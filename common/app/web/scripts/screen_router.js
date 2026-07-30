@@ -70,6 +70,9 @@ function openScreen(screenId, activeButtonId = "", options = {}) {
   if (screenId === "i_detail" || screenId === "b_detail") updateDetailPostNavigationButtons();
   if (screenId === "collection_main") scheduleCollectionRows();
   if (typeof scheduleScreenVirtualCardList === "function") scheduleScreenVirtualCardList(screenId);
+  if ((screenId === "i_main" || screenId === "i_discover_main") && typeof prepareActiveImagineBridgeSession === "function") {
+    prepareActiveImagineBridgeSession().catch((error) => console.warn(error));
+  }
   if (typeof syncCardSelectionControls === "function") syncCardSelectionControls();
   writeBrowserHistory(screenId, activeButtonId, options);
 }
