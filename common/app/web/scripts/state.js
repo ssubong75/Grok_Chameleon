@@ -1,4 +1,8 @@
 // State, constants, API snapshot helpers
+function normalizeNfcText(value = "") {
+  return String(value ?? "").normalize("NFC");
+}
+
     const screenIds = [
       "i_main",
       "b_main",
