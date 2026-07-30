@@ -433,6 +433,7 @@ function scheduleScreenVirtualCardList(screenId) {
     i_main: "imagine-main",
     i_discover_main: "imagine-discover",
     i_unsaved_main: "imagine-unsaved",
+    "2nd_main": "collection-second-main",
   }[screenId];
   if (!listKey) return;
   requestAnimationFrame(() => scheduleVirtualCardList(listKey));

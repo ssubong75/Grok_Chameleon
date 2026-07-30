@@ -269,10 +269,10 @@
     try {
       for (const post of posts) {
         data = await qApi("/api/library/delete-post", { post_path: post.folder_path });
+        applyLibrarySnapshot(data);
       }
       library_state.selectedItems.clear();
       if (data) {
-        applyLibrarySnapshot(data);
         restoreLibraryCardListScroll(scrollState);
         reconcileSecondMainAfterCardDelete(currentScreen);
       }

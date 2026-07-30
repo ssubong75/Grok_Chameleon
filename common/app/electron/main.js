@@ -100,12 +100,43 @@ function macQuarantineValue(bundlePath) {
   }
 }
 
+function macBundleLastUsedTime(bundlePath) {
+  try {
+    const value = execFileSync(
+      "/usr/bin/mdls",
+      ["-raw", "-name", "kMDItemLastUsedDate", bundlePath],
+      {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      },
+    ).trim();
+    if (!value || value === "(null)") return 0;
+    const timestamp = Date.parse(value);
+    return Number.isFinite(timestamp) ? timestamp : 0;
+  } catch (_) {
+    return 0;
+  }
+}
+
 function resolveTranslocatedMacBundle(currentBundlePath) {
   const fingerprint = portableBundleFingerprint(currentBundlePath);
   if (!fingerprint) throw new Error("Portable app identity could not be read.");
   let matches = macOriginalBundleCandidates(fingerprint)
     .filter((candidate) => !candidate.includes(`${path.sep}AppTranslocation${path.sep}`))
     .filter((candidate) => portableBundleFingerprint(candidate) === fingerprint);
+  if (matches.length > 1) {
+    const lastUsedMatches = matches.map((candidate) => ({
+      candidate,
+      lastUsed: macBundleLastUsedTime(candidate),
+    }));
+    const newestLastUsed = Math.max(...lastUsedMatches.map((entry) => entry.lastUsed));
+    if (newestLastUsed > 0) {
+      const newestMatches = lastUsedMatches
+        .filter((entry) => entry.lastUsed === newestLastUsed)
+        .map((entry) => entry.candidate);
+      if (newestMatches.length) matches = newestMatches;
+    }
+  }
   if (matches.length > 1) {
     const quarantine = macQuarantineValue(currentBundlePath);
     const quarantineMatches = quarantine
@@ -371,8 +402,9 @@ const CARD_PREVIEW_MAX_BYTES = 512 * 1024 * 1024;
 const cardPreviewQueue = [];
 const cardPreviewTasks = new Map();
 const cardPreviewPruneTimes = new Map();
+const cardPreviewPruneTasks = new Map();
+const cardPreviewTouchTimes = new Map();
 let activeCardPreviewTasks = 0;
-let lastVerifiedCardPreviewCacheDir = "";
 
 function appendLog(line) {
   try {
@@ -399,7 +431,6 @@ function verifiedLibraryCardPreviewCacheDir(info = {}) {
   ) {
     throw new Error("Refusing unsafe card preview cache path.");
   }
-  lastVerifiedCardPreviewCacheDir = resolvedCacheDir;
   return resolvedCacheDir;
 }
 
@@ -432,36 +463,9 @@ function verifiedLibraryBuildPreviewDir(info = {}, kind = "card") {
   return resolvedPreviewDir;
 }
 
-function clearVerifiedCardPreviewCache(cacheDir, reason = "cleanup") {
-  if (!cacheDir || path.resolve(cacheDir) !== lastVerifiedCardPreviewCacheDir) return false;
-  try {
-    const verifiedCacheDir = lastVerifiedCardPreviewCacheDir;
-    fs.rmSync(verifiedCacheDir, { recursive: true, force: true });
-    cardPreviewPruneTimes.delete(verifiedCacheDir);
-    appendLog(`card preview cache cleared reason=${reason} path=${verifiedCacheDir}`);
-    return true;
-  } catch (error) {
-    appendLog(`card preview cache cleanup failed reason=${reason} path=${lastVerifiedCardPreviewCacheDir} detail=${error.message || String(error)}`);
-    return false;
-  }
-}
-
 async function waitForCardPreviewTasks() {
   const tasks = Array.from(cardPreviewTasks.values());
   if (tasks.length) await Promise.allSettled(tasks);
-}
-
-async function clearCurrentCardPreviewCache(reason = "cleanup") {
-  try {
-    const info = await fetchJson(`${SERVER_BASE}/api/card-preview/cache-info`, {
-      signal: AbortSignal.timeout(3000),
-    });
-    const cacheDir = verifiedLibraryCardPreviewCacheDir(info);
-    return clearVerifiedCardPreviewCache(cacheDir, reason);
-  } catch (error) {
-    appendLog(`card preview cache cleanup skipped reason=${reason} detail=${error.message || String(error)}`);
-    return false;
-  }
 }
 
 function cardPreviewResult(key, storage = "cache", kind = "card") {
@@ -497,44 +501,64 @@ function queueCardPreviewTask(task) {
   });
 }
 
-function pruneCardPreviewCache(cacheDir, protectedPath = "") {
+function scheduleCardPreviewCachePrune(cacheDir, protectedPath = "") {
   const now = Date.now();
   const lastPruneAt = Number(cardPreviewPruneTimes.get(cacheDir) || 0);
-  if (now - lastPruneAt < 5 * 60 * 1000) return;
+  if (now - lastPruneAt < 5 * 60 * 1000) return cardPreviewPruneTasks.get(cacheDir) || null;
+  if (cardPreviewPruneTasks.has(cacheDir)) return cardPreviewPruneTasks.get(cacheDir);
   cardPreviewPruneTimes.set(cacheDir, now);
-  let entries = [];
-  try {
-    entries = fs.readdirSync(cacheDir)
-      .filter((name) => /^[a-f0-9]{64}\.jpg$/.test(name))
-      .map((name) => {
-        const filePath = path.join(cacheDir, name);
-        const stat = fs.statSync(filePath);
-        return { filePath, size: stat.size, mtimeMs: stat.mtimeMs };
-      });
-  } catch (_) {
-    return;
-  }
-  let totalBytes = entries.reduce((total, entry) => total + entry.size, 0);
-  if (entries.length <= CARD_PREVIEW_MAX_FILES && totalBytes <= CARD_PREVIEW_MAX_BYTES) return;
-  entries.sort((left, right) => left.mtimeMs - right.mtimeMs);
-  const targetFiles = Math.floor(CARD_PREVIEW_MAX_FILES * 0.8);
-  const targetBytes = Math.floor(CARD_PREVIEW_MAX_BYTES * 0.8);
-  while (entries.length > targetFiles || totalBytes > targetBytes) {
-    const entry = entries.shift();
-    if (!entry) break;
-    if (entry.filePath === protectedPath) continue;
+  const task = (async () => {
+    let names = [];
     try {
-      fs.unlinkSync(entry.filePath);
-      totalBytes -= entry.size;
-    } catch (_) {}
-  }
+      names = (await fs.promises.readdir(cacheDir))
+        .filter((name) => /^[a-f0-9]{64}\.jpg$/.test(name));
+    } catch (_) {
+      return;
+    }
+    const entries = [];
+    for (let offset = 0; offset < names.length; offset += 32) {
+      const batch = await Promise.all(names.slice(offset, offset + 32).map(async (name) => {
+        const filePath = path.join(cacheDir, name);
+        try {
+          const stat = await fs.promises.stat(filePath);
+          return { filePath, size: stat.size, mtimeMs: stat.mtimeMs };
+        } catch (_) {
+          return null;
+        }
+      }));
+      entries.push(...batch.filter(Boolean));
+    }
+    let totalBytes = entries.reduce((total, entry) => total + entry.size, 0);
+    if (entries.length <= CARD_PREVIEW_MAX_FILES && totalBytes <= CARD_PREVIEW_MAX_BYTES) return;
+    entries.sort((left, right) => left.mtimeMs - right.mtimeMs);
+    const targetFiles = Math.floor(CARD_PREVIEW_MAX_FILES * 0.8);
+    const targetBytes = Math.floor(CARD_PREVIEW_MAX_BYTES * 0.8);
+    while (entries.length > targetFiles || totalBytes > targetBytes) {
+      const entry = entries.shift();
+      if (!entry) break;
+      if (entry.filePath === protectedPath) continue;
+      try {
+        await fs.promises.unlink(entry.filePath);
+        cardPreviewTouchTimes.delete(entry.filePath);
+        totalBytes -= entry.size;
+      } catch (_) {}
+    }
+  })().finally(() => {
+    cardPreviewPruneTasks.delete(cacheDir);
+  });
+  cardPreviewPruneTasks.set(cacheDir, task);
+  return task;
 }
 
-function touchCardPreviewCacheFile(filePath) {
-  try {
-    const now = new Date();
-    fs.utimesSync(filePath, now, now);
-  } catch (_) {}
+function scheduleCardPreviewCacheTouch(filePath) {
+  const now = Date.now();
+  const lastTouchAt = Number(cardPreviewTouchTimes.get(filePath) || 0);
+  if (now - lastTouchAt < 60 * 60 * 1000) return;
+  cardPreviewTouchTimes.set(filePath, now);
+  const value = new Date(now);
+  fs.promises.utimes(filePath, value, value).catch(() => {
+    cardPreviewTouchTimes.delete(filePath);
+  });
 }
 
 async function pruneCardPreviewCacheAtStartup() {
@@ -542,10 +566,9 @@ async function pruneCardPreviewCacheAtStartup() {
     const info = await fetchJson(`${SERVER_BASE}/api/card-preview/cache-info`, {
       signal: AbortSignal.timeout(3000),
     });
-    const cacheDir = String(info?.cache_dir || "").trim();
-    if (!path.isAbsolute(cacheDir)) return;
+    const cacheDir = verifiedLibraryCardPreviewCacheDir(info);
     fs.mkdirSync(cacheDir, { recursive: true });
-    pruneCardPreviewCache(cacheDir);
+    scheduleCardPreviewCachePrune(cacheDir);
   } catch (error) {
     appendLog(`card preview startup prune skipped: ${error.message || String(error)}`);
   }
@@ -625,8 +648,8 @@ async function ensureCardPreview(payload = {}) {
   const taskKey = `${previewDir}\0${previewKey}`;
   if (usablePreviewFile(targetPath)) {
     if (storage === "cache") {
-      touchCardPreviewCacheFile(targetPath);
-      pruneCardPreviewCache(previewDir, targetPath);
+      scheduleCardPreviewCacheTouch(targetPath);
+      scheduleCardPreviewCachePrune(previewDir, targetPath);
     }
     return cardPreviewResult(previewKey, storage, previewKind);
   }
@@ -638,8 +661,8 @@ async function ensureCardPreview(payload = {}) {
     fs.mkdirSync(previewDir, { recursive: true });
     if (usablePreviewFile(targetPath)) {
       if (storage === "cache") {
-        touchCardPreviewCacheFile(targetPath);
-        pruneCardPreviewCache(previewDir, targetPath);
+        scheduleCardPreviewCacheTouch(targetPath);
+        scheduleCardPreviewCachePrune(previewDir, targetPath);
       }
       return cardPreviewResult(previewKey, storage, previewKind);
     }
@@ -647,7 +670,7 @@ async function ensureCardPreview(payload = {}) {
       fs.unlinkSync(targetPath);
     } catch (_) {}
     await generateCardPreview(sourcePath, targetPath, previewKind);
-    if (storage === "cache") pruneCardPreviewCache(previewDir, targetPath);
+    if (storage === "cache") scheduleCardPreviewCachePrune(previewDir, targetPath);
     return cardPreviewResult(previewKey, storage, previewKind);
   });
   cardPreviewTasks.set(taskKey, task);
@@ -902,7 +925,6 @@ async function exitAppNow(reason = "app-exit") {
     } catch (_) {}
   }
   await waitForCardPreviewTasks();
-  await clearCurrentCardPreviewCache("shutdown");
   await requestShutdown();
   shutdownServerNow(false);
   app.exit(0);
@@ -1844,8 +1866,8 @@ async function boot() {
     installMediaPermissionGuards();
     installMenu();
     await startServer();
-    await clearCurrentCardPreviewCache("startup");
     createMainWindow();
+    void pruneCardPreviewCacheAtStartup();
     pollBridge();
   } catch (error) {
     appendLog(`boot failed: ${error.stack || error.message}`);
@@ -1874,6 +1896,5 @@ app.on("window-all-closed", () => {
 });
 
 app.on("will-quit", () => {
-  clearVerifiedCardPreviewCache(lastVerifiedCardPreviewCacheDir, "will-quit");
   if (!appTerminating) shutdownServerNow();
 });

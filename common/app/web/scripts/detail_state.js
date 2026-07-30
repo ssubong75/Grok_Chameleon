@@ -9,6 +9,16 @@ function selectLibraryPost(path) {
     clearComposerAttachmentsForPostChange();
   }
   const post = selectedLibraryPost();
+  if (
+    (!post || post._indexed_summary)
+    && path
+    && library_state.libraryIndexEnabled
+    && typeof loadIndexedPost === "function"
+  ) {
+    loadIndexedPost(path).then((loadedPost) => {
+      if (loadedPost && library_state.selectedPostPath === path) selectLibraryPost(path);
+    }).catch((error) => console.warn(error));
+  }
   if (post) {
     const samePost = previousPath === library_state.selectedPostPath;
     const visibleItems = detailVisibleItems(post);

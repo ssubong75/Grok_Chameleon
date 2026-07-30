@@ -154,6 +154,9 @@
     }
 
     function composerUploadSourcePosts() {
+      if (library_state.libraryIndexEnabled) {
+        return library_state.indexedUploadPosts || [];
+      }
       const posts = [];
       for (const post of library_state.posts || []) {
         if (post.area === "upload") posts.push(post);
@@ -712,6 +715,14 @@
     function renderComposerUploadHistory() {
       const list = document.getElementById("composer_upload_thumb_list");
       if (!list) return;
+      if (
+        library_state.libraryIndexEnabled
+        && !library_state.indexedUploadLoaded
+        && !library_state.indexedUploadLoading
+        && typeof loadIndexedUploadPosts === "function"
+      ) {
+        loadIndexedUploadPosts().catch((error) => console.warn(error));
+      }
       const currentSignature = Array.from(list.querySelectorAll(".composer_upload_thumb"))
         .map((button) => composerUploadAttachmentKey(button.dataset.uploadPostPath || "", button.dataset.uploadItemId || ""))
         .join("||");

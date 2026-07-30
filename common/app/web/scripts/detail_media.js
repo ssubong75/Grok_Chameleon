@@ -633,15 +633,47 @@ function cardPreviewLoadOptions(host, item, url) {
   };
 }
 
+async function sha256Text(value) {
+  if (!globalThis.crypto?.subtle || typeof TextEncoder === "undefined") return "";
+  const bytes = new TextEncoder().encode(String(value || ""));
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function existingPersistentCardPreview(rawUrl, kind = "card") {
+  try {
+    const parsed = new URL(String(rawUrl || ""), location.origin);
+    if (parsed.origin !== location.origin || parsed.pathname !== "/api/media") return "";
+    const mediaPath = String(parsed.searchParams.get("path") || "").replace(/^\/+/, "");
+    if (!/^(created|collection)\//.test(mediaPath)) return "";
+    const version = String(parsed.searchParams.get("v") || "");
+    const match = version.match(/^([a-f0-9]+)-([a-f0-9]+)$/i);
+    if (!match) return "";
+    const modifiedNs = BigInt(`0x${match[1]}`).toString(10);
+    const size = BigInt(`0x${match[2]}`).toString(10);
+    const key = await sha256Text(`${mediaPath}\0${modifiedNs}\0${size}`);
+    if (!key) return "";
+    const previewKind = String(kind || "").toLowerCase() === "thumbnail" ? "thumbnail" : "card";
+    const previewUrl = `/api/build-preview?kind=${previewKind}&key=${key}`;
+    const response = await fetch(previewUrl, { method: "HEAD", cache: "force-cache" });
+    return response.ok ? previewUrl : "";
+  } catch (_) {
+    return "";
+  }
+}
+
 function resolveLocalCardPreview(url, kind = "card") {
   const key = String(url || "");
   if (!key) return Promise.resolve("");
   const nativePreview = window.grokChameleonNative?.cardPreview;
-  return typeof nativePreview === "function"
-    ? Promise.resolve(nativePreview({ url: key, kind }))
-      .then((result) => String(result?.url || key))
-      .catch(() => key)
-    : Promise.resolve(key);
+  return existingPersistentCardPreview(key, kind).then((existingPreview) => {
+    if (existingPreview) return existingPreview;
+    return typeof nativePreview === "function"
+      ? Promise.resolve(nativePreview({ url: key, kind }))
+        .then((result) => String(result?.url || key))
+        .catch(() => key)
+      : key;
+  });
 }
 
 function scheduleLocalCardPreview(preview, url, kind = "card") {

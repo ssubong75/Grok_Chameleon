@@ -15,6 +15,7 @@ function buildCardPagingKey() {
 }
 
 function pagedBuildPosts(posts, list = null) {
+  if (library_state.libraryIndexEnabled) return posts;
   const key = buildCardPagingKey();
   if (buildCardPagingState.key !== key) {
     const hadPreviousPage = Boolean(buildCardPagingState.key);
@@ -77,6 +78,17 @@ function buildSourcePosts() {
       || String(left?.created_at || "").localeCompare(String(right?.created_at || ""))
     ));
   }
+  if (library_state.libraryIndexEnabled) {
+    if (
+      library_state.indexedBuildKey !== indexedBuildQueryKey()
+      && !library_state.indexedBuildLoading
+      && typeof loadIndexedBuildPosts === "function"
+    ) {
+      loadIndexedBuildPosts({ force: true }).catch((error) => console.warn(error));
+      return [];
+    }
+    return library_state.indexedBuildPosts || [];
+  }
   return library_state.posts.filter(buildMainPostVisible);
 }
 
@@ -97,7 +109,10 @@ function renderBuildSourceCards() {
   const t2iView = library_state.bMainView === "t2i";
   const visiblePosts = pagedBuildPosts(posts, list);
   if (list) {
-    if (!posts.length && !visibleJobs.length) {
+    if (library_state.libraryIndexEnabled && library_state.indexedBuildLoading && !posts.length && !visibleJobs.length) {
+      disableVirtualCardList(BUILD_VIRTUAL_LIST_KEY, list);
+      list.replaceChildren(emptyLibraryNode("Loading . . ."));
+    } else if (!posts.length && !visibleJobs.length) {
       disableVirtualCardList(BUILD_VIRTUAL_LIST_KEY, list);
       list.replaceChildren(emptyLibraryNode(t2iView ? "No T2I items." : "No build items."));
     } else {
@@ -116,12 +131,23 @@ function renderBuildSourceCards() {
   const jobSlots = t2iView
     ? visibleJobs.reduce((total, job) => total + (typeof visibleGenerationJobSlots === "function" ? visibleGenerationJobSlots(job).length : buildJobT2iSlotCount(job)), 0)
     : visibleJobs.length;
-  if (count) count.textContent = `${posts.length + jobSlots} items`;
+  const postCount = library_state.libraryIndexEnabled && !t2iView
+    ? Number(library_state.indexedBuildTotal || 0)
+    : posts.length;
+  if (count) count.textContent = `${postCount + jobSlots} items`;
 }
 
 function maybeLoadMoreBuildSourceCards() {
   const list = document.querySelector(".b_card_list");
-  if (!list || buildCardPagingState.key !== buildCardPagingKey()) return;
+  if (!list) return;
+  if (library_state.libraryIndexEnabled) {
+    if (!library_state.indexedBuildHasMore || library_state.indexedBuildLoading) return;
+    const remaining = virtualCardListRemaining(list);
+    if (remaining > BUILD_CARD_LOAD_THRESHOLD) return;
+    loadIndexedBuildPosts({ append: true }).catch((error) => console.warn(error));
+    return;
+  }
+  if (buildCardPagingState.key !== buildCardPagingKey()) return;
   const posts = filterPostsBySearch(buildSourcePosts());
   if (buildCardPagingState.visiblePosts >= posts.length) return;
   const remaining = virtualCardListRemaining(list);

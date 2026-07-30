@@ -190,9 +190,9 @@
         }
         if (itemKey) payload.item_key = itemKey;
         data = await qApi(endpoint, payload);
+        applyLibrarySnapshot(data);
       }
       closeMoveToCollectionDialog();
-      applyLibrarySnapshot(data);
       for (const source of sources) library_state.selectedItems?.delete?.(source.folder_path);
       if (!library_state.selectedItems?.size) library_state.cardSelectionScreen = "";
       if (typeof syncCardSelectionControls === "function") syncCardSelectionControls();
@@ -319,7 +319,9 @@
             disabled: targetBlocked(collection.path),
             primary: true,
           });
-          card.addEventListener("click", () => selectTarget(collection.path, collection.path));
+          card.addEventListener("click", () => {
+            selectTarget(collection.path, collection.path);
+          });
           primaryList.append(card);
         }
       };
@@ -328,6 +330,13 @@
         const collection = library_state.collections.find((item) => item.path === activeCollectionPath);
         if (!collection) {
           secondaryList.append(moveDialogEmptyNode("Select a folder."));
+          return;
+        }
+        if (library_state.libraryIndexEnabled && !collection.indexed_loaded) {
+          secondaryList.append(moveDialogEmptyNode("Loading . . ."));
+          if (!collection.indexed_loading && typeof loadIndexedCollectionPosts === "function") {
+            loadIndexedCollectionPosts(collection.path).then(renderSecondary).catch((error) => console.warn(error));
+          }
           return;
         }
         const posts = directPosts(collection);
@@ -348,6 +357,20 @@
           secondaryList.append(card);
         }
       };
+      secondaryList.addEventListener("scroll", () => {
+        const collection = library_state.collections.find((item) => item.path === activeCollectionPath);
+        if (
+          !collection?.indexed_has_more
+          || collection.indexed_loading
+          || secondaryList.scrollHeight - secondaryList.scrollTop - secondaryList.clientHeight > 160
+          || typeof loadIndexedCollectionPosts !== "function"
+        ) {
+          return;
+        }
+        loadIndexedCollectionPosts(collection.path, { append: true })
+          .then(renderSecondary)
+          .catch((error) => console.warn(error));
+      }, { passive: true });
       const settle = (result) => closeMergeDestinationDialog(result);
 
       overlay.addEventListener("pointerdown", (event) => {
@@ -571,14 +594,23 @@
         syncActions();
         return;
       }
+      if (library_state.libraryIndexEnabled && !collection.indexed_loaded) {
+        secondaryList.append(moveDialogEmptyNode("Loading . . ."));
+        if (!collection.indexed_loading && typeof loadIndexedCollectionPosts === "function") {
+          loadIndexedCollectionPosts(collection.path).then(renderSecondary).catch((error) => console.warn(error));
+        }
+        syncActions();
+        return;
+      }
       if (!posts.length) {
         secondaryList.append(moveDialogEmptyNode("No items yet."));
         syncActions();
         return;
       }
       const maxSlot = Math.max(11, ...posts.map((post) => Number(post.grid_slot) || 0)) + 8;
+      const postBySlot = new Map(posts.map((post) => [Number(post.grid_slot) || 0, post]));
       const slots = Array.from({ length: maxSlot + 1 }, (_, slot) => {
-        const post = posts.find((candidate) => Number(candidate.grid_slot) === slot) || null;
+        const post = postBySlot.get(slot) || null;
         if (!post) {
           const emptySlot = document.createElement("button");
           emptySlot.className = "secondary-folder-slot";
@@ -705,6 +737,21 @@
       renderPrimary();
       renderSecondary();
     };
+
+    secondaryList.addEventListener("scroll", () => {
+      const collection = selectedCollection();
+      if (
+        !collection?.indexed_has_more
+        || collection.indexed_loading
+        || secondaryList.scrollHeight - secondaryList.scrollTop - secondaryList.clientHeight > 160
+        || typeof loadIndexedCollectionPosts !== "function"
+      ) {
+        return;
+      }
+      loadIndexedCollectionPosts(collection.path, { append: true })
+        .then(renderSecondary)
+        .catch((error) => console.warn(error));
+    }, { passive: true });
 
     collectionButton?.addEventListener("click", () => {
       collectionSelected = true;

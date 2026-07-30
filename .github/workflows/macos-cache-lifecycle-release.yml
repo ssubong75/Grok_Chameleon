@@ -22,6 +22,7 @@ env:
   COMMON_SIDEBAR_EVENTS: common/app/web/scripts/sidebar_events.js
   COMMON_SIDEBAR_STYLE: common/app/web/styles/sidebar.css
   COMMON_COLLECTION_EVENTS: common/app/web/scripts/collection_events.js
+  COMMON_COLLECTION_RENDER: common/app/web/scripts/collection_render.js
   COMMON_COLLECTION_STYLE: common/app/web/styles/collection.css
   COMMON_MAIN_STYLE: common/app/web/styles/main.css
   COMMON_CARD_RENDER: common/app/web/scripts/card_render.js
@@ -35,19 +36,25 @@ env:
   COMMON_ATTACHMENTS: common/app/web/scripts/composer_attachments.js
   COMMON_I_SUBMIT: common/app/web/scripts/i_composer_submit.js
   COMMON_LIBRARY_CORE: common/app/web/scripts/library_core.js
+  COMMON_LIBRARY_SCAN: common/app/web/scripts/library_scan.js
   COMMON_DETAIL_STATE: common/app/web/scripts/detail_state.js
   COMMON_DETAIL_MEDIA: common/app/web/scripts/detail_media.js
+  COMMON_DETAIL_EVENTS: common/app/web/scripts/detail_events.js
+  COMMON_DETAIL_NAVIGATION: common/app/web/scripts/detail_navigation.js
   COMMON_DETAIL_RENDER: common/app/web/scripts/detail_render.js
   COMMON_DETAIL_STYLE: common/app/web/styles/detail.css
   COMMON_I_SOURCE: common/app/web/scripts/i_source_render.js
   COMMON_IMAGINE_MAIN: common/app/web/scripts/imagine_main.js
   COMMON_RENDER: common/app/web/scripts/render.js
   COMMON_COLLECTION_ACTIONS: common/app/web/scripts/collection_actions.js
+  COMMON_IMAGE_EDITOR_FLOW: common/app/web/scripts/image_editor_flow.js
+  COMMON_SEARCH_RENDER: common/app/web/scripts/search_render.js
   COMMON_PROMPT_EVENTS: common/app/web/scripts/prompt_events.js
   COMMON_UI_FEEDBACK: common/app/web/scripts/ui_feedback.js
   COMMON_ACCOUNT_STYLE: common/app/web/styles/account.css
   COMMON_PRELOAD: common/app/electron/preload-bridge.js
   COMMON_SERVER: common/app/runtime/server.py
+  COMMON_LIBRARY_INDEX: common/app/runtime/library_index.py
   COMMON_IMAGINE_STATE: common/app/runtime/imagine_state.py
   COMMON_IMAGINE_ACCOUNTS: common/app/runtime/imagine_accounts.py
   COMMON_IMAGINE_ROUTES: common/app/runtime/imagine_routes.py
@@ -64,7 +71,7 @@ jobs:
       INPUT_ZIP: Win_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Win_Grok_Chameleon_a.zip
       OUTPUT_U_ZIP: Win_Grok_Chameleon_u.zip
-      EXPECTED_INPUT_SHA256: 3d6a7303d0db0eb0515b85597a35810a43c39333551a3aecdbe4b81cfef1f75e
+      EXPECTED_INPUT_SHA256: fd7ccb4b36d75a89141928dd63ed47a5f7424648a5a23f5ee546fc2d06a0187a
 
     steps:
       - name: Check out the shared source commit
@@ -102,6 +109,7 @@ jobs:
             @{ Name = "main"; Relative = "electron\main.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_MAIN) },
             @{ Name = "preload"; Relative = "electron\preload-bridge.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_PRELOAD) },
             @{ Name = "server"; Relative = "runtime\server.py"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_SERVER) },
+            @{ Name = "library_index"; Relative = "runtime\library_index.py"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_LIBRARY_INDEX) },
             @{ Name = "imagine_state"; Relative = "runtime\imagine_state.py"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_IMAGINE_STATE) },
             @{ Name = "imagine_accounts"; Relative = "runtime\imagine_accounts.py"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_IMAGINE_ACCOUNTS) },
             @{ Name = "imagine_routes"; Relative = "runtime\imagine_routes.py"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_IMAGINE_ROUTES) },
@@ -113,6 +121,7 @@ jobs:
             @{ Name = "sidebar_events"; Relative = "web\scripts\sidebar_events.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_SIDEBAR_EVENTS) },
             @{ Name = "sidebar_style"; Relative = "web\styles\sidebar.css"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_SIDEBAR_STYLE) },
             @{ Name = "collection_events"; Relative = "web\scripts\collection_events.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_COLLECTION_EVENTS) },
+            @{ Name = "collection_render"; Relative = "web\scripts\collection_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_COLLECTION_RENDER) },
             @{ Name = "collection_style"; Relative = "web\styles\collection.css"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_COLLECTION_STYLE) },
             @{ Name = "main_style"; Relative = "web\styles\main.css"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_MAIN_STYLE) },
             @{ Name = "card_render"; Relative = "web\scripts\card_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_CARD_RENDER) },
@@ -126,14 +135,19 @@ jobs:
             @{ Name = "attachments"; Relative = "web\scripts\composer_attachments.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_ATTACHMENTS) },
             @{ Name = "i_submit"; Relative = "web\scripts\i_composer_submit.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_I_SUBMIT) },
             @{ Name = "library_core"; Relative = "web\scripts\library_core.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_LIBRARY_CORE) },
+            @{ Name = "library_scan"; Relative = "web\scripts\library_scan.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_LIBRARY_SCAN) },
             @{ Name = "detail_state"; Relative = "web\scripts\detail_state.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_STATE) },
             @{ Name = "detail_media"; Relative = "web\scripts\detail_media.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_MEDIA) },
+            @{ Name = "detail_events"; Relative = "web\scripts\detail_events.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_EVENTS) },
+            @{ Name = "detail_navigation"; Relative = "web\scripts\detail_navigation.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_NAVIGATION) },
             @{ Name = "detail_render"; Relative = "web\scripts\detail_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_RENDER) },
             @{ Name = "detail_style"; Relative = "web\styles\detail.css"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_STYLE) },
             @{ Name = "i_source"; Relative = "web\scripts\i_source_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_I_SOURCE) },
             @{ Name = "imagine_main"; Relative = "web\scripts\imagine_main.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_IMAGINE_MAIN) },
             @{ Name = "render"; Relative = "web\scripts\render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_RENDER) },
             @{ Name = "collection_actions"; Relative = "web\scripts\collection_actions.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_COLLECTION_ACTIONS) },
+            @{ Name = "image_editor_flow"; Relative = "web\scripts\image_editor_flow.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_IMAGE_EDITOR_FLOW) },
+            @{ Name = "search_render"; Relative = "web\scripts\search_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_SEARCH_RENDER) },
             @{ Name = "prompt_events"; Relative = "web\scripts\prompt_events.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_PROMPT_EVENTS) },
             @{ Name = "prompt_account"; Relative = "web\scripts\prompt_account.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_PROMPT_ACCOUNT) },
             @{ Name = "account_core"; Relative = "web\scripts\account_core.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_ACCOUNT_CORE) },
@@ -146,6 +160,7 @@ jobs:
           $targetMain = ($sharedSources | Where-Object Name -eq "main").Target
           $targetPreload = ($sharedSources | Where-Object Name -eq "preload").Target
           $targetServer = ($sharedSources | Where-Object Name -eq "server").Target
+          $targetLibraryIndex = ($sharedSources | Where-Object Name -eq "library_index").Target
           $targetImagineState = ($sharedSources | Where-Object Name -eq "imagine_state").Target
           $targetImagineAccounts = ($sharedSources | Where-Object Name -eq "imagine_accounts").Target
           $targetImagineRoutes = ($sharedSources | Where-Object Name -eq "imagine_routes").Target
@@ -166,12 +181,16 @@ jobs:
           $targetAttachments = ($sharedSources | Where-Object Name -eq "attachments").Target
           $targetISubmit = ($sharedSources | Where-Object Name -eq "i_submit").Target
           $targetLibraryCore = ($sharedSources | Where-Object Name -eq "library_core").Target
+          $targetLibraryScan = ($sharedSources | Where-Object Name -eq "library_scan").Target
+          $targetCollectionRender = ($sharedSources | Where-Object Name -eq "collection_render").Target
           $targetDetailState = ($sharedSources | Where-Object Name -eq "detail_state").Target
           $targetDetailMedia = ($sharedSources | Where-Object Name -eq "detail_media").Target
+          $targetDetailNavigation = ($sharedSources | Where-Object Name -eq "detail_navigation").Target
           $targetDetailRender = ($sharedSources | Where-Object Name -eq "detail_render").Target
           $targetDetailStyle = ($sharedSources | Where-Object Name -eq "detail_style").Target
           $targetISource = ($sharedSources | Where-Object Name -eq "i_source").Target
           $targetCollectionActions = ($sharedSources | Where-Object Name -eq "collection_actions").Target
+          $targetSearchRender = ($sharedSources | Where-Object Name -eq "search_render").Target
           $targetPromptEvents = ($sharedSources | Where-Object Name -eq "prompt_events").Target
           $targetUiFeedback = ($sharedSources | Where-Object Name -eq "ui_feedback").Target
           $targetAccountStyle = ($sharedSources | Where-Object Name -eq "account_style").Target
@@ -238,6 +257,8 @@ jobs:
           }
           python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" $targetServer
           if ($LASTEXITCODE -ne 0) { throw "Windows server.py syntax check failed." }
+          python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" $targetLibraryIndex
+          if ($LASTEXITCODE -ne 0) { throw "Windows library_index.py syntax check failed." }
           python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" $targetImagineState
           if ($LASTEXITCODE -ne 0) { throw "Windows imagine_state.py syntax check failed." }
           python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" $targetImagineAccounts
@@ -296,9 +317,25 @@ jobs:
             'def build_preview_dir(kind: str, root: Path | None = None) -> Path:',
             'def remove_build_previews_for_tree(root: Path, folder: Path) -> None:',
             'cleaned_items = remove_embedded_preview_files(target_dir, post.get("items") or [])',
-            'if parsed.path == "/api/build-preview":'
+            'if parsed.path == "/api/build-preview":',
+            'import library_index',
+            'def current_library_snapshot(root: Path) -> dict:',
+            'def refresh_library_index_paths(',
+            'def query_library_posts(payload: dict) -> dict:',
+            '"/api/library/posts": query_library_posts',
+            '"/api/library/post": get_library_post'
           )) {
             if (-not $serverText.Contains($marker)) { throw "Windows relation recovery marker missing: $marker" }
+          }
+          $libraryIndexText = Get-Content -Raw -LiteralPath $targetLibraryIndex
+          foreach ($marker in @(
+            'SCHEMA_VERSION = 2',
+            'list_json TEXT NOT NULL',
+            'CREATE INDEX IF NOT EXISTS library_posts_parent_idx',
+            'def query_posts(',
+            'json_column = "data_json" if full else "list_json"'
+          )) {
+            if (-not $libraryIndexText.Contains($marker)) { throw "Windows library index marker missing: $marker" }
           }
           $imagineStateText = Get-Content -Raw -LiteralPath $targetImagineState
           foreach ($marker in @(
@@ -355,9 +392,14 @@ jobs:
             'function verifiedLibraryBuildPreviewDir(info = {}, kind = "card")',
             'const expectedCacheDir = path.resolve(resolvedLibraryRoot, "cache", "card-previews");',
             'normalizedKind === "thumbnail" ? "thumbnails" : "cards"',
-            'await clearCurrentCardPreviewCache("startup");'
+            'function macBundleLastUsedTime(bundlePath)',
+            'function scheduleCardPreviewCachePrune(cacheDir, protectedPath = "")',
+            'void pruneCardPreviewCacheAtStartup();'
           )) {
             if (-not $mainText.Contains($marker)) { throw "Cross-platform main marker missing: $marker" }
+          }
+          if ($mainText.Contains("clearCurrentCardPreviewCache(")) {
+            throw "Card preview cache deletion remains in main.js."
           }
           if (-not (Get-Content -Raw -LiteralPath $targetCardRender).Contains("storedBackTarget.scrollTop = scrollTop")) { throw "Imagine detail source scroll capture marker missing." }
           if (-not (Get-Content -Raw -LiteralPath $targetIDetailActions).Contains("function restoreImagineListScrollForScreen(screenId, scrollTop)")) { throw "Imagine detail source scroll restore marker missing." }
@@ -393,8 +435,22 @@ jobs:
           if (-not (Get-Content -Raw -LiteralPath $targetBSubmit).Contains('const completedMode = String(job.context?.mode || "").toLowerCase();')) { throw "Build attachment reset marker missing." }
           if (-not (Get-Content -Raw -LiteralPath $targetISubmit).Contains('new Set(["i2i", "i2v"])')) { throw "Imagine attachment reset marker missing." }
           if (-not (Get-Content -Raw -LiteralPath $targetLibraryCore).Contains('if (type === "image" || type.startsWith("image/"))')) { throw "Sharp image preview marker missing." }
+          $libraryScanText = Get-Content -Raw -LiteralPath $targetLibraryScan
+          foreach ($marker in @(
+            'async function loadIndexedBuildPosts(',
+            'async function loadIndexedCollectionPostContents(',
+            'async function loadIndexedSearchBuildPosts(',
+            'async function loadIndexedPost(path)'
+          )) {
+            if (-not $libraryScanText.Contains($marker)) { throw "Indexed card loader marker missing: $marker" }
+          }
+          if (-not (Get-Content -Raw -LiteralPath $targetCollectionRender).Contains('const COLLECTION_SECOND_MAIN_VIRTUAL_LIST_KEY = "collection-second-main";')) { throw "Collection virtual list marker missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetDetailNavigation).Contains("async function navigateDetailPost(offset)")) { throw "Indexed detail navigation marker missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetSearchRender).Contains("library_state.indexedSearchBuildHasMore")) { throw "Indexed search paging marker missing." }
           if (-not (Get-Content -Raw -LiteralPath $targetDetailState).Contains("function detailItemPrompt(item)")) { throw "Detail prompt lineage marker missing." }
-          if (-not (Get-Content -Raw -LiteralPath $targetDetailMedia).Contains('resolveLocalCardPreview(url, kind = "card")')) { throw "Persistent Build preview kind marker missing." }
+          $detailMediaText = Get-Content -Raw -LiteralPath $targetDetailMedia
+          if (-not $detailMediaText.Contains('resolveLocalCardPreview(url, kind = "card")')) { throw "Persistent Build preview kind marker missing." }
+          if (-not $detailMediaText.Contains('async function existingPersistentCardPreview(rawUrl, kind = "card")')) { throw "Persistent Build preview reuse marker missing." }
           $detailRenderText = Get-Content -Raw -LiteralPath $targetDetailRender
           if (-not $detailRenderText.Contains("const visible = !post?.is_job_post")) { throw "Build detail heart visibility marker missing." }
           if (-not $detailRenderText.Contains('resolveLocalCardPreview(buildPreviewSource, "thumbnail")')) { throw "Build detail thumbnail preview marker missing." }
@@ -444,6 +500,7 @@ jobs:
           }
           foreach ($pythonRelative in @(
             "runtime\server.py",
+            "runtime\library_index.py",
             "runtime\imagine_state.py",
             "runtime\imagine_accounts.py",
             "runtime\imagine_routes.py"
@@ -511,6 +568,8 @@ jobs:
           }
           python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" (Join-Path $verifiedAppRoot "runtime\server.py")
           if ($LASTEXITCODE -ne 0) { throw "Packaged Windows server syntax check failed." }
+          python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" (Join-Path $verifiedAppRoot "runtime\library_index.py")
+          if ($LASTEXITCODE -ne 0) { throw "Packaged Windows library index syntax check failed." }
           python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" (Join-Path $verifiedAppRoot "runtime\imagine_state.py")
           if ($LASTEXITCODE -ne 0) { throw "Packaged Windows imagine_state syntax check failed." }
           python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" (Join-Path $verifiedAppRoot "runtime\imagine_accounts.py")
@@ -538,7 +597,7 @@ jobs:
       INPUT_ZIP: Mac_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Mac_Grok_Chameleon_a.zip
       OUTPUT_U_ZIP: Mac_Grok_Chameleon_u.zip
-      EXPECTED_INPUT_SHA256: eb879bb20e55cb9d97c5a70b1463c3a3fb3186d8a5ed7d67033cb5a625f6b947
+      EXPECTED_INPUT_SHA256: 61d624740534d70e998d97ba4e8d05d6c3aaf7d4b881f94bcc16bb030980fb15
 
     steps:
       - name: Check out the shared source commit
@@ -575,6 +634,7 @@ jobs:
             electron/main.js
             electron/preload-bridge.js
             runtime/server.py
+            runtime/library_index.py
             runtime/imagine_state.py
             runtime/imagine_accounts.py
             runtime/imagine_routes.py
@@ -586,6 +646,7 @@ jobs:
             web/scripts/sidebar_events.js
             web/styles/sidebar.css
             web/scripts/collection_events.js
+            web/scripts/collection_render.js
             web/styles/collection.css
             web/styles/main.css
             web/scripts/card_render.js
@@ -599,14 +660,19 @@ jobs:
             web/scripts/composer_attachments.js
             web/scripts/i_composer_submit.js
             web/scripts/library_core.js
+            web/scripts/library_scan.js
             web/scripts/detail_state.js
             web/scripts/detail_media.js
+            web/scripts/detail_events.js
+            web/scripts/detail_navigation.js
             web/scripts/detail_render.js
             web/styles/detail.css
             web/scripts/i_source_render.js
             web/scripts/imagine_main.js
             web/scripts/render.js
             web/scripts/collection_actions.js
+            web/scripts/image_editor_flow.js
+            web/scripts/search_render.js
             web/scripts/prompt_events.js
             web/scripts/prompt_account.js
             web/scripts/account_core.js
@@ -617,6 +683,7 @@ jobs:
           main_js="$app_root/electron/main.js"
           preload_js="$app_root/electron/preload-bridge.js"
           server_py="$app_root/runtime/server.py"
+          library_index_py="$app_root/runtime/library_index.py"
           imagine_state_py="$app_root/runtime/imagine_state.py"
           imagine_accounts_py="$app_root/runtime/imagine_accounts.py"
           imagine_routes_py="$app_root/runtime/imagine_routes.py"
@@ -636,11 +703,15 @@ jobs:
           attachments_js="$app_root/web/scripts/composer_attachments.js"
           i_submit_js="$app_root/web/scripts/i_composer_submit.js"
           library_core_js="$app_root/web/scripts/library_core.js"
+          library_scan_js="$app_root/web/scripts/library_scan.js"
+          collection_render_js="$app_root/web/scripts/collection_render.js"
           detail_state_js="$app_root/web/scripts/detail_state.js"
           detail_media_js="$app_root/web/scripts/detail_media.js"
+          detail_navigation_js="$app_root/web/scripts/detail_navigation.js"
           detail_render_js="$app_root/web/scripts/detail_render.js"
           i_source_js="$app_root/web/scripts/i_source_render.js"
           collection_actions_js="$app_root/web/scripts/collection_actions.js"
+          search_render_js="$app_root/web/scripts/search_render.js"
           prompt_events_js="$app_root/web/scripts/prompt_events.js"
           ui_feedback_js="$app_root/web/scripts/ui_feedback.js"
           account_css="$app_root/web/styles/account.css"
@@ -668,6 +739,13 @@ jobs:
             fi
           done
           python3 - "$server_py" <<'PY'
+          import ast
+          import pathlib
+          import sys
+          path = pathlib.Path(sys.argv[1])
+          ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+          PY
+          python3 - "$library_index_py" <<'PY'
           import ast
           import pathlib
           import sys
@@ -735,6 +813,17 @@ jobs:
           grep -F 'def remove_build_previews_for_tree(root: Path, folder: Path) -> None:' "$server_py"
           grep -F 'cleaned_items = remove_embedded_preview_files(target_dir, post.get("items") or [])' "$server_py"
           grep -F 'if parsed.path == "/api/build-preview":' "$server_py"
+          grep -F 'import library_index' "$server_py"
+          grep -F 'def current_library_snapshot(root: Path) -> dict:' "$server_py"
+          grep -F 'def refresh_library_index_paths(' "$server_py"
+          grep -F 'def query_library_posts(payload: dict) -> dict:' "$server_py"
+          grep -F '"/api/library/posts": query_library_posts' "$server_py"
+          grep -F '"/api/library/post": get_library_post' "$server_py"
+          grep -F 'SCHEMA_VERSION = 2' "$library_index_py"
+          grep -F 'list_json TEXT NOT NULL' "$library_index_py"
+          grep -F 'CREATE INDEX IF NOT EXISTS library_posts_parent_idx' "$library_index_py"
+          grep -F 'def query_posts(' "$library_index_py"
+          grep -F 'json_column = "data_json" if full else "list_json"' "$library_index_py"
           grep -F 'ACCOUNT_TIER_SORT_ORDER = {"heavy": 0, "super": 1, "free": 2}' "$server_py"
           grep -F 'def sort_accounts_by_priority(accounts: list[dict], active_id: str = "") -> list[dict]:' "$server_py"
           grep -F 'write_build_auth(root, store, preserve_order=True)' "$server_py"
@@ -778,8 +867,16 @@ jobs:
           grep -F 'const completedMode = String(job.context?.mode || "").toLowerCase();' "$b_submit_js"
           grep -F 'new Set(["i2i", "i2v"])' "$i_submit_js"
           grep -F 'if (type === "image" || type.startsWith("image/"))' "$library_core_js"
+          grep -F 'async function loadIndexedBuildPosts(' "$library_scan_js"
+          grep -F 'async function loadIndexedCollectionPostContents(' "$library_scan_js"
+          grep -F 'async function loadIndexedSearchBuildPosts(' "$library_scan_js"
+          grep -F 'async function loadIndexedPost(path)' "$library_scan_js"
+          grep -F 'const COLLECTION_SECOND_MAIN_VIRTUAL_LIST_KEY = "collection-second-main";' "$collection_render_js"
+          grep -F 'async function navigateDetailPost(offset)' "$detail_navigation_js"
+          grep -F 'library_state.indexedSearchBuildHasMore' "$search_render_js"
           grep -F 'function detailItemPrompt(item)' "$detail_state_js"
           grep -F 'resolveLocalCardPreview(url, kind = "card")' "$detail_media_js"
+          grep -F 'async function existingPersistentCardPreview(rawUrl, kind = "card")' "$detail_media_js"
           grep -F 'const visible = !post?.is_job_post' "$detail_render_js"
           grep -F 'resolveLocalCardPreview(buildPreviewSource, "thumbnail")' "$detail_render_js"
           if grep -F 'Boolean(post?.is_job_post)' "$detail_render_js"; then
@@ -825,7 +922,13 @@ jobs:
           grep -F 'function verifiedLibraryBuildPreviewDir(info = {}, kind = "card")' "$main_js"
           grep -F 'const expectedCacheDir = path.resolve(resolvedLibraryRoot, "cache", "card-previews");' "$main_js"
           grep -F 'normalizedKind === "thumbnail" ? "thumbnails" : "cards"' "$main_js"
-          grep -F 'await clearCurrentCardPreviewCache("startup");' "$main_js"
+          grep -F 'function macBundleLastUsedTime(bundlePath)' "$main_js"
+          grep -F 'function scheduleCardPreviewCachePrune(cacheDir, protectedPath = "")' "$main_js"
+          grep -F 'void pruneCardPreviewCacheAtStartup();' "$main_js"
+          if grep -F 'clearCurrentCardPreviewCache(' "$main_js"; then
+            echo 'Card preview cache deletion remains in Mac main.js.' >&2
+            exit 1
+          fi
           grep -F 'app.on("activate"' "$main_js"
           grep -F 'app.on("window-all-closed"' "$main_js"
           rm -rf \
@@ -849,7 +952,7 @@ jobs:
               node --check "$u_app_root/$relative"
             fi
           done
-          for relative in runtime/server.py runtime/imagine_state.py runtime/imagine_accounts.py runtime/imagine_routes.py; do
+          for relative in runtime/server.py runtime/library_index.py runtime/imagine_state.py runtime/imagine_accounts.py runtime/imagine_routes.py; do
             python3 - "$u_app_root/$relative" <<'PY'
           import ast
           import pathlib
@@ -882,6 +985,7 @@ jobs:
             electron/main.js
             electron/preload-bridge.js
             runtime/server.py
+            runtime/library_index.py
             runtime/imagine_state.py
             runtime/imagine_accounts.py
             runtime/imagine_routes.py
@@ -893,6 +997,7 @@ jobs:
             web/scripts/sidebar_events.js
             web/styles/sidebar.css
             web/scripts/collection_events.js
+            web/scripts/collection_render.js
             web/styles/collection.css
             web/styles/main.css
             web/scripts/card_render.js
@@ -906,14 +1011,19 @@ jobs:
             web/scripts/composer_attachments.js
             web/scripts/i_composer_submit.js
             web/scripts/library_core.js
+            web/scripts/library_scan.js
             web/scripts/detail_state.js
             web/scripts/detail_media.js
+            web/scripts/detail_events.js
+            web/scripts/detail_navigation.js
             web/scripts/detail_render.js
             web/styles/detail.css
             web/scripts/i_source_render.js
             web/scripts/imagine_main.js
             web/scripts/render.js
             web/scripts/collection_actions.js
+            web/scripts/image_editor_flow.js
+            web/scripts/search_render.js
             web/scripts/prompt_events.js
             web/scripts/prompt_account.js
             web/scripts/account_core.js
@@ -962,6 +1072,7 @@ jobs:
           verified_app="$verified_main/Contents/Resources/app"
           verified_u_app="$verified_u_main/Contents/Resources/app"
           verified_server="$verified_app/runtime/server.py"
+          verified_library_index="$verified_app/runtime/library_index.py"
           verified_imagine_state="$verified_app/runtime/imagine_state.py"
           verified_imagine_accounts="$verified_app/runtime/imagine_accounts.py"
           verified_imagine_routes="$verified_app/runtime/imagine_routes.py"
@@ -982,6 +1093,13 @@ jobs:
             fi
           done
           python3 - "$verified_server" <<'PY'
+          import ast
+          import pathlib
+          import sys
+          path = pathlib.Path(sys.argv[1])
+          ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+          PY
+          python3 - "$verified_library_index" <<'PY'
           import ast
           import pathlib
           import sys
@@ -1062,8 +1180,8 @@ jobs:
           WIN_U_ZIP: Win_Grok_Chameleon_u.zip
           MAC_ZIP: Mac_Grok_Chameleon_a.zip
           MAC_U_ZIP: Mac_Grok_Chameleon_u.zip
-          WIN_INPUT_SHA256: 3d6a7303d0db0eb0515b85597a35810a43c39333551a3aecdbe4b81cfef1f75e
-          MAC_INPUT_SHA256: eb879bb20e55cb9d97c5a70b1463c3a3fb3186d8a5ed7d67033cb5a625f6b947
+          WIN_INPUT_SHA256: fd7ccb4b36d75a89141928dd63ed47a5f7424648a5a23f5ee546fc2d06a0187a
+          MAC_INPUT_SHA256: 61d624740534d70e998d97ba4e8d05d6c3aaf7d4b881f94bcc16bb030980fb15
         run: |
           set -euo pipefail
           mkdir -p current/win current/win-u current/mac current/mac-u backups

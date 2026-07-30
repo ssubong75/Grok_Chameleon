@@ -42,10 +42,11 @@ try:
     from build_routes import build_post_routes
     import imagine_accounts
     import imagine_state
+    import library_index
     from imagine_routes import imagine_post_routes
 except ImportError:
     from runtime.build_routes import build_post_routes
-    from runtime import imagine_accounts, imagine_state
+    from runtime import imagine_accounts, imagine_state, library_index
     from runtime.imagine_routes import imagine_post_routes
 
 try:
@@ -145,6 +146,7 @@ IMAGINE_RELATION_STATE_LOCK = threading.Lock()
 IMAGINE_STATE_READY_ROOTS: set[str] = set()
 LIBRARY_SCAN_LOCK = threading.Lock()
 LIBRARY_STATE_CACHE_VERSION = 1
+LIBRARY_INDEX_CHANGE_STATE = threading.local()
 
 BUILD_VIDEO_TERMINAL_STATUSES = {"failed", "expired", "cancelled", "canceled"}
 IMAGE_ASPECT_RATIOS = {"auto", "1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "2:1", "1:2", "19.5:9", "9:19.5", "20:9", "9:20"}
@@ -12174,7 +12176,10 @@ def collection_summary(collection: dict) -> dict:
         "path": collection.get("path"),
         "order": safe_int(collection.get("order"), 0),
         "sort_mode": collection.get("sort_mode") or "",
-        "post_count": len(collection.get("posts") or []),
+        "post_count": safe_int(
+            collection.get("post_count"),
+            len(collection.get("posts") or []),
+        ),
     }
 
 
@@ -12234,10 +12239,59 @@ def cache_library_snapshot(root: Path, snapshot: dict) -> None:
             pass
 
 
+def indexed_library_snapshot(root: Path, *, include_posts: bool = False) -> dict:
+    if not library_index.ready(root):
+        return {}
+    posts = library_index.all_posts(root) if include_posts else []
+    collections = library_index.collections(root)
+    if include_posts:
+        for collection in collections:
+            collection_path = str(collection.get("path") or "").rstrip("/")
+            collection["posts"] = [
+                post
+                for post in posts
+                if str(post.get("folder_path") or "") == collection_path
+                or str(post.get("folder_path") or "").startswith(f"{collection_path}/")
+            ]
+    library = merge_library_json(read_json(root / "library.json", {}))
+    prompts = scan_prompt_files(root)
+    library["posts"] = [post_summary(post) for post in posts] if include_posts else []
+    library["collections"] = [collection_summary(collection) for collection in collections]
+    library["prompts"] = [prompt_summary(prompt) for prompt in prompts]
+    return normalize_json_unicode({
+        "ok": True,
+        "library_root": str(root),
+        "root_name": root.name,
+        "library": library,
+        "posts": posts,
+        "collections": collections,
+        "prompts": prompts,
+        "accounts": account_files(root),
+        "library_index": {
+            "enabled": True,
+            "counts": library_index.counts(root),
+        },
+    })
+
+
+def current_library_snapshot(root: Path) -> dict:
+    indexed = indexed_library_snapshot(root)
+    if not indexed:
+        return scan_library(root)
+    changed_posts, deleted_paths = consume_library_index_changes()
+    indexed["changed_posts"] = changed_posts
+    indexed["deleted_paths"] = deleted_paths
+    return indexed
+
+
 def startup_library_snapshot(root: Path | None = None) -> dict:
     root = root or library_root()
     if not root:
         return empty_snapshot()
+    indexed = indexed_library_snapshot(root)
+    if indexed:
+        indexed["scan_pending"] = False
+        return indexed
     library = merge_library_json(read_json(root / "library.json", {}))
     cached = read_json(library_state_cache_path(root), {})
     snapshot = (
@@ -12259,6 +12313,8 @@ def startup_library_snapshot(root: Path | None = None) -> dict:
         "accounts": account_files(root),
         "scan_pending": True,
     }
+    result.pop("library_index", None)
+    result.pop("index_rebuilt", None)
     return normalize_json_unicode(result)
 
 
@@ -12268,6 +12324,14 @@ def scan_library(root: Path | None = None) -> dict:
         return empty_snapshot()
     with LIBRARY_SCAN_LOCK:
         return scan_library_unlocked(root)
+
+
+def ensure_library_index(root: Path) -> None:
+    if library_index.ready(root):
+        return
+    with LIBRARY_SCAN_LOCK:
+        if not library_index.ready(root):
+            scan_library_unlocked(root)
 
 
 def scan_library_unlocked(root: Path) -> dict:
@@ -12283,25 +12347,153 @@ def scan_library_unlocked(root: Path) -> dict:
     prompts = scan_prompt_files(root)
     library = merge_library_json(read_json(root / "library.json", {}))
     library["updated_at"] = now_iso()
-    library["posts"] = [post_summary(post) for post in posts]
+    library["posts"] = []
     library["collections"] = [collection_summary(collection) for collection in collections]
     library["prompts"] = [prompt_summary(prompt) for prompt in prompts]
+    library["card_index"] = {
+        "version": library_index.SCHEMA_VERSION,
+        "database": f"{library_index.STATE_DIRECTORY}/{library_index.DATABASE_FILENAME}",
+        "rebuildable": True,
+    }
     write_json(root / "library.json", library)
+    library_index.rebuild(root, posts, collections, updated_at=str(library.get("updated_at") or ""))
     accounts = account_files(root)
     sync_account_registries(root, accounts)
-    snapshot = normalize_json_unicode({
-        "ok": True,
-        "library_root": str(root),
-        "root_name": root.name,
-        "library": library,
-        "posts": posts,
-        "collections": collections,
-        "prompts": prompts,
-        "accounts": accounts,
-    })
-    snapshot["library_root"] = str(root)
+    snapshot = indexed_library_snapshot(root)
+    snapshot["index_rebuilt"] = True
     cache_library_snapshot(root, snapshot)
     return snapshot
+
+
+def indexed_collection_headers(root: Path) -> list[dict]:
+    collection_root = root / "collection"
+    if not collection_root.exists():
+        return []
+    library = merge_library_json(read_json(root / "library.json", {}))
+    settings = library.get("settings") if isinstance(library.get("settings"), dict) else {}
+    collection_order = [str(value) for value in settings.get("collection_order", []) if str(value)]
+    collection_order_index = {path: index for index, path in enumerate(collection_order)}
+    collection_sort = settings.get("collection_sort") if isinstance(settings.get("collection_sort"), dict) else {}
+    result = []
+    for entry in sorted_entries(collection_root):
+        if not entry.is_dir():
+            continue
+        path = f"collection/{entry.name}"
+        result.append({
+            "id": entry.name,
+            "name": readable_name(entry.name),
+            "path": path,
+            "order": collection_order_index.get(path, 10_000),
+            "sort_mode": str(collection_sort.get(path) or ""),
+            "posts": [],
+        })
+    return sorted(result, key=lambda item: (
+        safe_int(item.get("order"), 10_000),
+        str(item.get("name") or "").lower(),
+    ))
+
+
+def record_library_index_changes(
+    *,
+    changed_posts: list[dict] | None = None,
+    deleted_paths: list[str] | None = None,
+) -> None:
+    changed = getattr(LIBRARY_INDEX_CHANGE_STATE, "changed_posts", {})
+    deleted = getattr(LIBRARY_INDEX_CHANGE_STATE, "deleted_paths", set())
+    if not isinstance(changed, dict):
+        changed = {}
+    if not isinstance(deleted, set):
+        deleted = set()
+    for path in deleted_paths or []:
+        normalized = str(path or "").replace("\\", "/").strip("/")
+        if not normalized:
+            continue
+        deleted.add(normalized)
+        for changed_path in list(changed):
+            if changed_path == normalized or changed_path.startswith(f"{normalized}/"):
+                changed.pop(changed_path, None)
+    for post in changed_posts or []:
+        normalized = str(post.get("folder_path") or "").replace("\\", "/").strip("/")
+        if not normalized:
+            continue
+        changed[normalized] = post
+        deleted.discard(normalized)
+    LIBRARY_INDEX_CHANGE_STATE.changed_posts = changed
+    LIBRARY_INDEX_CHANGE_STATE.deleted_paths = deleted
+
+
+def consume_library_index_changes() -> tuple[list[dict], list[str]]:
+    changed = getattr(LIBRARY_INDEX_CHANGE_STATE, "changed_posts", {})
+    deleted = getattr(LIBRARY_INDEX_CHANGE_STATE, "deleted_paths", set())
+    LIBRARY_INDEX_CHANGE_STATE.changed_posts = {}
+    LIBRARY_INDEX_CHANGE_STATE.deleted_paths = set()
+    changed_posts = list(changed.values()) if isinstance(changed, dict) else []
+    deleted_paths = sorted(deleted) if isinstance(deleted, set) else []
+    return changed_posts, deleted_paths
+
+
+def delete_library_index_paths(root: Path, paths: list[str], *, recursive: bool = False) -> None:
+    library_index.delete_paths(root, paths, recursive=recursive)
+    record_library_index_changes(deleted_paths=paths)
+
+
+def indexed_post_context(rel_path: str) -> dict | None:
+    normalized = str(rel_path or "").replace("\\", "/").strip("/")
+    parts = normalized.split("/") if normalized else []
+    if len(parts) < 2 or parts[0] not in {"created", "upload", "collection"}:
+        return None
+    area = parts[0]
+    return {
+        "area": area,
+        "path": normalized,
+        "folderName": parts[-1],
+        "collection": parts[1] if area == "collection" and len(parts) > 1 else None,
+        **({"source": "local"} if area == "upload" else {}),
+    }
+
+
+def refresh_library_index_paths(
+    root: Path,
+    paths: list[str],
+    *,
+    recursive: bool = False,
+) -> None:
+    if not library_index.ready(root):
+        ensure_library_index(root)
+    normalized_paths = list(dict.fromkeys(
+        str(path or "").replace("\\", "/").strip("/")
+        for path in paths
+        if str(path or "").strip()
+    ))
+    refreshed_posts: list[dict] = []
+    for rel_path in normalized_paths:
+        context = indexed_post_context(rel_path)
+        if not context:
+            continue
+        delete_library_index_paths(root, [rel_path], recursive=recursive)
+        try:
+            target = safe_join(root, rel_path)
+        except ValueError:
+            continue
+        if not target.is_dir():
+            continue
+        if recursive:
+            refreshed_posts.extend(scan_post_tree(root, target, context))
+        else:
+            post = post_from_folder(root, target, context)
+            if post:
+                refreshed_posts.append(post)
+    if refreshed_posts:
+        library_index.replace_posts(root, refreshed_posts)
+        record_library_index_changes(changed_posts=refreshed_posts)
+    library_index.replace_collections(root, indexed_collection_headers(root))
+
+
+def refresh_library_index_collection(root: Path, collection_path: str) -> None:
+    path = str(collection_path or "").replace("\\", "/").strip("/")
+    if not path.startswith("collection/"):
+        return
+    refresh_library_index_paths(root, [path], recursive=True)
 
 
 def applescript_string(value: str) -> str:
@@ -14209,7 +14401,21 @@ def post_origin_key(post: dict) -> str:
 
 
 def find_post(snapshot: dict, folder_path: str) -> dict | None:
-    return next((post for post in snapshot.get("posts", []) if post.get("folder_path") == folder_path), None)
+    normalized = str(folder_path or "").replace("\\", "/").strip("/")
+    post = next((
+        post
+        for post in [
+            *(snapshot.get("posts", []) or []),
+            *(snapshot.get("changed_posts", []) or []),
+        ]
+        if str(post.get("folder_path") or "") == normalized
+    ), None)
+    if post:
+        return post
+    root_path = str(snapshot.get("library_root") or "").strip()
+    if root_path:
+        return library_index.get_post(Path(root_path), normalized)
+    return None
 
 
 def copy_file_to_directory(source_dir: Path, file_name: str, target_dir: Path) -> str:
@@ -15737,7 +15943,8 @@ def build_generate(payload: dict, progress_callback=None, cancel_checker=None) -
                 "completed_count": len(selected_paths),
                 "expected_count": expected_count,
             })
-            data = scan_library(root)
+            refresh_library_index_paths(root, selected_paths)
+            data = current_library_snapshot(root)
             data["selected_path"] = selected_paths[0]
             data["selected_paths"] = selected_paths
             data["selected_item_id"] = selected_item_id
@@ -15940,7 +16147,8 @@ def build_generate(payload: dict, progress_callback=None, cancel_checker=None) -
         post_json["build_requests"] = append_build_request_history(existing_post, request_record)
     write_json(folder / "post.json", post_json)
     report_progress(98, "running", {"action": action})
-    data = scan_library(root)
+    refresh_library_index_paths(root, [folder_path])
+    data = current_library_snapshot(root)
     data["selected_path"] = folder_path
     data["selected_item_id"] = saved_result_items[0].get("item_id") or ""
     data["lucky"] = any(media_item_is_lucky(item) for item in saved_result_items)
@@ -16206,7 +16414,8 @@ def set_build_favorite(payload: dict) -> dict:
         meta["favorite"] = favorite
         meta["updated_at"] = now_iso()
         write_json(post_path, meta)
-    data = scan_library(root)
+    refresh_library_index_paths(root, [rel_path])
+    data = current_library_snapshot(root)
     data["selected_path"] = rel_path
     return data
 
@@ -16239,6 +16448,7 @@ def permanent_delete_unfavorite_build_t2i(root: Path | None = None, cancel_activ
     deleted_count = 0
     deleted_file_count = 0
     deleted_bytes = 0
+    deleted_paths = []
     failed = []
     with BUILD_T2I_FILE_LOCK:
         post_files = sorted(created_root.rglob("post.json"), key=lambda path: str(path).casefold())
@@ -16262,9 +16472,13 @@ def permanent_delete_unfavorite_build_t2i(root: Path | None = None, cancel_activ
                 deleted_count += 1
                 deleted_file_count += len(files)
                 deleted_bytes += folder_bytes
+                deleted_paths.append(folder.relative_to(target_root).as_posix())
             except Exception as exc:
                 failed.append({"path": str(folder), "error": str(exc)})
 
+    if deleted_paths and library_index.ready(target_root):
+        delete_library_index_paths(target_root, deleted_paths, recursive=True)
+        library_index.replace_collections(target_root, indexed_collection_headers(target_root))
     result = {
         "deleted_count": deleted_count,
         "deleted_file_count": deleted_file_count,
@@ -16296,7 +16510,7 @@ def save_prompt(payload: dict) -> dict:
             (prompt_dir / current_name).unlink()
         except FileNotFoundError:
             pass
-    return scan_library(root)
+    return current_library_snapshot(root)
 
 
 def delete_prompt(payload: dict) -> dict:
@@ -16309,7 +16523,7 @@ def delete_prompt(payload: dict) -> dict:
             (root / "prompt" / file_name).unlink()
         except FileNotFoundError:
             pass
-    return scan_library(root)
+    return current_library_snapshot(root)
 
 
 def translate_prompt(payload: dict) -> dict:
@@ -16396,12 +16610,17 @@ def create_collection(payload: dict) -> dict:
             "representative": "",
             "items": [],
         })
-        data = scan_library(root)
+        refresh_library_index_paths(root, [folder_path])
+        data = current_library_snapshot(root)
         data["selected_collection_path"] = parent_path
         data["selected_collection_post_path"] = folder_path
         return data
     (root / "collection" / name).mkdir(parents=True, exist_ok=True)
-    data = scan_library(root)
+    if library_index.ready(root):
+        library_index.replace_collections(root, indexed_collection_headers(root))
+    else:
+        scan_library(root)
+    data = current_library_snapshot(root)
     data["selected_collection_path"] = f"collection/{name}"
     data["selected_collection_post_path"] = ""
     return data
@@ -16442,6 +16661,7 @@ def rename_collection_folder(payload: dict) -> dict:
     if not root:
         raise RuntimeError("Library path is not set.")
     target, parts = collection_target(root, str(payload.get("target_path") or ""))
+    original_path = target.relative_to(root).as_posix()
     name = safe_name(str(payload.get("name") or "").strip(), "")
     if not name:
         raise RuntimeError("Collection name is empty.")
@@ -16453,7 +16673,10 @@ def rename_collection_folder(payload: dict) -> dict:
         target.rename(destination)
     refresh_collection_post_jsons(root, destination)
     destination_path = destination.relative_to(root).as_posix()
-    data = scan_library(root)
+    if library_index.ready(root):
+        delete_library_index_paths(root, [original_path], recursive=True)
+    refresh_library_index_paths(root, [destination_path], recursive=True)
+    data = current_library_snapshot(root)
     if len(parts) == 2:
         data["selected_collection_path"] = destination_path
         data["selected_collection_post_path"] = ""
@@ -16468,10 +16691,16 @@ def delete_collection_folder(payload: dict) -> dict:
     if not root:
         raise RuntimeError("Library path is not set.")
     target, parts = collection_target(root, str(payload.get("target_path") or ""))
+    target_path = target.relative_to(root).as_posix()
     parent_path = target.parent.relative_to(root).as_posix()
     remove_build_previews_for_tree(root, target)
     move_path_to_trash(target)
-    data = scan_library(root)
+    if library_index.ready(root):
+        delete_library_index_paths(root, [target_path], recursive=True)
+        library_index.replace_collections(root, indexed_collection_headers(root))
+    else:
+        scan_library(root)
+    data = current_library_snapshot(root)
     if len(parts) > 2:
         data["selected_collection_path"] = parent_path
         data["selected_collection_post_path"] = ""
@@ -16501,6 +16730,7 @@ def save_collection_layout(payload: dict) -> dict:
         settings["collection_order"] = valid_paths
 
     posts = payload.get("posts")
+    changed_post_paths = []
     if isinstance(posts, list):
         for entry in posts:
             if not isinstance(entry, dict):
@@ -16526,6 +16756,7 @@ def save_collection_layout(payload: dict) -> dict:
                 meta["grid_slot"] = max(0, safe_int(entry.get("grid_slot"), 0))
             meta["updated_at"] = now_iso()
             write_json(meta_path, meta)
+            changed_post_paths.append(rel_path)
 
     collection_path = str(payload.get("collection_path") or "").strip("/")
     if "sort_mode" in payload:
@@ -16539,7 +16770,13 @@ def save_collection_layout(payload: dict) -> dict:
 
     library["updated_at"] = now_iso()
     write_json(library_path, library)
-    data = scan_library(root)
+    if changed_post_paths:
+        refresh_library_index_paths(root, changed_post_paths)
+    elif library_index.ready(root):
+        library_index.replace_collections(root, indexed_collection_headers(root))
+    else:
+        scan_library(root)
+    data = current_library_snapshot(root)
     if collection_path:
         data["selected_collection_path"] = collection_path
     selected_post_path = str(payload.get("selected_collection_post_path") or "").strip("/")
@@ -16649,7 +16886,7 @@ def clear_source_role_for_reassignment(item: dict) -> None:
         item.pop("source_type", None)
 
 
-def collection_selection_for_deleted_post(post: dict, snapshot: dict) -> tuple[str, str]:
+def collection_selection_for_deleted_post(root: Path, post: dict) -> tuple[str, str]:
     folder_path = str(post.get("folder_path") or "")
     parts = Path(folder_path).parts
     if len(parts) >= 3 and parts[0] == "collection":
@@ -16657,16 +16894,18 @@ def collection_selection_for_deleted_post(post: dict, snapshot: dict) -> tuple[s
         if len(parts) < 4:
             return collection_path, ""
         second_folder_path = "/".join(parts[:3])
-        second_folder = find_post(snapshot, second_folder_path)
+        second_folder = library_index.get_post(root, second_folder_path)
         if not second_folder:
             return collection_path, ""
-        second_folder_depth = len(Path(second_folder_path).parts)
-        has_remaining_cards = bool(second_folder.get("items")) or any(
-            candidate.get("items")
-            and str(candidate.get("folder_path") or "").startswith(f"{second_folder_path}/")
-            and len(Path(str(candidate.get("folder_path") or "")).parts) == second_folder_depth + 1
-            for candidate in snapshot.get("posts", [])
-        )
+        children = library_index.query_posts(
+            root,
+            scope="collection",
+            parent_path=second_folder_path,
+            recursive=False,
+            offset=0,
+            limit=500,
+        ).get("posts", [])
+        has_remaining_cards = bool(second_folder.get("items")) or any(candidate.get("items") for candidate in children)
         return collection_path, second_folder_path if has_remaining_cards else ""
     return "", ""
 
@@ -16675,7 +16914,7 @@ def delete_library_post(payload: dict) -> dict:
     root = library_root()
     if not root:
         raise RuntimeError("Library path is not set.")
-    snapshot = scan_library(root)
+    snapshot = current_library_snapshot(root)
     post = find_post(snapshot, str(payload.get("post_path") or ""))
     if not post:
         raise RuntimeError("Selected post was not found.")
@@ -16683,8 +16922,10 @@ def delete_library_post(payload: dict) -> dict:
     if target.is_dir():
         remove_build_previews_for_items(root, target, post.get("items") or [])
     move_path_to_trash(target)
-    data = scan_library(root)
-    collection_path, collection_post_path = collection_selection_for_deleted_post(post, data)
+    delete_library_index_paths(root, [post.get("folder_path") or ""], recursive=True)
+    library_index.replace_collections(root, indexed_collection_headers(root))
+    data = current_library_snapshot(root)
+    collection_path, collection_post_path = collection_selection_for_deleted_post(root, post)
     data["selected_path"] = ""
     data["selected_item_id"] = ""
     if collection_path:
@@ -16697,7 +16938,7 @@ def delete_library_item(payload: dict) -> dict:
     root = library_root()
     if not root:
         raise RuntimeError("Library path is not set.")
-    snapshot = scan_library(root)
+    snapshot = current_library_snapshot(root)
     post = find_post(snapshot, str(payload.get("post_path") or ""))
     item_key = str(payload.get("item_key") or "")
     if not post:
@@ -16708,7 +16949,9 @@ def delete_library_item(payload: dict) -> dict:
     post_dir = assert_deletable_library_path(root, post.get("folder_path") or "")
     if not post_dir.is_dir():
         move_path_to_trash(post_dir)
-        data = scan_library(root)
+        delete_library_index_paths(root, [post.get("folder_path") or ""], recursive=True)
+        library_index.replace_collections(root, indexed_collection_headers(root))
+        data = current_library_snapshot(root)
         data["selected_path"] = ""
         data["selected_item_id"] = ""
         return data
@@ -16722,7 +16965,9 @@ def delete_library_item(payload: dict) -> dict:
     if not remaining_items:
         remove_build_previews_for_items(root, post_dir, post.get("items") or [])
         move_path_to_trash(post_dir)
-        data = scan_library(root)
+        delete_library_index_paths(root, [post.get("folder_path") or ""], recursive=True)
+        library_index.replace_collections(root, indexed_collection_headers(root))
+        data = current_library_snapshot(root)
         data["selected_path"] = ""
         data["selected_item_id"] = ""
         return data
@@ -16739,7 +16984,8 @@ def delete_library_item(payload: dict) -> dict:
         representative=representative_for_remaining_items(remaining_items),
     )
     write_json(post_dir / "post.json", post_json)
-    data = scan_library(root)
+    refresh_library_index_paths(root, [post.get("folder_path") or ""])
+    data = current_library_snapshot(root)
     data["selected_path"] = post.get("folder_path") or ""
     data["selected_item_id"] = media_item_key(next_item)
     return data
@@ -16749,7 +16995,7 @@ def set_post_source_item(payload: dict) -> dict:
     root = library_root()
     if not root:
         raise RuntimeError("Library path is not set.")
-    snapshot = scan_library(root)
+    snapshot = current_library_snapshot(root)
     post = find_post(snapshot, str(payload.get("post_path") or ""))
     source_key = str(payload.get("source_item_key") or "")
     if not post:
@@ -16786,7 +17032,8 @@ def set_post_source_item(payload: dict) -> dict:
         representative=post.get("representative") or representative_for_remaining_items(updated_items),
     )
     write_json(post_dir / "post.json", post_json)
-    data = scan_library(root)
+    refresh_library_index_paths(root, [post.get("folder_path") or ""])
+    data = current_library_snapshot(root)
     data["selected_path"] = post.get("folder_path") or ""
     data["selected_item_id"] = source_item_id
     collection_path = collection_path_for_post_path(post.get("folder_path") or "")
@@ -17009,7 +17256,7 @@ def copy_imagine_remote_post_to_collection(payload: dict, item_only: bool = Fals
             existing_dir, existing_post = existing
             existing_path = existing_dir.relative_to(root).as_posix()
             existing_items = existing_post.get("items") if isinstance(existing_post.get("items"), list) else []
-            data = scan_library(root)
+            data = current_library_snapshot(root)
             data["selected_path"] = existing_path
             data["selected_item_id"] = media_item_key(existing_items[-1] if existing_items else {})
             data["selected_collection_path"] = collection_path
@@ -17050,7 +17297,8 @@ def copy_imagine_remote_post_to_collection(payload: dict, item_only: bool = Fals
             shutil.rmtree(target_dir, ignore_errors=True)
             raise
 
-        data = scan_library(root)
+        refresh_library_index_paths(root, [post_json["folder_path"]])
+        data = current_library_snapshot(root)
         data["selected_path"] = post_json["folder_path"]
         data["selected_item_id"] = media_item_key(copied_items[-1] if copied_items else {})
         data["selected_collection_path"] = collection_path
@@ -17146,7 +17394,7 @@ def merge_selected_posts(payload: dict) -> dict:
     if len(post_paths) < 2:
         raise RuntimeError("Select two or more cards to merge.")
 
-    snapshot = scan_library(root)
+    snapshot = current_library_snapshot(root)
     posts = []
     for path in post_paths:
         post = find_post(snapshot, path)
@@ -17228,7 +17476,9 @@ def merge_selected_posts(payload: dict) -> dict:
                 remove_build_previews_for_items(root, source_dir, source_post.get("items") or [])
             shutil.rmtree(source_dir)
 
-    data = scan_library(root)
+    delete_library_index_paths(root, post_paths, recursive=True)
+    refresh_library_index_paths(root, [final_dir.relative_to(root).as_posix()])
+    data = current_library_snapshot(root)
     data["selected_path"] = final_dir.relative_to(root).as_posix()
     data["selected_item_id"] = media_item_key(merged_items[-1])
     collection_path = collection_path_for_post_path(data["selected_path"])
@@ -17286,7 +17536,7 @@ def move_post_to_collection(payload: dict) -> dict:
     root = library_root()
     if not root:
         raise RuntimeError("Library path is not set.")
-    snapshot = scan_library(root)
+    snapshot = current_library_snapshot(root)
     post = find_post(snapshot, str(payload.get("post_path") or ""))
     collection_path = str(payload.get("collection_path") or "")
     merge_path = str(payload.get("merge_path") or "")
@@ -17311,7 +17561,9 @@ def move_post_to_collection(payload: dict) -> dict:
         post_json = merge_items_into_post(post, source_dir, merge_post, target_dir, post.get("items") or [])
         remove_build_previews_for_items(root, source_dir, post.get("items") or [])
         shutil.rmtree(source_dir)
-        data = scan_library(root)
+        delete_library_index_paths(root, [post.get("folder_path") or ""], recursive=True)
+        refresh_library_index_paths(root, [post_json["folder_path"]])
+        data = current_library_snapshot(root)
         data["selected_path"] = post_json["folder_path"]
         data["selected_item_id"] = media_item_key((post_json.get("items") or [])[-1] if post_json.get("items") else {})
         data["selected_collection_path"] = collection_path_for_post_path(post_json["folder_path"])
@@ -17332,7 +17584,9 @@ def move_post_to_collection(payload: dict) -> dict:
         representative=representative_for_remaining_items(cleaned_items),
     )
     write_json(target_dir / "post.json", post_json)
-    data = scan_library(root)
+    delete_library_index_paths(root, [post.get("folder_path") or ""], recursive=True)
+    refresh_library_index_paths(root, [post_json["folder_path"]], recursive=True)
+    data = current_library_snapshot(root)
     data["selected_path"] = post_json["folder_path"]
     data["selected_collection_path"] = collection_path
     data["selected_collection_post_path"] = target_parent_path or post_json["folder_path"]
@@ -17343,7 +17597,7 @@ def move_item_to_collection(payload: dict) -> dict:
     root = library_root()
     if not root:
         raise RuntimeError("Library path is not set.")
-    snapshot = scan_library(root)
+    snapshot = current_library_snapshot(root)
     post = find_post(snapshot, str(payload.get("post_path") or ""))
     collection_path = str(payload.get("collection_path") or "")
     selected_key = str(payload.get("item_key") or "")
@@ -17412,7 +17666,11 @@ def move_item_to_collection(payload: dict) -> dict:
         except FileNotFoundError:
             pass
     remove_source_post_after_move(source_dir, post, remaining_items)
-    data = scan_library(root)
+    refresh_library_index_paths(root, [
+        post.get("folder_path") or "",
+        post_json["folder_path"],
+    ])
+    data = current_library_snapshot(root)
     data["selected_path"] = post_json["folder_path"]
     data["selected_item_id"] = media_item_key(moved_item)
     data["selected_collection_path"] = collection_path_for_post_path(post_json["folder_path"])
@@ -17424,7 +17682,7 @@ def split_library_item(payload: dict) -> dict:
     root = library_root()
     if not root:
         raise RuntimeError("Library path is not set.")
-    snapshot = scan_library(root)
+    snapshot = current_library_snapshot(root)
     post = find_post(snapshot, str(payload.get("post_path") or ""))
     selected_key = str(payload.get("item_key") or "")
     if not post or post.get("area") not in {"created", "collection", "upload"}:
@@ -17478,7 +17736,11 @@ def split_library_item(payload: dict) -> dict:
             pass
     remove_source_post_after_move(source_dir, post, remaining_items)
 
-    data = scan_library(root)
+    refresh_library_index_paths(root, [
+        post.get("folder_path") or "",
+        post_json["folder_path"],
+    ])
+    data = current_library_snapshot(root)
     data["selected_path"] = post_json["folder_path"]
     data["selected_item_id"] = media_item_key(moved_item)
     collection_path = collection_path_for_post_path(post_json["folder_path"])
@@ -17503,7 +17765,7 @@ def editor_source_from_payload(root: Path, payload: dict) -> tuple[dict, dict | 
     source_path = local_media_source_from_url(root, source_url) if source_url else None
     if not post_path and source_path:
         post_path = source_path.parent.relative_to(root).as_posix()
-    snapshot = scan_library(root)
+    snapshot = current_library_snapshot(root)
     post = find_post(snapshot, post_path)
     if not post:
         raise RuntimeError("Editor source post was not found.")
@@ -17653,7 +17915,8 @@ def save_image_editor_result(payload: dict) -> dict:
         updated_at=now,
     )
     write_json(post_dir / "post.json", post_json)
-    data = scan_library(root)
+    refresh_library_index_paths(root, [post.get("folder_path") or ""])
+    data = current_library_snapshot(root)
     data["selected_path"] = post.get("folder_path") or ""
     data["selected_item_id"] = new_item["item_id"]
     data["item"] = {
@@ -17747,7 +18010,10 @@ def unhide_saved_upload_refs(root: Path, saved_refs: list[tuple[str, str]]) -> N
 
 
 def uploaded_item_from_snapshot(snapshot: dict, folder_path: str, item_id: str) -> dict:
-    for post in snapshot.get("posts") or []:
+    for post in [
+        *(snapshot.get("posts") or []),
+        *(snapshot.get("changed_posts") or []),
+    ]:
         if str(post.get("folder_path") or "") != folder_path:
             continue
         for item in post.get("items") or []:
@@ -17834,7 +18100,8 @@ def save_composer_uploads(payload: dict) -> dict:
     if not saved_refs:
         raise RuntimeError("No upload files were saved.")
     unhide_saved_upload_refs(root, saved_refs)
-    snapshot = scan_library(root)
+    refresh_library_index_paths(root, [folder_path for folder_path, _ in saved_refs])
+    snapshot = current_library_snapshot(root)
     snapshot["saved"] = [uploaded_item_from_snapshot(snapshot, folder_path, item_id) for folder_path, item_id in saved_refs]
     return snapshot
 
@@ -17860,11 +18127,58 @@ def remove_upload_from_composer_list(payload: dict) -> dict:
     settings["hidden_upload_keys"] = removed
     library["updated_at"] = now_iso()
     write_json(library_path, library)
-    return scan_library(root)
+    return current_library_snapshot(root)
+
+
+def query_library_posts(payload: dict) -> dict:
+    root = library_root()
+    if not root:
+        return {
+            "ok": True,
+            "posts": [],
+            "total": 0,
+            "offset": 0,
+            "limit": 60,
+            "has_more": False,
+        }
+    if not library_index.ready(root):
+        ensure_library_index(root)
+    result = library_index.query_posts(
+        root,
+        scope=str((payload or {}).get("scope") or "all"),
+        query=str((payload or {}).get("query") or ""),
+        collection_path=str((payload or {}).get("collection_path") or ""),
+        parent_path=str((payload or {}).get("parent_path") or ""),
+        recursive=bool((payload or {}).get("recursive", True)),
+        include_collections=bool((payload or {}).get("include_collections", False)),
+        full=bool((payload or {}).get("full", False)),
+        offset=safe_int((payload or {}).get("offset"), 0),
+        limit=safe_int((payload or {}).get("limit"), 60),
+    )
+    return {
+        "ok": True,
+        **result,
+        "counts": library_index.counts(root),
+    }
+
+
+def get_library_post(payload: dict) -> dict:
+    root = library_root()
+    path = str((payload or {}).get("path") or "").replace("\\", "/").strip("/")
+    if not root or not path:
+        raise RuntimeError("Library post path is missing.")
+    if not library_index.ready(root):
+        ensure_library_index(root)
+    post = library_index.get_post(root, path)
+    if not post:
+        raise RuntimeError("Library post was not found.")
+    return {"ok": True, "post": post}
 
 
 POST_JSON_ROUTES = {
     "/api/library/scan": lambda payload: scan_library(),
+    "/api/library/posts": query_library_posts,
+    "/api/library/post": get_library_post,
     "/api/open-library-folder": open_library_folder,
     "/api/prompts/save": save_prompt,
     "/api/prompts/delete": delete_prompt,
@@ -18366,7 +18680,8 @@ class Handler(SimpleHTTPRequestHandler):
             if parsed.path == "/api/choose-library-folder":
                 selected = choose_library_folder(str(payload.get("current") or ""))
                 if selected is None:
-                    data = scan_library()
+                    root = library_root()
+                    data = current_library_snapshot(root) if root else empty_snapshot()
                     data["cancelled"] = True
                     self.send_json(data)
                     return

@@ -112,6 +112,32 @@
     posts: [],
     collections: [],
     prompts: [],
+    libraryIndexEnabled: false,
+    libraryIndexCounts: {
+      posts: 0,
+      build: 0,
+      build_main: 0,
+      build_main_with_collections: 0,
+      upload: 0,
+      collection: 0,
+    },
+    indexedBuildPosts: [],
+    indexedBuildTotal: 0,
+    indexedBuildOffset: 0,
+    indexedBuildHasMore: false,
+    indexedBuildLoading: false,
+    indexedBuildLoaded: false,
+    indexedBuildKey: "",
+    indexedSearchBuildPosts: [],
+    indexedSearchBuildTotal: 0,
+    indexedSearchBuildOffset: 0,
+    indexedSearchBuildHasMore: false,
+    indexedSearchBuildLoading: false,
+    indexedSearchBuildLoaded: false,
+    indexedSearchBuildQuery: "",
+    indexedUploadPosts: [],
+    indexedUploadLoading: false,
+    indexedUploadLoaded: false,
     searchQuery: "",
     selectedCollectionPath: "",
     selectedCollectionPostPath: "",
@@ -283,13 +309,128 @@
     library_state.rootPath = data.library_root || "";
     library_state.rootName = data.root_name || (library_state.rootPath.split(/[\\/]/).filter(Boolean).pop() || "");
     library_state.library = mergeLibraryJson(data.library || {});
-    library_state.posts = Array.isArray(data.posts) ? data.posts.map(normalizeServerPost) : [];
-    library_state.collections = Array.isArray(data.collections)
-      ? data.collections.map((collection) => ({
-        ...collection,
-        posts: Array.isArray(collection.posts) ? collection.posts.map(normalizeServerPost) : [],
-      }))
-      : [];
+    const indexed = Boolean(data.library_index?.enabled);
+    if (indexed) {
+      const previouslyIndexed = library_state.libraryIndexEnabled;
+      library_state.libraryIndexEnabled = true;
+      library_state.libraryIndexCounts = {
+        ...library_state.libraryIndexCounts,
+        ...(data.library_index?.counts || {}),
+      };
+      library_state.indexedBuildTotal = Number(
+        library_state.buildIncludeCollections
+          ? library_state.libraryIndexCounts.build_main_with_collections
+          : library_state.libraryIndexCounts.build_main,
+      ) || 0;
+      if (data.index_rebuilt || !previouslyIndexed) {
+        library_state.posts = [];
+        library_state.indexedBuildPosts = [];
+        library_state.indexedBuildTotal = Number(data.library_index?.counts?.build_main || 0);
+        library_state.indexedBuildOffset = 0;
+        library_state.indexedBuildHasMore = library_state.indexedBuildTotal > 0;
+        library_state.indexedBuildLoaded = false;
+        library_state.indexedBuildKey = "";
+        library_state.indexedSearchBuildPosts = [];
+        library_state.indexedSearchBuildTotal = 0;
+        library_state.indexedSearchBuildOffset = 0;
+        library_state.indexedSearchBuildHasMore = false;
+        library_state.indexedSearchBuildLoaded = false;
+        library_state.indexedSearchBuildQuery = "";
+        library_state.indexedUploadPosts = [];
+        library_state.indexedUploadLoaded = false;
+      }
+      const previousCollections = new Map(
+        (library_state.collections || []).map((collection) => [collection.path, collection]),
+      );
+      library_state.collections = Array.isArray(data.collections)
+        ? data.collections.map((collection) => ({
+          ...collection,
+          posts: previousCollections.get(collection.path)?.posts || [],
+          indexed_loaded: Boolean(previousCollections.get(collection.path)?.indexed_loaded),
+          indexed_loading: false,
+          indexed_total: Number(previousCollections.get(collection.path)?.indexed_total || 0),
+          indexed_offset: Number(previousCollections.get(collection.path)?.indexed_offset || 0),
+          indexed_has_more: Boolean(previousCollections.get(collection.path)?.indexed_has_more),
+        }))
+        : library_state.collections;
+      const deletedPaths = Array.isArray(data.deleted_paths) ? data.deleted_paths : [];
+      if (deletedPaths.length) {
+        const deleted = (path) => deletedPaths.some((prefix) => (
+          String(path || "") === String(prefix || "")
+          || String(path || "").startsWith(`${String(prefix || "")}/`)
+        ));
+        library_state.posts = (library_state.posts || []).filter((post) => !deleted(post.folder_path));
+        library_state.indexedBuildPosts = (library_state.indexedBuildPosts || []).filter((post) => !deleted(post.folder_path));
+        library_state.indexedSearchBuildPosts = (library_state.indexedSearchBuildPosts || []).filter((post) => !deleted(post.folder_path));
+        library_state.indexedUploadPosts = (library_state.indexedUploadPosts || []).filter((post) => !deleted(post.folder_path));
+        for (const collection of library_state.collections || []) {
+          collection.posts = (collection.posts || []).filter((post) => !deleted(post.folder_path));
+        }
+      }
+      const changedPosts = Array.isArray(data.changed_posts)
+        ? data.changed_posts.map(normalizeServerPost)
+        : [];
+      const mergePosts = (current, changed) => {
+        const byPath = new Map((current || []).map((post) => [post.folder_path, post]));
+        for (const post of changed || []) {
+          if (post?.folder_path) byPath.set(post.folder_path, post);
+        }
+        return Array.from(byPath.values());
+      };
+      const replaceChangedPosts = (current, changed, predicate) => {
+        const changedPaths = new Set((changed || []).map((post) => post?.folder_path).filter(Boolean));
+        return mergePosts(
+          (current || []).filter((post) => !changedPaths.has(post?.folder_path)),
+          (changed || []).filter(predicate),
+        );
+      };
+      library_state.posts = mergePosts(library_state.posts, changedPosts);
+      library_state.indexedBuildPosts = replaceChangedPosts(
+        library_state.indexedBuildPosts,
+        changedPosts,
+        (post) => (
+          typeof buildMainPostVisible === "function"
+            ? buildMainPostVisible(post)
+            : (typeof isBuildPost !== "function" || isBuildPost(post))
+        ),
+      );
+      library_state.indexedBuildPosts.sort((left, right) => (
+        String(right?.created_at || "").localeCompare(String(left?.created_at || ""))
+        || String(left?.folder_path || "").localeCompare(String(right?.folder_path || ""))
+      ));
+      library_state.indexedBuildOffset = library_state.indexedBuildPosts.length;
+      library_state.indexedBuildHasMore = (
+        library_state.indexedBuildOffset < library_state.indexedBuildTotal
+      );
+      library_state.indexedUploadPosts = replaceChangedPosts(
+        library_state.indexedUploadPosts,
+        changedPosts,
+        (post) => post.area === "upload",
+      );
+      library_state.indexedUploadPosts = library_state.indexedUploadPosts
+        .sort((left, right) => String(right?.created_at || "").localeCompare(String(left?.created_at || "")))
+        .slice(0, uploadHistoryPageSize);
+      if ((changedPosts.length || deletedPaths.length) && library_state.indexedSearchBuildQuery) {
+        library_state.indexedSearchBuildQuery = "";
+        library_state.indexedSearchBuildLoaded = false;
+      }
+      for (const collection of library_state.collections || []) {
+        const collectionChanged = changedPosts.filter((post) => (
+          String(post.folder_path || "") === String(collection.path || "")
+          || String(post.folder_path || "").startsWith(`${String(collection.path || "")}/`)
+        ));
+        if (collectionChanged.length) collection.posts = mergePosts(collection.posts, collectionChanged);
+      }
+    } else {
+      library_state.libraryIndexEnabled = false;
+      library_state.posts = Array.isArray(data.posts) ? data.posts.map(normalizeServerPost) : [];
+      library_state.collections = Array.isArray(data.collections)
+        ? data.collections.map((collection) => ({
+          ...collection,
+          posts: Array.isArray(collection.posts) ? collection.posts.map(normalizeServerPost) : [],
+        }))
+        : [];
+    }
     const selectablePaths = new Set([
       ...library_state.posts.map((post) => post.folder_path).filter(Boolean),
       ...library_state.collections.flatMap((collection) => (collection.posts || []).map((post) => post.folder_path)).filter(Boolean),
@@ -304,6 +445,9 @@
     if ("selected_collection_path" in data) library_state.selectedCollectionPath = data.selected_collection_path || "";
     if ("selected_collection_post_path" in data) library_state.selectedCollectionPostPath = data.selected_collection_post_path || "";
     renderLibrary();
+    if (indexed && typeof refreshIndexedLibraryViews === "function") {
+      queueMicrotask(() => refreshIndexedLibraryViews());
+    }
   }
 
   function isTransientImagineRemotePost(post) {
