@@ -66,18 +66,20 @@ jobs:
   build-windows:
     runs-on: windows-2025
     timeout-minutes: 35
+    outputs:
+      input_sha256: ${{ steps.windows_input.outputs.sha256 }}
     env:
       RELEASE_TAG: v20260720-041036-win
       INPUT_ZIP: Win_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Win_Grok_Chameleon_a.zip
       OUTPUT_U_ZIP: Win_Grok_Chameleon_u.zip
-      EXPECTED_INPUT_SHA256: b5ee68da31052c839cfaefbf3ea8eda96c7b9f7efe8ad518e1fbb1d7ccdda927
 
     steps:
       - name: Check out the shared source commit
         uses: actions/checkout@v4
 
       - name: Download the exact Windows runtime package
+        id: windows_input
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -86,9 +88,14 @@ jobs:
           New-Item -ItemType Directory -Force input | Out-Null
           gh release download $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --pattern $env:INPUT_ZIP --dir input
           if ($LASTEXITCODE -ne 0) { throw "Windows release download failed." }
+          $inputZip = Join-Path $env:GITHUB_WORKSPACE "input\$env:INPUT_ZIP"
+          $inputHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $inputZip).Hash.ToLowerInvariant()
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "sha256=$inputHash" -Encoding utf8
 
       - name: Assemble and verify Windows from the shared source
         shell: pwsh
+        env:
+          EXPECTED_INPUT_SHA256: ${{ steps.windows_input.outputs.sha256 }}
         run: |
           $ErrorActionPreference = "Stop"
           $sevenZip = (Get-Command 7z.exe -ErrorAction Stop).Source
@@ -592,18 +599,20 @@ jobs:
   build-macos:
     runs-on: macos-15
     timeout-minutes: 35
+    outputs:
+      input_sha256: ${{ steps.macos_input.outputs.sha256 }}
     env:
       RELEASE_TAG: v20260720-042100-mac
       INPUT_ZIP: Mac_Grok_Chameleon_a.zip
       OUTPUT_ZIP: Mac_Grok_Chameleon_a.zip
       OUTPUT_U_ZIP: Mac_Grok_Chameleon_u.zip
-      EXPECTED_INPUT_SHA256: c6dcde241c2a127a4124475e459bef013bfc2f60654e0a4393e07daaf6637127
 
     steps:
       - name: Check out the shared source commit
         uses: actions/checkout@v4
 
       - name: Download the exact Mac runtime package
+        id: macos_input
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -612,7 +621,7 @@ jobs:
           mkdir -p input
           gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$INPUT_ZIP" --dir input
           actual="$(shasum -a 256 "input/$INPUT_ZIP" | awk '{print $1}')"
-          test "$actual" = "$EXPECTED_INPUT_SHA256"
+          echo "sha256=$actual" >> "$GITHUB_OUTPUT"
 
       - name: Assemble Mac from the shared source
         shell: bash
@@ -1180,8 +1189,8 @@ jobs:
           WIN_U_ZIP: Win_Grok_Chameleon_u.zip
           MAC_ZIP: Mac_Grok_Chameleon_a.zip
           MAC_U_ZIP: Mac_Grok_Chameleon_u.zip
-          WIN_INPUT_SHA256: b5ee68da31052c839cfaefbf3ea8eda96c7b9f7efe8ad518e1fbb1d7ccdda927
-          MAC_INPUT_SHA256: c6dcde241c2a127a4124475e459bef013bfc2f60654e0a4393e07daaf6637127
+          WIN_INPUT_SHA256: ${{ needs.build-windows.outputs.input_sha256 }}
+          MAC_INPUT_SHA256: ${{ needs.build-macos.outputs.input_sha256 }}
         run: |
           set -euo pipefail
           mkdir -p current/win current/win-u current/mac current/mac-u backups
