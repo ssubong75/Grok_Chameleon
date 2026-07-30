@@ -484,11 +484,11 @@ function mergeImagineGeneratedItems(post, generatedItems) {
 function upsertImagineRemotePost(post) {
   if (!post?.folder_path) return "";
   const normalized = normalizeServerPost(post);
-  const list = Array.isArray(library_state.imagineRemotePosts) ? library_state.imagineRemotePosts : [];
-  const index = list.findIndex((candidate) => candidate?.folder_path === normalized.folder_path);
-  if (index >= 0) list.splice(index, 1, normalized);
-  else list.unshift(normalized);
-  library_state.imagineRemotePosts = list;
+  const currentPosts = Array.isArray(library_state.imagineRemotePosts) ? library_state.imagineRemotePosts : [];
+  const index = currentPosts.findIndex((candidate) => candidate?.folder_path === normalized.folder_path);
+  library_state.imagineRemotePosts = index >= 0
+    ? currentPosts.map((candidate, candidateIndex) => (candidateIndex === index ? normalized : candidate))
+    : [normalized, ...currentPosts];
   syncImagineRemotePostsIntoLibrary();
   return normalized.folder_path;
 }
