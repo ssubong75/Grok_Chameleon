@@ -421,7 +421,12 @@
     overlay.innerHTML = `
       <section class="move-gallery-modal" role="dialog" aria-modal="true" aria-label="Move to Collection" tabindex="-1">
         <header>
-          <div><span>Selected Items</span><h3>Choose a Category or Item</h3></div>
+          <div><h3>Choose a Category / Item</h3></div>
+          <div class="move-gallery-actions">
+            <button class="make-folder-button move-gallery-make" type="button"><span aria-hidden="true">+</span> Make</button>
+            <button class="rename-folder-button move-gallery-rename" type="button"><span aria-hidden="true">=</span> Rename</button>
+            <button class="delete-folder-button move-gallery-delete" type="button"><span aria-hidden="true">-</span> Delete</button>
+          </div>
         </header>
         <div class="move-gallery-layout">
           <section class="move-gallery-primary-panel primary-folder-panel" aria-label="First folders">
@@ -438,11 +443,6 @@
                 <button type="button" data-move-gallery-sort="abc">ABC</button>
               </div>
               <button class="collection_sort_save_btn move-gallery-sort-save" type="button">Save</button>
-              <div class="move-gallery-actions">
-                <button class="make-folder-button move-gallery-make" type="button"><span aria-hidden="true">+</span> Make</button>
-                <button class="rename-folder-button move-gallery-rename" type="button"><span aria-hidden="true">=</span> Rename</button>
-                <button class="delete-folder-button move-gallery-delete" type="button"><span aria-hidden="true">-</span> Delete</button>
-              </div>
             </div>
             <div class="move-gallery-secondary-list secondary-folder-grid"></div>
           </section>

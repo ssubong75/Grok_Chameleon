@@ -9,9 +9,9 @@
   gap: 5px;
   min-height: 22px;
   padding: 0 8px;
-  border: 1px solid var(--line);
+  border: 1px solid transparent;
   border-radius: 6px;
-  background: var(--panel);
+  background: transparent;
   color: var(--soft);
   font-size: 12px;
   font-weight: 760;
@@ -40,21 +40,24 @@
 }
 
 .collection_make_btn:hover {
-  border-color: #4a5258;
-  background: var(--panel-2);
+  border-color: transparent;
+  background: transparent;
   color: #4db6ff;
+  filter: brightness(1.2);
 }
 
 .collection_rename_btn:hover {
-  border-color: var(--line);
-  background: var(--panel);
+  border-color: transparent;
+  background: transparent;
   color: var(--accent);
+  filter: brightness(1.2);
 }
 
 .collection_delete_btn:hover {
-  border-color: var(--line);
-  background: var(--panel);
+  border-color: transparent;
+  background: transparent;
   color: var(--folder-delete);
+  filter: brightness(1.2);
 }
 
 .collection_layout {
@@ -194,6 +197,7 @@
 .move-gallery-sort-save:hover {
   border-color: transparent;
   color: #2DD4BF;
+  filter: brightness(1.2);
 }
 
 .collection_sort_btns .collection_item_title_btn {
@@ -898,8 +902,33 @@
 
 .move-gallery-actions {
   display: flex;
+  flex: 0 0 auto;
+  align-self: flex-end;
   align-items: center;
   gap: 40px;
+  margin-left: auto;
+  transform: translateY(12px);
+}
+
+.move-gallery-actions .make-folder-button,
+.move-gallery-actions .rename-folder-button,
+.move-gallery-actions .delete-folder-button,
+.move-gallery-actions .make-folder-button:hover,
+.move-gallery-actions .make-folder-button:focus-visible,
+.move-gallery-actions .rename-folder-button:hover,
+.move-gallery-actions .rename-folder-button:focus-visible,
+.move-gallery-actions .delete-folder-button:hover,
+.move-gallery-actions .delete-folder-button:focus-visible {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.move-gallery-actions .make-folder-button:hover,
+.move-gallery-actions .rename-folder-button:hover,
+.move-gallery-actions .delete-folder-button:hover {
+  filter: brightness(1.2);
 }
 
 .move-gallery-actions button:disabled {
@@ -951,12 +980,6 @@
 .move-gallery-secondary-heading .move-gallery-sort-save {
   grid-column: 4;
   justify-self: start;
-}
-
-.move-gallery-secondary-heading .move-gallery-actions {
-  grid-column: 5;
-  justify-self: end;
-  align-self: end;
 }
 
 .move-gallery-primary-list.primary-folder-list {

@@ -92,9 +92,9 @@ function buildSourcePosts() {
     for (const post of library_state.posts.filter(isSessionBuildT2iPost)) {
       if (post?.folder_path) byPath.set(post.folder_path, post);
     }
-    return Array.from(byPath.values());
+    return Array.from(byPath.values()).sort(comparePostsByRecentActivity);
   }
-  return library_state.posts.filter(buildMainPostVisible);
+  return library_state.posts.filter(buildMainPostVisible).sort(comparePostsByRecentActivity);
 }
 
 function buildVisibleJobs() {

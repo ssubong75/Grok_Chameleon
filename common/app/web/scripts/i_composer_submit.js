@@ -202,8 +202,12 @@ function selectImagineJob(jobId, options = {}) {
   library_state.selectedImagineJobId = String(job.id);
   library_state.selectedJobId = "";
   if (!options.keepDetailPost) library_state.selectedPostPath = "";
-  if (options.slotIndex) library_state.selectedDetailItemId = `imagine-job-${job.id}-${options.slotIndex}`;
-  else if (!options.keepDetailPost || options.focusJobThumb) library_state.selectedDetailItemId = "";
+  const focusedSlot = options.slotIndex
+    || (options.focusJobThumb && typeof visibleGenerationJobSlots === "function"
+      ? (visibleGenerationJobSlots(job)[0] || 1)
+      : (options.focusJobThumb ? 1 : 0));
+  if (focusedSlot) library_state.selectedDetailItemId = `imagine-job-${job.id}-${focusedSlot}`;
+  else if (!options.keepDetailPost) library_state.selectedDetailItemId = "";
   renderDetailViews();
   openScreen("i_detail", screen_state.current_i_nav_btn || "i_imagine_nav_btn");
 }
@@ -550,12 +554,14 @@ function applyImagineDirectResult(result, options = {}) {
       if (selectedPath) upsertedPaths.push(selectedPath);
     }
   }
+  upsertedPaths.forEach((path) => {
+    if (path) noteMainGenerationActivity("imagine", "post", path);
+  });
   if (options.stayOnImagineMain) {
     if (!library_state.sessionImagineT2iPaths) library_state.sessionImagineT2iPaths = new Set();
     upsertedPaths.forEach((path) => {
       if (!path) return;
       library_state.sessionImagineT2iPaths.add(path);
-      noteMainGenerationActivity("imagine", "post", path);
     });
   }
   renderImagineSourceCards();
@@ -733,7 +739,7 @@ async function submitImagineComposer() {
       upsertImagineJob(pendingJob);
       selectImagineJob(pendingJob.id, {
         keepDetailPost: true,
-        focusJobThumb: false,
+        focusJobThumb: true,
       });
     }
     if (typeof prepareActiveImagineBridgeSession === "function") {
@@ -815,7 +821,7 @@ async function submitImagineComposer() {
       if (!isTextToImage && (screen_state.current_screen === "i_detail" || isImageToImage)) {
         selectImagineJob(data.job.id, {
           keepDetailPost: screen_state.current_screen === "i_detail" && Boolean(sourcePostPath),
-          focusJobThumb: false,
+          focusJobThumb: true,
         });
       }
       scheduleImagineJobPoll(data.job.id);

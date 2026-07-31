@@ -320,6 +320,47 @@ function normalizeNfcText(value = "") {
     }
   }
 
+  function activityTimestampValue(value) {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return Math.abs(value) < 100_000_000_000 ? value * 1000 : value;
+    }
+    const text = String(value || "").trim();
+    if (!text) return 0;
+    const numeric = Number(text);
+    if (Number.isFinite(numeric)) {
+      return Math.abs(numeric) < 100_000_000_000 ? numeric * 1000 : numeric;
+    }
+    const parsed = Date.parse(text);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  function postActivityTimestamp(post) {
+    const values = [
+      post?.activity_at,
+      post?.last_activity_at,
+      post?.created_at,
+      post?.createdAt,
+      post?.timestamp,
+    ];
+    for (const item of Array.isArray(post?.items) ? post.items : []) {
+      values.push(
+        item?.created_at,
+        item?.createdAt,
+        item?.updated_at,
+        item?.updatedAt,
+        item?.timestamp,
+        item?.last_modified,
+        item?.lastModified,
+      );
+    }
+    return Math.max(0, ...values.map(activityTimestampValue));
+  }
+
+  function comparePostsByRecentActivity(left, right) {
+    return postActivityTimestamp(right) - postActivityTimestamp(left)
+      || String(left?.folder_path || "").localeCompare(String(right?.folder_path || ""));
+  }
+
   function normalizeServerPost(post) {
     const items = Array.isArray(post?.items) ? post.items : [];
     const representative = representativeItem(items, post)
@@ -456,10 +497,7 @@ function normalizeNfcText(value = "") {
             : (typeof isBuildPost !== "function" || isBuildPost(post))
         ),
       );
-      library_state.indexedBuildPosts.sort((left, right) => (
-        String(right?.created_at || "").localeCompare(String(left?.created_at || ""))
-        || String(left?.folder_path || "").localeCompare(String(right?.folder_path || ""))
-      ));
+      library_state.indexedBuildPosts.sort(comparePostsByRecentActivity);
       library_state.indexedBuildOffset = library_state.indexedBuildPosts.length;
       library_state.indexedBuildHasMore = (
         library_state.indexedBuildOffset < library_state.indexedBuildTotal

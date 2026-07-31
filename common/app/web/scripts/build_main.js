@@ -386,8 +386,10 @@
     if (!job) return;
     library_state.selectedJobId = String(job.id);
     if (!options.keepDetailPost) library_state.selectedPostPath = "";
-    if (options.slotIndex) library_state.selectedDetailItemId = `job-${job.id}-${options.slotIndex}`;
-    else if (!options.keepDetailPost || options.focusJobThumb) library_state.selectedDetailItemId = "";
+    const focusedSlot = options.slotIndex
+      || (options.focusJobThumb ? (visibleGenerationJobSlots(job)[0] || 1) : 0);
+    if (focusedSlot) library_state.selectedDetailItemId = `job-${job.id}-${focusedSlot}`;
+    else if (!options.keepDetailPost) library_state.selectedDetailItemId = "";
     screen_state.detail_back.build = { screenId: "b_main", activeButtonId: "b_build_btn" };
     renderDetailViews();
     openScreen("b_detail", "b_build_btn");
@@ -450,7 +452,6 @@
   function generationJobSourceItem(job, basePost, selectedBaseItem) {
     if (selectedBaseItem) return selectedBaseItem;
     const items = Array.isArray(basePost?.items) ? basePost.items : [];
-    if (!items.length) return null;
     const context = job?.context || {};
     const sourceKey = String(
       context.source_item_id
@@ -459,21 +460,17 @@
       || context.original_item_id
       || ""
     ).trim();
-    if (sourceKey) {
+    if (sourceKey && items.length) {
       const sourceItem = items.find((item) => {
+        const metadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
+        const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
         const keys = [
           mediaItemKey(item),
           item?.item_id,
           item?.id,
           item?.post_id,
           item?.detail_item_id,
-          item?.parent_post_id,
-          item?.root_post_id,
-          item?.original_post_id,
-          item?.source_item_id,
-          item?.parent_item_id,
-          item?.root_item_id,
-          item?.original_item_id,
+          item?.asset_id,
           item?.file,
           item?.name,
           item?.url,
@@ -483,13 +480,24 @@
           item?.mediaUrl,
           item?.source_url,
           item?.raw_url,
+          metadata.item_id,
+          metadata.post_id,
+          metadata.asset_id,
+          metadata.imagine_post_id,
+          metadata.media_url,
+          metadata.remote_url,
+          metadata.imagine_media_url,
+          imagine.item_id,
+          imagine.post_id,
+          imagine.asset_id,
+          imagine.media_url,
         ].map((value) => String(value || "")).filter(Boolean);
         return keys.includes(sourceKey);
       });
       if (sourceItem) return sourceItem;
     }
     const previewKey = String(context.preview_url || "").trim();
-    if (previewKey && typeof detailMediaUrlForItem === "function") {
+    if (previewKey && items.length && typeof detailMediaUrlForItem === "function") {
       const prefix = generationJobPreviewPrefix(job, basePost);
       const sourceItem = items.find((item) => {
         const keys = [
@@ -506,11 +514,29 @@
       });
       if (sourceItem) return sourceItem;
     }
-    return basePost?.representative_item
-      || representativeItem(items, basePost)
-      || (typeof detailOrderedItems === "function" ? detailOrderedItems(basePost)[0] : null)
-      || items[0]
-      || null;
+    if (!previewKey) return null;
+    const mode = String(context.mode || "").toLowerCase();
+    const previewType = String(context.preview_type || "").toLowerCase();
+    const sourceType = previewType === "video" || previewType.startsWith("video/")
+      ? "video"
+      : (previewType === "image" || previewType.startsWith("image/")
+        ? "image"
+        : (mode === "extend" || mode === "video_edit" ? "video" : "image"));
+    return {
+      item_id: sourceKey || `job-source-${job?.id || "preview"}`,
+      post_id: sourceKey || "",
+      type: sourceType,
+      mime_type: sourceType === "video" ? "video/mp4" : "image/jpeg",
+      role: "source",
+      object_url: previewKey,
+      url: previewKey,
+      preview_url: previewKey,
+      thumbnail_url: sourceType === "image" ? previewKey : "",
+      aspect_ratio: context.aspect_ratio || "",
+      conversation_id: context.source_conversation_id || "",
+      response_id: context.parent_response_id || "",
+      account_id: context.account_id || "",
+    };
   }
 
 

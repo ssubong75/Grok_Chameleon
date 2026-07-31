@@ -30,6 +30,14 @@ document.getElementById("selectionClearBtn")?.addEventListener("click", () => {
   clearCardSelection();
 });
 
+document.querySelector(".topbar_history_back")?.addEventListener("click", () => {
+  navigateBrowserHistory(-1);
+});
+
+document.querySelector(".topbar_history_forward")?.addEventListener("click", () => {
+  navigateBrowserHistory(1);
+});
+
 let browserClosingSent = false;
 const INTERNAL_NAVIGATION_KEY = "grokChameleonInternalNavigation";
 

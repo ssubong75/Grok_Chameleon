@@ -6,10 +6,11 @@ import threading
 import time
 import unicodedata
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 STATE_DIRECTORY = "sql_data"
 DATABASE_FILENAME = "library_index.sqlite3"
 _LOCKS_GUARD = threading.Lock()
@@ -81,6 +82,7 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             title TEXT NOT NULL,
             prompt TEXT NOT NULL,
             created_at TEXT NOT NULL,
+            activity_at TEXT NOT NULL DEFAULT '',
             build_visible INTEGER NOT NULL DEFAULT 0,
             favorite INTEGER NOT NULL DEFAULT 0,
             order_value INTEGER NOT NULL DEFAULT 0,
@@ -121,6 +123,7 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             account_key TEXT NOT NULL,
             post_key TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT '',
+            activity_at TEXT NOT NULL DEFAULT '',
             post_json TEXT NOT NULL,
             refreshed_at REAL NOT NULL,
             sync_token TEXT NOT NULL DEFAULT '',
@@ -148,10 +151,65 @@ def _create_schema(connection: sqlite3.Connection) -> None:
         str(row["name"])
         for row in connection.execute("PRAGMA table_info(imagine_remote_posts)").fetchall()
     }
+    library_post_columns = {
+        str(row["name"])
+        for row in connection.execute("PRAGMA table_info(library_posts)").fetchall()
+    }
+    if "activity_at" not in library_post_columns:
+        connection.execute(
+            "ALTER TABLE library_posts ADD COLUMN activity_at TEXT NOT NULL DEFAULT ''"
+        )
+        rows = connection.execute(
+            "SELECT path, created_at, data_json FROM library_posts"
+        ).fetchall()
+        connection.executemany(
+            "UPDATE library_posts SET activity_at = ? WHERE path = ?",
+            [
+                (
+                    post_activity_at(_json_dict(row["data_json"])) or str(row["created_at"] or ""),
+                    str(row["path"]),
+                )
+                for row in rows
+            ],
+        )
     if "sync_token" not in imagine_remote_columns:
         connection.execute(
             "ALTER TABLE imagine_remote_posts ADD COLUMN sync_token TEXT NOT NULL DEFAULT ''"
         )
+    if "activity_at" not in imagine_remote_columns:
+        connection.execute(
+            "ALTER TABLE imagine_remote_posts ADD COLUMN activity_at TEXT NOT NULL DEFAULT ''"
+        )
+        rows = connection.execute(
+            "SELECT account_key, post_key, created_at, post_json FROM imagine_remote_posts"
+        ).fetchall()
+        connection.executemany(
+            """
+            UPDATE imagine_remote_posts
+            SET activity_at = ?
+            WHERE account_key = ? AND post_key = ?
+            """,
+            [
+                (
+                    post_activity_at(_json_dict(row["post_json"])) or str(row["created_at"] or ""),
+                    str(row["account_key"]),
+                    str(row["post_key"]),
+                )
+                for row in rows
+            ],
+        )
+    connection.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS library_posts_activity_idx
+            ON library_posts(activity_at DESC, path);
+        CREATE INDEX IF NOT EXISTS library_posts_area_activity_idx
+            ON library_posts(area, activity_at DESC, path);
+        CREATE INDEX IF NOT EXISTS library_posts_build_activity_idx
+            ON library_posts(build_visible, area, activity_at DESC, path);
+        CREATE INDEX IF NOT EXISTS imagine_remote_posts_activity_idx
+            ON imagine_remote_posts(account_key, activity_at DESC, post_key);
+        """
+    )
     connection.execute(
         """
         INSERT INTO index_metadata(key, value) VALUES('schema_version', ?)
@@ -188,6 +246,59 @@ def _safe_int(value, fallback: int = 0) -> int:
         return int(value)
     except (TypeError, ValueError):
         return fallback
+
+
+def _normalized_activity_time(value) -> str:
+    if value is None or isinstance(value, bool):
+        return ""
+    if isinstance(value, (int, float)):
+        seconds = float(value)
+        if abs(seconds) > 10_000_000_000:
+            seconds /= 1000
+        try:
+            return datetime.fromtimestamp(seconds, timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        except (OverflowError, OSError, ValueError):
+            return ""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        numeric = float(text)
+    except ValueError:
+        numeric = None
+    if numeric is not None:
+        return _normalized_activity_time(numeric)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    except ValueError:
+        return text
+
+
+def post_activity_at(post: dict) -> str:
+    values = [
+        post.get("activity_at"),
+        post.get("last_activity_at"),
+        post.get("created_at"),
+        post.get("createdAt"),
+        post.get("timestamp"),
+    ]
+    for item in post.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        values.extend((
+            item.get("created_at"),
+            item.get("createdAt"),
+            item.get("updated_at"),
+            item.get("updatedAt"),
+            item.get("timestamp"),
+            item.get("last_modified"),
+            item.get("lastModified"),
+        ))
+    normalized = [_normalized_activity_time(value) for value in values]
+    return max((value for value in normalized if value), default="")
 
 
 def _is_collection_container(post: dict) -> bool:
@@ -286,6 +397,7 @@ def _post_list_summary(post: dict) -> dict:
     representative = _list_item(_representative_item(post))
     summary["items"] = [representative] if representative else []
     summary["item_count"] = len(post.get("items") or [])
+    summary["activity_at"] = post_activity_at(post)
     summary["_indexed_summary"] = True
     return summary
 
@@ -305,6 +417,7 @@ def _post_row(post: dict) -> tuple:
         str(post.get("title") or ""),
         str(post.get("prompt") or ""),
         str(post.get("created_at") or ""),
+        post_activity_at(post),
         1 if _is_build_visible(post) else 0,
         1 if (post.get("build_favorite") or post.get("favorite") or post.get("liked")) else 0,
         _safe_int(post.get("order"), 0),
@@ -339,8 +452,8 @@ def _insert_posts(connection: sqlite3.Connection, posts: list[dict]) -> None:
         INSERT INTO library_posts(
             path, path_key, parent_path, parent_path_key,
             area, collection_name, source, mode, title, prompt,
-            created_at, build_visible, favorite, order_value, grid_slot, list_json, data_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            created_at, activity_at, build_visible, favorite, order_value, grid_slot, list_json, data_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(path) DO UPDATE SET
             path_key = excluded.path_key,
             parent_path = excluded.parent_path,
@@ -352,6 +465,7 @@ def _insert_posts(connection: sqlite3.Connection, posts: list[dict]) -> None:
             title = excluded.title,
             prompt = excluded.prompt,
             created_at = excluded.created_at,
+            activity_at = excluded.activity_at,
             build_visible = excluded.build_visible,
             favorite = excluded.favorite,
             order_value = excluded.order_value,
@@ -428,12 +542,23 @@ def ready(root: Path) -> bool:
             complete = connection.execute(
                 "SELECT value FROM index_metadata WHERE key = 'complete'"
             ).fetchone()
-            return bool(
-                version
-                and complete
-                and str(version["value"]) == str(SCHEMA_VERSION)
-                and str(complete["value"]) == "1"
-            )
+        if version and str(version["value"]) != str(SCHEMA_VERSION):
+            with _lock_for(root):
+                with _connection(root, write=True) as connection:
+                    _create_schema(connection)
+            with _connection(root) as connection:
+                version = connection.execute(
+                    "SELECT value FROM index_metadata WHERE key = 'schema_version'"
+                ).fetchone()
+                complete = connection.execute(
+                    "SELECT value FROM index_metadata WHERE key = 'complete'"
+                ).fetchone()
+        return bool(
+            version
+            and complete
+            and str(version["value"]) == str(SCHEMA_VERSION)
+            and str(complete["value"]) == "1"
+        )
     except sqlite3.Error:
         return False
 
@@ -532,7 +657,7 @@ def all_posts(root: Path) -> list[dict]:
         return []
     with _connection(root) as connection:
         rows = connection.execute(
-            "SELECT data_json FROM library_posts ORDER BY created_at DESC, path"
+            "SELECT data_json FROM library_posts ORDER BY activity_at DESC, path"
         ).fetchall()
     return [post for row in rows if (post := _json_dict(row["data_json"]))]
 
@@ -610,7 +735,7 @@ def query_posts(
     order = (
         "parent_path_key, grid_slot, order_value, created_at, path"
         if normalized_scope == "collection" or collection_value or parent_value
-        else "created_at DESC, path"
+        else "activity_at DESC, path"
     )
     safe_offset = max(0, int(offset or 0))
     safe_limit = min(500, max(1, int(limit or 60)))
@@ -734,7 +859,7 @@ def query_imagine_remote_posts(
                     SELECT post_json
                     FROM imagine_remote_posts
                     WHERE account_key = ?
-                    ORDER BY created_at DESC, post_key
+                    ORDER BY activity_at DESC, post_key
                     LIMIT ? OFFSET ?
                     """,
                     (normalized_account, safe_limit, safe_offset),
@@ -780,6 +905,7 @@ def upsert_imagine_remote_posts(
         normalized_records.append((
             post_key,
             str(record.get("created_at") or post.get("created_at") or ""),
+            str(record.get("activity_at") or post_activity_at(post)),
             post,
             asset_ids,
         ))
@@ -789,7 +915,7 @@ def upsert_imagine_remote_posts(
     with _lock_for(root):
         with _connection(root, write=True) as connection:
             _create_schema(connection)
-            for post_key, created_at, post, asset_ids in normalized_records:
+            for post_key, created_at, activity_at, post, asset_ids in normalized_records:
                 conflicting_keys: set[str] = set()
                 if asset_ids:
                     placeholders = ",".join("?" for _ in asset_ids)
@@ -818,11 +944,12 @@ def upsert_imagine_remote_posts(
                 connection.execute(
                     """
                     INSERT INTO imagine_remote_posts(
-                        account_key, post_key, created_at, post_json, refreshed_at,
+                        account_key, post_key, created_at, activity_at, post_json, refreshed_at,
                         sync_token
-                    ) VALUES(?, ?, ?, ?, ?, ?)
+                    ) VALUES(?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(account_key, post_key) DO UPDATE SET
                         created_at = excluded.created_at,
+                        activity_at = excluded.activity_at,
                         post_json = excluded.post_json,
                         refreshed_at = excluded.refreshed_at,
                         sync_token = CASE
@@ -834,6 +961,7 @@ def upsert_imagine_remote_posts(
                         normalized_account,
                         post_key,
                         created_at,
+                        activity_at,
                         _json_text(post),
                         refreshed_at,
                         normalized_sync_token,

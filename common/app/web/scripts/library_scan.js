@@ -434,7 +434,7 @@
         ...await scanCreatedArea(library_state.rootHandle, "created"),
         ...await scanCreatedArea(library_state.rootHandle, "upload"),
       ...collections.flatMap((collection) => collection.posts),
-    ].sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+    ].sort(comparePostsByRecentActivity);
     const prompts = await scanPromptFiles(library_state.rootHandle);
     library_state.posts = posts;
     library_state.collections = collections;

@@ -11,6 +11,14 @@ RETURN_SVG = (
     '<svg class="detail_return_glyph" viewBox="0 0 24 24" aria-hidden="true" '
     'focusable="false"><path d="M19 12H5"></path><path d="m10 7-5 5 5 5"></path></svg>'
 )
+HISTORY_BACK_SVG = (
+    '<svg class="topbar_history_glyph" viewBox="0 0 24 24" aria-hidden="true" '
+    'focusable="false"><path d="M19 12H5"></path><path d="m10 7-5 5 5 5"></path></svg>'
+)
+HISTORY_FORWARD_SVG = (
+    '<svg class="topbar_history_glyph" viewBox="0 0 24 24" aria-hidden="true" '
+    'focusable="false"><path d="M5 12h14"></path><path d="m14 7 5 5-5 5"></path></svg>'
+)
 BACK_SVG = (
     '<svg class="detail_nav_glyph" viewBox="0 0 24 24" aria-hidden="true" '
     'focusable="false"><path d="m15 18-6-6 6-6"></path></svg>'
@@ -54,7 +62,15 @@ INDEX_REPLACEMENTS = (
     replacement(
         '<span class="detail_return_glyph" aria-hidden="true">↓</span>',
         RETURN_SVG,
-        3,
+        2,
+    ),
+    replacement(
+        '<button class="topbar_history_back" type="button" aria-label="Previous page" disabled><span aria-hidden="true">↓</span></button>',
+        f'<button class="topbar_history_back" type="button" aria-label="Previous page" disabled>{HISTORY_BACK_SVG}</button>',
+    ),
+    replacement(
+        '<button class="topbar_history_forward" type="button" aria-label="Next page" disabled><span aria-hidden="true">↓</span></button>',
+        f'<button class="topbar_history_forward" type="button" aria-label="Next page" disabled>{HISTORY_FORWARD_SVG}</button>',
     ),
     replacement(
         '<button class="i_detail_back" type="button" aria-label="Back"><span aria-hidden="true">&lt;</span></button>',
@@ -153,6 +169,7 @@ DETAIL_STYLE_REPLACEMENTS = (
   transform: translate(1px, -2px);
 }""",
         """.detail_return_glyph,
+.topbar_history_glyph,
 .detail_nav_glyph,
 .i_detail_copy_arrow,
 .i_detail_action_glyph,
@@ -178,7 +195,8 @@ DETAIL_STYLE_REPLACEMENTS = (
   line-height: 1;
   transform: rotate(90deg);
 }""",
-        """.detail_return_glyph {
+        """.detail_return_glyph,
+.topbar_history_glyph {
   width: 22px;
   height: 22px;
 }""",

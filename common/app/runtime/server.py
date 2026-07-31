@@ -4109,6 +4109,7 @@ def imagine_remote_cache_records(posts: list[dict]) -> list[dict]:
         records.append({
             "post_key": post_key,
             "created_at": str(post.get("created_at") or ""),
+            "activity_at": library_index.post_activity_at(post),
             "asset_ids": sorted(asset_ids),
             "post": normalize_json_unicode(post),
         })
@@ -4447,7 +4448,7 @@ def list_imagine_saved(payload: dict) -> dict:
                 insert_if_missing=not bool(cursor),
             )
     posts = merge_imagine_saved_lineage_cards(list(saved_groups.values()))
-    posts.sort(key=lambda post: str(post.get("created_at") or ""), reverse=True)
+    posts.sort(key=library_index.post_activity_at, reverse=True)
     try:
         cache_imagine_remote_posts(root, account, posts, sync_token=sync_token)
     except Exception as exc:
@@ -13036,7 +13037,7 @@ def scan_library_unlocked(root: Path) -> dict:
         *scan_created_area(root, "upload"),
         *[post for collection in collections for post in collection.get("posts", [])],
     ]
-    posts = sorted(posts, key=lambda item: str(item.get("created_at") or ""), reverse=True)
+    posts = sorted(posts, key=library_index.post_activity_at, reverse=True)
     prompts = scan_prompt_files(root)
     library = merge_library_json(read_json(root / "library.json", {}))
     library["updated_at"] = now_iso()

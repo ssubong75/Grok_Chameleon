@@ -11,11 +11,6 @@ document.querySelector(".second_main_back_btn")?.addEventListener("click", () =>
   openScreen("collection_main", "b_collection_nav_btn");
 });
 
-document.querySelector(".second_main_return_btn")?.addEventListener("click", () => {
-  if (typeof clearSidebarSearchQuery === "function") clearSidebarSearchQuery();
-  openScreen("collection_main", "b_collection_nav_btn");
-});
-
 document.querySelector(".collection_title_btn")?.addEventListener("click", () => {
   library_state.collectionActionLevel = "first";
   library_state.selectedCollectionPostPath = "";

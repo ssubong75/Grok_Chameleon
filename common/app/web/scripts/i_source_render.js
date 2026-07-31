@@ -346,7 +346,7 @@ function takeImagineSavedPostMatch(index, post, matchedIndexes, acceptKeyMatch =
 function mergeImagineRefreshedPosts(existingPosts, refreshedPosts) {
   const existing = reconcileImagineSavedDisplayPosts(existingPosts || []);
   const refreshed = reconcileImagineSavedDisplayPosts(refreshedPosts || []);
-  if (!existing.length) return refreshed;
+  if (!existing.length) return [...refreshed].sort(comparePostsByRecentActivity);
   if (!refreshed.length) return [];
 
   const existingIndex = imagineSavedPostMatchIndex(existing);
@@ -381,14 +381,14 @@ function mergeImagineRefreshedPosts(existingPosts, refreshedPosts) {
   return [
     ...newPosts,
     ...existing.map((post, index) => refreshedForExistingIndex.get(index)).filter(Boolean),
-  ];
+  ].sort(comparePostsByRecentActivity);
 }
 
 function mergeImagineSyncedPosts(existingPosts, refreshedPosts) {
   const existing = reconcileImagineSavedDisplayPosts(existingPosts || []);
   const refreshed = reconcileImagineSavedDisplayPosts(refreshedPosts || []);
-  if (!existing.length) return refreshed;
-  if (!refreshed.length) return existing;
+  if (!existing.length) return [...refreshed].sort(comparePostsByRecentActivity);
+  if (!refreshed.length) return [...existing].sort(comparePostsByRecentActivity);
 
   const existingIndex = imagineSavedPostMatchIndex(existing);
   const matchedExistingIndexes = new Set();
@@ -412,10 +412,7 @@ function mergeImagineSyncedPosts(existingPosts, refreshedPosts) {
   return [
     ...newPosts,
     ...existing.map((post, index) => refreshedForExistingIndex.get(index) || post),
-  ].sort((left, right) => (
-    String(right?.created_at || "").localeCompare(String(left?.created_at || ""))
-    || String(left?.folder_path || "").localeCompare(String(right?.folder_path || ""))
-  ));
+  ].sort(comparePostsByRecentActivity);
 }
 
 function imagineSavedItemAssetId(item) {
@@ -1229,7 +1226,8 @@ function imagineSourcePosts() {
     const sourcePosts = library_state.imagineRemotePosts || [];
     if (imagineSavedDisplayPostsMemoSource !== sourcePosts) {
       imagineSavedDisplayPostsMemoSource = sourcePosts;
-      imagineSavedDisplayPostsMemoResult = reconcileImagineSavedDisplayPosts(sourcePosts);
+      imagineSavedDisplayPostsMemoResult = reconcileImagineSavedDisplayPosts(sourcePosts)
+        .sort(comparePostsByRecentActivity);
       imagineSavedVisiblePostsMemoResult = imagineSavedDisplayPostsMemoResult.filter((post) => (
         !isImagineT2iGroupContainer(post)
       ));

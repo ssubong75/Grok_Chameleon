@@ -187,6 +187,9 @@ function finishBuildJob(job) {
     if (stayOnBuildMain && typeof markSessionBuildT2iPaths === "function") {
       markSessionBuildT2iPaths(job.result);
     }
+    if (!stayOnBuildMain && job.result.selected_path) {
+      noteMainGenerationActivity("build", "post", job.result.selected_path);
+    }
     applyLibrarySnapshot(job.result);
     if (typeof resultHasLucky === "function" && resultHasLucky(job.result)) showLuckyNotice();
     if (job.result.selected_path && !stayOnBuildMain) {
@@ -311,7 +314,7 @@ async function submitBuildComposer() {
       upsertBuildJob(pendingJob);
       selectBuildJob(pendingJob.id, {
         keepDetailPost: true,
-        focusJobThumb: false,
+        focusJobThumb: true,
       });
     }
     await Promise.all(lockedAttachments.map((attachment) => ensureComposerAttachmentDataUrl(attachment)));
@@ -340,7 +343,7 @@ async function submitBuildComposer() {
       if (isTextToImage) {
         showBuildMainNow();
       } else {
-        selectBuildJob(data.job.id, { keepDetailPost: screen_state.current_screen === "b_detail", focusJobThumb: false });
+        selectBuildJob(data.job.id, { keepDetailPost: screen_state.current_screen === "b_detail", focusJobThumb: true });
       }
       scheduleBuildJobPoll(data.job.id);
     }
