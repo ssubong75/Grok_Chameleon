@@ -16,8 +16,12 @@
   let nextStoreCallId = 1;
   let bridgeDirectCallDepth = 0;
   const capturedRuntimes = [];
+  const capturedRuntimeCacheKeys = new WeakSet();
   const capturedMediaStores = [];
   const storeTrace = [];
+  const runtimeScanTimers = new WeakMap();
+  const runtimeScanTimerGroups = new Set();
+  const runtimeScansInProgress = new WeakSet();
 
   function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -843,6 +847,7 @@
     capturedMediaStore = capturedMediaStore || value;
     capturedMediaStorePath = capturedMediaStorePath || record.path || "";
     capturedMediaStoreModule = capturedMediaStoreModule || record.moduleId || "";
+    cancelAllRuntimeScans();
     return true;
   }
 
@@ -972,36 +977,83 @@
     } catch (_) {}
   }
 
+  function runtimeCacheIdentity(runtime) {
+    if (!runtime || (typeof runtime !== "object" && typeof runtime !== "function")) return null;
+    const cache = runtime.c;
+    if (cache && (typeof cache === "object" || typeof cache === "function")) return cache;
+    return runtime;
+  }
+
   function rememberRuntime(runtime) {
-    if (!runtime || capturedRuntimes.includes(runtime)) return;
+    const cacheKey = runtimeCacheIdentity(runtime);
+    if (!cacheKey || capturedRuntimeCacheKeys.has(cacheKey)) return;
+    capturedRuntimeCacheKeys.add(cacheKey);
     capturedRuntimes.push(runtime);
   }
 
-  function scanRuntimeCache(runtime) {
-    if (!runtime) return;
+  function runtimeScanComplete(requireAll = false) {
+    if (!capturedMediaStore) return false;
+    return !requireAll || Boolean(capturedStoreV2Methods && capturedImagineModeStore);
+  }
+
+  function scanRuntimeCache(runtime, requireAll = false) {
+    const cacheKey = runtimeCacheIdentity(runtime);
+    if (!cacheKey || runtimeScanComplete(requireAll) || runtimeScansInProgress.has(cacheKey)) return;
     rememberRuntime(runtime);
+    runtimeScansInProgress.add(cacheKey);
     try {
       const cache = runtime.c || {};
       for (const moduleId of MEDIA_STORE_MODULE_IDS) {
         const cachedModule = cache[moduleId] || cache[String(moduleId)];
         if (cachedModule) {
           inspectTurbopackModule(cachedModule, String(moduleId));
-          if (capturedMediaStore && capturedStoreV2Methods && capturedImagineModeStore) return;
+          if (runtimeScanComplete(requireAll)) return;
         }
       }
       for (const key of Object.keys(cache)) {
         inspectTurbopackModule(cache[key], key);
-        if (capturedMediaStore && capturedStoreV2Methods && capturedImagineModeStore) return;
+        if (runtimeScanComplete(requireAll)) return;
       }
-    } catch (_) {}
+    } catch (_) {
+    } finally {
+      runtimeScansInProgress.delete(cacheKey);
+    }
   }
 
-  function scanAllRuntimes() {
+  function scanAllRuntimes(requireAll = false) {
     for (const runtime of capturedRuntimes) {
-      scanRuntimeCache(runtime);
-      if (capturedMediaStore && capturedStoreV2Methods && capturedImagineModeStore) return true;
+      scanRuntimeCache(runtime, requireAll);
+      if (runtimeScanComplete(requireAll)) return true;
     }
     return Boolean(capturedMediaStore);
+  }
+
+  function cancelAllRuntimeScans() {
+    for (const timers of runtimeScanTimerGroups) {
+      for (const timer of timers.values()) clearTimeout(timer);
+      timers.clear();
+    }
+    runtimeScanTimerGroups.clear();
+  }
+
+  function scheduleRuntimeScan(runtime, delayMs) {
+    const cacheKey = runtimeCacheIdentity(runtime);
+    if (!cacheKey || capturedMediaStore) return;
+    let timers = runtimeScanTimers.get(cacheKey);
+    if (!timers) {
+      timers = new Map();
+      runtimeScanTimers.set(cacheKey, timers);
+    }
+    runtimeScanTimerGroups.add(timers);
+    const key = Number(delayMs) || 0;
+    const previous = timers.get(key);
+    if (previous) clearTimeout(previous);
+    const timer = setTimeout(() => {
+      if (timers.get(key) === timer) timers.delete(key);
+      if (timers.size === 0) runtimeScanTimerGroups.delete(timers);
+      if (!capturedMediaStore) scanRuntimeCache(runtime);
+    }, key);
+    timers.set(key, timer);
   }
 
   function wrapTurbopackFactory(factory, ids) {
@@ -1012,10 +1064,9 @@
         return factory.apply(this, arguments);
       } finally {
         inspectTurbopackModule(module, ids);
-        setTimeout(() => inspectTurbopackModule(module, ids), 0);
-        setTimeout(() => scanRuntimeCache(runtime), 100);
-        setTimeout(() => scanRuntimeCache(runtime), 1000);
-        setTimeout(() => scanRuntimeCache(runtime), 3000);
+        scheduleRuntimeScan(runtime, 100);
+        scheduleRuntimeScan(runtime, 1000);
+        scheduleRuntimeScan(runtime, 3000);
       }
     };
     Object.defineProperty(wrapped, TURBOPACK_WRAP_MARK, { value: true });
@@ -2206,7 +2257,7 @@
     aspectRatio,
     durationSeconds,
   }) {
-    scanAllRuntimes();
+    scanAllRuntimes(true);
     if (!capturedImagineModeStore || typeof capturedImagineModeStore.getState !== "function") {
       throw new Error("Official Imagine mode store was not captured.");
     }

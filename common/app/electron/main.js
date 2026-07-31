@@ -15,6 +15,11 @@ const PORT = String(process.env.GROK_CHAMELEON_PORT || "8797");
 const CDP_PORT = String(process.env.GROK_CHAMELEON_CDP_PORT || "0");
 const SERVER_BASE = `http://127.0.0.1:${PORT}`;
 const GROK_USAGE_URL = "https://grok.com/?_s=usage";
+const IMAGINE_BRIDGE_READY_MAX_AGE_MS = 20 * 60 * 1000;
+const IMAGINE_BRIDGE_PAGE_TIMEOUT_MS = 10000;
+const IMAGINE_BRIDGE_STORE_TIMEOUT_MS = 12000;
+const IMAGINE_BRIDGE_SCRIPT_TIMEOUT_MS = 3000;
+const IMAGINE_BRIDGE_PREPARE_TIMEOUT_MS = 30000;
 
 function portableFileDigest(filePath) {
   try {
@@ -1192,7 +1197,11 @@ function createMainWindow() {
 }
 
 function bridgeCommandCanRunInParallel(command) {
-  return ["t2i_ws"].includes(String(command?.type || ""));
+  return ["t2i_ws", "fetch_stream"].includes(String(command?.type || ""));
+}
+
+function bridgeCommandUsesEphemeralWindow(command) {
+  return String(command?.type || "") === "t2i_ws";
 }
 
 function bridgeAccountKey(command) {
@@ -1209,13 +1218,13 @@ function bridgeKey(command) {
 function bridgeWindowKey(command) {
   const baseKey = bridgeAccountKey(command);
   if (String(command?.type || "") === "open_page") return `${baseKey}::open_page`;
-  if (!bridgeCommandCanRunInParallel(command)) return baseKey;
+  if (!bridgeCommandUsesEphemeralWindow(command)) return baseKey;
   return `${baseKey}::${command.request_id || command.id || Date.now()}`;
 }
 
 function bridgePartition(command) {
   const raw = String(command.store_id || command.account_id || "default").replace(/[^a-zA-Z0-9_.-]/g, "_");
-  return `grok-chameleon-imagine-${raw}`;
+  return `persist:grok-chameleon-imagine-${raw}`;
 }
 
 function closeInactiveAccountWindows(command) {
@@ -1277,10 +1286,43 @@ async function clearGrokCookies(ses) {
     .map((cookie) => ses.cookies.remove(bridgeCookieUrl(cookie), cookie.name).catch(() => {})));
 }
 
+function bridgeCookieKey(cookie) {
+  const name = String(cookie?.name || "").trim();
+  const domain = String(cookie?.domain || ".grok.com").trim().replace(/^\./, "").toLowerCase() || "grok.com";
+  const rawPath = String(cookie?.path || "/").trim() || "/";
+  const cookiePath = rawPath.startsWith("/") ? rawPath : `/${rawPath}`;
+  return `${name}\n${domain}\n${cookiePath}`;
+}
+
+async function bridgeSessionHasCookies(ses, cookies) {
+  const desired = cookies.filter((cookie) => String(cookie?.name || "").trim());
+  if (!desired.length) return false;
+  const current = await ses.cookies.get({});
+  const currentValues = new Map(current.map((cookie) => [
+    bridgeCookieKey(cookie),
+    String(cookie?.value || ""),
+  ]));
+  return desired.every((cookie) => (
+    currentValues.get(bridgeCookieKey(cookie)) === String(cookie?.value || "")
+  ));
+}
+
 async function applyBridgeCookies(win, command, options = {}) {
   const cookies = Array.isArray(command?.cookies) ? command.cookies : [];
-  if (!cookies.length) return;
+  if (!cookies.length) return false;
+  const signature = crypto.createHash("sha256").update(JSON.stringify(cookies.map((cookie) => ({
+    name: String(cookie?.name || ""),
+    value: String(cookie?.value || ""),
+    domain: String(cookie?.domain || ""),
+    path: String(cookie?.path || ""),
+    expirationDate: Number(cookie?.expirationDate || cookie?.expires || 0),
+  })))).digest("hex");
+  if (!options.force && win.__grokCookieSignature === signature) return false;
   const ses = win.webContents.session;
+  if (!options.force && await bridgeSessionHasCookies(ses, cookies)) {
+    win.__grokCookieSignature = signature;
+    return false;
+  }
   const clearExisting = options.clearExisting !== false;
   if (clearExisting) await clearGrokCookies(ses);
   let applied = 0;
@@ -1311,7 +1353,10 @@ async function applyBridgeCookies(win, command, options = {}) {
       appendLog(`bridge cookie set failed account=${command?.account_id || ""} name=${name} error=${error.message}`);
     }
   }
+  win.__grokCookieSignature = signature;
+  win.__grokPreparedAt = 0;
   appendLog(`bridge cookies applied account=${command?.account_id || ""} mode=${clearExisting ? "reset" : "merge"} count=${applied}`);
+  return true;
 }
 
 function bridgeWindow(command) {
@@ -1324,6 +1369,7 @@ function bridgeWindow(command) {
   const win = new BrowserWindow({
     ...bounds,
     show: false,
+    paintWhenInitiallyHidden: true,
     title: `${APP_NAME} Imagine Login`,
     backgroundColor: "#090b0c",
     webPreferences: {
@@ -1333,9 +1379,23 @@ function bridgeWindow(command) {
       nodeIntegration: false,
       webSecurity: true,
       autoplayPolicy: "no-user-gesture-required",
+      backgroundThrottling: false,
     },
   });
   win.__grokAccountKey = bridgeAccountKey(command);
+  win.__grokCookieSignature = "";
+  win.__grokPreparedAt = 0;
+  win.__grokPreparePromise = null;
+  win.__grokPrepareGeneration = 0;
+  win.__grokDomReadyUrl = "";
+  win.webContents.on("did-start-navigation", (_event, _url, isInPlace, isMainFrame) => {
+    if (!isMainFrame || isInPlace) return;
+    win.__grokDomReadyUrl = "";
+    win.__grokPreparedAt = 0;
+  });
+  win.webContents.on("dom-ready", () => {
+    win.__grokDomReadyUrl = normalizeGrokUrl(win.webContents.getURL() || "");
+  });
   win.on("closed", () => bridgeWindows.delete(key));
   bridgeWindows.set(key, win);
   return win;
@@ -1505,75 +1565,78 @@ async function waitForLoad(win, url, options = {}) {
   const targetUrl = url || "https://grok.com/imagine";
   const forceTarget = Boolean(options.forceTarget);
   const timeoutMs = Math.max(1000, Number(options.timeoutMs || 12000));
-  const usable = () => {
+  const attempts = Math.max(1, Number(options.attempts || 3));
+  const targetReached = () => {
     const current = win.webContents.getURL() || "";
     return current.includes("grok.com")
-      && !win.webContents.isLoadingMainFrame()
       && (!forceTarget || grokUrlMatches(current, targetUrl));
   };
-  if (usable()) return;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  const domReadyAtTarget = () => (
+    targetReached()
+    && (
+      grokUrlMatches(win.__grokDomReadyUrl || "", targetUrl)
+      || !win.webContents.isLoadingMainFrame()
+    )
+  );
+  if (domReadyAtTarget()) return;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     await new Promise((resolve) => {
       let settled = false;
+      let timer = null;
       const done = () => {
         if (settled) return;
         settled = true;
         cleanup();
         resolve();
       };
-      const cleanup = () => {
-        clearTimeout(timer);
-        win.webContents.off("did-finish-load", done);
-        win.webContents.off("did-stop-loading", done);
-        win.webContents.off("did-fail-load", done);
+      const ready = () => {
+        if (domReadyAtTarget()) done();
       };
-      const timer = setTimeout(done, timeoutMs);
-      win.webContents.once("did-finish-load", done);
-      win.webContents.once("did-stop-loading", done);
-      win.webContents.once("did-fail-load", done);
-      const current = win.webContents.getURL() || "";
-      const alreadyAtTarget = current.includes("grok.com")
-        && (!forceTarget || grokUrlMatches(current, targetUrl));
-      if (alreadyAtTarget) {
-        if (!win.webContents.isLoadingMainFrame()) done();
-      } else {
+      const cleanup = () => {
+        if (timer) clearTimeout(timer);
+        win.webContents.off("dom-ready", ready);
+        win.webContents.off("did-finish-load", ready);
+        win.webContents.off("did-stop-loading", ready);
+      };
+      timer = setTimeout(done, timeoutMs);
+      win.webContents.on("dom-ready", ready);
+      win.webContents.on("did-finish-load", ready);
+      win.webContents.on("did-stop-loading", ready);
+      if (domReadyAtTarget()) {
+        done();
+      } else if (!targetReached()) {
         win.loadURL(targetUrl).catch(done);
       }
     });
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      if (usable()) return;
-      await sleep(150);
-    }
+    if (domReadyAtTarget()) return;
   }
-  throw new Error(`Grok page did not reach target url=${targetUrl} current=${win.webContents.getURL() || ""}`);
+  throw new Error(`Grok page did not become ready url=${targetUrl} current=${win.webContents.getURL() || ""}`);
 }
 
-async function loginProbe(win) {
-  const script = `
-    (async () => {
-      try {
-        const response = await fetch('/rest/media/post/list', {
-          method: 'POST',
-          credentials: 'include',
-          headers: {
-            'content-type': 'application/json',
-            'accept': 'application/json, text/plain, */*'
-          },
-          body: JSON.stringify({ limit: 1, source: 'MEDIA_POST_SOURCE_LIKED', safeForWork: false })
-        });
-        const text = await response.text();
-        return { ok: response.ok, status: response.status, text: text.slice(0, 300) };
-      } catch (error) {
-        return { ok: false, status: 0, text: String(error && error.message || error || '') };
-      }
-    })()
-  `;
-  try {
-    return await win.webContents.executeJavaScript(script, true);
-  } catch (error) {
-    return { ok: false, status: 0, text: error.message || String(error) };
-  }
+function bridgePromiseWithTimeout(promise, timeoutMs, message) {
+  const waitMs = Math.max(250, Number(timeoutMs || 0));
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(message));
+    }, waitMs);
+    Promise.resolve(promise).then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }
 
 function commandMediaIds(command) {
@@ -1650,7 +1713,7 @@ function commandRootContextId(command) {
 }
 
 
-async function bridgeMediaContext(win, ids = []) {
+async function bridgeMediaContext(win, ids = [], timeoutMs = IMAGINE_BRIDGE_SCRIPT_TIMEOUT_MS) {
   const script = `
     (() => {
       const bridge = window.__grokChameleonImagineBridge;
@@ -1665,9 +1728,35 @@ async function bridgeMediaContext(win, ids = []) {
     })()
   `;
   try {
-    return await win.webContents.executeJavaScript(script, true);
+    return await bridgePromiseWithTimeout(
+      win.webContents.executeJavaScript(script, true),
+      timeoutMs,
+      "Imagine media store check did not return.",
+    );
   } catch (error) {
     return { ok: false, error: error.message || String(error), hasMediaStore: false, matchedBy: "", ids };
+  }
+}
+
+async function bridgeMediaStatus(win, timeoutMs = IMAGINE_BRIDGE_SCRIPT_TIMEOUT_MS) {
+  const script = `
+    (() => {
+      const bridge = window.__grokChameleonImagineBridge;
+      if (!bridge || typeof bridge.status !== 'function') {
+        return { ok: false, error: 'bridge missing', hasMediaStore: false, status: null };
+      }
+      const status = bridge.status();
+      return { ok: true, hasMediaStore: Boolean(status && status.hasMediaStore), status };
+    })()
+  `;
+  try {
+    return await bridgePromiseWithTimeout(
+      win.webContents.executeJavaScript(script, true),
+      timeoutMs,
+      "Imagine bridge status check did not return.",
+    );
+  } catch (error) {
+    return { ok: false, error: error.message || String(error), hasMediaStore: false, status: null };
   }
 }
 
@@ -1678,15 +1767,19 @@ async function waitForBridgeStoreReady(win, command, options = {}) {
   const deadline = Date.now() + timeoutMs;
   let last = null;
   while (Date.now() < deadline) {
-    last = await bridgeMediaContext(win, ids);
+    const remainingMs = Math.max(250, deadline - Date.now());
+    const probeTimeoutMs = Math.min(IMAGINE_BRIDGE_SCRIPT_TIMEOUT_MS, remainingMs);
+    last = needIdMatch
+      ? await bridgeMediaContext(win, ids, probeTimeoutMs)
+      : await bridgeMediaStatus(win, probeTimeoutMs);
     if (last?.hasMediaStore && (!needIdMatch || last.matchedBy)) return last;
     await sleep(250);
   }
   return last;
 }
 
-async function ensureBridgeReady(command) {
-  const win = bridgeWindow(command);
+async function prepareBridgeWindow(win, command, prepareGeneration = 0) {
+  const prepareStartedAt = Date.now();
   const storePageCommand = ["prepare", "fetch_stream"].includes(command.type);
   // Generation commands reuse the account-scoped media store prepared at app startup.
   // Source post/conversation context is carried in the command payload and hydrated by
@@ -1694,29 +1787,99 @@ async function ensureBridgeReady(command) {
   const targetUrl = ["t2i_ws", "prepare", "fetch_stream"].includes(command.type)
     ? "https://grok.com/imagine/saved"
     : (command.url || "https://grok.com/imagine");
-  await applyBridgeCookies(win, command);
-  await waitForLoad(win, targetUrl, { forceTarget: ["t2i_ws", "prepare", "fetch_stream", "crop_image", "open_page"].includes(command.type) });
-  let probe = await loginProbe(win);
-  if (probe?.ok) {
-    const context = await waitForBridgeStoreReady(win, command, { timeoutMs: storePageCommand ? 12000 : undefined });
-    if (storePageCommand && !context?.hasMediaStore) {
-      throw new Error("Imagine official media store could not be prepared on the saved page.");
-    }
-    return win;
-  }
-  showBridgeWindow(win, `${APP_NAME} Imagine Login`);
-  const deadline = Date.now() + 180000;
-  while (Date.now() < deadline) {
-    await sleep(1000);
-    probe = await loginProbe(win);
-    if (probe?.ok) {
-      await sleep(2000);
-      await waitForBridgeStoreReady(win, command);
-      win.hide();
+  const cookiesChanged = await applyBridgeCookies(win, command);
+  const currentUrl = win.webContents.getURL() || "";
+  const preparedRecently = (
+    storePageCommand
+    && !command.force_refresh
+    && !cookiesChanged
+    && Number(win.__grokPreparedAt || 0) > 0
+    && Date.now() - Number(win.__grokPreparedAt || 0) < IMAGINE_BRIDGE_READY_MAX_AGE_MS
+    && grokUrlMatches(currentUrl, targetUrl)
+  );
+  if (preparedRecently) {
+    const context = await bridgeMediaStatus(win);
+    if (context?.hasMediaStore) {
+      if (command.type === "prepare") {
+        appendLog(`bridge prepared account=${command?.account_id || ""} mode=reused elapsed_ms=${Date.now() - prepareStartedAt}`);
+      }
       return win;
     }
+    win.__grokPreparedAt = 0;
   }
-  throw new Error("Imagine login was not completed.");
+
+  await waitForLoad(win, targetUrl, {
+    forceTarget: ["t2i_ws", "prepare", "fetch_stream", "crop_image", "open_page"].includes(command.type),
+    timeoutMs: storePageCommand ? IMAGINE_BRIDGE_PAGE_TIMEOUT_MS : undefined,
+    attempts: storePageCommand ? 1 : undefined,
+  });
+  const needsMediaStore = storePageCommand || command.type === "crop_image";
+  const context = needsMediaStore
+    ? await waitForBridgeStoreReady(win, command, {
+      timeoutMs: storePageCommand ? IMAGINE_BRIDGE_STORE_TIMEOUT_MS : undefined,
+    })
+    : null;
+  if (needsMediaStore && !context?.hasMediaStore) {
+    const status = context?.status || {};
+    appendLog(
+      `bridge media store missing account=${command?.account_id || ""} type=${command?.type || ""}`
+      + ` runtimes=${Number(status?.turbopackRuntimeCount || 0)}`
+      + ` modules=${Array.isArray(status?.turbopackModuleCounts) ? status.turbopackModuleCounts.join(",") : ""}`
+      + ` error=${String(context?.error || "")}`,
+    );
+    throw new Error("Imagine official media store is not ready.");
+  }
+  if (storePageCommand) {
+    if (prepareGeneration && win.__grokPrepareGeneration !== prepareGeneration) {
+      throw new Error("Imagine bridge preparation was superseded.");
+    }
+    win.__grokPreparedAt = Date.now();
+    if (command.type === "prepare") {
+      const status = context?.status || {};
+      appendLog(
+        `bridge prepared account=${command?.account_id || ""} mode=initial`
+        + ` elapsed_ms=${Date.now() - prepareStartedAt}`
+        + ` runtimes=${Number(status?.turbopackRuntimeCount || 0)}`
+        + ` modules=${Array.isArray(status?.turbopackModuleCounts) ? status.turbopackModuleCounts.join(",") : ""}`,
+      );
+    }
+  }
+  return win;
+}
+
+async function ensureBridgeReady(command) {
+  const win = bridgeWindow(command);
+  const storePageCommand = ["prepare", "fetch_stream"].includes(command.type);
+  if (!storePageCommand) return prepareBridgeWindow(win, command);
+  if (win.__grokPreparePromise) {
+    await win.__grokPreparePromise;
+    return win;
+  }
+  const generation = Number(win.__grokPrepareGeneration || 0) + 1;
+  win.__grokPrepareGeneration = generation;
+  const preparePromise = prepareBridgeWindow(win, command, generation).then((value) => {
+    if (win.__grokPrepareGeneration !== generation) {
+      throw new Error("Imagine bridge preparation was superseded.");
+    }
+    return value;
+  });
+  const promise = bridgePromiseWithTimeout(
+    preparePromise,
+    IMAGINE_BRIDGE_PREPARE_TIMEOUT_MS,
+    "Imagine bridge preparation did not finish in time.",
+  );
+  win.__grokPreparePromise = promise;
+  try {
+    return await promise;
+  } catch (error) {
+    if (win.__grokPrepareGeneration === generation) {
+      win.__grokPrepareGeneration += 1;
+      win.__grokPreparedAt = 0;
+    }
+    throw error;
+  } finally {
+    if (win.__grokPreparePromise === promise) win.__grokPreparePromise = null;
+  }
 }
 
 async function openBridgePage(command) {
@@ -1870,7 +2033,7 @@ async function handleBridgeCommand(command) {
   } catch (error) {
     await sendBridgeResult(id, false, {}, error.message || String(error));
   } finally {
-    if (bridgeCommandCanRunInParallel(command) && win && !win.isDestroyed()) {
+    if (bridgeCommandUsesEphemeralWindow(command) && win && !win.isDestroyed()) {
       win.close();
     }
   }

@@ -11451,8 +11451,11 @@ def prepare_imagine_bridge_session(payload: dict) -> dict:
         root,
         account,
         "prepare",
-        {"url": IMAGINE_BASE + "/imagine/saved"},
-        timeout_seconds=IMAGINE_BRIDGE_LOGIN_WAIT_SECONDS + 20,
+        {
+            "url": IMAGINE_BASE + "/imagine/saved",
+            "force_refresh": bool((payload or {}).get("force_refresh")),
+        },
+        timeout_seconds=40,
     )
     status = str(value.get("status") or ("ready" if value.get("ok", True) else "login_needed"))
     return {

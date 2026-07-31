@@ -570,18 +570,23 @@
 
   async function selectAccount(provider, id) {
     const previousId = provider === "imagine" ? String(account_state.imagine.active_id || "") : "";
+    const nextId = String(id || "");
+    const imagineAccountChanged = provider === "imagine" && previousId !== nextId;
     if (library_state.apiReady) {
       const data = await qApi(provider === "imagine" ? "/api/imagine/select" : "/api/accounts/select", { id });
       applyAccountSnapshot(data);
       sortAccountCardsByPriority(provider);
-      if (provider === "imagine" && previousId !== String(id || "")) clearImagineAccountScopedCache(String(id || ""));
+      if (imagineAccountChanged) {
+        clearImagineAccountScopedCache(nextId);
+        if (typeof invalidateImagineBridgePreparation === "function") invalidateImagineBridgePreparation();
+      }
       setComposerProvider(provider);
       renderAccounts();
       if (provider === "imagine") {
-        refreshSelectedImagineAccountTier(String(id || "")).catch((error) => console.warn(error));
+        refreshSelectedImagineAccountTier(nextId).catch((error) => console.warn(error));
       }
       if (provider === "imagine" && typeof prepareActiveImagineBridgeSession === "function") {
-        prepareActiveImagineBridgeSession({ force: false, accountId: String(id || "") }).catch((error) => console.warn(error));
+        prepareActiveImagineBridgeSession({ force: imagineAccountChanged, accountId: nextId }).catch((error) => console.warn(error));
       }
       if (provider === "imagine" && typeof warmActiveImagineUsage === "function") warmActiveImagineUsage();
       return;
@@ -592,11 +597,14 @@
     store.active_id = id;
     sortAccountCardsByPriority(provider);
     await persistAccountFiles();
-    if (provider === "imagine" && previousId !== String(id || "")) clearImagineAccountScopedCache(String(id || ""));
+    if (imagineAccountChanged) {
+      clearImagineAccountScopedCache(nextId);
+      if (typeof invalidateImagineBridgePreparation === "function") invalidateImagineBridgePreparation();
+    }
     setComposerProvider(provider);
     renderAccounts();
     if (provider === "imagine" && typeof prepareActiveImagineBridgeSession === "function") {
-      prepareActiveImagineBridgeSession({ force: false, accountId: String(id || "") }).catch((error) => console.warn(error));
+      prepareActiveImagineBridgeSession({ force: imagineAccountChanged, accountId: nextId }).catch((error) => console.warn(error));
     }
     if (provider === "imagine" && typeof warmActiveImagineUsage === "function") warmActiveImagineUsage();
   }
@@ -884,6 +892,7 @@
       applyAccountSnapshot(data);
       sortAccountCardsByPriority("imagine");
       clearImagineAccountScopedCache("");
+      if (typeof invalidateImagineBridgePreparation === "function") invalidateImagineBridgePreparation();
       renderAccounts();
       return;
     }
@@ -893,6 +902,7 @@
     sortAccountCardsByPriority("imagine");
     await persistAccountFiles();
     clearImagineAccountScopedCache("");
+    if (typeof invalidateImagineBridgePreparation === "function") invalidateImagineBridgePreparation();
     renderAccounts();
   }
 
