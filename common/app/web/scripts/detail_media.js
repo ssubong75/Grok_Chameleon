@@ -482,6 +482,38 @@ function bindHoverVideoPreview(host, video) {
   });
 }
 
+function bindLazyHoverVideoPreview(host, media, poster, posterUrl, videoUrl, item) {
+  if (!host || !media || !poster || !videoUrl) return;
+  let video = null;
+  host.addEventListener("mouseenter", () => {
+    if (!video) {
+      video = document.createElement("video");
+      video.className = "card_preview card_video_preview card_preview_loaded";
+      if (posterUrl && posterUrl !== videoUrl) video.poster = posterUrl;
+      video.muted = true;
+      video.loop = true;
+      video.playsInline = true;
+      video.preload = "metadata";
+      video.src = videoUrl;
+      bindCardPreviewLoadState(media, video, videoUrl, cardPreviewLoadOptions(host, item, videoUrl));
+      poster.replaceWith(video);
+      if (posterUrl && item?.card_local_preview) {
+        scheduleLocalCardVideoPoster(video, posterUrl, videoUrl, cardPreviewStableIdentity(item));
+      }
+    }
+    video.play().catch(() => {});
+  });
+  host.addEventListener("mouseleave", () => {
+    if (!video) return;
+    video.pause();
+    try {
+      video.currentTime = 0;
+    } catch {
+      // Browser may block seeking before metadata is loaded.
+    }
+  });
+}
+
 function cardPreviewRetryUrl(url, attempt) {
   const key = String(url || "");
   if (!key || /^(?:blob|data):/i.test(key)) return key;
@@ -893,6 +925,7 @@ function appendMediaPreview(host, media, item, type) {
     preview.loading = item?.card_lazy_preview ? "lazy" : "eager";
     preview.decoding = "async";
     appendCardImagePreview(host, media, preview, previewUrl, item);
+    bindLazyHoverVideoPreview(host, media, preview, previewUrl, videoUrl, item);
     return;
   }
   if (videoUrl) {
