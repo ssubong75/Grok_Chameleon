@@ -173,7 +173,7 @@ function detailIsImagineLinkSource(post, item) {
 }
 
 function detailCanSaveImaginePost(post, item) {
-  if (detailIsImagineLinkSource(post, item)) return false;
+  if (detailIsImagineLinkSource(post, item)) return true;
   return Boolean(
     (typeof isImagineDiscoverPost === "function" && isImagineDiscoverPost(post, item))
     || (typeof isImagineT2iPost === "function" && isImagineT2iPost(post))

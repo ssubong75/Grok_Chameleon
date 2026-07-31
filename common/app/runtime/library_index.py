@@ -923,6 +923,137 @@ def delete_imagine_remote_assets(
     return len(post_keys)
 
 
+def prune_imagine_remote_assets(
+    root: Path,
+    account_key: str,
+    asset_ids: set[str],
+) -> int:
+    normalized_account = str(account_key or "").strip().lower()
+    normalized_ids = sorted({
+        str(asset_id).strip()
+        for asset_id in (asset_ids or set())
+        if str(asset_id).strip()
+    })
+    if not normalized_account or not normalized_ids:
+        return 0
+
+    def item_asset_id(item: dict) -> str:
+        if not isinstance(item, dict):
+            return ""
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
+        return str(
+            item.get("asset_id")
+            or metadata.get("asset_id")
+            or imagine.get("asset_id")
+            or item.get("item_id")
+            or item.get("post_id")
+            or ""
+        ).strip()
+
+    changed_posts = 0
+    target_ids = set(normalized_ids)
+    with _lock_for(root):
+        with _connection(root, write=True) as connection:
+            _create_schema(connection)
+            placeholders = ",".join("?" for _ in normalized_ids)
+            rows = connection.execute(
+                f"""
+                SELECT DISTINCT assets.post_key, posts.post_json
+                FROM imagine_remote_assets AS assets
+                JOIN imagine_remote_posts AS posts
+                  ON posts.account_key = assets.account_key
+                 AND posts.post_key = assets.post_key
+                WHERE assets.account_key = ?
+                  AND assets.asset_id IN ({placeholders})
+                """,
+                (normalized_account, *normalized_ids),
+            ).fetchall()
+            for row in rows:
+                post_key = str(row["post_key"] or "").strip()
+                if not post_key:
+                    continue
+                try:
+                    post = json.loads(str(row["post_json"] or ""))
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    post = None
+                items = post.get("items") if isinstance(post, dict) and isinstance(post.get("items"), list) else []
+                remaining = [
+                    item
+                    for item in items
+                    if isinstance(item, dict) and item_asset_id(item) not in target_ids
+                ]
+                if not isinstance(post, dict) or not items or len(remaining) == len(items):
+                    connection.execute(
+                        """
+                        DELETE FROM imagine_remote_posts
+                        WHERE account_key = ? AND post_key = ?
+                        """,
+                        (normalized_account, post_key),
+                    )
+                    changed_posts += 1
+                    continue
+                if not remaining:
+                    connection.execute(
+                        """
+                        DELETE FROM imagine_remote_posts
+                        WHERE account_key = ? AND post_key = ?
+                        """,
+                        (normalized_account, post_key),
+                    )
+                    changed_posts += 1
+                    continue
+                current_representative = post.get("representative_item")
+                current_representative_id = item_asset_id(current_representative)
+                representative = next(
+                    (
+                        item
+                        for item in remaining
+                        if current_representative_id and item_asset_id(item) == current_representative_id
+                    ),
+                    remaining[-1],
+                )
+                post["items"] = remaining
+                post["representative_item"] = representative
+                post["representative"] = str(
+                    representative.get("url")
+                    or representative.get("remote_url")
+                    or representative.get("object_url")
+                    or representative.get("item_id")
+                    or ""
+                )
+                metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+                primary_ids = metadata.get("local_heart_primary_asset_ids")
+                if isinstance(primary_ids, list):
+                    metadata["local_heart_primary_asset_ids"] = [
+                        value for value in primary_ids if str(value or "").strip() not in target_ids
+                    ]
+                    post["metadata"] = metadata
+                connection.execute(
+                    """
+                    UPDATE imagine_remote_posts
+                    SET post_json = ?
+                    WHERE account_key = ? AND post_key = ?
+                    """,
+                    (
+                        json.dumps(post, ensure_ascii=False, separators=(",", ":")),
+                        normalized_account,
+                        post_key,
+                    ),
+                )
+                connection.execute(
+                    f"""
+                    DELETE FROM imagine_remote_assets
+                    WHERE account_key = ?
+                      AND post_key = ?
+                      AND asset_id IN ({placeholders})
+                    """,
+                    (normalized_account, post_key, *normalized_ids),
+                )
+                changed_posts += 1
+    return changed_posts
+
+
 def delete_imagine_remote_post_keys(
     root: Path,
     account_key: str,

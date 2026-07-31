@@ -576,6 +576,7 @@ function removeUnavailableImagineItem(postPath, url, host = null) {
   if (!path || typeof library_state !== "object" || !library_state) return false;
   let changed = false;
   let keptPost = null;
+  const removedSelectedPost = String(library_state.selectedPostPath || "") === path;
   for (const stateKey of [
     "imagineRemotePosts",
     "imagineDiscoverPosts",
@@ -621,6 +622,20 @@ function removeUnavailableImagineItem(postPath, url, host = null) {
   if (typeof syncImagineRemotePostsIntoLibrary === "function") syncImagineRemotePostsIntoLibrary();
   host?.remove?.();
   window.setTimeout(() => {
+    if (
+      removedSelectedPost
+      && !keptPost
+      && typeof screen_state === "object"
+      && screen_state?.current_screen === "i_detail"
+      && typeof openScreen === "function"
+    ) {
+      const backTarget = typeof detailBackTarget === "function" ? detailBackTarget("imagine") : null;
+      openScreen(
+        backTarget?.screenId || "i_main",
+        backTarget?.activeButtonId || screen_state.current_i_nav_btn || "i_imagine_nav_btn",
+      );
+      return;
+    }
     if (typeof screen_state === "object" && screen_state?.current_screen === "search_main") {
       if (typeof renderSearchResults === "function") renderSearchResults();
       return;
@@ -638,7 +653,36 @@ function removeUnavailableImagineItem(postPath, url, host = null) {
   return true;
 }
 
-function handleUnavailableImagineCardPreview(host, url, postPath) {
+function missingImagineAssetIdentity(item, url) {
+  const metadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
+  const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
+  const candidates = [
+    item?.asset_id,
+    metadata.asset_id,
+    imagine.asset_id,
+    item?.item_id,
+    item?.post_id,
+    url,
+  ];
+  const uuidPattern = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+  let assetId = "";
+  for (const candidate of candidates) {
+    const match = String(candidate || "").match(uuidPattern);
+    if (match) {
+      assetId = match[0];
+      break;
+    }
+  }
+  const accountId = String(
+    item?.account_id
+    || metadata.account_id
+    || imagine.account_id
+    || "",
+  ).trim();
+  return { assetId, accountId };
+}
+
+function handleUnavailableImagineCardPreview(host, item, url, postPath) {
   const key = String(url || "").trim();
   const path = String(postPath || "").trim();
   if (!path || !isImagineRemotePreviewUrl(key)) return Promise.resolve(false);
@@ -647,8 +691,17 @@ function handleUnavailableImagineCardPreview(host, url, postPath) {
     method: "HEAD",
     cache: "no-store",
   }).then((response) => {
-    if (![404, 410].includes(Number(response.status))) return false;
-    return removeUnavailableImagineItem(path, key, host);
+    const status = Number(response.status);
+    if (![404, 410].includes(status)) return false;
+    const { assetId, accountId } = missingImagineAssetIdentity(item, key);
+    const cleanup = assetId
+      ? qApi("/api/imagine/asset/missing", {
+        asset_id: assetId,
+        account_id: accountId,
+        status,
+      }).catch(() => null)
+      : Promise.resolve(null);
+    return cleanup.then(() => removeUnavailableImagineItem(path, key, host));
   }).catch(() => false).finally(() => {
     missingImagineCardPreviewChecks.delete(key);
   });
@@ -661,7 +714,7 @@ function cardPreviewLoadOptions(host, item, url) {
   return {
     retries: item?.card_preview_retries,
     onUnavailable: postPath
-      ? () => handleUnavailableImagineCardPreview(host, url, postPath)
+      ? () => handleUnavailableImagineCardPreview(host, item, url, postPath)
       : null,
   };
 }

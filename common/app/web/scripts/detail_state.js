@@ -133,10 +133,13 @@ function detailItemPrompt(item) {
 function detailPromptFor(post, item = selectedDetailItem(post)) {
   const itemPrompt = detailItemPrompt(item);
   if (itemPrompt) return itemPrompt;
-  if (item && post?.source === "imagine") return "";
-  return post?.prompt
-    || post?.original_prompt
-    || item?.title
+  const linkSource = typeof detailIsImagineLinkSource === "function"
+    && detailIsImagineLinkSource(post, item);
+  if (item && post?.source === "imagine" && !linkSource) return "";
+  const postPrompt = detailItemPrompt(post);
+  if (postPrompt) return postPrompt;
+  if (linkSource) return "";
+  return item?.title
     || post?.title
     || "";
 }

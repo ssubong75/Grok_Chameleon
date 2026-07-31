@@ -1111,6 +1111,142 @@ async function startServer() {
   throw new Error(`Local server did not start. See ${LOG_FILE}`);
 }
 
+const EDIT_CONTEXT_ICON_CACHE = new Map();
+
+function editContextIcon(name) {
+  const color = process.platform === "darwin"
+    ? 0
+    : (nativeTheme.shouldUseDarkColors ? 238 : 32);
+  const cacheKey = `${name}:${color}`;
+  if (EDIT_CONTEXT_ICON_CACHE.has(cacheKey)) return EDIT_CONTEXT_ICON_CACHE.get(cacheKey);
+  const size = 32;
+  const bitmap = Buffer.alloc(size * size * 4);
+  const paint = (x, y, alpha = 255) => {
+    const pixelX = Math.round(x);
+    const pixelY = Math.round(y);
+    if (pixelX < 0 || pixelX >= size || pixelY < 0 || pixelY >= size) return;
+    const offset = ((pixelY * size) + pixelX) * 4;
+    bitmap[offset] = color;
+    bitmap[offset + 1] = color;
+    bitmap[offset + 2] = color;
+    bitmap[offset + 3] = Math.max(bitmap[offset + 3], alpha);
+  };
+  const dot = (x, y, radius = 1.4) => {
+    const edge = radius + 0.75;
+    for (let pixelY = Math.floor(y - edge); pixelY <= Math.ceil(y + edge); pixelY += 1) {
+      for (let pixelX = Math.floor(x - edge); pixelX <= Math.ceil(x + edge); pixelX += 1) {
+        const distance = Math.hypot(pixelX - x, pixelY - y);
+        if (distance > edge) continue;
+        const alpha = distance <= radius ? 255 : Math.round(255 * (edge - distance) / 0.75);
+        paint(pixelX, pixelY, alpha);
+      }
+    }
+  };
+  const line = (x1, y1, x2, y2, thickness = 1.5) => {
+    const steps = Math.max(1, Math.ceil(Math.hypot(x2 - x1, y2 - y1) * 2));
+    for (let index = 0; index <= steps; index += 1) {
+      const ratio = index / steps;
+      dot(x1 + ((x2 - x1) * ratio), y1 + ((y2 - y1) * ratio), thickness);
+    }
+  };
+  const arc = (centerX, centerY, radius, startDegrees, endDegrees, thickness = 1.5, mirror = false) => {
+    const steps = Math.max(12, Math.ceil(Math.abs(endDegrees - startDegrees) * radius / 24));
+    for (let index = 0; index <= steps; index += 1) {
+      const degrees = startDegrees + ((endDegrees - startDegrees) * index / steps);
+      const radians = degrees * Math.PI / 180;
+      const rawX = centerX + (Math.cos(radians) * radius);
+      const x = mirror ? (size - 1 - rawX) : rawX;
+      dot(x, centerY + (Math.sin(radians) * radius), thickness);
+    }
+  };
+  const rectangle = (left, top, right, bottom, thickness = 1.35) => {
+    line(left, top, right, top, thickness);
+    line(right, top, right, bottom, thickness);
+    line(right, bottom, left, bottom, thickness);
+    line(left, bottom, left, top, thickness);
+  };
+
+  if (name === "selectAll") {
+    line(6, 12, 6, 6);
+    line(6, 6, 12, 6);
+    line(20, 6, 26, 6);
+    line(26, 6, 26, 12);
+    line(26, 20, 26, 26);
+    line(26, 26, 20, 26);
+    line(12, 26, 6, 26);
+    line(6, 26, 6, 20);
+    rectangle(11, 11, 21, 21, 1.25);
+  } else if (name === "undo" || name === "redo") {
+    const mirror = name === "redo";
+    const mirrorX = (x) => (mirror ? size - 1 - x : x);
+    arc(18, 17, 9, 185, 390, 1.55, mirror);
+    line(mirrorX(9), 17, mirrorX(14), 11.5, 1.55);
+    line(mirrorX(9), 17, mirrorX(14), 22.5, 1.55);
+  } else if (name === "paste") {
+    rectangle(8, 8, 24, 28, 1.35);
+    rectangle(12, 5, 20, 11, 1.35);
+    line(12, 16, 20, 16, 1.1);
+    line(12, 21, 20, 21, 1.1);
+  } else if (name === "copy") {
+    rectangle(7, 5, 20, 23, 1.35);
+    rectangle(12, 10, 25, 28, 1.35);
+  } else if (name === "cut") {
+    arc(8, 9, 4, 0, 360, 1.35);
+    arc(8, 23, 4, 0, 360, 1.35);
+    line(11, 12, 25, 4, 1.35);
+    line(11, 20, 25, 28, 1.35);
+    dot(14, 16, 1.6);
+  } else if (name === "delete") {
+    line(7, 9, 25, 9, 1.45);
+    line(12, 5, 20, 5, 1.45);
+    line(10, 12, 12, 28, 1.35);
+    line(22, 12, 20, 28, 1.35);
+    line(12, 28, 20, 28, 1.35);
+    line(14.5, 14, 15.5, 24, 1.05);
+    line(18.5, 14, 17.5, 24, 1.05);
+  }
+
+  const icon = nativeImage.createFromBitmap(bitmap, {
+    width: size,
+    height: size,
+    scaleFactor: 2,
+  });
+  if (process.platform === "darwin") icon.setTemplateImage(true);
+  EDIT_CONTEXT_ICON_CACHE.set(cacheKey, icon);
+  return icon;
+}
+
+function installEditableContextMenu(win) {
+  win.webContents.on("context-menu", (_event, params) => {
+    if (!params.isEditable || win.isDestroyed() || win.webContents.isDestroyed()) return;
+    const flags = params.editFlags || {};
+    const actionItem = (name, label, accelerator, enabled) => ({
+      label,
+      accelerator,
+      registerAccelerator: false,
+      icon: editContextIcon(name),
+      enabled: Boolean(enabled),
+      click: () => {
+        if (win.isDestroyed() || win.webContents.isDestroyed()) return;
+        const action = win.webContents[name];
+        if (typeof action === "function") action.call(win.webContents);
+      },
+    });
+    const menu = Menu.buildFromTemplate([
+      actionItem("selectAll", "Select All", "CommandOrControl+A", flags.canSelectAll),
+      actionItem("undo", "Undo", "CommandOrControl+Z", flags.canUndo),
+      actionItem("redo", "Redo", "CommandOrControl+Shift+Z", flags.canRedo),
+      { type: "separator" },
+      actionItem("copy", "Copy", "CommandOrControl+C", flags.canCopy),
+      actionItem("cut", "Cut", "CommandOrControl+X", flags.canCut),
+      actionItem("paste", "Paste", "CommandOrControl+V", flags.canPaste),
+      { type: "separator" },
+      actionItem("delete", "Delete", "Backspace", flags.canDelete),
+    ]);
+    menu.popup({ window: win });
+  });
+}
+
 function installMenu() {
   const isMac = process.platform === "darwin";
   const template = [
@@ -1183,6 +1319,7 @@ function createMainWindow() {
       backgroundThrottling: false,
     },
   });
+  installEditableContextMenu(mainWindow);
   mainWindow.maximize();
   mainWindow.loadURL(`${SERVER_BASE}/?launch=${Date.now()}`);
   mainWindow.on("close", (event) => {

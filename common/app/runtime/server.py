@@ -2098,8 +2098,77 @@ def imagine_text_value(value) -> str:
     return ""
 
 
+def imagine_generation_prompt(value, depth: int = 0) -> str:
+    if depth > 12:
+        return ""
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or text[:1] not in {"{", "["}:
+            return ""
+        try:
+            parsed = json.loads(text)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return ""
+        return imagine_generation_prompt(parsed, depth + 1)
+    if isinstance(value, list):
+        for item in value:
+            prompt = imagine_generation_prompt(item, depth + 1)
+            if prompt:
+                return prompt
+        return ""
+    if not isinstance(value, dict):
+        return ""
+    prompt_keys = {"prompt", "originalprompt", "userprompt", "textprompt", "inputprompt"}
+    for key, child in value.items():
+        compact_key = re.sub(r"[^a-z0-9]", "", str(key or "").lower())
+        if compact_key not in prompt_keys:
+            continue
+        prompt = imagine_text_value(child)
+        if prompt:
+            return prompt
+    for child in value.values():
+        prompt = imagine_generation_prompt(child, depth + 1)
+        if prompt:
+            return prompt
+    return ""
+
+
+def imagine_post_explicit_prompt(post: dict) -> str:
+    if not isinstance(post, dict):
+        return ""
+    for key in ("prompt", "originalPrompt", "original_prompt"):
+        text = imagine_text_value(post.get(key))
+        if text:
+            return text
+    for key in ("mediaGenInput", "media_gen_input"):
+        text = imagine_generation_prompt(post.get(key))
+        if text:
+            return text
+    for key in ("message", "text", "caption", "description"):
+        text = imagine_text_value(post.get(key))
+        if text:
+            return text
+    for key in ("query", "input"):
+        text = imagine_text_value(post.get(key))
+        if text:
+            return text
+    return ""
+
+
 def imagine_post_text(post: dict) -> str:
-    for key in ("prompt", "originalPrompt", "message", "text", "caption", "title", "description"):
+    for key in ("prompt", "originalPrompt", "original_prompt"):
+        text = imagine_text_value(post.get(key))
+        if text:
+            return text
+    for key in ("mediaGenInput", "media_gen_input"):
+        text = imagine_generation_prompt(post.get(key))
+        if text:
+            return text
+    for key in ("message", "text", "caption"):
+        text = imagine_text_value(post.get(key))
+        if text:
+            return text
+    for key in ("title", "description"):
         text = imagine_text_value(post.get(key))
         if text:
             return text
@@ -4086,6 +4155,26 @@ def remove_imagine_remote_cache_assets(
         })
 
 
+def prune_imagine_remote_cache_assets(
+    root: Path | None,
+    account: dict,
+    asset_ids: set[str],
+) -> None:
+    if not root or not asset_ids:
+        return
+    try:
+        library_index.prune_imagine_remote_assets(
+            root,
+            imagine_account_settings_key(account),
+            asset_ids,
+        )
+    except Exception as exc:
+        imagine_debug_event("saved_cache_asset_prune_failed", {
+            "account_id": str(account.get("id") or ""),
+            "error": str(exc)[:400],
+        })
+
+
 def remove_imagine_remote_cache_post_keys(
     root: Path | None,
     account: dict,
@@ -4417,6 +4506,29 @@ def list_imagine_saved(payload: dict) -> dict:
     }
 
 
+def imagine_media_post_with_asset_prompt(post: dict, post_id: str, account: dict, timeout: int = 12) -> dict:
+    if not isinstance(post, dict) or imagine_post_explicit_prompt(post):
+        return post
+    try:
+        data = imagine_get_json(
+            f"/rest/assets/{quote(post_id, safe='')}",
+            account,
+            timeout=timeout,
+            referer=f"{IMAGINE_BASE}/imagine/post/{quote(post_id, safe='')}",
+        )
+    except Exception:
+        return post
+    asset = data.get("asset") if isinstance(data.get("asset"), dict) else data
+    asset_prompt = imagine_post_explicit_prompt(asset) if isinstance(asset, dict) else ""
+    if not asset_prompt:
+        return post
+    enriched = dict(post)
+    enriched["prompt"] = asset_prompt
+    if not imagine_text_value(enriched.get("originalPrompt")):
+        enriched["originalPrompt"] = asset_prompt
+    return enriched
+
+
 def imagine_get_media_post_direct(post_id: str, account: dict, timeout: int = 12) -> dict:
     errors: list[str] = []
     for payload in ({"id": post_id}, {"ids": [post_id]}):
@@ -4428,13 +4540,13 @@ def imagine_get_media_post_direct(post_id: str, account: dict, timeout: int = 12
             continue
         post = data.get("post") if isinstance(data.get("post"), dict) else None
         if post:
-            return post
+            return imagine_media_post_with_asset_prompt(post, post_id, account, timeout=timeout)
         posts = data.get("posts") if isinstance(data.get("posts"), list) else []
         for candidate in posts:
             if isinstance(candidate, dict) and imagine_post_id(candidate) == post_id:
-                return candidate
+                return imagine_media_post_with_asset_prompt(candidate, post_id, account, timeout=timeout)
         if posts and isinstance(posts[0], dict):
-            return posts[0]
+            return imagine_media_post_with_asset_prompt(posts[0], post_id, account, timeout=timeout)
     try:
         public_post = imagine_get_public_asset_post(post_id, account, timeout=timeout)
         if public_post:
@@ -6371,6 +6483,43 @@ def delete_imagine_asset(payload: dict) -> dict:
         remove_imagine_remote_cache_assets(root, account, {asset_id})
     invalidate_imagine_saved_media_keys_cache(account)
     return {"ok": True, "asset_id": asset_id, "result": result}
+
+
+def discard_missing_imagine_asset(payload: dict) -> dict:
+    payload = payload if isinstance(payload, dict) else {}
+    status = safe_int(payload.get("status"), 0)
+    if status not in {404, 410}:
+        raise RuntimeError("Missing Imagine asset confirmation is required.")
+    root = library_root()
+    if not root:
+        raise RuntimeError("Library path is not set.")
+    account = active_imagine_account(root, str(payload.get("account_id") or ""))
+    if not account:
+        raise RuntimeError("Select or capture an Imagine account first.")
+    asset_id = imagine_delete_target_id(payload)
+    if not asset_id:
+        raise RuntimeError("Imagine asset id is required.")
+    update_imagine_local_heart_posts(
+        root,
+        account,
+        remove_asset_ids={asset_id},
+        remove_entire_link_post=False,
+    )
+    update_imagine_account_setting_ids(
+        root,
+        "imagine_external_reference_asset_ids",
+        account,
+        remove={asset_id},
+    )
+    remove_imagine_generated_relation_state(root, asset_ids={asset_id})
+    prune_imagine_remote_cache_assets(root, account, {asset_id})
+    invalidate_imagine_saved_media_keys_cache(account)
+    imagine_debug_event("missing_asset_pruned", {
+        "account_id": str(account.get("id") or ""),
+        "asset_id": asset_id,
+        "status": status,
+    })
+    return {"ok": True, "asset_id": asset_id, "status": status}
 
 
 def delete_imagine_asset_metadata(payload: dict) -> dict:
@@ -18757,6 +18906,7 @@ POST_JSON_ROUTES = {
         dismiss_imagine_job=dismiss_imagine_job,
         delete_imagine_media_post=delete_imagine_media_post,
         delete_imagine_asset=delete_imagine_asset,
+        discard_missing_imagine_asset=discard_missing_imagine_asset,
         delete_imagine_asset_metadata=delete_imagine_asset_metadata,
         delete_imagine_conversation=delete_imagine_conversation,
         like_imagine_media_post=like_imagine_media_post,
