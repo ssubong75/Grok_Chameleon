@@ -548,6 +548,65 @@ function renderImagineListForScreen(screenId = screen_state.current_screen, scro
   restoreImagineListScrollForScreen(screenId, scrollTop);
 }
 
+const imaginePostListNames = [
+  "imagineRemotePosts",
+  "imagineDiscoverPosts",
+  "imagineUnsavedPosts",
+  "imagineSearchPosts",
+  "imagineUploadPosts",
+  "posts",
+];
+
+function captureImaginePostRemovalSnapshot(post) {
+  const folderPath = String(post?.folder_path || "");
+  if (!folderPath) return null;
+  return {
+    folderPath,
+    selectedPostPath: library_state.selectedPostPath,
+    selectedDetailItemId: library_state.selectedDetailItemId,
+    screenId: screen_state.current_screen,
+    activeButtonId: screen_state.current_i_nav_btn,
+    lists: imaginePostListNames.map((listName) => ({
+      listName,
+      entries: (library_state[listName] || []).flatMap((candidate, index) => (
+        candidate?.folder_path === folderPath ? [{ index, post: candidate }] : []
+      )),
+    })).filter((snapshot) => snapshot.entries.length),
+  };
+}
+
+function restoreImaginePostRemovalSnapshot(snapshot, optimisticState = {}) {
+  if (!snapshot?.folderPath) return;
+  for (const listSnapshot of snapshot.lists || []) {
+    const current = Array.isArray(library_state[listSnapshot.listName])
+      ? library_state[listSnapshot.listName].filter((candidate) => candidate?.folder_path !== snapshot.folderPath)
+      : [];
+    for (const entry of [...listSnapshot.entries].sort((left, right) => left.index - right.index)) {
+      current.splice(Math.min(entry.index, current.length), 0, entry.post);
+    }
+    library_state[listSnapshot.listName] = current;
+  }
+  syncImagineRemotePostsIntoLibrary();
+  const selectionUnchanged = (
+    screen_state.current_screen === optimisticState.screenId
+    && library_state.selectedPostPath === optimisticState.selectedPostPath
+    && library_state.selectedDetailItemId === optimisticState.selectedDetailItemId
+  );
+  if (selectionUnchanged) {
+    library_state.selectedPostPath = snapshot.selectedPostPath;
+    library_state.selectedDetailItemId = snapshot.selectedDetailItemId;
+  }
+  if (
+    selectionUnchanged
+    && snapshot.screenId === "i_detail"
+    && screen_state.current_screen !== "i_detail"
+  ) {
+    openScreen("i_detail", snapshot.activeButtonId);
+  }
+  renderImagineListForScreen(snapshot.screenId);
+  renderDetailViews();
+}
+
 function removeImagineItemsFromPost(post, removedItems, options = {}) {
   const itemsToRemove = (Array.isArray(removedItems) ? removedItems : [removedItems]).filter(Boolean);
   if (!post?.folder_path || !itemsToRemove.length) return false;
@@ -570,7 +629,7 @@ function removeImagineItemsFromPost(post, removedItems, options = {}) {
       representative_item: representative,
     });
   };
-  for (const listName of ["imagineRemotePosts", "imagineDiscoverPosts", "imagineUnsavedPosts", "imagineSearchPosts", "imagineUploadPosts", "posts"]) {
+  for (const listName of imaginePostListNames) {
     if (!Array.isArray(library_state[listName])) continue;
     library_state[listName] = library_state[listName].map(stripPost).filter(Boolean);
   }
@@ -833,9 +892,27 @@ async function deleteImagineSelectedDetailItem() {
     toast("Removed temporary link item.");
     return;
   }
-  const result = await deleteImagineRemoteItem(post, item);
-  removeImagineItemsFromPost(post, result.deletedItems);
-  toast(result.action === "external-unsave" ? "Removed external Imagine item." : "Deleted Imagine item.");
+  const snapshot = captureImaginePostRemovalSnapshot(post);
+  const deleteButton = document.querySelector(".i_detail_delete");
+  const deleteButtonWasDisabled = Boolean(deleteButton?.disabled);
+  if (deleteButton) deleteButton.disabled = true;
+  deleteButton?.setAttribute("aria-busy", "true");
+  removeImagineItemsFromPost(post, [item]);
+  const optimisticState = {
+    screenId: screen_state.current_screen,
+    selectedPostPath: library_state.selectedPostPath,
+    selectedDetailItemId: library_state.selectedDetailItemId,
+  };
+  try {
+    const result = await deleteImagineRemoteItem(post, item);
+    toast(result.action === "external-unsave" ? "Removed external Imagine item." : "Deleted Imagine item.");
+  } catch (error) {
+    restoreImaginePostRemovalSnapshot(snapshot, optimisticState);
+    throw error;
+  } finally {
+    if (deleteButton) deleteButton.disabled = deleteButtonWasDisabled;
+    deleteButton?.removeAttribute("aria-busy");
+  }
 }
 
 async function deleteImagineCardPost(post, button = null) {
@@ -854,9 +931,15 @@ async function deleteImagineCardPost(post, button = null) {
     confirmLabel: "Delete",
   });
   if (!ok) return;
+  const pendingCard = button?.closest?.(".card") || null;
+  if (pendingCard) {
+    pendingCard.hidden = true;
+    pendingCard.setAttribute("aria-busy", "true");
+  }
   button?.setAttribute("aria-busy", "true");
   try {
     const result = await deleteImagineRemoteCard(post);
+    if (pendingCard) pendingCard.hidden = false;
     if (result.deletedItems.length) {
       removeImagineItemsFromPost(post, result.deletedItems, {
         keepListScreen: true,
@@ -866,14 +949,23 @@ async function deleteImagineCardPost(post, button = null) {
       toast(result.data?.action === "external-unsave" ? "Removed external Imagine post." : "Deleted Imagine post.");
     }
     if (result.failures.length) {
+      if (!result.deletedItems.length && pendingCard) {
+        pendingCard.hidden = false;
+        renderImagineListForScreen(screenId, scrollTop);
+      }
       showErrorPanel(
         "Delete failed",
         `${result.failures.length} media item(s) could not be deleted. ${result.failures[0]?.message || ""}`.trim(),
       );
     }
   } catch (error) {
+    if (pendingCard) {
+      pendingCard.hidden = false;
+      renderImagineListForScreen(screenId, scrollTop);
+    }
     showErrorPanel("Delete failed", error?.message || "Delete failed.");
   } finally {
+    pendingCard?.removeAttribute("aria-busy");
     button?.removeAttribute("aria-busy");
   }
 }

@@ -202,6 +202,11 @@
     if (!ok) return;
     const screenId = screen_state.current_screen;
     const scrollTop = imagineListScrollTopForScreen(screenId);
+    const pendingPaths = targets.map((target) => target.post.folder_path).filter(Boolean);
+    if (typeof setRenderedCardPathsHidden === "function") {
+      setRenderedCardPathsHidden(pendingPaths, true);
+    }
+    clearCardSelection();
     const deletedTargets = [];
     const failures = [];
     const deletedItemKeys = new Set();
@@ -239,6 +244,9 @@
         });
       }
     }
+    if (typeof setRenderedCardPathsHidden === "function") {
+      setRenderedCardPathsHidden(pendingPaths, false);
+    }
     for (const target of deletedTargets) {
       removeImagineItemsFromPost(target.post, target.items, {
         keepListScreen: true,
@@ -246,7 +254,6 @@
         scrollTop,
       });
     }
-    clearCardSelection();
     if (deletedTargets.length) {
       const removedExternalOnly = deletedTargets.every((target) => target.externalOnly);
       toast(

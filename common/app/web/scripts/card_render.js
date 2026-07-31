@@ -218,6 +218,20 @@ const virtualCardListStates = new Map();
 const virtualCardListBindings = new Map();
 let virtualCardWindowEventsBound = false;
 
+function setRenderedCardPathsHidden(paths, hidden) {
+  const wanted = new Set((paths || []).map((path) => String(path || "")).filter(Boolean));
+  if (!wanted.size) return;
+  const cards = new Set(document.querySelectorAll(".card[data-library-post-path]"));
+  for (const state of virtualCardListStates.values()) {
+    for (const node of state.nodeCache?.values?.() || []) {
+      if (node?.classList?.contains("card")) cards.add(node);
+    }
+  }
+  for (const card of cards) {
+    if (wanted.has(String(card.dataset.libraryPostPath || ""))) card.hidden = Boolean(hidden);
+  }
+}
+
 function virtualCardWindow(totalItems, columns, rowHeight, gap, scrollOffset, viewportHeight) {
   const itemCount = Math.max(0, Number(totalItems) || 0);
   const columnCount = Math.max(1, Math.floor(Number(columns) || 1));
