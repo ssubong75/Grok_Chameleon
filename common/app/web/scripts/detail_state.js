@@ -54,6 +54,27 @@ function selectedDetailItem(post = selectedLibraryPost()) {
     || post.items[0];
 }
 
+function selectedDetailSourceContext(post = selectedLibraryPost()) {
+  const selectedItemId = String(library_state.selectedDetailItemId || "");
+  const selectedBaseItem = post?.items?.find((item) => mediaItemKey(item) === selectedItemId) || null;
+  if (selectedBaseItem) return { post, item: selectedBaseItem };
+
+  const job = screen_state.current_screen === "b_detail"
+    ? (typeof selectedBuildJob === "function" ? selectedBuildJob() : null)
+    : (screen_state.current_screen === "i_detail" && typeof selectedImagineJob === "function" ? selectedImagineJob() : null);
+  if (
+    job
+    && typeof generationJobSourcePost === "function"
+    && typeof generationJobSourceItem === "function"
+  ) {
+    const sourcePost = generationJobSourcePost(job, post);
+    const sourceItem = generationJobSourceItem(job, sourcePost, null);
+    if (sourcePost && sourceItem) return { post: sourcePost, item: sourceItem };
+  }
+
+  return { post, item: selectedDetailItem(post) };
+}
+
 function detailItemRoleRank(item) {
   const role = String(item?.role || item?.relation || item?.source_type || item?.kind || "").toLowerCase();
   const type = String(item?.type || "").toLowerCase();

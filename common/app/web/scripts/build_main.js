@@ -128,8 +128,12 @@
   }
 
   function generationJobSourcePost(job, basePost = null) {
-    if (basePost?.items?.length) return basePost;
     const sourcePath = generationJobSourcePostPath(job);
+    if (
+      basePost?.items?.length
+      && sourcePath
+      && String(basePost.folder_path || "") === sourcePath
+    ) return basePost;
     if (!sourcePath) return null;
     const pools = [
       library_state.posts || [],

@@ -213,6 +213,14 @@ function activeImagineAccountId() {
 }
 
 function imagineSubmissionPreview(postOverride = null, itemOverride = undefined) {
+  const attachment = composerAttachments.find((item) => item.preview_url || item.source_url || item.raw_url);
+  if (attachment) {
+    return {
+      url: attachment.preview_url || attachment.source_url || attachment.raw_url || "",
+      type: composerMediaKind(attachment) || "image",
+      aspect_ratio: attachment.aspect_ratio || attachment.aspectRatio || "",
+    };
+  }
   if (postOverride || screen_state.current_screen === "i_detail") {
     const post = postOverride || selectedLibraryPost();
     const item = arguments.length >= 2 ? itemOverride : selectedDetailItem(post);
@@ -227,14 +235,6 @@ function imagineSubmissionPreview(postOverride = null, itemOverride = undefined)
         aspect_ratio: aspectRatio,
       };
     }
-  }
-  const attachment = composerAttachments.find((item) => item.preview_url || item.source_url || item.raw_url);
-  if (attachment) {
-    return {
-      url: attachment.preview_url || attachment.source_url || attachment.raw_url || "",
-      type: composerMediaKind(attachment) || "image",
-      aspect_ratio: attachment.aspect_ratio || attachment.aspectRatio || "",
-    };
   }
   return {
     url: "",
@@ -699,46 +699,51 @@ async function submitImagineComposer() {
   const submissionAccountId = activeImagineAccountId();
   if (movedToImagineMain) showImagineMainNow();
   const isExtendSubmit = composerState.mode === "extend";
-  const initialPost = screen_state.current_screen === "i_detail" ? selectedLibraryPost() : null;
-  const initialItem = initialPost ? selectedDetailItem(initialPost) : null;
-  const initialPreview = imagineSubmissionPreview(initialPost, initialItem);
-  const initialSourcePostPath = initialPost?.area === "imagine_remote" ? initialPost.folder_path : "";
-  const initialSourceItemId = initialItem ? mediaItemKey(initialItem) : "";
-  const useInitialDetailSource = Boolean(
-    initialSourcePostPath
-    && ["image", "video", "extend"].includes(String(composerState.mode || "")),
-  );
-  let lockedExtendAttachment = null;
-  if (isExtendSubmit) {
-    if (typeof prepareDetailExtendFromCurrentVideo === "function") prepareDetailExtendFromCurrentVideo();
-    lockedExtendAttachment = await detailVideoAttachmentForSourceMode(initialPost, initialItem);
-    if (!lockedExtendAttachment) {
-      showErrorPanel("Extend unavailable", "Select an Imagine video thumbnail.");
-      return;
-    }
-  }
+  const initialSelection = screen_state.current_screen === "i_detail" && typeof selectedDetailSourceContext === "function"
+    ? selectedDetailSourceContext()
+    : { post: null, item: null };
+  const initialPost = initialSelection.post;
+  const initialItem = initialSelection.item;
   let pendingJob = null;
-  if (shouldCreatePendingImagineDetailJob(initialSourcePostPath)) {
-    pendingJob = createPendingImagineJob(prompt, initialPreview, initialSourcePostPath, initialSourceItemId);
-    upsertImagineJob(pendingJob);
-    selectImagineJob(pendingJob.id, {
-      keepDetailPost: true,
-      focusJobThumb: true,
-    });
-  }
   setComposerBusy(true);
   try {
+    if (initialPost && initialItem) await syncDetailAttachmentForComposerTray(initialPost, initialItem);
+    else await syncDetailAttachmentForComposerTray();
+    trimComposerAttachmentsToLimit();
+    const lockedAttachments = [...composerAttachments];
+    const lockedPrimarySource = imaginePrimarySubmissionAttachment(lockedAttachments, composerState.mode);
+    const lockedSourcePostPath = String(lockedPrimarySource?.detail_post_path || "").trim();
+    const lockedSourceItemId = imagineAttachmentSubmissionItemId(lockedPrimarySource);
+    const lockedPreview = lockedPrimarySource
+      ? {
+        url: String(lockedPrimarySource.preview_url || lockedPrimarySource.source_url || lockedPrimarySource.raw_url || ""),
+        type: composerMediaKind(lockedPrimarySource) || "image",
+        aspect_ratio: lockedPrimarySource.aspect_ratio || lockedPrimarySource.aspectRatio || "",
+      }
+      : {
+        url: "",
+        type: composerState.mode === "video" || composerState.mode === "extend" ? "video" : "image",
+        aspect_ratio: "",
+      };
+    if (isExtendSubmit && !lockedPrimarySource) {
+      throw new Error("Select an Imagine video thumbnail.");
+    }
+    if (shouldCreatePendingImagineDetailJob(lockedSourcePostPath)) {
+      pendingJob = createPendingImagineJob(prompt, lockedPreview, lockedSourcePostPath, lockedSourceItemId);
+      upsertImagineJob(pendingJob);
+      selectImagineJob(pendingJob.id, {
+        keepDetailPost: true,
+        focusJobThumb: false,
+      });
+    }
     if (typeof prepareActiveImagineBridgeSession === "function") {
       await prepareActiveImagineBridgeSession({ force: false, silent: false, accountId: submissionAccountId });
     }
-    if (useInitialDetailSource) await syncDetailAttachmentForComposerTray(initialPost, initialItem);
-    else await syncDetailAttachmentForComposerTray();
-    trimComposerAttachmentsToLimit();
-    await ensureComposerAttachmentsReady();
-    let attachments = composerAttachments.map(composerSubmissionAttachment);
+    await Promise.all(lockedAttachments.map((attachment) => ensureComposerAttachmentDataUrl(attachment)));
+    let attachments = lockedAttachments.map(composerSubmissionAttachment);
     attachments = await imagineAttachmentsWithMeasuredImageAspects(attachments);
     if (isExtendSubmit) {
-      const detailAttachment = lockedExtendAttachment || await detailVideoAttachmentForSourceMode(initialPost, initialItem);
+      const detailAttachment = imaginePrimarySubmissionAttachment(attachments, composerState.mode);
       if (detailAttachment) {
         attachments = [detailAttachment];
       } else if (!hasVideoAttachment(attachments)) {
@@ -775,25 +780,18 @@ async function submitImagineComposer() {
         }
       }
     }
-    const post = useInitialDetailSource ? initialPost : selectedLibraryPost();
-    const item = useInitialDetailSource ? initialItem : selectedDetailItem(post);
     const primarySourceAttachment = imaginePrimarySubmissionAttachment(attachments, composerState.mode);
-    const preview = useInitialDetailSource ? initialPreview : imagineSubmissionPreview();
+    const preview = lockedPreview;
     const attachmentSourcePostPath = String(primarySourceAttachment?.detail_post_path || "").trim();
-    const fallbackSourcePostPath = useInitialDetailSource
-      ? initialSourcePostPath
-      : (screen_state.current_screen === "i_detail" && post?.area === "imagine_remote" ? post.folder_path : "");
-    const sourcePostPath = attachmentSourcePostPath || (!primarySourceAttachment ? fallbackSourcePostPath : "");
+    const sourcePostPath = attachmentSourcePostPath;
     const attachmentSourceItemId = imagineAttachmentSubmissionItemId(primarySourceAttachment);
-    const fallbackSourceItemId = useInitialDetailSource ? initialSourceItemId : (item ? mediaItemKey(item) : "");
-    const sourceItemId = attachmentSourceItemId || (!primarySourceAttachment ? fallbackSourceItemId : "");
+    const sourceItemId = attachmentSourceItemId;
     const sourceContext = primarySourceAttachment
       ? imagineAttachmentSubmissionContext(primarySourceAttachment)
-      : (sourcePostPath ? imagineSubmissionSourceContext(post, item) : { conversation_id: "", response_id: "" });
+      : { conversation_id: "", response_id: "", source_is_t2i: false };
     const isImageToImage = composerState.mode === "image"
-      && (useInitialDetailSource || attachments.some((attachment) => composerMediaKind(attachment) === "image"));
+      && attachments.some((attachment) => composerMediaKind(attachment) === "image");
     const isTextToImage = composerState.mode === "image"
-      && !useInitialDetailSource
       && !attachments.some((attachment) => composerMediaKind(attachment) === "image");
     if (isTextToImage && !movedToImagineMain) showImagineMainNow();
     const data = await qApi("/api/imagine/start", {
@@ -817,7 +815,7 @@ async function submitImagineComposer() {
       if (!isTextToImage && (screen_state.current_screen === "i_detail" || isImageToImage)) {
         selectImagineJob(data.job.id, {
           keepDetailPost: screen_state.current_screen === "i_detail" && Boolean(sourcePostPath),
-          focusJobThumb: true,
+          focusJobThumb: false,
         });
       }
       scheduleImagineJobPoll(data.job.id);

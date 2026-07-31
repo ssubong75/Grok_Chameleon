@@ -64,6 +64,8 @@ for (const thumbListSelector of [".i_detail_thumb_list", ".b_detail_thumb_list"]
       library_state.selectedDetailItemId = thumb.dataset.libraryItemId || "";
       renderDetailViews();
       syncComposerPromptFromDetail();
+      composerState.dismissedDetailAttachmentKey = "";
+      syncDetailAttachmentForComposerTray().catch((error) => console.warn(error));
       return;
     }
     if (thumb.dataset.imagineJobId) {
@@ -72,6 +74,8 @@ for (const thumbListSelector of [".i_detail_thumb_list", ".b_detail_thumb_list"]
       library_state.selectedDetailItemId = thumb.dataset.libraryItemId || "";
       renderDetailViews();
       syncComposerPromptFromDetail();
+      composerState.dismissedDetailAttachmentKey = "";
+      syncDetailAttachmentForComposerTray().catch((error) => console.warn(error));
       return;
     }
     if (typeof handleBuildDetailThumbAction === "function" && handleBuildDetailThumbAction(thumb)) return;

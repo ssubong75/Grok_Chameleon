@@ -31,6 +31,7 @@ env:
   COMMON_SCREEN_ROUTER: common/app/web/scripts/screen_router.js
   COMMON_I_DETAIL_ACTIONS: common/app/web/scripts/i_detail_actions.js
   COMMON_COMPOSER_EVENTS: common/app/web/scripts/composer_events.js
+  COMMON_COMPOSER_PROVIDER: common/app/web/scripts/composer_provider.js
   COMMON_CARDS_PROMPT_STYLE: common/app/web/styles/cards_prompt.css
   COMMON_COMPOSER: common/app/web/scripts/composer_options.js
   COMMON_ATTACHMENTS: common/app/web/scripts/composer_attachments.js
@@ -137,6 +138,7 @@ jobs:
             @{ Name = "screen_router"; Relative = "web\scripts\screen_router.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_SCREEN_ROUTER) },
             @{ Name = "i_detail_actions"; Relative = "web\scripts\i_detail_actions.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_I_DETAIL_ACTIONS) },
             @{ Name = "composer_events"; Relative = "web\scripts\composer_events.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_COMPOSER_EVENTS) },
+            @{ Name = "composer_provider"; Relative = "web\scripts\composer_provider.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_COMPOSER_PROVIDER) },
             @{ Name = "cards_prompt_style"; Relative = "web\styles\cards_prompt.css"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_CARDS_PROMPT_STYLE) },
             @{ Name = "composer"; Relative = "web\scripts\composer_options.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_COMPOSER) },
             @{ Name = "attachments"; Relative = "web\scripts\composer_attachments.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_ATTACHMENTS) },
@@ -664,6 +666,7 @@ jobs:
             web/scripts/screen_router.js
             web/scripts/i_detail_actions.js
             web/scripts/composer_events.js
+            web/scripts/composer_provider.js
             web/styles/cards_prompt.css
             web/scripts/composer_options.js
             web/scripts/composer_attachments.js
@@ -1012,6 +1015,7 @@ jobs:
             web/scripts/screen_router.js
             web/scripts/i_detail_actions.js
             web/scripts/composer_events.js
+            web/scripts/composer_provider.js
             web/styles/cards_prompt.css
             web/scripts/composer_options.js
             web/scripts/composer_attachments.js

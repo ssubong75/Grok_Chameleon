@@ -29,6 +29,13 @@ function applyBuildT2iPartialJobResult(job) {
 }
 
 function buildSubmissionPreview(postOverride = null, itemOverride = undefined) {
+  const attachment = composerAttachments.find((item) => item.preview_url || item.source_url);
+  if (attachment) {
+    return {
+      url: attachment.preview_url || attachment.source_url || "",
+      type: composerMediaKind(attachment) || "image",
+    };
+  }
   if (composerState.mode === "extend" || composerState.mode === "video_edit") {
     const post = postOverride || selectedLibraryPost();
     const item = arguments.length >= 2 ? itemOverride : selectedDetailItem(post);
@@ -41,13 +48,6 @@ function buildSubmissionPreview(postOverride = null, itemOverride = undefined) {
         type: "video",
       };
     }
-  }
-  const attachment = composerAttachments.find((item) => item.preview_url || item.source_url);
-  if (attachment) {
-    return {
-      url: attachment.preview_url || attachment.source_url || "",
-      type: composerMediaKind(attachment) || "image",
-    };
   }
   if (postOverride || screen_state.current_screen === "b_detail") {
     const post = postOverride || selectedLibraryPost();
@@ -62,6 +62,35 @@ function buildSubmissionPreview(postOverride = null, itemOverride = undefined) {
     }
   }
   return { url: "", type: composerState.mode === "video" || composerState.mode === "extend" || composerState.mode === "video_edit" ? "video" : "image" };
+}
+
+function buildPrimarySubmissionAttachment(attachments, mode = composerState.mode) {
+  const expectedType = mode === "extend" || mode === "video_edit"
+    ? "video"
+    : (mode === "image" || mode === "video" ? "image" : "");
+  if (!expectedType) return null;
+  return (Array.isArray(attachments) ? attachments : [])
+    .find((attachment) => composerMediaKind(attachment) === expectedType) || null;
+}
+
+function buildAttachmentSubmissionPostPath(attachment) {
+  return String(attachment?.detail_post_path || attachment?.upload_post_path || "").trim();
+}
+
+function buildAttachmentSubmissionItemId(attachment) {
+  return String(
+    attachment?.detail_item_id
+    || attachment?.upload_item_id
+    || attachment?.item_id
+    || ""
+  ).trim();
+}
+
+function buildAttachmentSubmissionPreview(attachment) {
+  return {
+    url: String(attachment?.preview_url || attachment?.source_url || attachment?.raw_url || ""),
+    type: composerMediaKind(attachment) || (composerState.mode === "video" ? "image" : composerState.mode),
+  };
 }
 
 function createPendingBuildJob(prompt, preview, sourcePostPath, sourceItemId) {
@@ -256,49 +285,43 @@ async function submitBuildComposer() {
   }
   const movedToBuildMain = shouldShowBuildMainBeforeSubmit();
   if (movedToBuildMain) showBuildMainNow();
-  const initialSourcePost = screen_state.current_screen === "b_detail" ? selectedLibraryPost() : null;
-  const initialSourceItem = initialSourcePost ? selectedDetailItem(initialSourcePost) : null;
-  const initialPreview = buildSubmissionPreview(initialSourcePost, initialSourceItem);
-  const initialSourcePostPath = initialSourcePost?.folder_path || "";
-  const initialSourceItemId = initialSourceItem ? mediaItemKey(initialSourceItem) : "";
-  const useInitialDetailSource = Boolean(
-    initialSourcePostPath
-    && ["image", "video", "extend", "video_edit"].includes(String(composerState.mode || "")),
-  );
+  const initialSelection = screen_state.current_screen === "b_detail" && typeof selectedDetailSourceContext === "function"
+    ? selectedDetailSourceContext()
+    : { post: null, item: null };
+  const initialSourcePost = initialSelection.post;
+  const initialSourceItem = initialSelection.item;
   let pendingJob = null;
-  if (shouldCreatePendingBuildDetailJob(initialSourcePostPath)) {
-    pendingJob = createPendingBuildJob(prompt, initialPreview, initialSourcePostPath, initialSourceItemId);
-    upsertBuildJob(pendingJob);
-    selectBuildJob(pendingJob.id, {
-      keepDetailPost: true,
-      focusJobThumb: true,
-    });
-  }
   setComposerBusy(true);
   try {
-    if (useInitialDetailSource) await syncDetailAttachmentForComposerTray(initialSourcePost, initialSourceItem);
+    if (initialSourcePost && initialSourceItem) await syncDetailAttachmentForComposerTray(initialSourcePost, initialSourceItem);
     else await syncDetailAttachmentForComposerTray();
     pruneComposerAttachmentsForMode();
-    await ensureComposerAttachmentsReady();
-    let attachments = composerAttachments.map(composerSubmissionAttachment);
-    if (composerState.mode === "extend" || composerState.mode === "video_edit") {
-      const detailAttachment = useInitialDetailSource
-        ? await detailVideoAttachmentForSourceMode(initialSourcePost, initialSourceItem)
-        : await detailVideoAttachmentForSourceMode();
-      if (detailAttachment) {
-        attachments = [detailAttachment, ...attachments.filter((attachment) => !isComposerVideoAttachment(attachment))];
-      } else if (!hasVideoAttachment(attachments)) {
-        throw new Error(composerState.mode === "video_edit" ? "Video Edit needs one source video." : "Extend needs one source video.");
-      }
+    const lockedAttachments = [...composerAttachments];
+    const primarySource = buildPrimarySubmissionAttachment(lockedAttachments);
+    const sourcePostPath = buildAttachmentSubmissionPostPath(primarySource);
+    const sourceItemId = buildAttachmentSubmissionItemId(primarySource);
+    const preview = primarySource
+      ? buildAttachmentSubmissionPreview(primarySource)
+      : {
+        url: "",
+        type: composerState.mode === "video" || composerState.mode === "extend" || composerState.mode === "video_edit" ? "video" : "image",
+      };
+    if (shouldCreatePendingBuildDetailJob(sourcePostPath)) {
+      pendingJob = createPendingBuildJob(prompt, preview, sourcePostPath, sourceItemId);
+      upsertBuildJob(pendingJob);
+      selectBuildJob(pendingJob.id, {
+        keepDetailPost: true,
+        focusJobThumb: false,
+      });
     }
-    if (composerState.mode === "video_edit" && !hasVideoAttachment(attachments)) {
-      throw new Error("Video Edit needs one source video.");
+    await Promise.all(lockedAttachments.map((attachment) => ensureComposerAttachmentDataUrl(attachment)));
+    const attachments = lockedAttachments.map(composerSubmissionAttachment);
+    if ((composerState.mode === "extend" || composerState.mode === "video_edit") && !hasVideoAttachment(attachments)) {
+      throw new Error(composerState.mode === "video_edit" ? "Video Edit needs one source video." : "Extend needs one source video.");
     }
-    const isTextToImage = composerState.mode === "image" && !useInitialDetailSource && !attachments.length;
+    const isTextToImage = composerState.mode === "image"
+      && !attachments.some((attachment) => composerMediaKind(attachment) === "image");
     if (isTextToImage && !movedToBuildMain) showBuildMainNow();
-    const preview = useInitialDetailSource ? initialPreview : buildSubmissionPreview();
-    const sourcePost = useInitialDetailSource ? initialSourcePost : (screen_state.current_screen === "b_detail" ? selectedLibraryPost() : null);
-    const sourceItem = useInitialDetailSource ? initialSourceItem : (sourcePost ? selectedDetailItem(sourcePost) : null);
     const requestOptions = composerRequestOptions();
     const data = await qApi("/api/build/start", {
       provider: "build",
@@ -308,8 +331,8 @@ async function submitBuildComposer() {
       attachments,
       preview_url: preview.url,
       preview_type: preview.type,
-      source_post_path: sourcePost?.folder_path || "",
-      source_item_id: sourceItem ? mediaItemKey(sourceItem) : "",
+      source_post_path: sourcePostPath,
+      source_item_id: sourceItemId,
     });
     if (data?.job) {
       if (pendingJob) discardPendingBuildJob(pendingJob.id, false);
@@ -317,7 +340,7 @@ async function submitBuildComposer() {
       if (isTextToImage) {
         showBuildMainNow();
       } else {
-        selectBuildJob(data.job.id, { keepDetailPost: screen_state.current_screen === "b_detail", focusJobThumb: screen_state.current_screen === "b_detail" });
+        selectBuildJob(data.job.id, { keepDetailPost: screen_state.current_screen === "b_detail", focusJobThumb: false });
       }
       scheduleBuildJobPoll(data.job.id);
     }

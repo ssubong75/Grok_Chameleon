@@ -343,7 +343,7 @@
 
     function detailComposerAttachmentKey(post, item) {
       if (!post || !item) return "";
-      return `detail::${composerState.provider}::${composerState.mode}::${post.folder_path || ""}::${mediaItemKey(item)}`;
+      return `detail::${composerState.provider}::${post.folder_path || ""}::${mediaItemKey(item)}`;
     }
 
     function composerMediaKind(source = {}) {
@@ -812,11 +812,24 @@
     async function syncDetailAttachmentForComposerTray(postOverride = null, itemOverride = undefined) {
       if (screen_state.current_screen !== "i_detail" && screen_state.current_screen !== "b_detail") return;
       if (!["image", "video", "extend", "video_edit", "analyze"].includes(composerState.mode)) return;
-      const post = postOverride || selectedLibraryPost();
+      const selectedContext = arguments.length === 0 && typeof selectedDetailSourceContext === "function"
+        ? selectedDetailSourceContext()
+        : null;
+      const post = selectedContext?.post || postOverride || selectedLibraryPost();
       const sourceVideoMode = composerState.mode === "extend" || composerState.mode === "video_edit";
       const item = arguments.length >= 2
         ? (sourceVideoMode ? detailVideoForComposer(post, itemOverride) : detailImageForComposer(post, itemOverride))
-        : (sourceVideoMode ? detailVideoForComposer(post) : detailImageForComposer(post));
+        : (sourceVideoMode
+          ? detailVideoForComposer(post, selectedContext?.item)
+          : detailImageForComposer(post, selectedContext?.item));
+      const manualSourceKind = sourceVideoMode ? "video" : "image";
+      const hasManualSourceOverride = Boolean(
+        composerState.dismissedDetailAttachmentKey
+        && composerAttachments.some((attachment) => (
+          !attachment.detail_auto
+          && composerMediaKind(attachment) === manualSourceKind
+        )),
+      );
       const sourceUrl = detailMediaUrlForComposer(item, post);
       const previewUrl = sourceVideoMode
         ? (detailVideoPreviewUrlForComposer(item, post) || detailPreviewUrlForComposer(item, post))
@@ -828,11 +841,33 @@
           removeComposerAttachmentAt(index, { markDismissed: false });
         }
       }
+      if (hasManualSourceOverride) {
+        renderComposerAttachments();
+        return;
+      }
       if (!post || !sourceUrl || !detailKey || composerState.dismissedDetailAttachmentKey === detailKey) {
         renderComposerAttachments();
         return;
       }
-      const existing = composerAttachments.find((attachment) => attachment.detail_key === detailKey);
+      const sourcePostPath = String(post.folder_path || "");
+      const sourceItemId = String(mediaItemKey(item) || "");
+      const existing = composerAttachments.find((attachment) => (
+        attachment.detail_key === detailKey
+        || (
+          sourcePostPath
+          && sourceItemId
+          && (
+            (
+              String(attachment.detail_post_path || "") === sourcePostPath
+              && String(attachment.detail_item_id || "") === sourceItemId
+            )
+            || (
+              String(attachment.upload_post_path || "") === sourcePostPath
+              && String(attachment.upload_item_id || "") === sourceItemId
+            )
+          )
+        )
+      ));
       if (existing) {
         renderComposerAttachments();
         return;
