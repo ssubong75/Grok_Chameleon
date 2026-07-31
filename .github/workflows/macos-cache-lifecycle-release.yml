@@ -71,9 +71,9 @@ jobs:
     outputs:
       input_sha256: ${{ steps.windows_input.outputs.sha256 }}
     env:
-      RELEASE_TAG: v20260720-041036-win
-      INPUT_ZIP: Win_Grok_Chameleon_a.zip
-      OUTPUT_ZIP: Win_Grok_Chameleon_a.zip
+      RELEASE_TAG: v1.0.0
+      INPUT_ZIP: Win_Grok_Chameleon.zip
+      OUTPUT_ZIP: Win_Grok_Chameleon.zip
       OUTPUT_U_ZIP: Win_Grok_Chameleon_u.zip
 
     steps:
@@ -595,7 +595,7 @@ jobs:
         with:
           name: windows-common-source-build
           path: |
-            output/Win_Grok_Chameleon_a.zip
+            output/Win_Grok_Chameleon.zip
             output/Win_Grok_Chameleon_u.zip
           if-no-files-found: error
           retention-days: 3
@@ -606,9 +606,9 @@ jobs:
     outputs:
       input_sha256: ${{ steps.macos_input.outputs.sha256 }}
     env:
-      RELEASE_TAG: v20260720-042100-mac
-      INPUT_ZIP: Mac_Grok_Chameleon_a.zip
-      OUTPUT_ZIP: Mac_Grok_Chameleon_a.zip
+      RELEASE_TAG: v1.0.0
+      INPUT_ZIP: Mac_Grok_Chameleon.zip
+      OUTPUT_ZIP: Mac_Grok_Chameleon.zip
       OUTPUT_U_ZIP: Mac_Grok_Chameleon_u.zip
 
     steps:
@@ -1159,7 +1159,7 @@ jobs:
         with:
           name: mac-common-source-build
           path: |
-            output/Mac_Grok_Chameleon_a.zip
+            output/Mac_Grok_Chameleon.zip
             output/Mac_Grok_Chameleon_u.zip
           if-no-files-found: error
           retention-days: 3
@@ -1184,71 +1184,47 @@ jobs:
           name: mac-common-source-build
           path: release/macos
 
-      - name: Preserve and replace both release assets
+      - name: Replace the four release assets
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          WIN_TAG: v20260720-041036-win
-          MAC_TAG: v20260720-042100-mac
-          WIN_ZIP: Win_Grok_Chameleon_a.zip
+          RELEASE_TAG: v1.0.0
+          WIN_ZIP: Win_Grok_Chameleon.zip
           WIN_U_ZIP: Win_Grok_Chameleon_u.zip
-          MAC_ZIP: Mac_Grok_Chameleon_a.zip
+          MAC_ZIP: Mac_Grok_Chameleon.zip
           MAC_U_ZIP: Mac_Grok_Chameleon_u.zip
           WIN_INPUT_SHA256: ${{ needs.build-windows.outputs.input_sha256 }}
           MAC_INPUT_SHA256: ${{ needs.build-macos.outputs.input_sha256 }}
         run: |
           set -euo pipefail
-          mkdir -p current/win current/win-u current/mac current/mac-u backups
-          gh release download "$WIN_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$WIN_ZIP" --dir current/win
-          gh release download "$MAC_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$MAC_ZIP" --dir current/mac
-          gh release download "$WIN_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$WIN_U_ZIP" --dir current/win-u || true
-          gh release download "$MAC_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$MAC_U_ZIP" --dir current/mac-u || true
+          mkdir -p current/win current/win-u current/mac current/mac-u
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$WIN_ZIP" --dir current/win
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$WIN_U_ZIP" --dir current/win-u
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$MAC_ZIP" --dir current/mac
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$MAC_U_ZIP" --dir current/mac-u
           test "$(sha256sum "current/win/$WIN_ZIP" | awk '{print $1}')" = "$WIN_INPUT_SHA256"
           test "$(sha256sum "current/mac/$MAC_ZIP" | awk '{print $1}')" = "$MAC_INPUT_SHA256"
-          short_sha="$(printf '%s' "$GITHUB_SHA" | cut -c1-12)"
-          win_backup="Win_Grok_Chameleon_a.previous-before-portable-sqlite-u-$short_sha.zip"
-          mac_backup="Mac_Grok_Chameleon_a.previous-before-portable-sqlite-u-$short_sha.zip"
-          cp "current/win/$WIN_ZIP" "backups/$win_backup"
-          cp "current/mac/$MAC_ZIP" "backups/$mac_backup"
-          gh release upload "$WIN_TAG" "backups/$win_backup" --repo "$GITHUB_REPOSITORY"
-          gh release upload "$MAC_TAG" "backups/$mac_backup" --repo "$GITHUB_REPOSITORY"
-          if test -f "current/win-u/$WIN_U_ZIP"; then
-            cp "current/win-u/$WIN_U_ZIP" "backups/Win_Grok_Chameleon_u.previous-$short_sha.zip"
-            gh release upload "$WIN_TAG" "backups/Win_Grok_Chameleon_u.previous-$short_sha.zip" --repo "$GITHUB_REPOSITORY"
-          fi
-          if test -f "current/mac-u/$MAC_U_ZIP"; then
-            cp "current/mac-u/$MAC_U_ZIP" "backups/Mac_Grok_Chameleon_u.previous-$short_sha.zip"
-            gh release upload "$MAC_TAG" "backups/Mac_Grok_Chameleon_u.previous-$short_sha.zip" --repo "$GITHUB_REPOSITORY"
-          fi
 
           rollback() {
             echo 'Rolling back all production assets.' >&2
-            gh release upload "$WIN_TAG" "current/win/$WIN_ZIP" --repo "$GITHUB_REPOSITORY" --clobber || true
-            gh release upload "$MAC_TAG" "current/mac/$MAC_ZIP" --repo "$GITHUB_REPOSITORY" --clobber || true
-            if test -f "current/win-u/$WIN_U_ZIP"; then
-              gh release upload "$WIN_TAG" "current/win-u/$WIN_U_ZIP" --repo "$GITHUB_REPOSITORY" --clobber || true
-            else
-              gh release delete-asset "$WIN_TAG" "$WIN_U_ZIP" --repo "$GITHUB_REPOSITORY" --yes || true
-            fi
-            if test -f "current/mac-u/$MAC_U_ZIP"; then
-              gh release upload "$MAC_TAG" "current/mac-u/$MAC_U_ZIP" --repo "$GITHUB_REPOSITORY" --clobber || true
-            else
-              gh release delete-asset "$MAC_TAG" "$MAC_U_ZIP" --repo "$GITHUB_REPOSITORY" --yes || true
-            fi
+            gh release upload "$RELEASE_TAG" "current/win/$WIN_ZIP" --repo "$GITHUB_REPOSITORY" --clobber || true
+            gh release upload "$RELEASE_TAG" "current/win-u/$WIN_U_ZIP" --repo "$GITHUB_REPOSITORY" --clobber || true
+            gh release upload "$RELEASE_TAG" "current/mac/$MAC_ZIP" --repo "$GITHUB_REPOSITORY" --clobber || true
+            gh release upload "$RELEASE_TAG" "current/mac-u/$MAC_U_ZIP" --repo "$GITHUB_REPOSITORY" --clobber || true
           }
           trap rollback ERR
-          gh release upload "$WIN_TAG" "release/windows/$WIN_ZIP" --repo "$GITHUB_REPOSITORY" --clobber
-          gh release upload "$WIN_TAG" "release/windows/$WIN_U_ZIP" --repo "$GITHUB_REPOSITORY" --clobber
-          gh release upload "$MAC_TAG" "release/macos/$MAC_ZIP" --repo "$GITHUB_REPOSITORY" --clobber
-          gh release upload "$MAC_TAG" "release/macos/$MAC_U_ZIP" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$RELEASE_TAG" "release/windows/$WIN_ZIP" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$RELEASE_TAG" "release/windows/$WIN_U_ZIP" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$RELEASE_TAG" "release/macos/$MAC_ZIP" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$RELEASE_TAG" "release/macos/$MAC_U_ZIP" --repo "$GITHUB_REPOSITORY" --clobber
           win_local="sha256:$(sha256sum "release/windows/$WIN_ZIP" | awk '{print $1}')"
           win_u_local="sha256:$(sha256sum "release/windows/$WIN_U_ZIP" | awk '{print $1}')"
           mac_local="sha256:$(sha256sum "release/macos/$MAC_ZIP" | awk '{print $1}')"
           mac_u_local="sha256:$(sha256sum "release/macos/$MAC_U_ZIP" | awk '{print $1}')"
-          win_remote="$(gh release view "$WIN_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | select(.name == "'"$WIN_ZIP"'") | .digest')"
-          win_u_remote="$(gh release view "$WIN_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | select(.name == "'"$WIN_U_ZIP"'") | .digest')"
-          mac_remote="$(gh release view "$MAC_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | select(.name == "'"$MAC_ZIP"'") | .digest')"
-          mac_u_remote="$(gh release view "$MAC_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | select(.name == "'"$MAC_U_ZIP"'") | .digest')"
+          win_remote="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | select(.name == "'"$WIN_ZIP"'") | .digest')"
+          win_u_remote="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | select(.name == "'"$WIN_U_ZIP"'") | .digest')"
+          mac_remote="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | select(.name == "'"$MAC_ZIP"'") | .digest')"
+          mac_u_remote="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | select(.name == "'"$MAC_U_ZIP"'") | .digest')"
           test "$win_local" = "$win_remote"
           test "$win_u_local" = "$win_u_remote"
           test "$mac_local" = "$mac_remote"
