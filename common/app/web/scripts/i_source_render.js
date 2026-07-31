@@ -590,10 +590,14 @@ function mergeImagineSavedLineageCards(cards) {
   });
 
   const ownerByItemId = new Map(rootOwnerById);
+  const sourceOwnerById = new Map();
   active.forEach((card, index) => {
     for (const item of card.items || []) {
-      if (imagineSavedItemIsSource(item)) continue;
       const itemId = imagineSavedItemAssetId(item);
+      if (imagineSavedItemIsSource(item)) {
+        if (itemId && !sourceOwnerById.has(itemId)) sourceOwnerById.set(itemId, index);
+        continue;
+      }
       if (itemId && !ownerByItemId.has(itemId)) ownerByItemId.set(itemId, index);
     }
   });
@@ -609,7 +613,7 @@ function mergeImagineSavedLineageCards(cards) {
     const rootItem = (candidate.items || [])
       .find((item) => imagineSavedItemAssetId(item) === rootId);
     const parentId = imagineSavedItemSourceId(rootItem);
-    const parentOwner = ownerByItemId.get(parentId);
+    const parentOwner = ownerByItemId.get(parentId) ?? sourceOwnerById.get(parentId);
     if (parentId && parentOwner !== undefined && parentOwner !== index) {
       parentIndexes[index] = parentOwner;
     }
@@ -869,29 +873,39 @@ function finishImagineSavedRequest(context) {
   }
 }
 
-function applyImagineSavedRemotePage(data) {
-  const normalized = normalizeImagineRemotePosts(
-    Array.isArray(data.posts) ? data.posts : [],
-  );
-  const pending = [
-    ...restoreImaginePendingSavedPosts(),
-    ...imaginePendingSavedPosts(),
-  ];
-  const currentPosts = (library_state.imagineRemotePosts || [])
-    .filter((post) => !imagineSavedPostIsPending(post));
-  library_state.imagineRemotePosts = reconcileImagineSavedDisplayPosts(
-    reconcileImaginePendingSavedPosts(
-      mergeImagineSyncedPosts(currentPosts, normalized),
-      pending,
-    ),
-  );
+function applyImagineSavedRemotePage(data, { updatePosts = true } = {}) {
+  if (updatePosts) {
+    const normalized = normalizeImagineRemotePosts(
+      Array.isArray(data.posts) ? data.posts : [],
+    );
+    const pending = [
+      ...restoreImaginePendingSavedPosts(),
+      ...imaginePendingSavedPosts(),
+    ];
+    const currentPosts = (library_state.imagineRemotePosts || [])
+      .filter((post) => !imagineSavedPostIsPending(post));
+    library_state.imagineRemotePosts = reconcileImagineSavedDisplayPosts(
+      reconcileImaginePendingSavedPosts(
+        mergeImagineSyncedPosts(currentPosts, normalized),
+        pending,
+      ),
+    );
+  }
   library_state.imagineRemoteCursor = String(data.next_cursor || "");
   library_state.imagineRemoteSyncToken = String(
     data.sync_token || library_state.imagineRemoteSyncToken || "",
   );
 }
 
-async function syncImagineSavedCards(context, { append = false, force = false, showLoading = false } = {}) {
+async function syncImagineSavedCards(
+  context,
+  {
+    append = false,
+    force = false,
+    showLoading = false,
+    updatePosts = true,
+  } = {},
+) {
   if (!imagineSavedRequestIsCurrent(context) || !canLoadImagineSavedList()) return;
   library_state.imagineRemoteSyncing = true;
   if (showLoading) library_state.imagineRemoteLoading = true;
@@ -906,7 +920,7 @@ async function syncImagineSavedCards(context, { append = false, force = false, s
       sync_token: library_state.imagineRemoteSyncToken,
     }, { signal: context.controller.signal });
     if (!imagineSavedResponseMatches(context, data)) return;
-    applyImagineSavedRemotePage(data);
+    applyImagineSavedRemotePage(data, { updatePosts });
     library_state.imagineRemoteError = "";
   } catch (error) {
     if (!imagineSavedRequestCancelled(error, context) && !library_state.imagineRemotePosts.length) {
@@ -925,7 +939,7 @@ async function syncImagineSavedCards(context, { append = false, force = false, s
       if (imaginePendingSavedPosts().length) scheduleImaginePendingSavedRefresh();
       else imaginePendingSavedRefreshAttempt = 0;
       library_state.imagineRemoteSyncPromise = null;
-      renderImagineSourceCards();
+      if (updatePosts) renderImagineSourceCards();
     }
     finishImagineSavedRequest(context);
   }
@@ -946,7 +960,12 @@ function scheduleImagineSavedSync(context) {
         return;
       }
       Promise.resolve(
-        syncImagineSavedCards(context, { append: false, force: false, showLoading: false }),
+        syncImagineSavedCards(context, {
+          append: false,
+          force: false,
+          showLoading: false,
+          updatePosts: false,
+        }),
       ).then(resolve, resolve);
     }, IMAGINE_SAVED_BACKGROUND_SYNC_DELAY_MS);
   });
@@ -1022,7 +1041,6 @@ async function loadImagineSavedCards({ force = false, append = false } = {}) {
         );
         library_state.imagineRemoteCacheHasMore = Boolean(cacheData.has_more);
         loadedCachePage = true;
-        renderImagineSourceCards();
       } catch (error) {
         if (imagineSavedRequestCancelled(error, context)) return;
         loadError = error;

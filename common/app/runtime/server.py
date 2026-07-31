@@ -3653,11 +3653,14 @@ def merge_imagine_saved_lineage_cards(cards: list[dict]) -> list[dict]:
             root_owner_by_id.setdefault(root_id, index)
 
     owner_by_item_id = dict(root_owner_by_id)
+    source_owner_by_id: dict[str, int] = {}
     for index, card in enumerate(active):
         for item in card.get("items") or []:
-            if imagine_item_is_source(item):
-                continue
             item_id = imagine_item_asset_id(item)
+            if imagine_item_is_source(item):
+                if item_id:
+                    source_owner_by_id.setdefault(item_id, index)
+                continue
             if item_id:
                 owner_by_item_id.setdefault(item_id, index)
 
@@ -3675,6 +3678,8 @@ def merge_imagine_saved_lineage_cards(cards: list[dict]) -> list[dict]:
         ), None)
         parent_id = imagine_item_source_id(root_item or {})
         parent_owner = owner_by_item_id.get(parent_id)
+        if parent_owner is None:
+            parent_owner = source_owner_by_id.get(parent_id)
         if parent_id and parent_owner is not None and parent_owner != index:
             parent_indexes[index] = parent_owner
 
