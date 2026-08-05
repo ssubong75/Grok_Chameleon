@@ -1073,7 +1073,7 @@ jobs:
             local launch_started launch_output open_pid app_started
             launch_started="$(date -u '+%Y-%m-%d %H:%M:%S%z')"
             launch_output="$RUNNER_TEMP/packaged-mac-launch-$cycle.log"
-            open -n "$archive_app" >"$launch_output" 2>&1 &
+            open -n "$archive_utility_main" >"$launch_output" 2>&1 &
             open_pid=$!
             app_started=false
             for attempt in {1..40}; do
@@ -1120,12 +1120,12 @@ jobs:
             kill "$open_pid" 2>/dev/null || true
             wait "$open_pid" 2>/dev/null || true
             for attempt in {1..40}; do
-              if ! mount | grep -F "$archive_app on " >/dev/null; then
+              if ! mount | grep -F "$archive_utility_main on " >/dev/null; then
                 break
               fi
               sleep 0.25
             done
-            if mount | grep -F "$archive_app on "; then
+            if mount | grep -F "$archive_utility_main on "; then
               echo "AppTranslocation mount remained after clean shutdown on cycle $cycle." >&2
               exit 1
             fi
