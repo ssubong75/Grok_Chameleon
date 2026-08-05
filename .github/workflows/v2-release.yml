@@ -582,7 +582,12 @@ jobs:
           export COPYFILE_DISABLE=1
           mkdir -p unpack output verify
           ditto -x -k "input/$INPUT_ZIP" unpack
-          root="$PWD/unpack/Grok Chameleon"
+          assembled_root="$PWD/unpack/Grok Chameleon"
+          clean_parent="$RUNNER_TEMP/grok-chameleon-final-stage"
+          test ! -e "$clean_parent"
+          mkdir -p "$clean_parent"
+          ditto --norsrc --noextattr --noacl --noqtn "$assembled_root" "$clean_parent/Grok Chameleon"
+          root="$clean_parent/Grok Chameleon"
           main_app="$root/Grok Chameleon.app"
           migration_app="$root/Migration.app"
           app_root="$main_app/Contents/Resources/app"
@@ -973,14 +978,13 @@ jobs:
             echo 'Quarantine attribute remains before Mac signing.' >&2
             exit 1
           fi
-          codesign --force --sign - --timestamp=none "$main_app"
+          codesign --force --deep --sign - --timestamp=none "$main_app"
           codesign --verify --deep --strict --verbose=4 "$main_app"
           plutil -lint "$main_app/Contents/Info.plist"
           xattr -cr "$root"
-          (
-            cd "$(dirname "$root")"
-            COPYFILE_DISABLE=1 /usr/bin/zip -qry -y "$GITHUB_WORKSPACE/output/$OUTPUT_ZIP" "$(basename "$root")"
-          )
+          output_zip="$GITHUB_WORKSPACE/output/$OUTPUT_ZIP"
+          test ! -e "$output_zip"
+          ditto -c -k --keepParent --norsrc --noextattr --noacl --noqtn "$root" "$output_zip"
           unzip -t "output/$OUTPUT_ZIP" >/dev/null
           if zipinfo -1 "output/$OUTPUT_ZIP" | grep -E '(^|/)(__MACOSX|\._|\.DS_Store)(/|$)'; then
             echo 'AppleDouble or Finder metadata found in Mac output.' >&2
