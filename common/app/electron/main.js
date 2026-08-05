@@ -7,7 +7,7 @@ const os = require("node:os");
 const net = require("node:net");
 
 const APP_NAME = "Grok Chameleon";
-const APP_BUNDLE_IDENTIFIER = "local.grokchameleon.app";
+const APP_BUNDLE_IDENTIFIER = "local.grokchameleon.v2.app";
 const APP_ROOT = path.resolve(__dirname, "..");
 const CERTIFI_CA = path.join(APP_ROOT, "vendor", "python", "certifi", "cacert.pem");
 const VENDOR_PYTHON = path.join(APP_ROOT, "vendor", "python");
