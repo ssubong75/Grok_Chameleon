@@ -976,10 +976,10 @@ jobs:
             echo 'Python cache found before Mac packaging.' >&2
             exit 1
           fi
-          /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier local.grokchameleon.v2.app' "$info_plist"
+          /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier local.grokchameleon.app' "$info_plist"
           /usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 2.0.0' "$info_plist"
           /usr/libexec/PlistBuddy -c 'Set :CFBundleVersion 2' "$info_plist"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$info_plist")" = 'local.grokchameleon.v2.app'
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$info_plist")" = 'local.grokchameleon.app'
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$info_plist")" = '2.0.0'
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$info_plist")" = '2'
           xattr -cr "$root"
@@ -1015,7 +1015,7 @@ jobs:
           test -L "$verified_main/Contents/Frameworks/Electron Framework.framework/Versions/Current"
           test -L "$verified_main/Contents/Frameworks/Electron Framework.framework/Electron Framework"
           codesign --verify --deep --strict --verbose=4 "$verified_main"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$verified_main/Contents/Info.plist")" = 'local.grokchameleon.v2.app'
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$verified_main/Contents/Info.plist")" = 'local.grokchameleon.app'
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$verified_main/Contents/Info.plist")" = '2.0.0'
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$verified_main/Contents/Info.plist")" = '2'
           for relative in "${shared_relatives[@]}"; do
@@ -1348,7 +1348,7 @@ jobs:
           test -L "$main_app/Contents/Frameworks/Electron Framework.framework/Electron Framework"
           find "$app_root/vendor/python" -type f -name '*darwin.so' -print -quit | grep -q .
           plutil -lint "$main_app/Contents/Info.plist"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$main_app/Contents/Info.plist")" = 'local.grokchameleon.v2.app'
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$main_app/Contents/Info.plist")" = 'local.grokchameleon.app'
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$main_app/Contents/Info.plist")" = '2.0.0'
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$main_app/Contents/Info.plist")" = '2'
           codesign --verify --deep --strict --verbose=4 "$main_app"
