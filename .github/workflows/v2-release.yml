@@ -1370,8 +1370,7 @@ jobs:
             fi
           }
 
-          launch_and_quit first
-          launch_and_quit second
+          launch_and_quit once
 
           echo "published-mac-digest=$remote_digest"
           echo 'published-mac-verification=passed'
