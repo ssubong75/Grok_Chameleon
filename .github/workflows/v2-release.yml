@@ -1150,3 +1150,186 @@ jobs:
           trap - ERR
           echo "windows-production-digest=$win_remote"
           echo "mac-production-digest=$mac_remote"
+
+  verify-published-macos:
+    runs-on: macos-15
+    timeout-minutes: 35
+    needs:
+      - publish
+    permissions:
+      contents: read
+    env:
+      RELEASE_TAG: v2.0.0
+      MAC_ZIP: Mac_Grok_Chameleon_v2.0.zip
+
+    steps:
+      - name: Check out the exact shared source commit
+        uses: actions/checkout@v4
+
+      - name: Download and verify the actual published Mac ZIP
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          export COPYFILE_DISABLE=1
+          published_dir="$RUNNER_TEMP/published-release"
+          ditto_dir="$RUNNER_TEMP/ditto-extracted"
+          archive_dir="$RUNNER_TEMP/archive-utility-extracted"
+          mkdir -p "$published_dir" "$ditto_dir" "$archive_dir"
+
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$MAC_ZIP" \
+            --dir "$published_dir"
+          published_zip="$published_dir/$MAC_ZIP"
+          local_digest="sha256:$(shasum -a 256 "$published_zip" | awk '{print $1}')"
+          remote_digest="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | select(.name == "'"$MAC_ZIP"'") | .digest')"
+          test -n "$remote_digest"
+          test "$local_digest" = "$remote_digest"
+
+          unzip -t "$published_zip" >/dev/null
+          if zipinfo -1 "$published_zip" | grep -E '(^|/)(__MACOSX|\._|\.DS_Store)(/|$)'; then
+            echo 'Forbidden AppleDouble or Finder metadata exists in the published ZIP.' >&2
+            exit 1
+          fi
+          top_levels="$(zipinfo -1 "$published_zip" | sed '/^$/d' | cut -d/ -f1 | sort -u)"
+          test "$top_levels" = 'Grok Chameleon'
+
+          ditto -x -k "$published_zip" "$ditto_dir"
+          root="$ditto_dir/Grok Chameleon"
+          main_app="$root/Grok Chameleon.app"
+          app_root="$main_app/Contents/Resources/app"
+          main_exec="$main_app/Contents/MacOS/Grok Chameleon"
+          python_exec="$main_app/Contents/Resources/Python/bin/python3"
+          common_root="$GITHUB_WORKSPACE/common/app"
+          shared_relatives=(
+            electron/main.js
+            electron/preload-bridge.js
+            runtime/server.py
+            runtime/library_index.py
+            runtime/imagine_state.py
+            runtime/imagine_accounts.py
+            runtime/imagine_routes.py
+            web/index.html
+            web/scripts/state.js
+            web/scripts/build_main.js
+            web/scripts/b_composer_submit.js
+            web/scripts/b_source_render.js
+            web/scripts/b_detail_actions.js
+            web/scripts/sidebar_events.js
+            web/styles/sidebar.css
+            web/scripts/collection_events.js
+            web/scripts/collection_render.js
+            web/styles/collection.css
+            web/styles/main.css
+            web/scripts/card_render.js
+            web/scripts/card_actions.js
+            web/scripts/screen_events.js
+            web/scripts/screen_router.js
+            web/scripts/navigation_history.js
+            web/scripts/i_detail_actions.js
+            web/scripts/composer_events.js
+            web/scripts/composer_provider.js
+            web/styles/cards_prompt.css
+            web/scripts/composer_options.js
+            web/scripts/composer_attachments.js
+            web/scripts/i_composer_submit.js
+            web/scripts/library_core.js
+            web/scripts/library_scan.js
+            web/scripts/detail_state.js
+            web/scripts/detail_media.js
+            web/scripts/detail_events.js
+            web/scripts/detail_navigation.js
+            web/scripts/detail_render.js
+            web/styles/detail.css
+            web/scripts/i_source_render.js
+            web/scripts/imagine_main.js
+            web/scripts/render.js
+            web/scripts/collection_actions.js
+            web/scripts/image_editor_flow.js
+            web/scripts/search_render.js
+            web/scripts/prompt_events.js
+            web/scripts/prompt_account.js
+            web/scripts/account_core.js
+            web/scripts/ui_feedback.js
+            web/styles/account.css
+          )
+
+          test -d "$root"
+          test -d "$app_root"
+          test -f "$main_app/Contents/Info.plist"
+          test -x "$main_exec"
+          test -x "$python_exec"
+          test -L "$main_app/Contents/Frameworks/Electron Framework.framework/Versions/Current"
+          test -L "$main_app/Contents/Frameworks/Electron Framework.framework/Electron Framework"
+          find "$app_root/vendor/python" -type f -name '*darwin.so' -print -quit | grep -q .
+          plutil -lint "$main_app/Contents/Info.plist"
+          codesign --verify --deep --strict --verbose=4 "$main_app"
+
+          broken_links=0
+          while IFS= read -r -d '' link; do
+            if [[ ! -e "$link" ]]; then
+              echo "Broken symbolic link: $link" >&2
+              broken_links=1
+            fi
+          done < <(find "$root" -type l -print0)
+          test "$broken_links" -eq 0
+
+          if find "$root" \( -name '__MACOSX' -o -name '._*' -o -name '.DS_Store' -o -name '__pycache__' \) -print | grep -q .; then
+            echo 'Forbidden metadata exists after ditto extraction.' >&2
+            exit 1
+          fi
+          for relative in "${shared_relatives[@]}"; do
+            cmp "$common_root/$relative" "$app_root/$relative"
+            if [[ "$relative" == *.js ]]; then
+              node --check "$app_root/$relative"
+            fi
+          done
+          "$python_exec" -c 'import sys; print("PUBLISHED_MAC_PYTHON_OK", sys.version_info[:3])'
+          ELECTRON_RUN_AS_NODE=1 "$main_exec" -e 'console.log("PUBLISHED_MAC_ELECTRON_OK")'
+
+          cp "$published_zip" "$archive_dir/$MAC_ZIP"
+          quarantined_zip="$archive_dir/$MAC_ZIP"
+          xattr -w com.apple.quarantine '0081;00000000;Chrome;' "$quarantined_zip"
+          open -W -a 'Archive Utility' "$quarantined_zip"
+          archive_root="$archive_dir/Grok Chameleon"
+          archive_app="$archive_root/Grok Chameleon.app"
+          archive_exec="$archive_app/Contents/MacOS/Grok Chameleon"
+          test -d "$archive_root"
+          test -d "$archive_app/Contents/Resources/app"
+          test -x "$archive_exec"
+          test -L "$archive_app/Contents/Frameworks/Electron Framework.framework/Versions/Current"
+          test -L "$archive_app/Contents/Frameworks/Electron Framework.framework/Electron Framework"
+          codesign --verify --deep --strict --verbose=4 "$archive_app"
+          if find "$archive_root" \( -name '__MACOSX' -o -name '._*' -o -name '.DS_Store' -o -name '__pycache__' \) -print | grep -q .; then
+            echo 'Forbidden metadata exists after Archive Utility extraction.' >&2
+            exit 1
+          fi
+
+          launch_started="$(date -u '+%Y-%m-%d %H:%M:%S%z')"
+          launchctl setenv ELECTRON_RUN_AS_NODE 1
+          cleanup_launch_env() {
+            launchctl unsetenv ELECTRON_RUN_AS_NODE || true
+          }
+          trap cleanup_launch_env EXIT
+          launch_output="$RUNNER_TEMP/published-mac-launch.log"
+          if ! open -W -n "$archive_app" --args -e 'setTimeout(() => process.exit(0), 500)' >"$launch_output" 2>&1; then
+            cat "$launch_output" >&2
+            exit 1
+          fi
+          cleanup_launch_env
+          trap - EXIT
+          if grep -E -- '-47|fBsyErr|Resource busy' "$launch_output"; then
+            echo 'ZIP -47 launch failure detected.' >&2
+            exit 1
+          fi
+          launch_failures="$(log show --start "$launch_started" --style compact --predicate '(process == "CoreServicesUIAgent") && (eventMessage CONTAINS "-47" || eventMessage CONTAINS "fBsyErr" || eventMessage CONTAINS "Resource busy")' 2>/dev/null || true)"
+          if [[ -n "$launch_failures" ]]; then
+            printf '%s\n' "$launch_failures" >&2
+            echo 'ZIP -47 launch failure detected in macOS unified log.' >&2
+            exit 1
+          fi
+
+          echo "published-mac-digest=$remote_digest"
+          echo 'published-mac-verification=passed'
