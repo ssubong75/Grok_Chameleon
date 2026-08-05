@@ -977,7 +977,10 @@ jobs:
           codesign --verify --deep --strict --verbose=4 "$main_app"
           plutil -lint "$main_app/Contents/Info.plist"
           xattr -cr "$root"
-          ditto -c -k --keepParent --norsrc --noextattr --noacl --noqtn "$root" "output/$OUTPUT_ZIP"
+          (
+            cd "$(dirname "$root")"
+            COPYFILE_DISABLE=1 /usr/bin/zip -qry -y "$GITHUB_WORKSPACE/output/$OUTPUT_ZIP" "$(basename "$root")"
+          )
           unzip -t "output/$OUTPUT_ZIP" >/dev/null
           if zipinfo -1 "output/$OUTPUT_ZIP" | grep -E '(^|/)(__MACOSX|\._|\.DS_Store)(/|$)'; then
             echo 'AppleDouble or Finder metadata found in Mac output.' >&2
@@ -1048,6 +1051,23 @@ jobs:
             exit 1
           fi
           ELECTRON_RUN_AS_NODE=1 "$verified_main/Contents/MacOS/Grok Chameleon" -e 'console.log("MAC_ELECTRON_OK")'
+
+          archive_utility_dir="$PWD/archive-utility-test"
+          mkdir -p "$archive_utility_dir"
+          cp "output/$OUTPUT_ZIP" "$archive_utility_dir/$OUTPUT_ZIP"
+          xattr -w com.apple.quarantine '0081;00000000;Chrome;' "$archive_utility_dir/$OUTPUT_ZIP"
+          open -W -a 'Archive Utility' "$archive_utility_dir/$OUTPUT_ZIP"
+          archive_utility_root="$archive_utility_dir/Grok Chameleon"
+          archive_utility_main="$archive_utility_root/Grok Chameleon.app"
+          test -d "$archive_utility_root"
+          test -x "$archive_utility_main/Contents/MacOS/Grok Chameleon"
+          test -L "$archive_utility_main/Contents/Frameworks/Electron Framework.framework/Versions/Current"
+          test -L "$archive_utility_main/Contents/Frameworks/Electron Framework.framework/Electron Framework"
+          codesign --verify --deep --strict --verbose=4 "$archive_utility_main"
+          if find "$archive_utility_root" \( -name '__MACOSX' -o -name '._*' -o -name '.DS_Store' -o -name '__pycache__' \) -print | grep -q .; then
+            echo 'Forbidden metadata found after Archive Utility extraction.' >&2
+            exit 1
+          fi
           shasum -a 256 "output/$OUTPUT_ZIP"
 
       - name: Retain the verified Mac build
