@@ -1,0 +1,1132 @@
+name: Grok Chameleon v2 release
+
+on:
+  push:
+    branches:
+      - v2
+
+permissions:
+  contents: write
+
+concurrency:
+  group: grok-chameleon-v2-release
+  cancel-in-progress: false
+
+env:
+  COMMON_MAIN: common/app/electron/main.js
+  COMMON_INDEX: common/app/web/index.html
+  COMMON_STATE: common/app/web/scripts/state.js
+  COMMON_BUILD_MAIN: common/app/web/scripts/build_main.js
+  COMMON_B_SUBMIT: common/app/web/scripts/b_composer_submit.js
+  COMMON_B_SOURCE: common/app/web/scripts/b_source_render.js
+  COMMON_B_DETAIL_ACTIONS: common/app/web/scripts/b_detail_actions.js
+  COMMON_SIDEBAR_EVENTS: common/app/web/scripts/sidebar_events.js
+  COMMON_SIDEBAR_STYLE: common/app/web/styles/sidebar.css
+  COMMON_COLLECTION_EVENTS: common/app/web/scripts/collection_events.js
+  COMMON_COLLECTION_RENDER: common/app/web/scripts/collection_render.js
+  COMMON_COLLECTION_STYLE: common/app/web/styles/collection.css
+  COMMON_MAIN_STYLE: common/app/web/styles/main.css
+  COMMON_CARD_RENDER: common/app/web/scripts/card_render.js
+  COMMON_CARD_ACTIONS: common/app/web/scripts/card_actions.js
+  COMMON_SCREEN_EVENTS: common/app/web/scripts/screen_events.js
+  COMMON_SCREEN_ROUTER: common/app/web/scripts/screen_router.js
+  COMMON_NAVIGATION_HISTORY: common/app/web/scripts/navigation_history.js
+  COMMON_I_DETAIL_ACTIONS: common/app/web/scripts/i_detail_actions.js
+  COMMON_COMPOSER_EVENTS: common/app/web/scripts/composer_events.js
+  COMMON_COMPOSER_PROVIDER: common/app/web/scripts/composer_provider.js
+  COMMON_CARDS_PROMPT_STYLE: common/app/web/styles/cards_prompt.css
+  COMMON_COMPOSER: common/app/web/scripts/composer_options.js
+  COMMON_ATTACHMENTS: common/app/web/scripts/composer_attachments.js
+  COMMON_I_SUBMIT: common/app/web/scripts/i_composer_submit.js
+  COMMON_LIBRARY_CORE: common/app/web/scripts/library_core.js
+  COMMON_LIBRARY_SCAN: common/app/web/scripts/library_scan.js
+  COMMON_DETAIL_STATE: common/app/web/scripts/detail_state.js
+  COMMON_DETAIL_MEDIA: common/app/web/scripts/detail_media.js
+  COMMON_DETAIL_EVENTS: common/app/web/scripts/detail_events.js
+  COMMON_DETAIL_NAVIGATION: common/app/web/scripts/detail_navigation.js
+  COMMON_DETAIL_RENDER: common/app/web/scripts/detail_render.js
+  COMMON_DETAIL_STYLE: common/app/web/styles/detail.css
+  COMMON_I_SOURCE: common/app/web/scripts/i_source_render.js
+  COMMON_IMAGINE_MAIN: common/app/web/scripts/imagine_main.js
+  COMMON_RENDER: common/app/web/scripts/render.js
+  COMMON_COLLECTION_ACTIONS: common/app/web/scripts/collection_actions.js
+  COMMON_IMAGE_EDITOR_FLOW: common/app/web/scripts/image_editor_flow.js
+  COMMON_SEARCH_RENDER: common/app/web/scripts/search_render.js
+  COMMON_PROMPT_EVENTS: common/app/web/scripts/prompt_events.js
+  COMMON_UI_FEEDBACK: common/app/web/scripts/ui_feedback.js
+  COMMON_ACCOUNT_STYLE: common/app/web/styles/account.css
+  COMMON_PRELOAD: common/app/electron/preload-bridge.js
+  COMMON_SERVER: common/app/runtime/server.py
+  COMMON_LIBRARY_INDEX: common/app/runtime/library_index.py
+  COMMON_IMAGINE_STATE: common/app/runtime/imagine_state.py
+  COMMON_IMAGINE_ACCOUNTS: common/app/runtime/imagine_accounts.py
+  COMMON_IMAGINE_ROUTES: common/app/runtime/imagine_routes.py
+  COMMON_PROMPT_ACCOUNT: common/app/web/scripts/prompt_account.js
+  COMMON_ACCOUNT_CORE: common/app/web/scripts/account_core.js
+
+jobs:
+  build-windows:
+    runs-on: windows-2025
+    timeout-minutes: 35
+    outputs:
+      input_sha256: ${{ steps.windows_input.outputs.sha256 }}
+    env:
+      RELEASE_TAG: v1.0.0
+      INPUT_ZIP: Win_Grok_Chameleon.zip
+      OUTPUT_ZIP: Win_Grok_Chameleon.zip
+
+    steps:
+      - name: Check out the shared source commit
+        uses: actions/checkout@v4
+
+      - name: Download the exact Windows runtime package
+        id: windows_input
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force input | Out-Null
+          gh release download $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --pattern $env:INPUT_ZIP --dir input
+          if ($LASTEXITCODE -ne 0) { throw "Windows release download failed." }
+          $inputZip = Join-Path $env:GITHUB_WORKSPACE "input\$env:INPUT_ZIP"
+          $inputHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $inputZip).Hash.ToLowerInvariant()
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "sha256=$inputHash" -Encoding utf8
+
+      - name: Assemble and verify Windows from the shared source
+        shell: pwsh
+        env:
+          EXPECTED_INPUT_SHA256: ${{ steps.windows_input.outputs.sha256 }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $sevenZip = (Get-Command 7z.exe -ErrorAction Stop).Source
+          New-Item -ItemType Directory -Force unpack, output, verify | Out-Null
+          $inputZip = Join-Path $env:GITHUB_WORKSPACE "input\$env:INPUT_ZIP"
+          $outputZip = Join-Path $env:GITHUB_WORKSPACE "output\$env:OUTPUT_ZIP"
+          $root = Join-Path $env:GITHUB_WORKSPACE "unpack\Grok Chameleon"
+          $appRoot = Join-Path $root "Resources\Grok Chameleon\resources\app"
+          $state = Join-Path $appRoot "web\scripts\state.js"
+          $outerExe = Join-Path $root "Grok Chameleon.exe"
+          $innerExe = Join-Path $root "Resources\Grok Chameleon\Grok Chameleon.exe"
+          $windowsSvgArrowPatch = Join-Path $env:GITHUB_WORKSPACE "tools\patch_windows_svg_arrows.py"
+          $sharedSources = @(
+            @{ Name = "main"; Relative = "electron\main.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_MAIN) },
+            @{ Name = "preload"; Relative = "electron\preload-bridge.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_PRELOAD) },
+            @{ Name = "server"; Relative = "runtime\server.py"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_SERVER) },
+            @{ Name = "library_index"; Relative = "runtime\library_index.py"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_LIBRARY_INDEX) },
+            @{ Name = "imagine_state"; Relative = "runtime\imagine_state.py"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_IMAGINE_STATE) },
+            @{ Name = "imagine_accounts"; Relative = "runtime\imagine_accounts.py"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_IMAGINE_ACCOUNTS) },
+            @{ Name = "imagine_routes"; Relative = "runtime\imagine_routes.py"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_IMAGINE_ROUTES) },
+            @{ Name = "index"; Relative = "web\index.html"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_INDEX) },
+            @{ Name = "state"; Relative = "web\scripts\state.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_STATE) },
+            @{ Name = "build_main"; Relative = "web\scripts\build_main.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_BUILD_MAIN) },
+            @{ Name = "b_submit"; Relative = "web\scripts\b_composer_submit.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_B_SUBMIT) },
+            @{ Name = "b_source"; Relative = "web\scripts\b_source_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_B_SOURCE) },
+            @{ Name = "b_detail_actions"; Relative = "web\scripts\b_detail_actions.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_B_DETAIL_ACTIONS) },
+            @{ Name = "sidebar_events"; Relative = "web\scripts\sidebar_events.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_SIDEBAR_EVENTS) },
+            @{ Name = "sidebar_style"; Relative = "web\styles\sidebar.css"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_SIDEBAR_STYLE) },
+            @{ Name = "collection_events"; Relative = "web\scripts\collection_events.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_COLLECTION_EVENTS) },
+            @{ Name = "collection_render"; Relative = "web\scripts\collection_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_COLLECTION_RENDER) },
+            @{ Name = "collection_style"; Relative = "web\styles\collection.css"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_COLLECTION_STYLE) },
+            @{ Name = "main_style"; Relative = "web\styles\main.css"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_MAIN_STYLE) },
+            @{ Name = "card_render"; Relative = "web\scripts\card_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_CARD_RENDER) },
+            @{ Name = "card_actions"; Relative = "web\scripts\card_actions.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_CARD_ACTIONS) },
+            @{ Name = "screen_events"; Relative = "web\scripts\screen_events.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_SCREEN_EVENTS) },
+            @{ Name = "screen_router"; Relative = "web\scripts\screen_router.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_SCREEN_ROUTER) },
+            @{ Name = "navigation_history"; Relative = "web\scripts\navigation_history.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_NAVIGATION_HISTORY) },
+            @{ Name = "i_detail_actions"; Relative = "web\scripts\i_detail_actions.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_I_DETAIL_ACTIONS) },
+            @{ Name = "composer_events"; Relative = "web\scripts\composer_events.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_COMPOSER_EVENTS) },
+            @{ Name = "composer_provider"; Relative = "web\scripts\composer_provider.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_COMPOSER_PROVIDER) },
+            @{ Name = "cards_prompt_style"; Relative = "web\styles\cards_prompt.css"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_CARDS_PROMPT_STYLE) },
+            @{ Name = "composer"; Relative = "web\scripts\composer_options.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_COMPOSER) },
+            @{ Name = "attachments"; Relative = "web\scripts\composer_attachments.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_ATTACHMENTS) },
+            @{ Name = "i_submit"; Relative = "web\scripts\i_composer_submit.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_I_SUBMIT) },
+            @{ Name = "library_core"; Relative = "web\scripts\library_core.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_LIBRARY_CORE) },
+            @{ Name = "library_scan"; Relative = "web\scripts\library_scan.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_LIBRARY_SCAN) },
+            @{ Name = "detail_state"; Relative = "web\scripts\detail_state.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_STATE) },
+            @{ Name = "detail_media"; Relative = "web\scripts\detail_media.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_MEDIA) },
+            @{ Name = "detail_events"; Relative = "web\scripts\detail_events.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_EVENTS) },
+            @{ Name = "detail_navigation"; Relative = "web\scripts\detail_navigation.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_NAVIGATION) },
+            @{ Name = "detail_render"; Relative = "web\scripts\detail_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_RENDER) },
+            @{ Name = "detail_style"; Relative = "web\styles\detail.css"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_STYLE) },
+            @{ Name = "i_source"; Relative = "web\scripts\i_source_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_I_SOURCE) },
+            @{ Name = "imagine_main"; Relative = "web\scripts\imagine_main.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_IMAGINE_MAIN) },
+            @{ Name = "render"; Relative = "web\scripts\render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_RENDER) },
+            @{ Name = "collection_actions"; Relative = "web\scripts\collection_actions.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_COLLECTION_ACTIONS) },
+            @{ Name = "image_editor_flow"; Relative = "web\scripts\image_editor_flow.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_IMAGE_EDITOR_FLOW) },
+            @{ Name = "search_render"; Relative = "web\scripts\search_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_SEARCH_RENDER) },
+            @{ Name = "prompt_events"; Relative = "web\scripts\prompt_events.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_PROMPT_EVENTS) },
+            @{ Name = "prompt_account"; Relative = "web\scripts\prompt_account.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_PROMPT_ACCOUNT) },
+            @{ Name = "account_core"; Relative = "web\scripts\account_core.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_ACCOUNT_CORE) },
+            @{ Name = "ui_feedback"; Relative = "web\scripts\ui_feedback.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_UI_FEEDBACK) },
+            @{ Name = "account_style"; Relative = "web\styles\account.css"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_ACCOUNT_STYLE) }
+          )
+          foreach ($shared in $sharedSources) {
+            $shared.Target = Join-Path $appRoot $shared.Relative
+          }
+          $targetMain = ($sharedSources | Where-Object Name -eq "main").Target
+          $targetPreload = ($sharedSources | Where-Object Name -eq "preload").Target
+          $targetServer = ($sharedSources | Where-Object Name -eq "server").Target
+          $targetLibraryIndex = ($sharedSources | Where-Object Name -eq "library_index").Target
+          $targetImagineState = ($sharedSources | Where-Object Name -eq "imagine_state").Target
+          $targetImagineAccounts = ($sharedSources | Where-Object Name -eq "imagine_accounts").Target
+          $targetImagineRoutes = ($sharedSources | Where-Object Name -eq "imagine_routes").Target
+          $targetPromptAccount = ($sharedSources | Where-Object Name -eq "prompt_account").Target
+          $targetAccountCore = ($sharedSources | Where-Object Name -eq "account_core").Target
+          $targetIndex = ($sharedSources | Where-Object Name -eq "index").Target
+          $targetState = ($sharedSources | Where-Object Name -eq "state").Target
+          $targetBuildMain = ($sharedSources | Where-Object Name -eq "build_main").Target
+          $targetBSubmit = ($sharedSources | Where-Object Name -eq "b_submit").Target
+          $targetBSource = ($sharedSources | Where-Object Name -eq "b_source").Target
+          $targetSidebarEvents = ($sharedSources | Where-Object Name -eq "sidebar_events").Target
+          $targetMainStyle = ($sharedSources | Where-Object Name -eq "main_style").Target
+          $targetCardRender = ($sharedSources | Where-Object Name -eq "card_render").Target
+          $targetIDetailActions = ($sharedSources | Where-Object Name -eq "i_detail_actions").Target
+          $targetComposerEvents = ($sharedSources | Where-Object Name -eq "composer_events").Target
+          $targetCardsPromptStyle = ($sharedSources | Where-Object Name -eq "cards_prompt_style").Target
+          $targetComposer = ($sharedSources | Where-Object Name -eq "composer").Target
+          $targetAttachments = ($sharedSources | Where-Object Name -eq "attachments").Target
+          $targetISubmit = ($sharedSources | Where-Object Name -eq "i_submit").Target
+          $targetLibraryCore = ($sharedSources | Where-Object Name -eq "library_core").Target
+          $targetLibraryScan = ($sharedSources | Where-Object Name -eq "library_scan").Target
+          $targetCollectionRender = ($sharedSources | Where-Object Name -eq "collection_render").Target
+          $targetDetailState = ($sharedSources | Where-Object Name -eq "detail_state").Target
+          $targetDetailMedia = ($sharedSources | Where-Object Name -eq "detail_media").Target
+          $targetDetailNavigation = ($sharedSources | Where-Object Name -eq "detail_navigation").Target
+          $targetDetailRender = ($sharedSources | Where-Object Name -eq "detail_render").Target
+          $targetDetailStyle = ($sharedSources | Where-Object Name -eq "detail_style").Target
+          $targetISource = ($sharedSources | Where-Object Name -eq "i_source").Target
+          $targetCollectionActions = ($sharedSources | Where-Object Name -eq "collection_actions").Target
+          $targetSearchRender = ($sharedSources | Where-Object Name -eq "search_render").Target
+          $targetPromptEvents = ($sharedSources | Where-Object Name -eq "prompt_events").Target
+          $targetUiFeedback = ($sharedSources | Where-Object Name -eq "ui_feedback").Target
+          $targetAccountStyle = ($sharedSources | Where-Object Name -eq "account_style").Target
+
+          $inputHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $inputZip).Hash.ToLowerInvariant()
+          if ($inputHash -ne $env:EXPECTED_INPUT_SHA256) { throw "Windows input digest changed: $inputHash" }
+          & $sevenZip t $inputZip
+          if ($LASTEXITCODE -ne 0) { throw "Windows input ZIP CRC check failed." }
+          & $sevenZip x -y "-o$env:GITHUB_WORKSPACE\unpack" $inputZip
+          if ($LASTEXITCODE -ne 0) { throw "Windows extraction failed." }
+          foreach ($required in @($sharedSources.Source + @(
+            $state,
+            $outerExe,
+            $innerExe,
+            $windowsSvgArrowPatch
+          ))) {
+            if (-not (Test-Path -LiteralPath $required)) { throw "Missing required file: $required" }
+          }
+
+          $exeHashes = @{
+            outer = (Get-FileHash -Algorithm SHA256 -LiteralPath $outerExe).Hash
+            inner = (Get-FileHash -Algorithm SHA256 -LiteralPath $innerExe).Hash
+          }
+          $sharedHashes = @{}
+          foreach ($shared in $sharedSources) {
+            Copy-Item -Force -LiteralPath $shared.Source -Destination $shared.Target
+            $sharedHashes[$shared.Name] = (Get-FileHash -Algorithm SHA256 -LiteralPath $shared.Source).Hash
+            if ((Get-FileHash -Algorithm SHA256 -LiteralPath $shared.Target).Hash -ne $sharedHashes[$shared.Name]) {
+              throw "Windows shared source copy mismatch: $($shared.Name)"
+            }
+          }
+          foreach ($migrationPath in @(
+            (Join-Path $root "Resources\Migration"),
+            (Join-Path $root "Migration.exe")
+          )) {
+            if (Test-Path -LiteralPath $migrationPath) {
+              Remove-Item -Recurse -Force -LiteralPath $migrationPath
+            }
+          }
+          foreach ($portableResidue in @(
+            (Join-Path $root ".library_path.json"),
+            (Join-Path $root "library_path.json"),
+            (Join-Path $root "runtime_data"),
+            (Join-Path $root "sql_data")
+          )) {
+            if (Test-Path -LiteralPath $portableResidue) {
+              Remove-Item -Recurse -Force -LiteralPath $portableResidue
+            }
+          }
+          python $windowsSvgArrowPatch --app-root $appRoot
+          if ($LASTEXITCODE -ne 0) { throw "Windows SVG arrow patch failed." }
+          foreach ($patchedShared in @(
+            @{ Name = "index"; Target = $targetIndex },
+            @{ Name = "card_render"; Target = $targetCardRender },
+            @{ Name = "cards_prompt_style"; Target = $targetCardsPromptStyle },
+            @{ Name = "detail_style"; Target = $targetDetailStyle }
+          )) {
+            $sharedHashes[$patchedShared.Name] = (Get-FileHash -Algorithm SHA256 -LiteralPath $patchedShared.Target).Hash
+          }
+          foreach ($javascript in $sharedSources | Where-Object { $_.Relative.EndsWith(".js") }) {
+            node --check $javascript.Target
+            if ($LASTEXITCODE -ne 0) { throw "Windows JavaScript syntax check failed: $($javascript.Relative)" }
+          }
+          python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" $targetServer
+          if ($LASTEXITCODE -ne 0) { throw "Windows server.py syntax check failed." }
+          python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" $targetLibraryIndex
+          if ($LASTEXITCODE -ne 0) { throw "Windows library_index.py syntax check failed." }
+          python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" $targetImagineState
+          if ($LASTEXITCODE -ne 0) { throw "Windows imagine_state.py syntax check failed." }
+          python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" $targetImagineAccounts
+          if ($LASTEXITCODE -ne 0) { throw "Windows imagine_accounts.py syntax check failed." }
+          python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" $targetImagineRoutes
+          if ($LASTEXITCODE -ne 0) { throw "Windows imagine_routes.py syntax check failed." }
+
+          $composerText = Get-Content -Raw -LiteralPath $targetComposer
+          foreach ($marker in @(
+            'const imageCountOptions = provider === "imagine"',
+            '? buildT2iCountOptions.filter((option) => option !== "1")',
+            'const imageCountDefault = "5";',
+            'setControlVisible(composerControls.count, !isImageToImage'
+          )) {
+            if (-not $composerText.Contains($marker)) { throw "Windows composer marker missing: $marker" }
+          }
+          $stateText = Get-Content -Raw -LiteralPath $state
+          if (-not $stateText.Contains('const buildT2iCountOptions = ["10", "8", "5", "4", "1"];')) {
+            throw "Build count options changed unexpectedly."
+          }
+          $preloadText = Get-Content -Raw -LiteralPath $targetPreload
+          foreach ($marker in @(
+            "const generationResponseCaptures = [];",
+            "conversation_request_route_applied",
+            "canonicalContainerId",
+            "baselineIds: Array.from(beforeIds)",
+            'const beforeIds = allCurrentIds(state, "video");',
+            "!tracking.retainTrackedCandidateUntilDeadline",
+            'retainTrackedCandidateUntilDeadline: tieredI2vWait || variant.kind === "textToVideo",',
+            "const finalEvents = finalContainerIds.flatMap((finalContainerId) => collectStoreEvents("
+          )) {
+            if (-not $preloadText.Contains($marker)) { throw "Windows relation bridge marker missing: $marker" }
+          }
+          if ($preloadText.Contains("if (hasInProgressCandidate && now - tracking.firstCandidateSeenAt >= storeObservationMs)")) {
+            throw "Windows eight-second video handoff guard is missing."
+          }
+          $serverText = Get-Content -Raw -LiteralPath $targetServer
+          foreach ($marker in @(
+            'import imagine_state',
+            'def normalize_json_unicode(value):',
+            '"database": "sql_data/state.sqlite3"',
+            'relation_recovery_action = action in {"i2i", "i2v", "t2v", "extend"}',
+            'events, bridge_parent_ids, bridge_baseline_ids, canonical_container_id = native_bridge_fetch_events(',
+            'def imagine_generated_relation_baseline_ids(root: Path, source_post_path: str, expected_type: str) -> set[str]:',
+            '"relation_count": relation_baseline_count',
+            'def imagine_conversation_root_generation(responses: list[dict]) -> dict:',
+            '"t2i_group_container": bool(root_generation.get("is_t2i_group_container"))',
+            'IMAGINE_DIRECT_I2I_MAX_WAIT_SECONDS = 14',
+            'COLLECTION_MOVE_LOCK = threading.Lock()',
+            'def thumbnail_file_names(folder: Path, meta: dict | None = None) -> set[str]:',
+            'existing = existing_remote_collection_post(target_parent, source_post, items)',
+            'def is_grok_preview_image_file_name(name: str) -> bool:',
+            'target_parent = root / "created"',
+            'def merged_post_source(posts: list[dict]) -> str:',
+            'saved_keys = imagine_saved_media_keys_cached(account, max_posts=0)',
+            'def build_preview_dir(kind: str, root: Path | None = None) -> Path:',
+            'def remove_build_previews_for_tree(root: Path, folder: Path) -> None:',
+            'cleaned_items = remove_embedded_preview_files(target_dir, post.get("items") or [])',
+            'if parsed.path == "/api/build-preview":',
+            'import library_index',
+            'def current_library_snapshot(root: Path) -> dict:',
+            'def refresh_library_index_paths(',
+            'def query_library_posts(payload: dict) -> dict:',
+            '"/api/library/posts": query_library_posts',
+            '"/api/library/post": get_library_post'
+          )) {
+            if (-not $serverText.Contains($marker)) { throw "Windows relation recovery marker missing: $marker" }
+          }
+          $libraryIndexText = Get-Content -Raw -LiteralPath $targetLibraryIndex
+          foreach ($marker in @(
+            'SCHEMA_VERSION = 4',
+            'list_json TEXT NOT NULL',
+            'CREATE INDEX IF NOT EXISTS library_posts_parent_idx',
+            'def query_posts(',
+            'json_column = "data_json" if full else "list_json"'
+          )) {
+            if (-not $libraryIndexText.Contains($marker)) { throw "Windows library index marker missing: $marker" }
+          }
+          $imagineStateText = Get-Content -Raw -LiteralPath $targetImagineState
+          foreach ($marker in @(
+            'STATE_DIRECTORY = "sql_data"',
+            'unicodedata.normalize("NFC"',
+            'CREATE TABLE IF NOT EXISTS account_registry',
+            'def sync_snapshot(root: Path) -> bool:'
+          )) {
+            if (-not $imagineStateText.Contains($marker)) { throw "Windows SQLite state marker missing: $marker" }
+          }
+          foreach ($marker in @(
+            'ACCOUNT_TIER_SORT_ORDER = {"heavy": 0, "super": 1, "free": 2}',
+            'def sort_accounts_by_priority(accounts: list[dict], active_id: str = "") -> list[dict]:',
+            'def write_build_auth(root: Path, data: dict, *, preserve_order: bool = False) -> None:',
+            'write_build_auth(root, store, preserve_order=True)',
+            'def oauth_browser_error(target: dict | None) -> str:',
+            'def build_account_is_denied(account: dict | None) -> bool:',
+            'failed_build_id = account_id(',
+            'verify_imagine_saved_access(normalize_imagine_account({'
+          )) {
+            if (-not $serverText.Contains($marker)) { throw "Windows account ordering marker missing: $marker" }
+          }
+          $imagineAccountsText = Get-Content -Raw -LiteralPath $targetImagineAccounts
+          foreach ($forbidden in @("supergrokheavy", "freecreditswithsupergrok", "supergrok포함무료크레딧")) {
+            if ($imagineAccountsText.Contains($forbidden)) { throw "Windows account tier marketing fallback remains: $forbidden" }
+          }
+          $promptAccountText = Get-Content -Raw -LiteralPath $targetPromptAccount
+          foreach ($marker in @(
+            'const accountTierSortOrder = { heavy: 0, super: 1, free: 2 };',
+            'function sortAccountCardsByPriority(provider)',
+            'row.draggable = true;',
+            'if (targetIndex >= 0 && from < targetIndex) to += 1;',
+            'if (status === "denied") return "Denied";',
+            'if (provider === "build" && status === "denied") {'
+          )) {
+            if (-not $promptAccountText.Contains($marker)) { throw "Windows account card marker missing: $marker" }
+          }
+          $accountCoreText = Get-Content -Raw -LiteralPath $targetAccountCore
+          foreach ($marker in @(
+            'function isDeniedBuildAccount(account)',
+            'function firstSelectableBuildAccountId(accounts)'
+          )) {
+            if (-not $accountCoreText.Contains($marker)) { throw "Windows denied account marker missing: $marker" }
+          }
+          $mainText = Get-Content -Raw -LiteralPath $targetMain
+          foreach ($marker in @(
+            "payload.grokChameleonConversationId",
+            'process.platform === "darwin"',
+            "process.resourcesPath",
+            'const LIBRARY_POINTER_PATH = path.join(PORTABLE_ROOT, ".library_path.json");',
+            '? path.join(SELECTED_LIBRARY_ROOT, "runtime_data")',
+            'app.setPath("userData", RUNTIME_DIR);',
+            "function verifiedLibraryCardPreviewCacheDir(info = {})",
+            'function verifiedLibraryBuildPreviewDir(info = {}, kind = "card")',
+            'const expectedCacheDir = path.resolve(resolvedLibraryRoot, "cache", "card-previews");',
+            'normalizedKind === "thumbnail" ? "thumbnails" : "cards"',
+            'function macBundleLastUsedTime(bundlePath)',
+            'function scheduleCardPreviewCachePrune(cacheDir, protectedPath = "")',
+            'void pruneCardPreviewCacheAtStartup();'
+          )) {
+            if (-not $mainText.Contains($marker)) { throw "Cross-platform main marker missing: $marker" }
+          }
+          if ($mainText.Contains("clearCurrentCardPreviewCache(")) {
+            throw "Card preview cache deletion remains in main.js."
+          }
+          if (-not (Get-Content -Raw -LiteralPath $targetCardRender).Contains("storedBackTarget.scrollTop = scrollTop")) { throw "Imagine detail source scroll capture marker missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetIDetailActions).Contains("function restoreImagineListScrollForScreen(screenId, scrollTop)")) { throw "Imagine detail source scroll restore marker missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetIDetailActions).Contains("restoreImagineListScrollForScreen(returnScreenId, returnScrollTop)")) { throw "Unsaved heart scroll restore call missing." }
+          $composerEventsText = Get-Content -Raw -LiteralPath $targetComposerEvents
+          foreach ($marker in @(
+            "function syncComposerScrollClearance()",
+            ".i_discover_card_list, .prompt_card_list, .second_main_card_list",
+            '"prompt_main"',
+            '"2nd_main"'
+          )) {
+            if (-not $composerEventsText.Contains($marker)) { throw "Composer scroll clearance marker missing: $marker" }
+          }
+          $cardsPromptStyleText = Get-Content -Raw -LiteralPath $targetCardsPromptStyle
+          foreach ($marker in @(
+            "--composer-scroll-clearance",
+            ".search_card_list,",
+            ".i_discover_card_list,",
+            ".i_unsaved_card_list,",
+            ".prompt_card_list,",
+            ".second_main_card_list"
+          )) {
+            if (-not $cardsPromptStyleText.Contains($marker)) { throw "Card list scroll clearance style missing: $marker" }
+          }
+          if (-not (Get-Content -Raw -LiteralPath $targetIndex).Contains('id="b_collection_filter_btn"')) { throw "Build Collection filter button missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetState).Contains("buildIncludeCollections: false")) { throw "Build Collection filter default missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetBuildMain).Contains("library_state.buildIncludeCollections && post?.items?.length")) { throw "Build Collection item filter missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetBSource).Contains('const collectionMode = library_state.buildIncludeCollections ? "with-collection" : "without-collection";')) { throw "Build Collection paging key missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetSidebarEvents).Contains('document.getElementById("b_collection_filter_btn")?.addEventListener')) { throw "Build Collection filter event missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetMainStyle).Contains("gap: 70px;")) { throw "Build Collection text spacing missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetAttachments).Contains("conversation_id: conversationId")) { throw "Attachment conversation lineage marker missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetISubmit).Contains("source_conversation_id: sourceContext.conversation_id")) { throw "Submit conversation lineage marker missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetBSubmit).Contains('const completedMode = String(job.context?.mode || "").toLowerCase();')) { throw "Build attachment reset marker missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetISubmit).Contains('new Set(["i2i", "i2v"])')) { throw "Imagine attachment reset marker missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetLibraryCore).Contains('if (type === "image" || type.startsWith("image/"))')) { throw "Sharp image preview marker missing." }
+          $libraryScanText = Get-Content -Raw -LiteralPath $targetLibraryScan
+          foreach ($marker in @(
+            'async function loadIndexedBuildPosts(',
+            'async function loadIndexedCollectionPostContents(',
+            'async function loadIndexedSearchBuildPosts(',
+            'async function loadIndexedPost(path)'
+          )) {
+            if (-not $libraryScanText.Contains($marker)) { throw "Indexed card loader marker missing: $marker" }
+          }
+          if (-not (Get-Content -Raw -LiteralPath $targetCollectionRender).Contains('const COLLECTION_SECOND_MAIN_VIRTUAL_LIST_KEY = "collection-second-main";')) { throw "Collection virtual list marker missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetDetailNavigation).Contains("async function navigateDetailPost(offset)")) { throw "Indexed detail navigation marker missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetSearchRender).Contains("library_state.indexedSearchBuildHasMore")) { throw "Indexed search paging marker missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetDetailState).Contains("function detailItemPrompt(item)")) { throw "Detail prompt lineage marker missing." }
+          $detailMediaText = Get-Content -Raw -LiteralPath $targetDetailMedia
+          if (-not $detailMediaText.Contains('resolveLocalCardPreview(url, kind = "card", cacheIdentity = "")')) { throw "Persistent Build preview kind marker missing." }
+          if (-not $detailMediaText.Contains('async function existingPersistentCardPreview(rawUrl, kind = "card", cacheIdentity = "")')) { throw "Persistent Build preview reuse marker missing." }
+          $detailRenderText = Get-Content -Raw -LiteralPath $targetDetailRender
+          if (-not $detailRenderText.Contains("const visible = !post?.is_job_post")) { throw "Build detail heart visibility marker missing." }
+          if (-not $detailRenderText.Contains('resolveLocalCardPreview(buildPreviewSource, "thumbnail")')) { throw "Build detail thumbnail preview marker missing." }
+          if ($detailRenderText.Contains("Boolean(post?.is_job_post)")) { throw "Build job heart visibility regression found." }
+          if (-not (Get-Content -Raw -LiteralPath $targetISource).Contains("function isImagineT2iGroupContainer(post)")) { throw "T2I group filter marker missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetISource).Contains('screen_state.current_screen === "i_unsaved_main"')) { throw "Unsaved pagination refill marker missing." }
+          $collectionActionsText = Get-Content -Raw -LiteralPath $targetCollectionActions
+          foreach ($marker in @(
+            'let moveToCollectionRequestPending = false;',
+            'if (moveToCollectionRequestPending) return;',
+            'moveToCollectionRequestPending = true;',
+            'moveToCollectionRequestPending = false;'
+          )) {
+            if (-not $collectionActionsText.Contains($marker)) { throw "Collection move guard marker missing: $marker" }
+          }
+          $promptEventsText = Get-Content -Raw -LiteralPath $targetPromptEvents
+          $promptWritePattern = '(?s)document\.querySelector\("\.prompt_write_btn"\)\?\.addEventListener\("click", \(\) => \{\s*openPromptSave\(\);\s*\}\);'
+          if ($promptEventsText -notmatch $promptWritePattern) { throw "Prompt Write does not open the shared prompt save dialog." }
+          if (-not (Get-Content -Raw -LiteralPath $targetUiFeedback).Contains('".workspace.i_detail_open .i_detail_media, .workspace.b_detail_open .b_detail_media"')) { throw "Lucky media center marker missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetAccountStyle).Contains(".lucky_notice.in_detail_media")) { throw "Lucky media position marker missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetDetailMedia).Contains("function scheduleLocalCardVideoPoster(")) { throw "Build video poster scheduling marker missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetCardRender).Contains('card_static_video_preview: type === "video" && Boolean(previewUrl)')) { throw "Static Imagine video poster marker missing." }
+          if (-not $mainText.Contains("const CARD_PREVIEW_MAX_EDGE = 960;")) { throw "Card preview size dropped below the 512x288 requirement." }
+          if ((Test-Path -LiteralPath (Join-Path $root "Resources\Migration")) -or (Test-Path -LiteralPath (Join-Path $root "Migration.exe"))) {
+            throw "Migration app remains in the Windows package."
+          }
+          foreach ($portableResidue in @(".library_path.json", "library_path.json", "runtime_data", "sql_data")) {
+            if (Test-Path -LiteralPath (Join-Path $root $portableResidue)) {
+              throw "Portable runtime residue remains in the Windows package: $portableResidue"
+            }
+          }
+
+          $fileCount = (Get-ChildItem -LiteralPath $root -Recurse -Force -File).Count
+          $metadata = Get-ChildItem -LiteralPath $root -Recurse -Force | Where-Object {
+            $_.Name -eq "__MACOSX" -or $_.Name -like "._*" -or $_.Name -eq ".DS_Store"
+          }
+          if ($metadata) { throw "macOS metadata exists in the Windows package." }
+
+          Push-Location (Join-Path $env:GITHUB_WORKSPACE "unpack")
+          try {
+            & $sevenZip a -tzip -mx=7 $outputZip ".\Grok Chameleon"
+            if ($LASTEXITCODE -ne 0) { throw "Windows ZIP creation failed." }
+          } finally {
+            Pop-Location
+          }
+          & $sevenZip t $outputZip
+          if ($LASTEXITCODE -ne 0) { throw "Windows output ZIP CRC check failed." }
+          & $sevenZip x -y "-o$env:GITHUB_WORKSPACE\verify" $outputZip
+          if ($LASTEXITCODE -ne 0) { throw "Windows verification extraction failed." }
+
+          $verifiedRoot = Join-Path $env:GITHUB_WORKSPACE "verify\Grok Chameleon"
+          $verifiedAppRoot = Join-Path $verifiedRoot "Resources\Grok Chameleon\resources\app"
+          if ((Get-ChildItem -LiteralPath $verifiedRoot -Recurse -Force -File).Count -ne $fileCount) {
+            throw "Windows file count changed during packaging."
+          }
+          foreach ($shared in $sharedSources) {
+            $verifiedPath = Join-Path $verifiedAppRoot $shared.Relative
+            if ((Get-FileHash -Algorithm SHA256 -LiteralPath $verifiedPath).Hash -ne $sharedHashes[$shared.Name]) {
+              throw "Windows packaged shared source mismatch: $($shared.Name)"
+            }
+          }
+          $verifiedExeHashes = @{
+            outer = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $verifiedRoot "Grok Chameleon.exe")).Hash
+            inner = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $verifiedRoot "Resources\Grok Chameleon\Grok Chameleon.exe")).Hash
+          }
+          foreach ($key in @("outer", "inner")) {
+            if ($verifiedExeHashes[$key] -ne $exeHashes[$key]) { throw "Windows executable changed: $key" }
+          }
+          foreach ($javascript in $sharedSources | Where-Object { $_.Relative.EndsWith(".js") }) {
+            node --check (Join-Path $verifiedAppRoot $javascript.Relative)
+            if ($LASTEXITCODE -ne 0) { throw "Packaged Windows JavaScript syntax check failed: $($javascript.Relative)" }
+          }
+          python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" (Join-Path $verifiedAppRoot "runtime\server.py")
+          if ($LASTEXITCODE -ne 0) { throw "Packaged Windows server syntax check failed." }
+          python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" (Join-Path $verifiedAppRoot "runtime\library_index.py")
+          if ($LASTEXITCODE -ne 0) { throw "Packaged Windows library index syntax check failed." }
+          python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" (Join-Path $verifiedAppRoot "runtime\imagine_state.py")
+          if ($LASTEXITCODE -ne 0) { throw "Packaged Windows imagine_state syntax check failed." }
+          python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" (Join-Path $verifiedAppRoot "runtime\imagine_accounts.py")
+          if ($LASTEXITCODE -ne 0) { throw "Packaged Windows imagine_accounts syntax check failed." }
+          python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" (Join-Path $verifiedAppRoot "runtime\imagine_routes.py")
+          if ($LASTEXITCODE -ne 0) { throw "Packaged Windows imagine_routes syntax check failed." }
+          "windows-output-sha256=" + (Get-FileHash -Algorithm SHA256 -LiteralPath $outputZip).Hash.ToLowerInvariant()
+
+      - name: Retain the verified Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-common-source-build
+          path: output/Win_Grok_Chameleon.zip
+          if-no-files-found: error
+          retention-days: 3
+
+  build-macos:
+    runs-on: macos-15
+    timeout-minutes: 35
+    outputs:
+      input_sha256: ${{ steps.macos_input.outputs.sha256 }}
+    env:
+      RELEASE_TAG: v1.0.0
+      INPUT_ZIP: Mac_Grok_Chameleon.zip
+      OUTPUT_ZIP: Mac_Grok_Chameleon.zip
+
+    steps:
+      - name: Check out the shared source commit
+        uses: actions/checkout@v4
+
+      - name: Download the exact Mac runtime package
+        id: macos_input
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p input
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$INPUT_ZIP" --dir input
+          actual="$(shasum -a 256 "input/$INPUT_ZIP" | awk '{print $1}')"
+          echo "sha256=$actual" >> "$GITHUB_OUTPUT"
+
+      - name: Assemble Mac from the shared source
+        shell: bash
+        run: |
+          set -euo pipefail
+          export COPYFILE_DISABLE=1
+          mkdir -p unpack output verify
+          ditto -x -k "input/$INPUT_ZIP" unpack
+          root="$PWD/unpack/Grok Chameleon"
+          main_app="$root/Grok Chameleon.app"
+          migration_app="$root/Migration.app"
+          app_root="$main_app/Contents/Resources/app"
+          common_root="$GITHUB_WORKSPACE/common/app"
+          shared_relatives=(
+            electron/main.js
+            electron/preload-bridge.js
+            runtime/server.py
+            runtime/library_index.py
+            runtime/imagine_state.py
+            runtime/imagine_accounts.py
+            runtime/imagine_routes.py
+            web/index.html
+            web/scripts/state.js
+            web/scripts/build_main.js
+            web/scripts/b_composer_submit.js
+            web/scripts/b_source_render.js
+            web/scripts/b_detail_actions.js
+            web/scripts/sidebar_events.js
+            web/styles/sidebar.css
+            web/scripts/collection_events.js
+            web/scripts/collection_render.js
+            web/styles/collection.css
+            web/styles/main.css
+            web/scripts/card_render.js
+            web/scripts/card_actions.js
+            web/scripts/screen_events.js
+            web/scripts/screen_router.js
+            web/scripts/navigation_history.js
+            web/scripts/i_detail_actions.js
+            web/scripts/composer_events.js
+            web/scripts/composer_provider.js
+            web/styles/cards_prompt.css
+            web/scripts/composer_options.js
+            web/scripts/composer_attachments.js
+            web/scripts/i_composer_submit.js
+            web/scripts/library_core.js
+            web/scripts/library_scan.js
+            web/scripts/detail_state.js
+            web/scripts/detail_media.js
+            web/scripts/detail_events.js
+            web/scripts/detail_navigation.js
+            web/scripts/detail_render.js
+            web/styles/detail.css
+            web/scripts/i_source_render.js
+            web/scripts/imagine_main.js
+            web/scripts/render.js
+            web/scripts/collection_actions.js
+            web/scripts/image_editor_flow.js
+            web/scripts/search_render.js
+            web/scripts/prompt_events.js
+            web/scripts/prompt_account.js
+            web/scripts/account_core.js
+            web/scripts/ui_feedback.js
+            web/styles/account.css
+          )
+          target="$app_root/web/scripts/composer_options.js"
+          main_js="$app_root/electron/main.js"
+          preload_js="$app_root/electron/preload-bridge.js"
+          server_py="$app_root/runtime/server.py"
+          library_index_py="$app_root/runtime/library_index.py"
+          imagine_state_py="$app_root/runtime/imagine_state.py"
+          imagine_accounts_py="$app_root/runtime/imagine_accounts.py"
+          imagine_routes_py="$app_root/runtime/imagine_routes.py"
+          prompt_account_js="$app_root/web/scripts/prompt_account.js"
+          account_core_js="$app_root/web/scripts/account_core.js"
+          index_html="$app_root/web/index.html"
+          state_js="$app_root/web/scripts/state.js"
+          build_main_js="$app_root/web/scripts/build_main.js"
+          b_submit_js="$app_root/web/scripts/b_composer_submit.js"
+          b_source_js="$app_root/web/scripts/b_source_render.js"
+          sidebar_events_js="$app_root/web/scripts/sidebar_events.js"
+          main_css="$app_root/web/styles/main.css"
+          card_render_js="$app_root/web/scripts/card_render.js"
+          i_detail_actions_js="$app_root/web/scripts/i_detail_actions.js"
+          composer_events_js="$app_root/web/scripts/composer_events.js"
+          cards_prompt_css="$app_root/web/styles/cards_prompt.css"
+          attachments_js="$app_root/web/scripts/composer_attachments.js"
+          i_submit_js="$app_root/web/scripts/i_composer_submit.js"
+          library_core_js="$app_root/web/scripts/library_core.js"
+          library_scan_js="$app_root/web/scripts/library_scan.js"
+          collection_render_js="$app_root/web/scripts/collection_render.js"
+          detail_state_js="$app_root/web/scripts/detail_state.js"
+          detail_media_js="$app_root/web/scripts/detail_media.js"
+          detail_navigation_js="$app_root/web/scripts/detail_navigation.js"
+          detail_render_js="$app_root/web/scripts/detail_render.js"
+          i_source_js="$app_root/web/scripts/i_source_render.js"
+          collection_actions_js="$app_root/web/scripts/collection_actions.js"
+          search_render_js="$app_root/web/scripts/search_render.js"
+          prompt_events_js="$app_root/web/scripts/prompt_events.js"
+          ui_feedback_js="$app_root/web/scripts/ui_feedback.js"
+          account_css="$app_root/web/styles/account.css"
+          main_exec="$main_app/Contents/MacOS/Grok Chameleon"
+
+          for relative in "${shared_relatives[@]}"; do
+            test -f "$common_root/$relative"
+          done
+          test -x "$main_exec"
+          test -L "$main_app/Contents/Frameworks/Electron Framework.framework/Versions/Current"
+          test -L "$main_app/Contents/Frameworks/Electron Framework.framework/Electron Framework"
+          find "$app_root/vendor/python" -type f -name '*darwin.so' -print -quit | grep -q .
+          if find "$root" \( -name '__MACOSX' -o -name '._*' -o -name '.DS_Store' \) -print | grep -q .; then
+            echo 'AppleDouble or Finder metadata found in Mac input.' >&2
+            exit 1
+          fi
+
+          for relative in "${shared_relatives[@]}"; do
+            mkdir -p "$(dirname "$app_root/$relative")"
+            cp "$common_root/$relative" "$app_root/$relative"
+            cmp "$common_root/$relative" "$app_root/$relative"
+            if [[ "$relative" == *.js ]]; then
+              node --check "$app_root/$relative"
+            fi
+          done
+          python3 - "$server_py" <<'PY'
+          import ast
+          import pathlib
+          import sys
+          path = pathlib.Path(sys.argv[1])
+          ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+          PY
+          python3 - "$library_index_py" <<'PY'
+          import ast
+          import pathlib
+          import sys
+          path = pathlib.Path(sys.argv[1])
+          ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+          PY
+          python3 - "$imagine_state_py" <<'PY'
+          import ast
+          import pathlib
+          import sys
+          path = pathlib.Path(sys.argv[1])
+          ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+          PY
+          python3 - "$imagine_accounts_py" <<'PY'
+          import ast
+          import pathlib
+          import sys
+          path = pathlib.Path(sys.argv[1])
+          ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+          PY
+          python3 - "$imagine_routes_py" <<'PY'
+          import ast
+          import pathlib
+          import sys
+          path = pathlib.Path(sys.argv[1])
+          ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+          PY
+          grep -F 'const imageCountOptions = provider === "imagine"' "$target"
+          grep -F '? buildT2iCountOptions.filter((option) => option !== "1")' "$target"
+          grep -F 'const imageCountDefault = "5";' "$target"
+          grep -F 'const generationResponseCaptures = [];' "$preload_js"
+          grep -F 'conversation_request_route_applied' "$preload_js"
+          grep -F 'canonicalContainerId' "$preload_js"
+          grep -F 'baselineIds: Array.from(beforeIds)' "$preload_js"
+          grep -F 'const beforeIds = allCurrentIds(state, "video");' "$preload_js"
+          grep -F '!tracking.retainTrackedCandidateUntilDeadline' "$preload_js"
+          grep -F 'retainTrackedCandidateUntilDeadline: tieredI2vWait || variant.kind === "textToVideo",' "$preload_js"
+          grep -F 'const finalEvents = finalContainerIds.flatMap((finalContainerId) => collectStoreEvents(' "$preload_js"
+          if grep -F 'if (hasInProgressCandidate && now - tracking.firstCandidateSeenAt >= storeObservationMs)' "$preload_js"; then
+            echo 'Mac eight-second video handoff guard is missing.' >&2
+            exit 1
+          fi
+          grep -F 'import imagine_state' "$server_py"
+          grep -F 'def normalize_json_unicode(value):' "$server_py"
+          grep -F '"database": "sql_data/state.sqlite3"' "$server_py"
+          grep -F 'STATE_DIRECTORY = "sql_data"' "$imagine_state_py"
+          grep -F 'unicodedata.normalize("NFC"' "$imagine_state_py"
+          grep -F 'CREATE TABLE IF NOT EXISTS account_registry' "$imagine_state_py"
+          grep -F 'def sync_snapshot(root: Path) -> bool:' "$imagine_state_py"
+          grep -F 'relation_recovery_action = action in {"i2i", "i2v", "t2v", "extend"}' "$server_py"
+          grep -F 'events, bridge_parent_ids, bridge_baseline_ids, canonical_container_id = native_bridge_fetch_events(' "$server_py"
+          grep -F 'def imagine_generated_relation_baseline_ids(root: Path, source_post_path: str, expected_type: str) -> set[str]:' "$server_py"
+          grep -F '"relation_count": relation_baseline_count' "$server_py"
+          grep -F 'def imagine_conversation_root_generation(responses: list[dict]) -> dict:' "$server_py"
+          grep -F '"t2i_group_container": bool(root_generation.get("is_t2i_group_container"))' "$server_py"
+          grep -F 'IMAGINE_DIRECT_I2I_MAX_WAIT_SECONDS = 14' "$server_py"
+          grep -F 'COLLECTION_MOVE_LOCK = threading.Lock()' "$server_py"
+          grep -F 'def thumbnail_file_names(folder: Path, meta: dict | None = None) -> set[str]:' "$server_py"
+          grep -F 'existing = existing_remote_collection_post(target_parent, source_post, items)' "$server_py"
+          grep -F 'def is_grok_preview_image_file_name(name: str) -> bool:' "$server_py"
+          grep -F 'target_parent = root / "created"' "$server_py"
+          grep -F 'def merged_post_source(posts: list[dict]) -> str:' "$server_py"
+          grep -F 'saved_keys = imagine_saved_media_keys_cached(account, max_posts=0)' "$server_py"
+          grep -F 'def build_preview_dir(kind: str, root: Path | None = None) -> Path:' "$server_py"
+          grep -F 'def remove_build_previews_for_tree(root: Path, folder: Path) -> None:' "$server_py"
+          grep -F 'cleaned_items = remove_embedded_preview_files(target_dir, post.get("items") or [])' "$server_py"
+          grep -F 'if parsed.path == "/api/build-preview":' "$server_py"
+          grep -F 'import library_index' "$server_py"
+          grep -F 'def current_library_snapshot(root: Path) -> dict:' "$server_py"
+          grep -F 'def refresh_library_index_paths(' "$server_py"
+          grep -F 'def query_library_posts(payload: dict) -> dict:' "$server_py"
+          grep -F '"/api/library/posts": query_library_posts' "$server_py"
+          grep -F '"/api/library/post": get_library_post' "$server_py"
+          grep -F 'SCHEMA_VERSION = 4' "$library_index_py"
+          grep -F 'list_json TEXT NOT NULL' "$library_index_py"
+          grep -F 'CREATE INDEX IF NOT EXISTS library_posts_parent_idx' "$library_index_py"
+          grep -F 'def query_posts(' "$library_index_py"
+          grep -F 'json_column = "data_json" if full else "list_json"' "$library_index_py"
+          grep -F 'ACCOUNT_TIER_SORT_ORDER = {"heavy": 0, "super": 1, "free": 2}' "$server_py"
+          grep -F 'def sort_accounts_by_priority(accounts: list[dict], active_id: str = "") -> list[dict]:' "$server_py"
+          grep -F 'write_build_auth(root, store, preserve_order=True)' "$server_py"
+          grep -F 'def oauth_browser_error(target: dict | None) -> str:' "$server_py"
+          grep -F 'def build_account_is_denied(account: dict | None) -> bool:' "$server_py"
+          grep -F 'failed_build_id = account_id(' "$server_py"
+          grep -F 'verify_imagine_saved_access(normalize_imagine_account({' "$server_py"
+          if grep -E 'supergrokheavy|freecreditswithsupergrok|supergrok포함무료크레딧' "$imagine_accounts_py"; then
+            echo 'Account tier marketing fallback remains.' >&2
+            exit 1
+          fi
+          grep -F 'const accountTierSortOrder = { heavy: 0, super: 1, free: 2 };' "$prompt_account_js"
+          grep -F 'function sortAccountCardsByPriority(provider)' "$prompt_account_js"
+          grep -F 'row.draggable = true;' "$prompt_account_js"
+          grep -F 'if (targetIndex >= 0 && from < targetIndex) to += 1;' "$prompt_account_js"
+          grep -F 'if (status === "denied") return "Denied";' "$prompt_account_js"
+          grep -F 'if (provider === "build" && status === "denied") {' "$prompt_account_js"
+          grep -F 'function isDeniedBuildAccount(account)' "$account_core_js"
+          grep -F 'function firstSelectableBuildAccountId(accounts)' "$account_core_js"
+          grep -F 'storedBackTarget.scrollTop = scrollTop' "$card_render_js"
+          grep -F 'function restoreImagineListScrollForScreen(screenId, scrollTop)' "$i_detail_actions_js"
+          grep -F 'restoreImagineListScrollForScreen(returnScreenId, returnScrollTop)' "$i_detail_actions_js"
+          grep -F 'function syncComposerScrollClearance()' "$composer_events_js"
+          grep -F '.i_discover_card_list, .prompt_card_list, .second_main_card_list' "$composer_events_js"
+          grep -F '"prompt_main"' "$composer_events_js"
+          grep -F '"2nd_main"' "$composer_events_js"
+          grep -F -- '--composer-scroll-clearance' "$cards_prompt_css"
+          grep -F '.search_card_list,' "$cards_prompt_css"
+          grep -F '.i_discover_card_list,' "$cards_prompt_css"
+          grep -F '.i_unsaved_card_list,' "$cards_prompt_css"
+          grep -F '.prompt_card_list,' "$cards_prompt_css"
+          grep -F '.second_main_card_list' "$cards_prompt_css"
+          grep -F 'id="b_collection_filter_btn"' "$index_html"
+          grep -F 'buildIncludeCollections: false' "$state_js"
+          grep -F 'library_state.buildIncludeCollections && post?.items?.length' "$build_main_js"
+          grep -F 'const collectionMode = library_state.buildIncludeCollections ? "with-collection" : "without-collection";' "$b_source_js"
+          grep -F 'document.getElementById("b_collection_filter_btn")?.addEventListener' "$sidebar_events_js"
+          grep -F 'gap: 70px;' "$main_css"
+          grep -F 'conversation_id: conversationId' "$attachments_js"
+          grep -F 'source_conversation_id: sourceContext.conversation_id' "$i_submit_js"
+          grep -F 'const completedMode = String(job.context?.mode || "").toLowerCase();' "$b_submit_js"
+          grep -F 'new Set(["i2i", "i2v"])' "$i_submit_js"
+          grep -F 'if (type === "image" || type.startsWith("image/"))' "$library_core_js"
+          grep -F 'async function loadIndexedBuildPosts(' "$library_scan_js"
+          grep -F 'async function loadIndexedCollectionPostContents(' "$library_scan_js"
+          grep -F 'async function loadIndexedSearchBuildPosts(' "$library_scan_js"
+          grep -F 'async function loadIndexedPost(path)' "$library_scan_js"
+          grep -F 'const COLLECTION_SECOND_MAIN_VIRTUAL_LIST_KEY = "collection-second-main";' "$collection_render_js"
+          grep -F 'async function navigateDetailPost(offset)' "$detail_navigation_js"
+          grep -F 'library_state.indexedSearchBuildHasMore' "$search_render_js"
+          grep -F 'function detailItemPrompt(item)' "$detail_state_js"
+          grep -F 'resolveLocalCardPreview(url, kind = "card", cacheIdentity = "")' "$detail_media_js"
+          grep -F 'async function existingPersistentCardPreview(rawUrl, kind = "card", cacheIdentity = "")' "$detail_media_js"
+          grep -F 'const visible = !post?.is_job_post' "$detail_render_js"
+          grep -F 'resolveLocalCardPreview(buildPreviewSource, "thumbnail")' "$detail_render_js"
+          if grep -F 'Boolean(post?.is_job_post)' "$detail_render_js"; then
+            echo 'Build job heart visibility regression found.' >&2
+            exit 1
+          fi
+          grep -F 'function isImagineT2iGroupContainer(post)' "$i_source_js"
+          grep -F 'screen_state.current_screen === "i_unsaved_main"' "$i_source_js"
+          grep -F 'let moveToCollectionRequestPending = false;' "$collection_actions_js"
+          grep -F 'if (moveToCollectionRequestPending) return;' "$collection_actions_js"
+          grep -F 'moveToCollectionRequestPending = true;' "$collection_actions_js"
+          grep -F 'moveToCollectionRequestPending = false;' "$collection_actions_js"
+          python3 - "$prompt_events_js" <<'PY'
+          import pathlib
+          import re
+          import sys
+          text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+          pattern = r'document\.querySelector\("\.prompt_write_btn"\)\?\.addEventListener\("click", \(\) => \{\s*openPromptSave\(\);\s*\}\);'
+          if not re.search(pattern, text, re.S):
+              raise SystemExit("Prompt Write does not open the shared prompt save dialog.")
+          PY
+          grep -F '".workspace.i_detail_open .i_detail_media, .workspace.b_detail_open .b_detail_media"' "$ui_feedback_js"
+          grep -F '.lucky_notice.in_detail_media' "$account_css"
+          grep -F 'function scheduleLocalCardVideoPoster(' "$detail_media_js"
+          grep -F 'card_static_video_preview: type === "video" && Boolean(previewUrl)' "$card_render_js"
+          grep -F 'const CARD_PREVIEW_MAX_EDGE = 960;' "$main_js"
+          grep -F 'RUNTIME_ROOT = Path(__file__).resolve().parent' "$server_py"
+          grep -F 'APP_ROOT = RUNTIME_ROOT.parent' "$server_py"
+          if grep -E 'C:\\|python\.exe' "$server_py"; then
+            echo 'Windows-only path leaked into Mac server.py.' >&2
+            exit 1
+          fi
+          grep -F 'process.platform === "darwin"' "$main_js"
+          grep -F 'process.resourcesPath' "$main_js"
+          grep -F 'path.join(resourceRoot, "Python", "bin", "python3")' "$main_js"
+          grep -F 'const LIBRARY_POINTER_PATH = path.join(PORTABLE_ROOT, ".library_path.json");' "$main_js"
+          grep -F '? path.join(SELECTED_LIBRARY_ROOT, "runtime_data")' "$main_js"
+          grep -F 'app.setPath("userData", RUNTIME_DIR);' "$main_js"
+          grep -F 'function verifiedLibraryCardPreviewCacheDir(info = {})' "$main_js"
+          grep -F 'function verifiedLibraryBuildPreviewDir(info = {}, kind = "card")' "$main_js"
+          grep -F 'const expectedCacheDir = path.resolve(resolvedLibraryRoot, "cache", "card-previews");' "$main_js"
+          grep -F 'normalizedKind === "thumbnail" ? "thumbnails" : "cards"' "$main_js"
+          grep -F 'function macBundleLastUsedTime(bundlePath)' "$main_js"
+          grep -F 'function scheduleCardPreviewCachePrune(cacheDir, protectedPath = "")' "$main_js"
+          grep -F 'void pruneCardPreviewCacheAtStartup();' "$main_js"
+          if grep -F 'clearCurrentCardPreviewCache(' "$main_js"; then
+            echo 'Card preview cache deletion remains in Mac main.js.' >&2
+            exit 1
+          fi
+          grep -F 'app.on("activate"' "$main_js"
+          grep -F 'app.on("window-all-closed"' "$main_js"
+          rm -rf \
+            "$migration_app" \
+            "$root/.library_path.json" \
+            "$root/library_path.json" \
+            "$root/runtime_data" \
+            "$root/sql_data"
+          test ! -e "$migration_app"
+          test ! -e "$root/.library_path.json"
+          test ! -e "$root/library_path.json"
+          test ! -e "$root/runtime_data"
+          test ! -e "$root/sql_data"
+          if find "$root" \( -name '__MACOSX' -o -name '._*' -o -name '.DS_Store' \) -print | grep -q .; then
+            echo 'AppleDouble or Finder metadata found after Mac assembly.' >&2
+            exit 1
+          fi
+
+      - name: Sign, package, and verify Mac without ZIP -47 regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          export COPYFILE_DISABLE=1
+          root="$PWD/unpack/Grok Chameleon"
+          main_app="$root/Grok Chameleon.app"
+          app_root="$main_app/Contents/Resources/app"
+          common_root="$GITHUB_WORKSPACE/common/app"
+          shared_relatives=(
+            electron/main.js
+            electron/preload-bridge.js
+            runtime/server.py
+            runtime/library_index.py
+            runtime/imagine_state.py
+            runtime/imagine_accounts.py
+            runtime/imagine_routes.py
+            web/index.html
+            web/scripts/state.js
+            web/scripts/build_main.js
+            web/scripts/b_composer_submit.js
+            web/scripts/b_source_render.js
+            web/scripts/b_detail_actions.js
+            web/scripts/sidebar_events.js
+            web/styles/sidebar.css
+            web/scripts/collection_events.js
+            web/scripts/collection_render.js
+            web/styles/collection.css
+            web/styles/main.css
+            web/scripts/card_render.js
+            web/scripts/card_actions.js
+            web/scripts/screen_events.js
+            web/scripts/screen_router.js
+            web/scripts/navigation_history.js
+            web/scripts/i_detail_actions.js
+            web/scripts/composer_events.js
+            web/scripts/composer_provider.js
+            web/styles/cards_prompt.css
+            web/scripts/composer_options.js
+            web/scripts/composer_attachments.js
+            web/scripts/i_composer_submit.js
+            web/scripts/library_core.js
+            web/scripts/library_scan.js
+            web/scripts/detail_state.js
+            web/scripts/detail_media.js
+            web/scripts/detail_events.js
+            web/scripts/detail_navigation.js
+            web/scripts/detail_render.js
+            web/styles/detail.css
+            web/scripts/i_source_render.js
+            web/scripts/imagine_main.js
+            web/scripts/render.js
+            web/scripts/collection_actions.js
+            web/scripts/image_editor_flow.js
+            web/scripts/search_render.js
+            web/scripts/prompt_events.js
+            web/scripts/prompt_account.js
+            web/scripts/account_core.js
+            web/scripts/ui_feedback.js
+            web/styles/account.css
+          )
+          if find "$root" -type d -name '__pycache__' -print | grep -q .; then
+            echo 'Python cache found before Mac packaging.' >&2
+            exit 1
+          fi
+          xattr -cr "$root"
+          if xattr -lr "$root" 2>/dev/null | grep -q 'com.apple.quarantine'; then
+            echo 'Quarantine attribute remains before Mac signing.' >&2
+            exit 1
+          fi
+          codesign --force --sign - --timestamp=none "$main_app"
+          codesign --verify --deep --strict --verbose=4 "$main_app"
+          plutil -lint "$main_app/Contents/Info.plist"
+          xattr -cr "$root"
+          ditto -c -k --keepParent --norsrc --noextattr --noacl --noqtn "$root" "output/$OUTPUT_ZIP"
+          unzip -t "output/$OUTPUT_ZIP" >/dev/null
+          if zipinfo -1 "output/$OUTPUT_ZIP" | grep -E '(^|/)(__MACOSX|\._|\.DS_Store)(/|$)'; then
+            echo 'AppleDouble or Finder metadata found in Mac output.' >&2
+            exit 1
+          fi
+
+          mkdir -p verify/a
+          ditto -x -k "output/$OUTPUT_ZIP" verify/a
+          verified_root="$PWD/verify/a/Grok Chameleon"
+          verified_main="$verified_root/Grok Chameleon.app"
+          verified_app="$verified_main/Contents/Resources/app"
+          verified_server="$verified_app/runtime/server.py"
+          verified_library_index="$verified_app/runtime/library_index.py"
+          verified_imagine_state="$verified_app/runtime/imagine_state.py"
+          verified_imagine_accounts="$verified_app/runtime/imagine_accounts.py"
+          verified_imagine_routes="$verified_app/runtime/imagine_routes.py"
+          test -x "$verified_main/Contents/MacOS/Grok Chameleon"
+          test -L "$verified_main/Contents/Frameworks/Electron Framework.framework/Versions/Current"
+          test -L "$verified_main/Contents/Frameworks/Electron Framework.framework/Electron Framework"
+          codesign --verify --deep --strict --verbose=4 "$verified_main"
+          for relative in "${shared_relatives[@]}"; do
+            cmp "$common_root/$relative" "$verified_app/$relative"
+            if [[ "$relative" == *.js ]]; then
+              node --check "$verified_app/$relative"
+            fi
+          done
+          python3 - "$verified_server" <<'PY'
+          import ast
+          import pathlib
+          import sys
+          path = pathlib.Path(sys.argv[1])
+          ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+          PY
+          python3 - "$verified_library_index" <<'PY'
+          import ast
+          import pathlib
+          import sys
+          path = pathlib.Path(sys.argv[1])
+          ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+          PY
+          python3 - "$verified_imagine_state" <<'PY'
+          import ast
+          import pathlib
+          import sys
+          path = pathlib.Path(sys.argv[1])
+          ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+          PY
+          python3 - "$verified_imagine_accounts" <<'PY'
+          import ast
+          import pathlib
+          import sys
+          path = pathlib.Path(sys.argv[1])
+          ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+          PY
+          python3 - "$verified_imagine_routes" <<'PY'
+          import ast
+          import pathlib
+          import sys
+          path = pathlib.Path(sys.argv[1])
+          ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+          PY
+          if find "$verified_root" \( -name '__MACOSX' -o -name '._*' -o -name '.DS_Store' -o -name '__pycache__' \) -print | grep -q .; then
+            echo 'Forbidden metadata found after final Mac extraction.' >&2
+            exit 1
+          fi
+          if xattr -lr "$verified_root" 2>/dev/null | grep -q 'com.apple.quarantine'; then
+            echo 'Quarantine attribute found after final Mac extraction.' >&2
+            exit 1
+          fi
+          ELECTRON_RUN_AS_NODE=1 "$verified_main/Contents/MacOS/Grok Chameleon" -e 'console.log("MAC_ELECTRON_OK")'
+          shasum -a 256 "output/$OUTPUT_ZIP"
+
+      - name: Retain the verified Mac build
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-common-source-build
+          path: output/Mac_Grok_Chameleon.zip
+          if-no-files-found: error
+          retention-days: 3
+
+  publish:
+    environment: release-update-approval
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs:
+      - build-windows
+      - build-macos
+    steps:
+      - name: Download the verified Windows build
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-common-source-build
+          path: release/windows
+
+      - name: Download the verified Mac build
+        uses: actions/download-artifact@v4
+        with:
+          name: mac-common-source-build
+          path: release/macos
+
+      - name: Publish the two verified v2 release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: v2.0.0
+          WIN_ZIP: Win_Grok_Chameleon.zip
+          MAC_ZIP: Mac_Grok_Chameleon.zip
+          WIN_INPUT_SHA256: ${{ needs.build-windows.outputs.input_sha256 }}
+          MAC_INPUT_SHA256: ${{ needs.build-macos.outputs.input_sha256 }}
+        run: |
+          set -euo pipefail
+          mkdir -p current/win current/mac
+          release_existed=false
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            release_existed=true
+            gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$WIN_ZIP" --dir current/win
+            gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$MAC_ZIP" --dir current/mac
+            test "$(sha256sum "current/win/$WIN_ZIP" | awk '{print $1}')" = "$WIN_INPUT_SHA256"
+            test "$(sha256sum "current/mac/$MAC_ZIP" | awk '{print $1}')" = "$MAC_INPUT_SHA256"
+          else
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Grok Chameleon v2.0.0" --latest
+          fi
+
+          rollback() {
+            echo 'Rolling back the v2 release assets.' >&2
+            if [[ "$release_existed" == true ]]; then
+              gh release upload "$RELEASE_TAG" "current/win/$WIN_ZIP" --repo "$GITHUB_REPOSITORY" --clobber || true
+              gh release upload "$RELEASE_TAG" "current/mac/$MAC_ZIP" --repo "$GITHUB_REPOSITORY" --clobber || true
+            else
+              gh release delete "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
+            fi
+          }
+          trap rollback ERR
+          gh release upload "$RELEASE_TAG" "release/windows/$WIN_ZIP" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$RELEASE_TAG" "release/macos/$MAC_ZIP" --repo "$GITHUB_REPOSITORY" --clobber
+          win_local="sha256:$(sha256sum "release/windows/$WIN_ZIP" | awk '{print $1}')"
+          mac_local="sha256:$(sha256sum "release/macos/$MAC_ZIP" | awk '{print $1}')"
+          win_remote="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | select(.name == "'"$WIN_ZIP"'") | .digest')"
+          mac_remote="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | select(.name == "'"$MAC_ZIP"'") | .digest')"
+          test "$win_local" = "$win_remote"
+          test "$mac_local" = "$mac_remote"
+          asset_names="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          test "$(printf '%s\n' "$asset_names" | grep -Fxc "$WIN_ZIP")" -eq 1
+          test "$(printf '%s\n' "$asset_names" | grep -Fxc "$MAC_ZIP")" -eq 1
+          test "$(printf '%s\n' "$asset_names" | sed '/^$/d' | wc -l | tr -d ' ')" -eq 2
+          if printf '%s\n' "$asset_names" | grep -Eq '(^|_)u\.zip$'; then
+            echo 'Unexpected U release asset found in v2.' >&2
+            exit 1
+          fi
+          trap - ERR
+          echo "windows-production-digest=$win_remote"
+          echo "mac-production-digest=$mac_remote"
