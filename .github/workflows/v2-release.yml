@@ -1309,11 +1309,28 @@ jobs:
 
           launch_started="$(date -u '+%Y-%m-%d %H:%M:%S%z')"
           launch_output="$RUNNER_TEMP/published-mac-launch.log"
-          if ! open -n "$archive_app" >"$launch_output" 2>&1; then
+          open -n "$archive_app" >"$launch_output" 2>&1 &
+          open_pid=$!
+          app_started=false
+          for attempt in {1..20}; do
+            if pgrep -x 'Grok Chameleon' >/dev/null; then
+              app_started=true
+              break
+            fi
+            if ! kill -0 "$open_pid" 2>/dev/null; then
+              break
+            fi
+            sleep 0.25
+          done
+          if [[ "$app_started" != true ]]; then
             cat "$launch_output" >&2
+            kill "$open_pid" 2>/dev/null || true
+            wait "$open_pid" 2>/dev/null || true
+            echo 'Published Mac app did not start through LaunchServices.' >&2
             exit 1
           fi
-          sleep 5
+          kill "$open_pid" 2>/dev/null || true
+          wait "$open_pid" 2>/dev/null || true
           if grep -E -- '-47|fBsyErr|Resource busy' "$launch_output"; then
             echo 'ZIP -47 launch failure detected.' >&2
             exit 1
@@ -1324,7 +1341,7 @@ jobs:
             echo 'ZIP -47 launch failure detected in macOS unified log.' >&2
             exit 1
           fi
-          pkill -f "$archive_exec" 2>/dev/null || true
+          pkill -x 'Grok Chameleon' 2>/dev/null || true
 
           echo "published-mac-digest=$remote_digest"
           echo 'published-mac-verification=passed'
