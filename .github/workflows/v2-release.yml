@@ -73,7 +73,7 @@ jobs:
     env:
       RELEASE_TAG: v1.0.0
       INPUT_ZIP: Win_Grok_Chameleon.zip
-      OUTPUT_ZIP: Win_Grok_Chameleon.zip
+      OUTPUT_ZIP: Win_Grok_Chameleon_v2.0.zip
 
     steps:
       - name: Check out the shared source commit
@@ -545,7 +545,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-common-source-build
-          path: output/Win_Grok_Chameleon.zip
+          path: output/Win_Grok_Chameleon_v2.0.zip
           if-no-files-found: error
           retention-days: 3
 
@@ -557,7 +557,7 @@ jobs:
     env:
       RELEASE_TAG: v1.0.0
       INPUT_ZIP: Mac_Grok_Chameleon.zip
-      OUTPUT_ZIP: Mac_Grok_Chameleon.zip
+      OUTPUT_ZIP: Mac_Grok_Chameleon_v2.0.zip
 
     steps:
       - name: Check out the shared source commit
@@ -1054,7 +1054,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: mac-common-source-build
-          path: output/Mac_Grok_Chameleon.zip
+          path: output/Mac_Grok_Chameleon_v2.0.zip
           if-no-files-found: error
           retention-days: 3
 
@@ -1083,8 +1083,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: v2.0.0
-          WIN_ZIP: Win_Grok_Chameleon.zip
-          MAC_ZIP: Mac_Grok_Chameleon.zip
+          WIN_ZIP: Win_Grok_Chameleon_v2.0.zip
+          MAC_ZIP: Mac_Grok_Chameleon_v2.0.zip
           WIN_INPUT_SHA256: ${{ needs.build-windows.outputs.input_sha256 }}
           MAC_INPUT_SHA256: ${{ needs.build-macos.outputs.input_sha256 }}
         run: |
