@@ -588,7 +588,14 @@ jobs:
           mkdir -p "$clean_parent"
           ditto --norsrc --noextattr --noacl --noqtn "$assembled_root" "$clean_parent/Grok Chameleon"
           root="$clean_parent/Grok Chameleon"
-          main_app="$root/Grok Chameleon.app"
+          legacy_main_app="$root/Grok Chameleon.app"
+          versioned_main_app="$root/Grok Chameleon v2.app"
+          if [[ -d "$versioned_main_app" ]]; then
+            main_app="$versioned_main_app"
+          else
+            test -d "$legacy_main_app"
+            main_app="$legacy_main_app"
+          fi
           migration_app="$root/Migration.app"
           app_root="$main_app/Contents/Resources/app"
           common_root="$GITHUB_WORKSPACE/common/app"
@@ -915,7 +922,13 @@ jobs:
           export COPYFILE_DISABLE=1
           root="$RUNNER_TEMP/grok-chameleon-final-stage/Grok Chameleon"
           test -d "$root"
-          main_app="$root/Grok Chameleon.app"
+          legacy_main_app="$root/Grok Chameleon.app"
+          main_app="$root/Grok Chameleon v2.app"
+          if [[ -d "$legacy_main_app" ]]; then
+            test ! -e "$main_app"
+            mv "$legacy_main_app" "$main_app"
+          fi
+          test -d "$main_app"
           app_root="$main_app/Contents/Resources/app"
           info_plist="$main_app/Contents/Info.plist"
           common_root="$GITHUB_WORKSPACE/common/app"
@@ -1000,8 +1013,10 @@ jobs:
           mkdir -p verify/a
           ditto -x -k "output/$OUTPUT_ZIP" verify/a
           verified_root="$PWD/verify/a/Grok Chameleon"
-          verified_main="$verified_root/Grok Chameleon.app"
+          verified_main="$verified_root/Grok Chameleon v2.app"
           verified_app="$verified_main/Contents/Resources/app"
+          test ! -e "$verified_root/Grok Chameleon.app"
+          test -d "$verified_main"
           verified_server="$verified_app/runtime/server.py"
           verified_library_index="$verified_app/runtime/library_index.py"
           verified_imagine_state="$verified_app/runtime/imagine_state.py"
@@ -1070,7 +1085,7 @@ jobs:
           xattr -w com.apple.quarantine '0081;00000000;Chrome;' "$archive_utility_dir/$OUTPUT_ZIP"
           open -W -a 'Archive Utility' "$archive_utility_dir/$OUTPUT_ZIP"
           archive_utility_root="$archive_utility_dir/Grok Chameleon"
-          archive_utility_main="$archive_utility_root/Grok Chameleon.app"
+          archive_utility_main="$archive_utility_root/Grok Chameleon v2.app"
           test -d "$archive_utility_root"
           test -x "$archive_utility_main/Contents/MacOS/Grok Chameleon"
           test -L "$archive_utility_main/Contents/Frameworks/Electron Framework.framework/Versions/Current"
@@ -1275,7 +1290,7 @@ jobs:
 
           ditto -x -k "$published_zip" "$ditto_dir"
           root="$ditto_dir/Grok Chameleon"
-          main_app="$root/Grok Chameleon.app"
+          main_app="$root/Grok Chameleon v2.app"
           app_root="$main_app/Contents/Resources/app"
           main_exec="$main_app/Contents/MacOS/Grok Chameleon"
           python_exec="$main_app/Contents/Resources/Python/bin/python3"
@@ -1334,6 +1349,8 @@ jobs:
           )
 
           test -d "$root"
+          test ! -e "$root/Grok Chameleon.app"
+          test -d "$main_app"
           test -d "$app_root"
           test -f "$main_app/Contents/Info.plist"
           test -x "$main_exec"
@@ -1373,7 +1390,7 @@ jobs:
           xattr -w com.apple.quarantine '0081;00000000;Chrome;' "$quarantined_zip"
           open -W -a 'Archive Utility' "$quarantined_zip"
           archive_root="$archive_dir/Grok Chameleon"
-          archive_app="$archive_root/Grok Chameleon.app"
+          archive_app="$archive_root/Grok Chameleon v2.app"
           archive_exec="$archive_app/Contents/MacOS/Grok Chameleon"
           test -d "$archive_root"
           test -d "$archive_app/Contents/Resources/app"
