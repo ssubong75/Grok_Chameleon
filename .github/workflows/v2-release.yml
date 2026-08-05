@@ -1335,7 +1335,7 @@ jobs:
             echo 'ZIP -47 launch failure detected.' >&2
             exit 1
           fi
-          launch_failures="$(log show --start "$launch_started" --style compact --predicate '(process == "CoreServicesUIAgent") && (eventMessage CONTAINS "-47" || eventMessage CONTAINS "fBsyErr" || eventMessage CONTAINS "Resource busy")' 2>/dev/null || true)"
+          launch_failures="$(log show --start "$launch_started" --style compact --predicate '(process == "CoreServicesUIAgent") && (eventMessage CONTAINS "-47" || eventMessage CONTAINS "fBsyErr" || eventMessage CONTAINS "Resource busy")' 2>/dev/null | grep -E -- '-47|fBsyErr|Resource busy' || true)"
           if [[ -n "$launch_failures" ]]; then
             printf '%s\n' "$launch_failures" >&2
             echo 'ZIP -47 launch failure detected in macOS unified log.' >&2
