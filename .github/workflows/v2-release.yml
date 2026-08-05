@@ -71,8 +71,8 @@ jobs:
     outputs:
       input_sha256: ${{ steps.windows_input.outputs.sha256 }}
     env:
-      RELEASE_TAG: v1.0.0
-      INPUT_ZIP: Win_Grok_Chameleon.zip
+      RELEASE_TAG: v2.0.0
+      INPUT_ZIP: Win_Grok_Chameleon_v2.0.zip
       OUTPUT_ZIP: Win_Grok_Chameleon_v2.0.zip
 
     steps:
@@ -555,8 +555,8 @@ jobs:
     outputs:
       input_sha256: ${{ steps.macos_input.outputs.sha256 }}
     env:
-      RELEASE_TAG: v1.0.0
-      INPUT_ZIP: Mac_Grok_Chameleon.zip
+      RELEASE_TAG: v2.0.0
+      INPUT_ZIP: Mac_Grok_Chameleon_v2.0.zip
       OUTPUT_ZIP: Mac_Grok_Chameleon_v2.0.zip
 
     steps:
