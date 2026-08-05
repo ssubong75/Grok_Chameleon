@@ -468,9 +468,15 @@ function verifiedLibraryBuildPreviewDir(info = {}, kind = "card") {
   return resolvedPreviewDir;
 }
 
-async function waitForCardPreviewTasks() {
+async function waitForCardPreviewTasks(timeoutMs = 2000) {
   const tasks = Array.from(cardPreviewTasks.values());
-  if (tasks.length) await Promise.allSettled(tasks);
+  if (!tasks.length) return true;
+  const completed = await Promise.race([
+    Promise.allSettled(tasks).then(() => true),
+    sleep(timeoutMs).then(() => false),
+  ]);
+  if (!completed) appendLog(`card preview shutdown wait timed out after ${timeoutMs}ms`);
+  return completed;
 }
 
 function cardPreviewResult(key, storage = "cache", kind = "card") {
@@ -2336,3 +2342,11 @@ app.on("window-all-closed", () => {
 app.on("will-quit", () => {
   if (!appTerminating) shutdownServerNow();
 });
+
+if (process.platform === "darwin") {
+  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+    process.once(signal, () => {
+      void exitAppNow(signal.toLowerCase());
+    });
+  }
+}
