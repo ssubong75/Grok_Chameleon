@@ -1308,18 +1308,12 @@ jobs:
           fi
 
           launch_started="$(date -u '+%Y-%m-%d %H:%M:%S%z')"
-          launchctl setenv ELECTRON_RUN_AS_NODE 1
-          cleanup_launch_env() {
-            launchctl unsetenv ELECTRON_RUN_AS_NODE || true
-          }
-          trap cleanup_launch_env EXIT
           launch_output="$RUNNER_TEMP/published-mac-launch.log"
-          if ! open -W -n "$archive_app" --args -e 'setTimeout(() => process.exit(0), 500)' >"$launch_output" 2>&1; then
+          if ! open -n "$archive_app" >"$launch_output" 2>&1; then
             cat "$launch_output" >&2
             exit 1
           fi
-          cleanup_launch_env
-          trap - EXIT
+          sleep 5
           if grep -E -- '-47|fBsyErr|Resource busy' "$launch_output"; then
             echo 'ZIP -47 launch failure detected.' >&2
             exit 1
@@ -1330,6 +1324,7 @@ jobs:
             echo 'ZIP -47 launch failure detected in macOS unified log.' >&2
             exit 1
           fi
+          pkill -f "$archive_exec" 2>/dev/null || true
 
           echo "published-mac-digest=$remote_digest"
           echo 'published-mac-verification=passed'
