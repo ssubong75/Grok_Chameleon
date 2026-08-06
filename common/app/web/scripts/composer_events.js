@@ -267,8 +267,10 @@ for (const thumbListSelector of [".composer_upload_thumb_list", ".composer_attac
     }
     const thumb = event.target.closest("button");
     if (!thumb || !thumbList.contains(thumb)) return;
-    if (thumb.dataset.attachmentIndex) {
-      removeComposerAttachmentAt(Number(thumb.dataset.attachmentIndex));
+    if (thumb.dataset.attachmentIndex !== undefined) {
+      const attachmentIndex = Number(thumb.dataset.attachmentIndex);
+      if (openComposerAttachmentImagePreview(attachmentIndex)) return;
+      removeComposerAttachmentAt(attachmentIndex);
       return;
     }
     if (thumb.dataset.uploadPostPath && thumb.dataset.uploadItemId) {

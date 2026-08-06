@@ -14,12 +14,35 @@
 
 ## 기준본과 공통 소스
 
-- Mac 바탕화면 기준본은 `/Users/emuse/Desktop/Grok Chameleon/`입니다. 작업 시작 시 실제 존재 여부와 앱 내부 경로를 다시 확인합니다.
+- 사용자가 지정한 Mac 바탕화면 기준본은 `/Users/emuse/Desktop/Grok Chameleon/`입니다. Mac 기준본 작업을 시작할 때 실제 존재 여부와 앱 내부 경로를 다시 확인합니다.
+- 사용자가 Windows에서 내려받은 Windows 배포본을 기준본으로 지정할 수도 있습니다. 작업마다 사용자가 지정한 기준본을 우선하며 Mac 기준본이라고 자동 가정하지 않습니다.
 - GitHub 공통 소스는 저장소의 `common/app/`입니다.
 - 배포 전 변경을 공통 코드, Windows 전용, Mac 전용으로 분류합니다.
 - 가능한 변경은 Windows와 Mac에 동일한 공통 소스로 구현합니다.
 - Mac 전용 Electron, Python 경로, `process.platform`, `process.resourcesPath`, 창 처리, 권한 및 프레임워크 심볼릭 링크 구조를 유지합니다.
 - 공통 소스와 기준본을 대조할 때 승인된 변경 파일만 반영합니다.
+
+## Windows 기준본
+
+- 현재 Windows ZIP의 앱 공통 소스 경로는 `Grok Chameleon\Resources\Grok Chameleon\resources\app`이고 번들 Python 경로는 `Grok Chameleon\Resources\Python\python.exe`입니다.
+- Windows 기준본 작업을 시작할 때 사용자가 실제로 압축 해제한 폴더와 위 내부 경로를 다시 확인하며 다운로드 위치를 추정하지 않습니다.
+- Windows 기준본의 공통 텍스트 소스는 CRLF일 수 있으므로 GitHub의 LF 공통 원본과 비교할 때 줄바꿈을 정규화합니다.
+- Windows에서 새로 입력하거나 JSON·인덱스에 기록하는 한글 경로는 NFC를 유지하고 Mac의 기존 NFD 파일명 표현을 가져와 강제로 적용하지 않습니다.
+- Windows 기준본의 `resources/app` 전체를 Mac 앱에 복사하거나 Mac 앱 전체를 Windows에 복사하지 않습니다. 검증된 대응 파일만 공통 소스에 반영합니다.
+- Windows에서 발견한 변경이 공통 동작이면 `common/app`에 반영하고 기존 워크플로로 두 운영체제를 같은 커밋에서 빌드합니다. Windows 전용 동작이면 공통 코드와 분리하고 Mac 구조가 유지되는지 확인합니다.
+
+## 현재 공통 소스 등록 누락 파일
+
+- 다음 파일은 현재 Windows와 Mac 배포본에 동일하게 존재하지만 GitHub `common/app` 및 기존 워크플로 공통 복사 목록에는 등록되어 있지 않습니다.
+- Electron·Python: `electron/preload-main.js`, `runtime/build_routes.py`
+- 이미지 편집기: `web/editor.html`, `web/assets/editor.js`, `web/assets/editor.css`
+- 웹 스크립트: `web/scripts/automation.js`, `web/scripts/b_detail_media.js`, `web/scripts/collection_utils.js`, `web/scripts/composer_submit.js`, `web/scripts/detail_common_actions.js`, `web/scripts/detail_video_player.js`, `web/scripts/dialog.js`, `web/scripts/i_detail_media.js`, `web/scripts/library_utils.js`, `web/scripts/prompt_render.js`, `web/scripts/prompt_translate.js`, `web/scripts/source_filter.js`, `web/scripts/source_render.js`
+- 스타일: `web/styles/base.css`, `web/styles/composer.css`, `web/styles/responsive.css`
+- 현재 직접 로드되지 않는 이전 파일: `web/scripts/app.js`
+- 위 파일 중 하나를 수정해야 하면 기준본만 바꾸지 않습니다. 먼저 공통/Windows 전용/Mac 전용으로 분류하고, 공통 파일이면 `common/app` 대응 파일과 기존 워크플로의 Windows 조립 목록, Mac `shared_relatives`, 게시 ZIP 검증 목록에 같은 상대 경로를 등록합니다.
+- `web/scripts/app.js`는 현재 `index.html`에서 로드되지 않으므로 수정 또는 공통 등록 전에 실제 사용 여부를 다시 확인합니다.
+- `package.json`은 Mac에만 `pack:mac` 명령이 있어 Windows와 내용이 다르므로 통째로 공통화하지 않습니다.
+- `tools/i2v_smoke_test.js`는 현재 Mac 배포본에만 있는 검증 도구이므로 Windows 공통 파일로 복사하지 않습니다.
 
 ## 패치 규칙
 
@@ -80,4 +103,3 @@
 - 최종 확인은 워크플로의 `headSha`, 전체 성공 여부, 릴리스 자산 두 개의 이름·크기·SHA-256·갱신 시각, 저장소의 깨끗한 상태로 제한합니다.
 - 워크플로에서 이미 확인한 공통 파일 전체 비교, Mac 메타데이터, 심볼릭 링크, 서명, Electron 및 Python 실행을 로컬에서 다시 반복하지 않습니다.
 - 워크플로가 실패했을 때만 실패한 정확한 단계와 관련된 검사를 추가로 수행합니다.
-

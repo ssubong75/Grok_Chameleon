@@ -1,4 +1,81 @@
 // Composer attachments
+  let composerAttachmentImagePreviewOverlay = null;
+  let composerAttachmentImagePreviewResizeHandler = null;
+
+  function closeComposerAttachmentImagePreview() {
+    if (composerAttachmentImagePreviewResizeHandler) {
+      window.removeEventListener("resize", composerAttachmentImagePreviewResizeHandler);
+      composerAttachmentImagePreviewResizeHandler = null;
+    }
+    composerAttachmentImagePreviewOverlay?.remove();
+    composerAttachmentImagePreviewOverlay = null;
+  }
+
+  function composerAttachmentImagePreviewUrls(attachment) {
+    return Array.from(new Set([
+      attachment?.source_url,
+      attachment?.raw_url,
+      attachment?.data_url,
+      attachment?.preview_url,
+    ].map((value) => String(value || "").trim()).filter(Boolean)));
+  }
+
+  function openComposerAttachmentImagePreview(index) {
+    const attachment = composerAttachments[Number(index)];
+    if (!attachment || composerMediaKind(attachment) !== "image") return false;
+    const urls = composerAttachmentImagePreviewUrls(attachment);
+    if (!urls.length) return false;
+    closeComposerAttachmentImagePreview();
+
+    const overlay = document.createElement("div");
+    overlay.className = "composer_attachment_image_preview_overlay";
+    overlay.tabIndex = -1;
+    overlay.setAttribute("role", "dialog");
+    overlay.setAttribute("aria-modal", "true");
+    overlay.setAttribute("aria-label", "Image preview");
+
+    const image = document.createElement("img");
+    image.className = "composer_attachment_image_preview";
+    image.alt = attachment.name || "Attached image";
+    image.draggable = false;
+    overlay.append(image);
+
+    const syncImageSize = () => {
+      if (!image.naturalWidth || !image.naturalHeight) return;
+      const targetHeight = Math.max(1, Math.round(window.innerHeight * 0.7));
+      const targetWidth = targetHeight * (image.naturalWidth / image.naturalHeight);
+      const maxWidth = Math.max(1, Math.round(window.innerWidth * 0.92));
+      const scale = Math.min(1, maxWidth / targetWidth);
+      image.style.width = `${Math.round(targetWidth * scale)}px`;
+      image.style.height = `${Math.round(targetHeight * scale)}px`;
+      image.classList.add("loaded");
+    };
+
+    let urlIndex = 0;
+    image.addEventListener("load", syncImageSize);
+    image.addEventListener("error", () => {
+      urlIndex += 1;
+      if (urlIndex < urls.length) {
+        image.src = urls[urlIndex];
+        return;
+      }
+      closeComposerAttachmentImagePreview();
+      showErrorPanel("Preview unavailable", "The attached image could not be opened.");
+    });
+    image.src = urls[urlIndex];
+
+    overlay.addEventListener("click", closeComposerAttachmentImagePreview);
+    overlay.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") closeComposerAttachmentImagePreview();
+    });
+    document.body.append(overlay);
+    composerAttachmentImagePreviewOverlay = overlay;
+    composerAttachmentImagePreviewResizeHandler = syncImageSize;
+    window.addEventListener("resize", composerAttachmentImagePreviewResizeHandler);
+    requestAnimationFrame(() => overlay.focus({ preventScroll: true }));
+    return true;
+  }
+
   function fileToDataUrl(file) {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -330,12 +407,7 @@
         button.classList.add("active");
         button.classList.toggle("is_detail_auto", Boolean(attachment?.detail_auto));
         button.classList.toggle("after_detail_auto", index === firstAfterDetail);
-        if (!button.querySelector(".composer_upload_check")) {
-          const check = document.createElement("span");
-          check.className = "composer_upload_check";
-          check.textContent = "✓";
-          button.append(check);
-        }
+        button.querySelector(".composer_upload_check")?.remove();
       }
       return true;
     }
@@ -712,7 +784,7 @@
         label.textContent = String(source.name || source.file || "MEDIA").slice(0, 3).toUpperCase();
         button.append(label);
       }
-      if (active) {
+      if (active && !attached) {
         const check = document.createElement("span");
         check.className = "composer_upload_check";
         check.textContent = "✓";
