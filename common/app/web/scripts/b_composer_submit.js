@@ -202,7 +202,12 @@ function finishBuildJob(job) {
         library_state.selectedDetailItemId = job.result.selected_item_id;
         renderDetailViews();
       }
-      screen_state.detail_back.build = { screenId: "b_main", activeButtonId: "b_build_btn" };
+      const backTarget = { screenId: "b_main", activeButtonId: "b_build_btn" };
+      if (typeof captureLibraryCardListScroll === "function") {
+        const scrollState = captureLibraryCardListScroll("b_main");
+        if (scrollState) backTarget.scrollState = scrollState;
+      }
+      screen_state.detail_back.build = backTarget;
       openScreen("b_detail", "b_build_btn");
       const completedMode = String(job.context?.mode || "").toLowerCase();
       const completedFromImage = Boolean(job.context?.source_item_id);

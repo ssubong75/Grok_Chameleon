@@ -808,6 +808,10 @@ function mediaCardForPost(post, className, backTargetOverride = null) {
         activeButtonId: screen_state.current_b_nav_btn,
       });
     const storedBackTarget = { ...backTarget };
+    if (typeof captureLibraryCardListScroll === "function") {
+      const scrollState = captureLibraryCardListScroll(storedBackTarget.screenId);
+      if (scrollState) storedBackTarget.scrollState = scrollState;
+    }
     if (detailType === "imagine" && typeof imagineListScrollTopForScreen === "function") {
       const scrollTop = imagineListScrollTopForScreen(storedBackTarget.screenId);
       if (scrollTop !== null && scrollTop !== undefined) storedBackTarget.scrollTop = scrollTop;
@@ -879,7 +883,12 @@ function mediaCardForItem(post, item, backTarget = { screenId: "2nd_main", activ
     selectLibraryPost(post.folder_path);
     setSelectedDetailItem(mediaItemKey(item));
     const detailType = cardUsesImagineDetail(post, "") ? "imagine" : "build";
-    screen_state.detail_back[detailType] = backTarget;
+    const storedBackTarget = { ...backTarget };
+    if (typeof captureLibraryCardListScroll === "function") {
+      const scrollState = captureLibraryCardListScroll(storedBackTarget.screenId);
+      if (scrollState) storedBackTarget.scrollState = scrollState;
+    }
+    screen_state.detail_back[detailType] = storedBackTarget;
     openScreen(detailType === "imagine" ? "i_detail" : "b_detail", "b_collection_nav_btn");
   };
   article.addEventListener("click", activate);

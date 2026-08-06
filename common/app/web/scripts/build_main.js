@@ -399,7 +399,12 @@
       || (options.focusJobThumb ? (visibleGenerationJobSlots(job)[0] || 1) : 0);
     if (focusedSlot) library_state.selectedDetailItemId = `job-${job.id}-${focusedSlot}`;
     else if (!options.keepDetailPost) library_state.selectedDetailItemId = "";
-    screen_state.detail_back.build = { screenId: "b_main", activeButtonId: "b_build_btn" };
+    const backTarget = { screenId: "b_main", activeButtonId: "b_build_btn" };
+    if (typeof captureLibraryCardListScroll === "function") {
+      const scrollState = captureLibraryCardListScroll("b_main");
+      if (scrollState) backTarget.scrollState = scrollState;
+    }
+    screen_state.detail_back.build = backTarget;
     renderDetailViews();
     openScreen("b_detail", "b_build_btn");
   }
@@ -1014,9 +1019,20 @@
 
     const activate = () => {
       if (basePost?.folder_path) library_state.selectedPostPath = basePost.folder_path;
-      if (backTargetOverride && provider === "build") screen_state.detail_back.build = backTargetOverride;
+      if (backTargetOverride && provider === "build") {
+        const storedBackTarget = { ...backTargetOverride };
+        if (typeof captureLibraryCardListScroll === "function") {
+          const scrollState = captureLibraryCardListScroll(storedBackTarget.screenId);
+          if (scrollState) storedBackTarget.scrollState = scrollState;
+        }
+        screen_state.detail_back.build = storedBackTarget;
+      }
       if (backTargetOverride && provider === "imagine") {
         const storedBackTarget = { ...backTargetOverride };
+        if (typeof captureLibraryCardListScroll === "function") {
+          const scrollState = captureLibraryCardListScroll(storedBackTarget.screenId);
+          if (scrollState) storedBackTarget.scrollState = scrollState;
+        }
         if (typeof imagineListScrollTopForScreen === "function") {
           const scrollTop = imagineListScrollTopForScreen(storedBackTarget.screenId);
           if (scrollTop !== null && scrollTop !== undefined) storedBackTarget.scrollTop = scrollTop;

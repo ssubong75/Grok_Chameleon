@@ -169,12 +169,18 @@ function returnFromDetailToSource() {
   if (!currentDetailType) return false;
   const target = detailBackTarget(currentDetailType);
   if (!target?.screenId) return false;
-  if (browserHistoryCursor > 0) {
-    navigateBrowserHistory(-1);
-  } else {
-    openScreen(target.screenId, target.activeButtonId || "", {
-      replaceHistory: true,
-    });
+  openScreen(target.screenId, target.activeButtonId || "", {
+    replaceHistory: true,
+  });
+  if (target.scrollState && typeof restoreLibraryCardListScroll === "function") {
+    restoreLibraryCardListScroll(target.scrollState);
+  } else if (
+    currentDetailType === "imagine"
+    && target.scrollTop !== null
+    && target.scrollTop !== undefined
+    && typeof restoreImagineListScrollForScreen === "function"
+  ) {
+    restoreImagineListScrollForScreen(target.screenId, target.scrollTop);
   }
   return true;
 }

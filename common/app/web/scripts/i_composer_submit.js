@@ -655,7 +655,12 @@ function applyImagineDirectResult(result, options = {}) {
       renderDetailViews();
     }
     if (!keepSourceDetail) {
-      screen_state.detail_back.imagine = { screenId: "i_main", activeButtonId: screen_state.current_i_nav_btn || "i_imagine_nav_btn" };
+      const backTarget = { screenId: "i_main", activeButtonId: screen_state.current_i_nav_btn || "i_imagine_nav_btn" };
+      if (typeof captureLibraryCardListScroll === "function") {
+        const scrollState = captureLibraryCardListScroll("i_main");
+        if (scrollState) backTarget.scrollState = scrollState;
+      }
+      screen_state.detail_back.imagine = backTarget;
     }
     openScreen("i_detail", screen_state.current_i_nav_btn || "i_imagine_nav_btn");
     if (

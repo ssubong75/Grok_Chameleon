@@ -9471,8 +9471,16 @@ def imagine_t2i_candidate_from_event(event: dict, prompt: str) -> dict | None:
     image_id = str(event.get("image_id") or event.get("job_id") or "").strip()
     if not image_id or not re.fullmatch(r"[0-9a-fA-F-]{32,36}", image_id):
         return None
-    raw_url = f"https://imagine-public.x.ai/imagine-public/images/{image_id}.jpg"
+    raw_url = str(event.get("url") or "").strip() or f"https://imagine-public.x.ai/imagine-public/images/{image_id}.jpg"
     status = str(event.get("current_status") or "").strip().lower()
+    progress = imagine_event_numeric_progress(event)
+    moderated = imagine_event_is_moderated(event)
+    terminal_image = (
+        str(event.get("type") or "").strip().lower() == "image"
+        and progress is not None
+        and progress >= 100
+        and isinstance(event.get("moderated"), bool)
+    )
     mode = str(event.get("mode") or "").strip().lower()
     model_label = "Quality" if mode == "quality" else ("Speed" if mode == "fast" else str(event.get("model_name") or "imagine-x-1"))
     return {
@@ -9490,8 +9498,8 @@ def imagine_t2i_candidate_from_event(event: dict, prompt: str) -> dict | None:
         "resolution_name": mode,
         "video_duration": "",
         "order": safe_int(event.get("order"), 0),
-        "completed": status == "completed",
-        "moderated": imagine_event_is_moderated(event),
+        "completed": status == "completed" or moderated or terminal_image,
+        "moderated": moderated,
     }
 
 
@@ -9602,15 +9610,15 @@ def imagine_t2i_direct_items(
                 raise
             if not text:
                 break
-            if '"type":"image"' in text[:32] or '"blob"' in text[:80]:
-                signal_seen = True
-                continue
             try:
                 event = json.loads(text)
             except json.JSONDecodeError:
                 continue
             if not isinstance(event, dict):
                 continue
+            if "blob" in event:
+                event = dict(event)
+                event.pop("blob", None)
             if str(event.get("request_id") or "") != request_id:
                 continue
             last_events.append(event)
@@ -9629,13 +9637,16 @@ def imagine_t2i_direct_items(
                 imagine_debug_event("t2i_progress", {"request_id": request_id, "progress": progress})
                 log_imagine_stream_event_if_needed(request_id, event, progress, imagine_event_is_terminal_failure(event), "t2i_progress")
             if candidate:
+                candidate_is_new = candidate["post_id"] not in candidates
                 candidates[candidate["post_id"]] = candidate
                 completed_count = sum(1 for item in candidates.values() if item.get("completed"))
                 if candidate.get("completed") and candidate["post_id"] not in completion_order:
                     completion_order.append(candidate["post_id"])
                 if completed_count >= count and completed_count != last_completed_count:
-                    completed_grace_deadline = time.monotonic() + 2.5
+                    completed_grace_deadline = time.monotonic() + 3.0
                     last_completed_count = completed_count
+                elif completed_count >= count and candidate_is_new:
+                    completed_grace_deadline = time.monotonic() + 3.0
                 elif completed_count > 0 and len(candidates) >= count and not completed_grace_deadline:
                     completed_grace_deadline = time.monotonic() + 1.25
                 imagine_debug_event("t2i_candidate", {
@@ -15479,18 +15490,17 @@ def chrome_bridge_t2i_events(
   let signalSeen = false;
   let completedGraceStartedAt = 0;
   let lastCompletedCount = 0;
+  let lastCandidateCount = 0;
   const socket = new WebSocket(wsUrl);
   function push(raw) {{
     const text = typeof raw === 'string' ? raw : '';
     if (!text) return;
-    if (text.slice(0, 32).includes('"type":"image"') || text.slice(0, 80).includes('"blob"')) {{
-      signalSeen = true;
-      return;
-    }}
     try {{
       const parsed = JSON.parse(text);
       if (parsed && parsed.request_id === requestId) {{
-        events.push(parsed);
+        const event = {{ ...parsed }};
+        delete event.blob;
+        events.push(event);
         signalSeen = true;
       }}
     }} catch (error) {{}}
@@ -15512,25 +15522,40 @@ def chrome_bridge_t2i_events(
   socket.send(JSON.stringify(createPayload));
 	  await new Promise((resolve) => {{
 	    function done() {{
-	      const completed = events.filter((event) => String(event.current_status || '').toLowerCase() === 'completed').length;
-      const terminal = events.some((event) => {{
+	      const terminalIds = new Set();
+	      const candidateIds = new Set();
+      const requestTerminal = events.some((event) => {{
         const text = JSON.stringify(event || {{}}).toLowerCase();
         const status = String(event.current_status || event.status || '').toLowerCase();
-        return status.includes('moderated')
-          || status.includes('failed')
+        const eventId = String(event.image_id || event.job_id || event.id || '').trim();
+        const progress = Number(event.percentage_complete);
+        if (eventId) candidateIds.add(eventId);
+        const candidateTerminal = status === 'completed'
+          || event.moderated === true
+          || (
+            String(event.type || '').toLowerCase() === 'image'
+            && Number.isFinite(progress)
+            && progress >= 100
+            && typeof event.moderated === 'boolean'
+          );
+        if (eventId && candidateTerminal) terminalIds.add(eventId);
+        const failed = status.includes('failed')
           || status.includes('error')
           || text.includes('content_policy_violation')
           || text.includes('content was moderated')
           || text.includes('rejected by content moderation');
+        return failed || (!eventId && status.includes('moderated'));
       }});
-	      if (terminal) return true;
-	      if (completed >= receiveLimit) return true;
-	      if (completed >= expectedCount) {{
-	        if (completed !== lastCompletedCount) {{
-	          lastCompletedCount = completed;
+	      const terminalCount = terminalIds.size;
+	      if (requestTerminal) return true;
+	      if (terminalCount >= receiveLimit) return true;
+	      if (terminalCount >= expectedCount) {{
+	        if (terminalCount !== lastCompletedCount || candidateIds.size !== lastCandidateCount) {{
+	          lastCompletedCount = terminalCount;
+	          lastCandidateCount = candidateIds.size;
 	          completedGraceStartedAt = Date.now();
 	        }}
-	        return completedGraceStartedAt && Date.now() - completedGraceStartedAt >= 2500;
+	        return completedGraceStartedAt && Date.now() - completedGraceStartedAt >= 3000;
 	      }}
 	      return false;
 	    }}

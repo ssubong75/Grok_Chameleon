@@ -1329,14 +1329,12 @@
   function collectEvent(raw, requestId, eventsState) {
     const text = typeof raw === "string" ? raw : "";
     if (!text) return;
-    if (text.slice(0, 32).includes('"type":"image"') || text.slice(0, 80).includes('"blob"')) {
-      eventsState.signalSeen = true;
-      return;
-    }
     try {
       const parsed = JSON.parse(text);
       if (parsed && parsed.request_id === requestId) {
-        eventsState.events.push(parsed);
+        const event = { ...parsed };
+        delete event.blob;
+        eventsState.events.push(event);
         eventsState.signalSeen = true;
       }
     } catch (_) {}
@@ -3413,6 +3411,7 @@
       const receiveLimit = wantedCount + 3;
       let completedGraceStartedAt = 0;
       let lastCompletedCount = 0;
+      let lastCandidateCount = 0;
       listeners.add(listener);
       try {
         socket.send(JSON.stringify(resetPayload));
@@ -3420,25 +3419,40 @@
         socket.send(JSON.stringify(createPayload));
         await new Promise((resolve) => {
           const done = () => {
-            const completed = state.events.filter((event) => String(event.current_status || "").toLowerCase() === "completed").length;
-            const terminal = state.events.some((event) => {
+            const terminalIds = new Set();
+            const candidateIds = new Set();
+            const requestTerminal = state.events.some((event) => {
               const text = JSON.stringify(event || {}).toLowerCase();
               const status = String(event?.current_status || event?.status || "").toLowerCase();
-              return status.includes("moderated")
-                || status.includes("failed")
+              const eventId = String(event?.image_id || event?.job_id || event?.id || "").trim();
+              const progress = Number(event?.percentage_complete);
+              if (eventId) candidateIds.add(eventId);
+              const candidateTerminal = status === "completed"
+                || event?.moderated === true
+                || (
+                  String(event?.type || "").toLowerCase() === "image"
+                  && Number.isFinite(progress)
+                  && progress >= 100
+                  && typeof event?.moderated === "boolean"
+                );
+              if (eventId && candidateTerminal) terminalIds.add(eventId);
+              const failed = status.includes("failed")
                 || status.includes("error")
                 || text.includes("content_policy_violation")
                 || text.includes("content was moderated")
                 || text.includes("rejected by content moderation");
+              return failed || (!eventId && status.includes("moderated"));
             });
-            if (terminal) return true;
-            if (completed >= receiveLimit) return true;
-            if (completed >= wantedCount) {
-              if (completed !== lastCompletedCount) {
-                lastCompletedCount = completed;
+            const terminalCount = terminalIds.size;
+            if (requestTerminal) return true;
+            if (terminalCount >= receiveLimit) return true;
+            if (terminalCount >= wantedCount) {
+              if (terminalCount !== lastCompletedCount || candidateIds.size !== lastCandidateCount) {
+                lastCompletedCount = terminalCount;
+                lastCandidateCount = candidateIds.size;
                 completedGraceStartedAt = Date.now();
               }
-              return completedGraceStartedAt && Date.now() - completedGraceStartedAt >= 2500;
+              return completedGraceStartedAt && Date.now() - completedGraceStartedAt >= 3000;
             }
             return false;
           };
