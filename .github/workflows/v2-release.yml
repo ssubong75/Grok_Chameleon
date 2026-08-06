@@ -1114,12 +1114,12 @@ jobs:
               echo "Packaged Mac app did not start through LaunchServices on cycle $cycle." >&2
               exit 1
             fi
-            if grep -E -- '-47|fBsyErr|Resource busy' "$launch_output"; then
+            if grep -E -- '(^|[^[:xdigit:]])-47([^[:xdigit:]]|$)|fBsyErr|Resource busy' "$launch_output"; then
               echo "ZIP -47 launch failure detected on cycle $cycle." >&2
               exit 1
             fi
             local launch_failures
-            launch_failures="$(log show --start "$launch_started" --style compact --predicate '(process == "CoreServicesUIAgent") && (eventMessage CONTAINS "-47" || eventMessage CONTAINS "fBsyErr" || eventMessage CONTAINS "Resource busy")' 2>/dev/null | grep -E -- '-47|fBsyErr|Resource busy' || true)"
+            launch_failures="$(log show --start "$launch_started" --style compact --predicate '(process == "CoreServicesUIAgent") && (eventMessage CONTAINS "-47" || eventMessage CONTAINS "fBsyErr" || eventMessage CONTAINS "Resource busy")' 2>/dev/null | grep -E -- '(^|[^[:xdigit:]])-47([^[:xdigit:]]|$)|fBsyErr|Resource busy' || true)"
             if [[ -n "$launch_failures" ]]; then
               printf '%s\n' "$launch_failures" >&2
               echo "ZIP -47 launch failure detected in macOS unified log on cycle $cycle." >&2
