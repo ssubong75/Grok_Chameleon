@@ -1,6 +1,7 @@
 // Composer attachments
   let composerAttachmentImagePreviewOverlay = null;
   let composerAttachmentImagePreviewResizeHandler = null;
+  let composerAttachmentImagePreviewPreviousFocus = null;
 
   function closeComposerAttachmentImagePreview() {
     if (composerAttachmentImagePreviewResizeHandler) {
@@ -9,6 +10,10 @@
     }
     composerAttachmentImagePreviewOverlay?.remove();
     composerAttachmentImagePreviewOverlay = null;
+    if (composerAttachmentImagePreviewPreviousFocus?.isConnected) {
+      composerAttachmentImagePreviewPreviousFocus.focus({ preventScroll: true });
+    }
+    composerAttachmentImagePreviewPreviousFocus = null;
   }
 
   function composerAttachmentImagePreviewUrls(attachment) {
@@ -26,6 +31,9 @@
     const urls = composerAttachmentImagePreviewUrls(attachment);
     if (!urls.length) return false;
     closeComposerAttachmentImagePreview();
+    composerAttachmentImagePreviewPreviousFocus = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
 
     const overlay = document.createElement("div");
     overlay.className = "composer_attachment_image_preview_overlay";
@@ -64,7 +72,10 @@
     });
     image.src = urls[urlIndex];
 
-    overlay.addEventListener("click", closeComposerAttachmentImagePreview);
+    overlay.addEventListener("click", (event) => {
+      event.stopPropagation();
+      closeComposerAttachmentImagePreview();
+    });
     overlay.addEventListener("keydown", (event) => {
       if (event.key === "Escape") closeComposerAttachmentImagePreview();
     });

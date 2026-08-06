@@ -335,6 +335,7 @@ document.addEventListener("click", (event) => {
 document.addEventListener("pointerdown", (event) => {
   if (!composerUploadTray || composerUploadTray.hidden) return;
   if (!(event.target instanceof Element)) return;
+  if (event.target.closest(".composer_attachment_image_preview_overlay")) return;
   if (composer?.contains(event.target)) return;
   closeComposerUploadTray();
 }, { capture: true });

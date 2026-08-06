@@ -7,10 +7,6 @@
 @import url("./account.css");
 @import url("./responsive.css");
 
-.composer_attached_thumb.has-preview {
-  cursor: zoom-in;
-}
-
 .composer_attached_thumb .composer_upload_check {
   display: none;
 }
@@ -24,7 +20,6 @@
   padding: 5vh 4vw;
   background: rgb(0 0 0 / 0.34);
   backdrop-filter: blur(20px) brightness(0.58);
-  cursor: zoom-out;
 }
 
 .composer_attachment_image_preview {
@@ -34,7 +29,6 @@
   object-fit: contain;
   opacity: 0;
   user-select: none;
-  cursor: zoom-out;
   filter: drop-shadow(0 22px 56px rgb(0 0 0 / 0.48));
   transition: opacity 0.12s ease;
 }
