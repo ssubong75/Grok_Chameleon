@@ -53,12 +53,22 @@
     const selectionBar = document.getElementById("selectionBar");
     const selectionCount = document.getElementById("selectionCount");
     const mergeButton = document.getElementById("selectionMergeBtn");
+    const renameButton = document.getElementById("selectionRenameBtn");
     const imagineMoveActions = cardSelectionUsesImagineMoveActions();
     if (selectionBar) selectionBar.hidden = count === 0;
     if (selectionCount) selectionCount.textContent = `Selected: ${count}`;
     if (mergeButton) {
       mergeButton.textContent = imagineMoveActions ? "Move" : "Merge";
       mergeButton.dataset.selectionAction = imagineMoveActions ? "move" : "merge";
+    }
+    if (renameButton) {
+      const selectedPost = count === 1 ? selectedCardPosts()[0] : null;
+      const pathParts = String(selectedPost?.folder_path || "").split("/").filter(Boolean);
+      renameButton.hidden = !(
+        currentScreen === "2nd_main"
+        && selectedPost?.area === "collection"
+        && pathParts.length >= 4
+      );
     }
     for (const card of document.querySelectorAll("[data-library-post-path]")) {
       const selected = library_state.selectedItems?.has(card.dataset.libraryPostPath || "");
@@ -155,6 +165,41 @@
   function downloadSelectedCardItems() {
     const posts = selectedCardPosts();
     return downloadLibraryItems(posts.flatMap((post) => post.items || []));
+  }
+
+  async function renameSelectedCollectionCard() {
+    const posts = selectedCardPosts();
+    const post = posts.length === 1 ? posts[0] : null;
+    const folderPath = String(post?.folder_path || "").trim().replace(/^\/+|\/+$/g, "");
+    const pathParts = folderPath.split("/").filter(Boolean);
+    if (
+      screen_state.current_screen !== "2nd_main"
+      || post?.area !== "collection"
+      || pathParts.length < 4
+    ) {
+      showErrorPanel("Rename unavailable", "Select one card inside the current Item folder.");
+      return;
+    }
+    if (!library_state.apiReady) {
+      setLibraryMessage("Rename needs the local app launcher.");
+      return;
+    }
+    const currentName = pathParts[pathParts.length - 1];
+    const name = await collectionActionInput({
+      title: "Rename Card",
+      value: currentName,
+      confirmLabel: "Rename",
+    });
+    if (!name || name === currentName) return;
+    const scrollState = captureLibraryCardListScroll("2nd_main");
+    const data = await qApi("/api/library/rename-card-folder", {
+      target_path: folderPath,
+      name,
+    });
+    library_state.selectedItems.clear();
+    applyLibrarySnapshot(data);
+    restoreLibraryCardListScroll(scrollState);
+    toast("Card folder renamed.");
   }
 
   async function moveSelectedImagineCardItems() {

@@ -19,6 +19,13 @@ document.getElementById("selectionMergeBtn")?.addEventListener("click", () => {
   });
 });
 
+document.getElementById("selectionRenameBtn")?.addEventListener("click", () => {
+  renameSelectedCollectionCard().catch((error) => {
+    console.warn(error);
+    showErrorPanel("Rename failed", error?.message || "Rename failed.");
+  });
+});
+
 document.getElementById("selectionDeleteBtn")?.addEventListener("click", () => {
   deleteSelectedCardItems().catch((error) => {
     console.warn(error);

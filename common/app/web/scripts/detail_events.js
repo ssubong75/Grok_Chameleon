@@ -44,11 +44,11 @@ document.querySelector(".i_detail_forward")?.addEventListener("click", () => {
 });
 
 document.querySelector(".b_detail_return")?.addEventListener("click", () => {
-  returnFromDetailToSource();
+  navigateBrowserHistory(-1);
 });
 
 document.querySelector(".i_detail_return")?.addEventListener("click", () => {
-  returnFromDetailToSource();
+  navigateBrowserHistory(-1);
 });
 
 for (const thumbListSelector of [".i_detail_thumb_list", ".b_detail_thumb_list"]) {

@@ -232,6 +232,14 @@
   color: var(--accent);
 }
 
+.selection-bar .selection_rename_action {
+  color: var(--prompt-teal);
+}
+
+.selection-bar .selection_rename_action[hidden] {
+  display: none;
+}
+
 .selection-bar .selection_download_action {
   color: var(--imagine-blue);
 }
@@ -297,8 +305,7 @@
   .search_main_actions,
 	.i_discover_main_actions,
   .i_unsaved_main_actions,
-  .i_unsaved_main_right_actions,
-.second_main_actions {
+  .i_unsaved_main_right_actions {
   display: flex;
   align-items: center;
   gap: 48px;
@@ -381,32 +388,11 @@
   gap: 40px;
 }
 
-.second_main_actions {
-  gap: 12px;
-}
-
 .second_main_title_actions {
   position: relative;
   display: flex;
   align-items: center;
   min-width: 0;
-}
-
-.second_main_back_btn {
-  min-height: 30px;
-  padding: 0 14px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: #15181a;
-  color: var(--accent);
-  font-size: 12px;
-  font-weight: 780;
-}
-
-.second_main_back_btn:hover {
-  border-color: var(--accent);
-  background: #1b1f21;
-  color: var(--accent);
 }
 
 .prompt_main_header h2,

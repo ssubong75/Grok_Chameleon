@@ -163,24 +163,3 @@ async function navigateDetailPost(offset) {
   updateDetailPostNavigationButtons();
   return true;
 }
-
-function returnFromDetailToSource() {
-  const currentDetailType = detailTypeForScreen();
-  if (!currentDetailType) return false;
-  const target = detailBackTarget(currentDetailType);
-  if (!target?.screenId) return false;
-  openScreen(target.screenId, target.activeButtonId || "", {
-    replaceHistory: true,
-  });
-  if (target.scrollState && typeof restoreLibraryCardListScroll === "function") {
-    restoreLibraryCardListScroll(target.scrollState);
-  } else if (
-    currentDetailType === "imagine"
-    && target.scrollTop !== null
-    && target.scrollTop !== undefined
-    && typeof restoreImagineListScrollForScreen === "function"
-  ) {
-    restoreImagineListScrollForScreen(target.screenId, target.scrollTop);
-  }
-  return true;
-}

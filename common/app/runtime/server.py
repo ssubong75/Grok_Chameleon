@@ -19046,6 +19046,45 @@ def rename_collection_folder(payload: dict) -> dict:
     return data
 
 
+def rename_collection_card_folder(payload: dict) -> dict:
+    root = library_root()
+    if not root:
+        raise RuntimeError("Library path is not set.")
+    root = root.resolve()
+    target_path = str(payload.get("target_path") or "").replace("\\", "/").strip("/")
+    parts = Path(target_path).parts
+    if len(parts) != 4 or parts[0] != "collection":
+        raise RuntimeError("Select a card inside a second-level folder.")
+    snapshot = current_library_snapshot(root)
+    post = find_post(snapshot, target_path)
+    if not post or post.get("area") != "collection":
+        raise RuntimeError("Selected collection card was not found.")
+    target = safe_join(root, target_path)
+    if not target.is_dir() or not (target / "post.json").is_file():
+        raise RuntimeError("Selected card folder was not found.")
+    name = safe_name(str(payload.get("name") or "").strip(), "")
+    if not name:
+        raise RuntimeError("Card folder name is empty.")
+    destination = target.parent / name
+    if destination.exists() and destination != target:
+        raise RuntimeError("A card folder with that name already exists.")
+    original_path = target.relative_to(root).as_posix()
+    if destination != target:
+        remove_build_previews_for_tree(root, target)
+        target.rename(destination)
+    refresh_collection_post_jsons(root, destination)
+    destination_path = destination.relative_to(root).as_posix()
+    if library_index.ready(root):
+        delete_library_index_paths(root, [original_path], recursive=True)
+    refresh_library_index_paths(root, [destination_path], recursive=True)
+    data = current_library_snapshot(root)
+    destination_parts = Path(destination_path).parts
+    data["selected_collection_path"] = "/".join(destination_parts[:2])
+    data["selected_collection_post_path"] = "/".join(destination_parts[:3])
+    data["selected_path"] = destination_path
+    return data
+
+
 def delete_collection_folder(payload: dict) -> dict:
     root = library_root()
     if not root:
@@ -20244,6 +20283,8 @@ def move_post_to_collection(payload: dict) -> dict:
         data["selected_collection_path"] = collection_path_for_post_path(post_json["folder_path"])
         data["selected_collection_post_path"] = post_json["folder_path"]
         return data
+    if source_dir.parent.resolve() == target_parent.resolve():
+        raise RuntimeError("The selected post is already in this folder.")
     target_name = unique_directory_name(target_parent, source_dir.name)
     target_dir = target_parent / target_name
     remove_build_previews_for_items(root, source_dir, post.get("items") or [])
@@ -20916,6 +20957,7 @@ POST_JSON_ROUTES = {
     ),
     "/api/collection/create": create_collection,
     "/api/collection/rename": rename_collection_folder,
+    "/api/library/rename-card-folder": rename_collection_card_folder,
     "/api/collection/delete": delete_collection_folder,
     "/api/collection/layout": save_collection_layout,
     "/api/library/delete-post": delete_library_post,
