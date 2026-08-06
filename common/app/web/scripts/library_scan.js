@@ -503,8 +503,9 @@
     }
   }
 
-  const INDEXED_COLLECTION_PAGE_SIZE = 120;
-  const INDEXED_COLLECTION_CONTENT_PAGE_SIZE = 80;
+  const INDEXED_CACHED_CARD_LIST_SIZE = 5000;
+  const INDEXED_COLLECTION_PAGE_SIZE = INDEXED_CACHED_CARD_LIST_SIZE;
+  const INDEXED_COLLECTION_CONTENT_PAGE_SIZE = INDEXED_CACHED_CARD_LIST_SIZE;
   const indexedPostRequests = new Map();
   const indexedCollectionContentRequests = new Map();
 
@@ -566,7 +567,7 @@
         scope: "build_main",
         include_collections: Boolean(library_state.buildIncludeCollections),
         offset: reset ? 0 : library_state.indexedBuildOffset,
-        limit: 60,
+        limit: INDEXED_CACHED_CARD_LIST_SIZE,
       });
       const posts = (Array.isArray(data.posts) ? data.posts : []).map(normalizeServerPost);
       const byPath = new Map((reset ? [] : library_state.indexedBuildPosts).map((post) => [post.folder_path, post]));

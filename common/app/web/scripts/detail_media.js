@@ -17,8 +17,10 @@ const imagineRecoveredStartFrameItems = new Map();
 const imagineRecoveredStartFrameRefreshes = new Set();
 const cardPreviewDisposers = new WeakMap();
 const CARD_PREVIEW_NATIVE_MAX_ACTIVE = 4;
+const CARD_PREVIEW_LIST_MAX_ACTIVE = 2;
 const nativeCardPreviewQueue = [];
 let activeNativeCardPreviewTasks = 0;
+const activeListCardPreviewTasks = new Map();
 let nativeCardPreviewPumpScheduled = false;
 const imagineRecoveredStartFrameIconDataUrl = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`
   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -815,21 +817,64 @@ function nativeCardPreviewQueuePriority(entry) {
   return verticalDistance + horizontalDistance;
 }
 
+function cardPreviewListThrottleKey(target) {
+  const list = target?.closest?.(".card_list");
+  const card = target?.closest?.(".card");
+  if (!list || !card) return null;
+  if (list.classList.contains("b_t2i_view_card_list")) return null;
+  if (card.classList.contains("b_t2i_card")) return null;
+  if (
+    list.classList.contains("i_card_list")
+    && String(library_state?.iMainView || "").toLowerCase() === "t2i"
+  ) {
+    return null;
+  }
+  if (
+    list.classList.contains("b_card_list")
+    && String(library_state?.bMainView || "").toLowerCase() === "t2i"
+  ) {
+    return null;
+  }
+  return list;
+}
+
+function activeListCardPreviewTaskCount(listKey) {
+  return listKey ? Number(activeListCardPreviewTasks.get(listKey) || 0) : 0;
+}
+
 function pumpNativeCardPreviewQueue() {
   while (activeNativeCardPreviewTasks < CARD_PREVIEW_NATIVE_MAX_ACTIVE && nativeCardPreviewQueue.length) {
     nativeCardPreviewQueue.sort((left, right) => nativeCardPreviewQueuePriority(left) - nativeCardPreviewQueuePriority(right));
-    const entry = nativeCardPreviewQueue.shift();
+    const entryIndex = nativeCardPreviewQueue.findIndex((candidate) => (
+      candidate.cancelled
+      || !candidate.target?.isConnected
+      || !candidate.listThrottled
+      || activeListCardPreviewTaskCount(candidate.listThrottleKey) < CARD_PREVIEW_LIST_MAX_ACTIVE
+    ));
+    if (entryIndex < 0) break;
+    const [entry] = nativeCardPreviewQueue.splice(entryIndex, 1);
     if (!entry || entry.cancelled || !entry.target?.isConnected) {
       entry?.resolve?.(null);
       continue;
     }
     entry.started = true;
     activeNativeCardPreviewTasks += 1;
+    if (entry.listThrottled) {
+      activeListCardPreviewTasks.set(
+        entry.listThrottleKey,
+        activeListCardPreviewTaskCount(entry.listThrottleKey) + 1,
+      );
+    }
     Promise.resolve()
       .then(() => entry.task())
       .then((result) => entry.resolve(entry.cancelled ? null : result), entry.reject)
       .finally(() => {
         activeNativeCardPreviewTasks -= 1;
+        if (entry.listThrottled) {
+          const remaining = activeListCardPreviewTaskCount(entry.listThrottleKey) - 1;
+          if (remaining > 0) activeListCardPreviewTasks.set(entry.listThrottleKey, remaining);
+          else activeListCardPreviewTasks.delete(entry.listThrottleKey);
+        }
         pumpNativeCardPreviewQueue();
       });
   }
@@ -847,7 +892,17 @@ function scheduleNativeCardPreviewPump() {
 function queueCardPreviewWork(target, task) {
   if (!target || typeof task !== "function") return Promise.resolve(null);
   return new Promise((resolve, reject) => {
-    const entry = { target, task, resolve, reject, started: false, cancelled: false };
+    const listThrottleKey = cardPreviewListThrottleKey(target);
+    const entry = {
+      target,
+      task,
+      resolve,
+      reject,
+      started: false,
+      cancelled: false,
+      listThrottleKey,
+      listThrottled: Boolean(listThrottleKey),
+    };
     const cancel = () => {
       if (entry.cancelled) return;
       entry.cancelled = true;
@@ -1419,13 +1474,39 @@ function appendCardImagePreview(host, media, preview, previewUrl, item) {
   else preview.src = previewUrl;
 }
 
+function mediaItemIsModerated(item) {
+  return Boolean(
+    item?.moderated
+    || String(item?.status || "").toLowerCase() === "moderated"
+    || item?.metadata?.moderated
+    || item?.metadata?.imagine?.moderated
+  );
+}
+
+function hiddenMediaPreviewElement(label = "Moderated") {
+  const preview = document.createElement("div");
+  preview.className = "text2image_moderated_preview";
+
+  const icon = document.createElement("span");
+  icon.className = "text2image_moderated_icon";
+  icon.innerHTML = typeof hiddenMediaIconSvg === "function"
+    ? hiddenMediaIconSvg()
+    : `<svg viewBox="0 0 96 96" aria-hidden="true">
+        <path d="M12 49s13-22 36-22c6.5 0 12.3 1.7 17.2 4.2M77.5 39.2C83 44.3 86 49 86 49S73 71 48 71c-6.8 0-12.8-1.6-17.9-4.1" fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M40 56.5A12 12 0 0 1 56.4 40M29 17l42 62" fill="none" stroke="currentColor" stroke-width="8" stroke-linecap="round"/>
+      </svg>`;
+
+  const text = document.createElement("span");
+  text.className = "text2image_moderated_label";
+  text.textContent = label;
+  preview.append(icon, text);
+  return preview;
+}
+
 function appendMediaPreview(host, media, item, type) {
-  if (item?.moderated || String(item?.status || "").toLowerCase() === "moderated" || item?.metadata?.moderated || item?.metadata?.imagine?.moderated) {
+  if (mediaItemIsModerated(item)) {
     media.classList.add("has_moderated_preview");
-    const failedPreview = document.createElement("div");
-    failedPreview.className = "text2image_moderated_preview";
-    failedPreview.innerHTML = `<span class="text2image_moderated_label">Moderated</span>`;
-    media.append(failedPreview);
+    media.append(hiddenMediaPreviewElement());
     return;
   }
   const previewUrl = mediaPreviewUrl({ ...item, type });

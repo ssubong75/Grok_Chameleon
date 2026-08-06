@@ -1175,7 +1175,7 @@ async function loadImagineSavedCards({ force = false, append = false } = {}) {
       try {
         const cacheData = await qApi("/api/imagine/saved/cache", {
           account_id: context.accountId,
-          limit: 60,
+          limit: 5000,
           offset: append ? library_state.imagineRemoteCacheOffset : 0,
         }, { signal: context.controller.signal });
         if (!imagineSavedResponseMatches(context, cacheData)) return;
@@ -1298,6 +1298,22 @@ function mergeImagineDiscoverPosts(existingPosts, nextPosts) {
   return Array.from(merged.values());
 }
 
+function mergeImagineDiscoverRefreshedPosts(existingPosts, refreshedPosts) {
+  const existingByPath = new Map(
+    (existingPosts || [])
+      .filter((post) => post?.folder_path)
+      .map((post) => [post.folder_path, post]),
+  );
+  const refreshed = (refreshedPosts || []).map((post) => (
+    mergeImaginePreservedGeneratedRelations(existingByPath.get(post?.folder_path), post)
+  ));
+  const refreshedPaths = new Set(refreshed.map((post) => String(post?.folder_path || "")).filter(Boolean));
+  return [
+    ...refreshed,
+    ...(existingPosts || []).filter((post) => !refreshedPaths.has(String(post?.folder_path || ""))),
+  ];
+}
+
 function mergeImagineUnsavedPosts(existingPosts, nextPosts) {
   const merged = new Map();
   for (const post of existingPosts || []) {
@@ -1314,6 +1330,35 @@ function mergeImagineUnsavedPosts(existingPosts, nextPosts) {
   return Array.from(merged.values());
 }
 
+async function loadImagineDiscoverCacheCards() {
+  if (library_state.imagineDiscoverCacheLoaded || library_state.imagineDiscoverCacheLoading) return;
+  if (!canLoadImagineSavedCache()) return;
+  const accountId = imaginePendingSavedAccountId();
+  const requestEpoch = Number(library_state.imagineRemoteRequestEpoch || 0);
+  if (!accountId) return;
+  library_state.imagineDiscoverCacheLoading = true;
+  renderImagineDiscoverCards();
+  try {
+    const data = await qApi("/api/imagine/discover/cache", {
+      account_id: accountId,
+      limit: 5000,
+    });
+    if (!imagineAccountResponseIsCurrent(accountId, requestEpoch, data)) return;
+    const cachedPosts = normalizeImagineDiscoverPosts(Array.isArray(data.posts) ? data.posts : []);
+    if (cachedPosts.length) library_state.imagineDiscoverPosts = cachedPosts;
+    library_state.imagineDiscoverCursor = String(data.next_cursor || "");
+    library_state.imagineDiscoverHasMore = Boolean(data.has_more && library_state.imagineDiscoverCursor);
+  } catch (_) {
+    // An empty or unavailable cache falls through to the live Discover refresh.
+  } finally {
+    if (imagineAccountResponseIsCurrent(accountId, requestEpoch)) {
+      library_state.imagineDiscoverCacheLoaded = true;
+      library_state.imagineDiscoverCacheLoading = false;
+      renderImagineDiscoverCards();
+    }
+  }
+}
+
 async function loadImagineDiscoverCards({ force = false, append = false } = {}) {
   if (library_state.imagineDiscoverLoading) return;
   if (!force && !append && library_state.imagineDiscoverLoaded) return;
@@ -1324,11 +1369,12 @@ async function loadImagineDiscoverCards({ force = false, append = false } = {}) 
   if (!accountId) return;
   library_state.imagineDiscoverLoading = true;
   library_state.imagineDiscoverError = "";
+  let backgroundCacheToken = "";
   renderImagineDiscoverCards();
   try {
     const data = await qApi("/api/imagine/discover", {
       account_id: accountId,
-      limit: 20,
+      limit: 60,
       cursor: force ? "" : (append ? (library_state.imagineDiscoverCursor || "") : ""),
       media_type: "video",
     });
@@ -1337,10 +1383,11 @@ async function loadImagineDiscoverCards({ force = false, append = false } = {}) 
     const normalized = normalizeImagineDiscoverPosts(posts);
     library_state.imagineDiscoverPosts = append && !force
       ? mergeImagineDiscoverPosts(library_state.imagineDiscoverPosts || [], normalized)
-      : mergeImagineExternalRefreshedPosts(library_state.imagineDiscoverPosts || [], normalized);
+      : mergeImagineDiscoverRefreshedPosts(library_state.imagineDiscoverPosts || [], normalized);
     library_state.imagineDiscoverCursor = String(data.next_cursor || "");
     library_state.imagineDiscoverHasMore = Boolean(data.has_more && library_state.imagineDiscoverCursor);
     library_state.imagineDiscoverLoaded = true;
+    backgroundCacheToken = String(data.background_cache_token || "");
   } catch (error) {
     if (imagineAccountResponseIsCurrent(accountId, requestEpoch)) {
       library_state.imagineDiscoverError = error?.message || "Imagine Discover list failed.";
@@ -1351,6 +1398,26 @@ async function loadImagineDiscoverCards({ force = false, append = false } = {}) 
       renderImagineDiscoverCards();
     }
   }
+  if (backgroundCacheToken && imagineAccountResponseIsCurrent(accountId, requestEpoch)) {
+    scheduleImagineDiscoverBackgroundSourceCache(backgroundCacheToken, accountId);
+  }
+}
+
+function scheduleImagineDiscoverBackgroundSourceCache(token, accountId) {
+  const start = () => {
+    qApi("/api/imagine/discover/cache-sources", {
+      token,
+      account_id: accountId,
+    }).catch(() => {});
+  };
+  const afterPaint = () => {
+    if (typeof window.requestIdleCallback === "function") {
+      window.requestIdleCallback(start, { timeout: 2000 });
+    } else {
+      window.setTimeout(start, 250);
+    }
+  };
+  window.requestAnimationFrame(() => window.requestAnimationFrame(afterPaint));
 }
 
 async function loadImagineUnsavedCards({ force = false, append = false } = {}) {
@@ -1603,7 +1670,7 @@ function maybeLoadMoreImagineDiscoverCards() {
   if (!library_state.imagineDiscoverLoaded || !library_state.imagineDiscoverHasMore) return;
   if (library_state.imagineDiscoverLoading) return;
   const remaining = virtualCardListRemaining(list);
-  if (remaining > virtualCardListPrefetchDistance(list, 1.5, 480)) return;
+  if (remaining > virtualCardListPrefetchDistance(list, 6, 960)) return;
   loadImagineDiscoverCards({ append: true }).catch((error) => {
     library_state.imagineDiscoverError = error?.message || "Imagine Discover list failed.";
     library_state.imagineDiscoverLoading = false;
@@ -1628,7 +1695,16 @@ function maybeLoadMoreImagineUnsavedCards() {
 function renderImagineDiscoverCards() {
   if (library_state.imagineDiscoverPosts?.length) syncImagineRemotePostsIntoLibrary();
   if (
-    !library_state.imagineDiscoverLoaded
+    !library_state.imagineDiscoverCacheLoaded
+    && !library_state.imagineDiscoverCacheLoading
+    && canLoadImagineSavedCache()
+  ) {
+    loadImagineDiscoverCacheCards().catch(() => {});
+  }
+  if (
+    screen_state.current_screen === "i_discover_main"
+    && library_state.imagineDiscoverCacheLoaded
+    && !library_state.imagineDiscoverLoaded
     && !library_state.imagineDiscoverLoading
     && canLoadImagineSavedList()
   ) {
@@ -1641,10 +1717,10 @@ function renderImagineDiscoverCards() {
   const list = document.querySelector(".i_discover_card_list");
   if (!list) return;
   const posts = filterPostsBySearch(library_state.imagineDiscoverPosts || []);
-  if (library_state.imagineDiscoverLoading && !posts.length) {
+  if ((library_state.imagineDiscoverCacheLoading || library_state.imagineDiscoverLoading) && !posts.length) {
     disableVirtualCardList(IMAGINE_DISCOVER_VIRTUAL_LIST_KEY, list);
     list.replaceChildren(emptyLibraryNode("Loading . . ."));
-  } else if (library_state.imagineDiscoverError) {
+  } else if (library_state.imagineDiscoverError && !posts.length) {
     disableVirtualCardList(IMAGINE_DISCOVER_VIRTUAL_LIST_KEY, list);
     list.replaceChildren(emptyLibraryNode(library_state.imagineDiscoverError));
   } else if (!posts.length) {
@@ -1657,9 +1733,12 @@ function renderImagineDiscoverCards() {
         activeButtonId: "i_discover_nav_btn",
       })),
     ], {
-      loading: library_state.imagineDiscoverLoading,
+      loading: false,
       remoteMedia: true,
     });
+  }
+  if (screen_state.current_screen === "i_discover_main") {
+    requestAnimationFrame(maybeLoadMoreImagineDiscoverCards);
   }
 }
 

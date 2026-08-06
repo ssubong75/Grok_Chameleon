@@ -148,6 +148,12 @@ IMAGINE_SAVE_ACTIVE_LOCK = threading.Lock()
 IMAGINE_STATE_MIGRATION_LOCK = threading.Lock()
 IMAGINE_RELATION_STATE_LOCK = threading.Lock()
 IMAGINE_STATE_READY_ROOTS: set[str] = set()
+IMAGINE_BUNDLE_BACKGROUND_LOCK = threading.Lock()
+IMAGINE_BUNDLE_BACKGROUND_BATCHES: dict[str, dict] = {}
+IMAGINE_BUNDLE_BACKGROUND_TASK_KEYS: set[str] = set()
+IMAGINE_BUNDLE_BACKGROUND_QUEUE: queue.Queue = queue.Queue(maxsize=512)
+IMAGINE_BUNDLE_BACKGROUND_WORKERS_STARTED = False
+IMAGINE_BUNDLE_BACKGROUND_WORKER_COUNT = 1
 LIBRARY_SCAN_LOCK = threading.Lock()
 LIBRARY_STATE_CACHE_VERSION = 1
 LIBRARY_INDEX_CHANGE_STATE = threading.local()
@@ -2760,6 +2766,21 @@ def imagine_upload_bundle_source_cache_dir(root: Path) -> Path:
     return candidate
 
 
+def imagine_cached_upload_bundle_source_path(root: Path, source_id: str) -> Path | None:
+    key = str(source_id or "").strip()
+    if not key:
+        return None
+    cache_dir = imagine_upload_bundle_source_cache_dir(root)
+    if not cache_dir.is_dir():
+        return None
+    cache_key = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    return next((
+        candidate
+        for candidate in sorted(cache_dir.glob(f"{cache_key}.*"))
+        if candidate.is_file() and candidate.suffix.lower().lstrip(".") in IMAGE_EXTS
+    ), None)
+
+
 def imagine_cache_upload_bundle_source(root: Path, item: dict, account: dict) -> dict:
     source = dict(item) if isinstance(item, dict) else {}
     source_id = imagine_item_asset_id(source)
@@ -2767,11 +2788,7 @@ def imagine_cache_upload_bundle_source(root: Path, item: dict, account: dict) ->
         return source
     cache_dir = imagine_upload_bundle_source_cache_dir(root)
     cache_key = hashlib.sha256(source_id.encode("utf-8")).hexdigest()
-    existing_path = next((
-        candidate
-        for candidate in sorted(cache_dir.glob(f"{cache_key}.*"))
-        if candidate.is_file() and candidate.suffix.lower().lstrip(".") in IMAGE_EXTS
-    ), None) if cache_dir.is_dir() else None
+    existing_path = imagine_cached_upload_bundle_source_path(root, source_id)
     if existing_path is None:
         raw_url = str(source.get("remote_url") or source.get("url") or "").strip()
         if raw_url:
@@ -3142,6 +3159,145 @@ def imagine_ensure_upload_bundle_record(
     return relations.get(post_id) if isinstance(relations.get(post_id), dict) else next_record
 
 
+def imagine_upload_bundle_background_candidate(post: dict) -> tuple[str, dict] | None:
+    if not isinstance(post, dict):
+        return None
+    source_item = imagine_upload_bundle_source_from_post(post)
+    if not source_item:
+        return None
+    generated_items = [
+        item
+        for item in post.get("items") or []
+        if isinstance(item, dict) and not imagine_item_is_upload_source(item)
+    ]
+    source_id = imagine_item_asset_id(source_item)
+    if not source_id or not generated_items:
+        return None
+    return source_id, post
+
+
+def prune_imagine_bundle_background_batches(now: float) -> None:
+    expired = [
+        token
+        for token, batch in IMAGINE_BUNDLE_BACKGROUND_BATCHES.items()
+        if now - float(batch.get("created_at") or 0) > 300
+    ]
+    for token in expired:
+        IMAGINE_BUNDLE_BACKGROUND_BATCHES.pop(token, None)
+    while len(IMAGINE_BUNDLE_BACKGROUND_BATCHES) >= 16:
+        oldest = min(
+            IMAGINE_BUNDLE_BACKGROUND_BATCHES,
+            key=lambda token: float(IMAGINE_BUNDLE_BACKGROUND_BATCHES[token].get("created_at") or 0),
+        )
+        IMAGINE_BUNDLE_BACKGROUND_BATCHES.pop(oldest, None)
+
+
+def stage_imagine_bundle_background_posts(root: Path, account: dict, posts: list[dict]) -> str:
+    candidates = [
+        candidate[1]
+        for post in posts
+        if (candidate := imagine_upload_bundle_background_candidate(post)) is not None
+    ]
+    if not candidates:
+        return ""
+    token = uuid.uuid4().hex
+    with IMAGINE_BUNDLE_BACKGROUND_LOCK:
+        prune_imagine_bundle_background_batches(time.monotonic())
+        IMAGINE_BUNDLE_BACKGROUND_BATCHES[token] = {
+            "created_at": time.monotonic(),
+            "root": str(Path(root).resolve()),
+            "account_id": str(account.get("id") or ""),
+            "posts": candidates,
+        }
+    return token
+
+
+def imagine_bundle_background_task_key(root: Path, source_id: str) -> str:
+    return f"{Path(root).resolve()}\0{str(source_id or '').strip()}"
+
+
+def imagine_bundle_background_worker() -> None:
+    while True:
+        task = IMAGINE_BUNDLE_BACKGROUND_QUEUE.get()
+        task_key = str(task.get("task_key") or "") if isinstance(task, dict) else ""
+        try:
+            if not isinstance(task, dict):
+                continue
+            root = Path(str(task.get("root") or "")).resolve()
+            if root == Path(root.anchor) or not (root / "library.json").is_file():
+                continue
+            account = active_imagine_account(root, str(task.get("account_id") or ""))
+            post = task.get("post") if isinstance(task.get("post"), dict) else None
+            if not account or not post:
+                continue
+            relations = imagine_state.load_generated_relations(root)
+            imagine_ensure_upload_bundle_record(post, root, account, relations)
+        except Exception:
+            pass
+        finally:
+            with IMAGINE_BUNDLE_BACKGROUND_LOCK:
+                IMAGINE_BUNDLE_BACKGROUND_TASK_KEYS.discard(task_key)
+            IMAGINE_BUNDLE_BACKGROUND_QUEUE.task_done()
+
+
+def ensure_imagine_bundle_background_workers() -> None:
+    global IMAGINE_BUNDLE_BACKGROUND_WORKERS_STARTED
+    with IMAGINE_BUNDLE_BACKGROUND_LOCK:
+        if IMAGINE_BUNDLE_BACKGROUND_WORKERS_STARTED:
+            return
+        IMAGINE_BUNDLE_BACKGROUND_WORKERS_STARTED = True
+    for index in range(IMAGINE_BUNDLE_BACKGROUND_WORKER_COUNT):
+        threading.Thread(
+            target=imagine_bundle_background_worker,
+            name=f"imagine-bundle-cache-{index + 1}",
+            daemon=True,
+        ).start()
+
+
+def start_imagine_bundle_background_cache(payload: dict) -> dict:
+    token = str((payload or {}).get("token") or "").strip().lower()
+    if not re.fullmatch(r"[a-f0-9]{32}", token):
+        return {"ok": True, "accepted": 0}
+    with IMAGINE_BUNDLE_BACKGROUND_LOCK:
+        prune_imagine_bundle_background_batches(time.monotonic())
+        batch = IMAGINE_BUNDLE_BACKGROUND_BATCHES.pop(token, None)
+    if not isinstance(batch, dict):
+        return {"ok": True, "accepted": 0}
+    requested_account_id = str((payload or {}).get("account_id") or "").strip()
+    account_id = str(batch.get("account_id") or "").strip()
+    if requested_account_id and requested_account_id != account_id:
+        return {"ok": True, "accepted": 0}
+    root = Path(str(batch.get("root") or "")).resolve()
+    if root == Path(root.anchor) or not (root / "library.json").is_file():
+        return {"ok": True, "accepted": 0}
+    ensure_imagine_bundle_background_workers()
+    accepted = 0
+    for post in batch.get("posts") or []:
+        candidate = imagine_upload_bundle_background_candidate(post)
+        if not candidate:
+            continue
+        source_id, candidate_post = candidate
+        if imagine_cached_upload_bundle_source_path(root, source_id) is not None:
+            continue
+        task_key = imagine_bundle_background_task_key(root, source_id)
+        with IMAGINE_BUNDLE_BACKGROUND_LOCK:
+            if task_key in IMAGINE_BUNDLE_BACKGROUND_TASK_KEYS:
+                continue
+            IMAGINE_BUNDLE_BACKGROUND_TASK_KEYS.add(task_key)
+        try:
+            IMAGINE_BUNDLE_BACKGROUND_QUEUE.put_nowait({
+                "task_key": task_key,
+                "root": str(root),
+                "account_id": account_id,
+                "post": candidate_post,
+            })
+            accepted += 1
+        except queue.Full:
+            with IMAGINE_BUNDLE_BACKGROUND_LOCK:
+                IMAGINE_BUNDLE_BACKGROUND_TASK_KEYS.discard(task_key)
+    return {"ok": True, "accepted": accepted}
+
+
 def imagine_post_is_link_source(post: dict) -> bool:
     if not isinstance(post, dict):
         return False
@@ -3176,6 +3332,7 @@ def imagine_apply_generated_relations(
     relations: dict[str, dict] | None = None,
     *,
     preserve_representative: bool = False,
+    ensure_upload_bundle: bool = True,
 ) -> dict:
     if not isinstance(post, dict):
         return post
@@ -3190,7 +3347,11 @@ def imagine_apply_generated_relations(
     record = relations.get(post_id) if isinstance(relations.get(post_id), dict) else None
     if conversation_id and isinstance(relations.get(conversation_id), dict) and relations[conversation_id].get("upload_origin_bundle"):
         record = relations[conversation_id]
-    upload_record = imagine_ensure_upload_bundle_record(post, root, account, relations)
+    upload_record = (
+        imagine_ensure_upload_bundle_record(post, root, account, relations)
+        if ensure_upload_bundle
+        else None
+    )
     if upload_record:
         record = upload_record
     if not record:
@@ -4640,9 +4801,9 @@ def list_imagine_saved_cache(payload: dict) -> dict:
     except (TypeError, ValueError):
         offset = 0
     try:
-        limit = min(200, max(1, int((payload or {}).get("limit") or 60)))
+        limit = min(5000, max(1, int((payload or {}).get("limit") or 5000)))
     except (TypeError, ValueError):
-        limit = 60
+        limit = 5000
     cached = library_index.query_imagine_remote_posts(
         root,
         imagine_account_settings_key(account),
@@ -5269,6 +5430,90 @@ def load_imagine_remote_link_post(payload: dict) -> dict:
     }
 
 
+def imagine_discover_cache_post_key(post: dict) -> str:
+    for value in (
+        post.get("folder_path"),
+        post.get("post_id"),
+        post.get("id"),
+    ):
+        key = str(value or "").strip()
+        if key:
+            return key
+    return imagine_remote_cache_post_key(post)
+
+
+def list_imagine_discover_cache(payload: dict) -> dict:
+    root = library_root()
+    if not root:
+        raise RuntimeError("Library path is not set.")
+    account = active_imagine_account(root, str((payload or {}).get("account_id") or ""))
+    if not account:
+        raise RuntimeError("Select or capture an Imagine account first.")
+    try:
+        limit = min(5000, max(1, int((payload or {}).get("limit") or 5000)))
+    except (TypeError, ValueError):
+        limit = 5000
+    cached = library_index.query_imagine_discover_posts(
+        root,
+        imagine_account_settings_key(account),
+        limit=limit,
+    )
+    return {
+        "ok": True,
+        "source": "discover_cache",
+        "posts": normalize_json_unicode(cached.get("posts") or []),
+        "total": int(cached.get("total") or 0),
+        "next_cursor": str(cached.get("next_cursor") or ""),
+        "has_more": bool(cached.get("next_cursor")),
+        "refreshed_at": float(cached.get("refreshed_at") or 0),
+        "imagine": {
+            "id": account.get("id") or "",
+            "email": account.get("email") or "",
+            "label": account.get("label") or "",
+            "tier": account.get("tier") or "",
+        },
+    }
+
+
+def cache_imagine_discover_posts(
+    root: Path,
+    account: dict,
+    posts: list[dict],
+    *,
+    next_cursor: str,
+    append: bool,
+) -> str:
+    existing = library_index.query_imagine_discover_posts(
+        root,
+        imagine_account_settings_key(account),
+        limit=5000,
+    )
+    existing_posts = [post for post in existing.get("posts") or [] if isinstance(post, dict)]
+    incoming_posts = [post for post in posts if isinstance(post, dict)]
+    ordered = [*existing_posts, *incoming_posts] if append else [*incoming_posts, *existing_posts]
+    records: list[dict] = []
+    seen_keys: set[str] = set()
+    for post in ordered:
+        post_key = imagine_discover_cache_post_key(post)
+        if not post_key or post_key in seen_keys:
+            continue
+        seen_keys.add(post_key)
+        records.append({"post_key": post_key, "post": post})
+        if len(records) >= 5000:
+            break
+    cached_cursor = str(existing.get("next_cursor") or "")
+    cache_cursor = str(next_cursor or "")
+    if not append and len(existing_posts) > len(incoming_posts) and cached_cursor:
+        cache_cursor = cached_cursor
+    library_index.replace_imagine_discover_posts(
+        root,
+        imagine_account_settings_key(account),
+        records,
+        next_cursor=cache_cursor,
+    )
+    return cache_cursor
+
+
 def list_imagine_discover(payload: dict) -> dict:
     root = library_root()
     if not root:
@@ -5277,10 +5522,10 @@ def list_imagine_discover(payload: dict) -> dict:
     if not account:
         raise RuntimeError("Select or capture an Imagine account first.")
     try:
-        limit = int((payload or {}).get("limit") or 20)
+        limit = int((payload or {}).get("limit") or 60)
     except (TypeError, ValueError):
-        limit = 20
-    limit = max(1, limit)
+        limit = 60
+    limit = min(120, max(1, limit))
     cursor = str((payload or {}).get("cursor") or "").strip()
     media_kind = str((payload or {}).get("media_type") or (payload or {}).get("discover_type") or "video").strip().lower()
     media_type = "MEDIA_POST_TYPE_IMAGE" if media_kind == "image" else "MEDIA_POST_TYPE_VIDEO"
@@ -5307,9 +5552,18 @@ def list_imagine_discover(payload: dict) -> dict:
             account,
             relations,
             preserve_representative=True,
+            ensure_upload_bundle=False,
         )
         for post in posts
     ]
+    next_cursor = cache_imagine_discover_posts(
+        root,
+        account,
+        posts,
+        next_cursor=str(data.get("nextCursor") or ""),
+        append=bool(cursor),
+    )
+    background_cache_token = stage_imagine_bundle_background_posts(root, account, posts)
     return {
         "ok": True,
         "source": "discover",
@@ -5318,8 +5572,9 @@ def list_imagine_discover(payload: dict) -> dict:
         "posts": posts,
         "items": posts,
         "cursor": cursor,
-        "next_cursor": str(data.get("nextCursor") or ""),
-        "has_more": bool(data.get("nextCursor")),
+        "next_cursor": next_cursor,
+        "has_more": bool(next_cursor),
+        "background_cache_token": background_cache_token,
         "imagine": {
             "id": account.get("id") or "",
             "email": account.get("email") or "",
@@ -20596,7 +20851,9 @@ POST_JSON_ROUTES = {
         open_imagine_usage_page=open_imagine_usage_page,
         list_imagine_saved_cache=list_imagine_saved_cache,
         list_imagine_saved=list_imagine_saved,
+        list_imagine_discover_cache=list_imagine_discover_cache,
         list_imagine_discover=list_imagine_discover,
+        start_imagine_bundle_background_cache=start_imagine_bundle_background_cache,
         list_imagine_unsaved=list_imagine_unsaved,
         search_imagine_media=search_imagine_media,
         load_imagine_remote_link_post=load_imagine_remote_link_post,

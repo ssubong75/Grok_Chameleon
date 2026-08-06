@@ -529,6 +529,8 @@
     library_state.imagineRemoteCacheHasMore = false;
     library_state.imagineRemoteSyncToken = "";
     library_state.imagineDiscoverPosts = [];
+    library_state.imagineDiscoverCacheLoaded = false;
+    library_state.imagineDiscoverCacheLoading = false;
     library_state.imagineDiscoverLoaded = false;
     library_state.imagineDiscoverLoading = false;
     library_state.imagineDiscoverError = "";

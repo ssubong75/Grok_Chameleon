@@ -193,6 +193,8 @@ function normalizeNfcText(value = "") {
       imagineRemoteSyncTimer: 0,
       imagineRemoteSyncTimerResolve: null,
       imagineDiscoverPosts: [],
+      imagineDiscoverCacheLoaded: false,
+      imagineDiscoverCacheLoading: false,
       imagineDiscoverLoaded: false,
       imagineDiscoverLoading: false,
       imagineDiscoverError: "",

@@ -201,6 +201,19 @@
     linear-gradient(135deg, #313638, #131516);
 }
 
+.moderated_detail_thumb_media {
+  background: var(--moderated-empty-state-light) !important;
+  background-position: center center !important;
+  background-size: 100% 100% !important;
+  filter: brightness(1.0048) !important;
+  opacity: 1 !important;
+  transform: none !important;
+}
+
+.moderated_media_thumb {
+  isolation: isolate;
+}
+
 .i_detail_thumb_image .i_detail_thumb_fill,
 .b_detail_thumb_image .b_detail_thumb_fill {
   background:
@@ -1576,7 +1589,7 @@
   place-items: center;
   overflow: hidden;
   border-radius: 18px;
-  background: #050606;
+  background: #15191a;
   isolation: isolate;
 }
 
@@ -1592,20 +1605,60 @@
 .detail_generation_fallback {
   aspect-ratio: var(--detail-media-aspect, 1 / 1);
   background:
-    radial-gradient(circle at 50% 50%, rgb(255 255 255 / 0.08), transparent 24%),
-    linear-gradient(135deg, #111516, #050606);
+    radial-gradient(circle at 50% 50%, rgb(255 255 255 / 0.16), transparent 28%),
+    linear-gradient(135deg, #2a3032, #15191a);
 }
 
 .detail_generation_frame.running .detail_generation_media {
-  filter: blur(18px) saturate(0.72) brightness(0.72);
+  filter: blur(4px) saturate(0.9) brightness(0.88);
   opacity: 1;
-  transform: scale(1.08);
+  transform: scale(1.06);
 }
 
 .detail_generation_frame.failed .detail_generation_media {
-  filter: grayscale(1) blur(20px);
+  filter: blur(3px) saturate(0.9) brightness(0.85);
   opacity: 1;
-  transform: scale(1.08);
+  transform: scale(1.06);
+}
+
+.detail_generation_frame.failed.moderated.no_preview .detail_generation_fallback {
+  background: var(--moderated-empty-state-light);
+  background-position: center center;
+  background-size: 100% 100%;
+  filter: brightness(1.0048);
+  opacity: 1;
+  transform: none;
+}
+
+.i_detail_media.has_moderated_preview,
+.b_detail_media.has_moderated_preview {
+  background: var(--moderated-empty-state-light);
+}
+
+.i_detail_media > .text2image_moderated_preview,
+.b_detail_media > .text2image_moderated_preview {
+  display: grid;
+  place-items: center;
+  gap: 0;
+}
+
+.i_detail_media > .text2image_moderated_preview .text2image_moderated_icon,
+.b_detail_media > .text2image_moderated_preview .text2image_moderated_icon {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 138px;
+  height: 138px;
+  transform: translate(-50%, -50%);
+}
+
+.i_detail_media > .text2image_moderated_preview .text2image_moderated_label,
+.b_detail_media > .text2image_moderated_preview .text2image_moderated_label {
+  position: absolute;
+  right: 0;
+  bottom: calc(50% - 100px);
+  left: 0;
+  font-size: 18px;
 }
 
 .detail_generation_status {
@@ -1748,12 +1801,12 @@
 }
 
 .detail_job_thumb.running .detail_job_thumb_media {
-  filter: blur(4px) saturate(0.8);
+  filter: blur(2px) saturate(0.9) brightness(0.88);
   transform: scale(1.08);
 }
 
 .detail_job_thumb.failed .detail_job_thumb_media {
-  filter: grayscale(1) blur(5px);
+  filter: blur(2px) saturate(0.9) brightness(0.85);
   transform: scale(1.1);
 }
 

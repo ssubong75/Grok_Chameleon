@@ -64,7 +64,7 @@ function cardDisplayItemForContext(post, item, className = "") {
 }
 
 function cardAttachedBuildJob(post, className = "") {
-  if (className === "b_card" && typeof buildJobsForPost === "function") {
+  if ((className === "b_card" || className === "collection_media_card") && typeof buildJobsForPost === "function") {
     return buildJobsForPost(post)[0] || null;
   }
   if (className === "i_card" && typeof imagineJobsForPost === "function") {
@@ -401,7 +401,15 @@ function virtualCardLoadingEntry(listKey) {
 
 function prepareVirtualRemoteCardImages(list) {
   for (const image of list.querySelectorAll(".remote_card img.card_preview")) {
+    if (
+      image.classList.contains("remote_preview_decoded")
+      || image.dataset.remotePreviewDecodeStarted === "true"
+    ) {
+      continue;
+    }
     const reveal = () => {
+      if (image.dataset.remotePreviewDecodeStarted === "true") return;
+      image.dataset.remotePreviewDecodeStarted = "true";
       const decoded = typeof image.decode === "function" ? image.decode().catch(() => {}) : Promise.resolve();
       decoded.then(() => {
         if (image.isConnected && image.naturalWidth > 0) image.classList.add("remote_preview_decoded");
@@ -703,7 +711,7 @@ function mediaCardForPost(post, className, backTargetOverride = null) {
   const rawRepresentative = representativeItem(post.items || [], post) || post.representative_item || post.items[0] || {};
   const attachedJob = cardAttachedBuildJob(post, className);
   if (attachedJob && typeof mediaCardForBuildJob === "function") {
-    return mediaCardForBuildJob(attachedJob, 0, post, backTargetOverride);
+    return mediaCardForBuildJob(attachedJob, 0, post, backTargetOverride, className);
   }
   const attachedJobFailed = attachedJob && ["failed", "moderated"].includes(buildJobStatus(attachedJob));
   const attachedPreview = attachedJob && typeof generationJobPreviewInfo === "function"
@@ -715,7 +723,7 @@ function mediaCardForPost(post, className, backTargetOverride = null) {
   const type = representative.type || "image";
   const remoteOnly = Boolean(post.remote || post.area === "imagine_remote");
   const article = document.createElement("article");
-  article.className = `card ${className}${attachedJob ? " gallery_job_card is_generating" : ""}${attachedJobFailed ? " failed" : ""}${library_state.selectedItems.has(post.folder_path || "") ? " selected" : ""}`;
+  article.className = `card ${className}${attachedJob ? ` gallery_job_card${attachedJobFailed ? " failed" : " is_generating"}` : ""}${library_state.selectedItems.has(post.folder_path || "") ? " selected" : ""}`;
   article.tabIndex = 0;
   article.setAttribute("role", "button");
   article.dataset.libraryPostPath = post.folder_path;

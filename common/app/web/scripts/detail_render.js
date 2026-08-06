@@ -278,6 +278,17 @@ function detailThumbButtonForItem(prefix, item, post, options = {}) {
 
   const fill = document.createElement("span");
   fill.className = `${prefix}_detail_thumb_fill`;
+  const moderated = typeof mediaItemIsModerated === "function" && mediaItemIsModerated(item);
+  if (moderated) {
+    button.classList.add("moderated_media_thumb");
+    button.setAttribute("aria-label", "Moderated");
+    fill.classList.add("moderated_detail_thumb_media");
+    const moderatedIcon = document.createElement("span");
+    moderatedIcon.className = "detail_job_thumb_icon";
+    moderatedIcon.innerHTML = hiddenMediaIconSvg();
+    button.append(fill, moderatedIcon);
+    return button;
+  }
   const previewUrl = detailPreviewUrlForItem(prefix, { ...item, type }, post);
   const videoUrl = type === "video" ? detailVideoPreviewUrlForItem(prefix, { ...item, type }, post) : "";
   const buildPreviewSource = previewUrl || videoUrl;
@@ -485,11 +496,14 @@ function renderDetailView(prefix, post) {
   if (prefix === "i") renderImagineDetailAspectMenu(selectedItem);
   const renderItem = detailRenderableItem(prefix, selectedItem, post);
   const detailMediaUrl = detailMediaUrlForItem(prefix, selectedItem, post);
-  const hasDetailMedia = Boolean(detailMediaUrl);
-  media.className = `${prefix}_detail_media ${prefix}_detail_media_${type}${hasDetailMedia ? " has_detail_media" : " has_detail_placeholder"}`;
+  const moderated = typeof mediaItemIsModerated === "function" && mediaItemIsModerated(selectedItem);
+  const hasDetailMedia = !moderated && Boolean(detailMediaUrl);
+  media.className = `${prefix}_detail_media ${prefix}_detail_media_${type}${moderated ? " has_moderated_preview" : (hasDetailMedia ? " has_detail_media" : " has_detail_placeholder")}`;
   media.replaceChildren();
   setDetailMediaAspect(prefix, detailAspectFromItem(selectedItem));
-  if (hasDetailMedia) {
+  if (moderated) {
+    media.append(hiddenMediaPreviewElement());
+  } else if (hasDetailMedia) {
     if (type === "video") {
       const player = createDetailVideoPlayer(prefix, renderItem);
       media.append(player);

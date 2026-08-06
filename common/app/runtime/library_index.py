@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 LIST_SUMMARY_VERSION = 2
 STATE_DIRECTORY = "sql_data"
 DATABASE_FILENAME = "library_index.sqlite3"
@@ -146,6 +146,24 @@ def _create_schema(connection: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS imagine_remote_assets_post_idx
             ON imagine_remote_assets(account_key, post_key);
+
+        CREATE TABLE IF NOT EXISTS imagine_discover_posts (
+            account_key TEXT NOT NULL,
+            post_key TEXT NOT NULL,
+            position INTEGER NOT NULL DEFAULT 0,
+            post_json TEXT NOT NULL,
+            refreshed_at REAL NOT NULL,
+            PRIMARY KEY (account_key, post_key)
+        );
+
+        CREATE INDEX IF NOT EXISTS imagine_discover_posts_order_idx
+            ON imagine_discover_posts(account_key, position, post_key);
+
+        CREATE TABLE IF NOT EXISTS imagine_discover_state (
+            account_key TEXT PRIMARY KEY,
+            next_cursor TEXT NOT NULL DEFAULT '',
+            refreshed_at REAL NOT NULL
+        );
         """
     )
     imagine_remote_columns = {
@@ -816,7 +834,7 @@ def query_posts(
     else:
         order = "activity_at DESC, path"
     safe_offset = max(0, int(offset or 0))
-    safe_limit = min(500, max(1, int(limit or 60)))
+    safe_limit = min(5000, max(1, int(limit or 60)))
     with _connection(root) as connection:
         count_row = connection.execute(
             f"SELECT COUNT(*) AS count FROM library_posts{where}",
@@ -898,7 +916,7 @@ def query_imagine_remote_posts(
 ) -> dict:
     normalized_account = str(account_key or "").strip().lower()
     safe_offset = max(0, int(offset or 0))
-    safe_limit = min(500, max(1, int(limit or 60)))
+    safe_limit = min(5000, max(1, int(limit or 60)))
     if not normalized_account:
         return {
             "posts": [],
@@ -956,6 +974,125 @@ def query_imagine_remote_posts(
         "has_more": next_offset < total,
         "refreshed_at": float(count_row["refreshed_at"] or 0) if count_row else 0,
     }
+
+
+def query_imagine_discover_posts(
+    root: Path,
+    account_key: str,
+    *,
+    limit: int = 5000,
+) -> dict:
+    normalized_account = str(account_key or "").strip().lower()
+    safe_limit = min(5000, max(1, int(limit or 5000)))
+    empty_result = {
+        "posts": [],
+        "total": 0,
+        "next_cursor": "",
+        "refreshed_at": 0,
+    }
+    if not normalized_account:
+        return empty_result
+    path = Path(root) / STATE_DIRECTORY / DATABASE_FILENAME
+    if not path.is_file():
+        return empty_result
+    try:
+        with _lock_for(root):
+            with _connection(root) as connection:
+                count_row = connection.execute(
+                    """
+                    SELECT COUNT(*) AS count, MAX(refreshed_at) AS refreshed_at
+                    FROM imagine_discover_posts
+                    WHERE account_key = ?
+                    """,
+                    (normalized_account,),
+                ).fetchone()
+                state_row = connection.execute(
+                    """
+                    SELECT next_cursor, refreshed_at
+                    FROM imagine_discover_state
+                    WHERE account_key = ?
+                    """,
+                    (normalized_account,),
+                ).fetchone()
+                rows = connection.execute(
+                    """
+                    SELECT post_json
+                    FROM imagine_discover_posts
+                    WHERE account_key = ?
+                    ORDER BY position ASC, post_key ASC
+                    LIMIT ?
+                    """,
+                    (normalized_account, safe_limit),
+                ).fetchall()
+    except sqlite3.Error:
+        return empty_result
+    posts = [post for row in rows if (post := _json_dict(row["post_json"]))]
+    refreshed_at = max(
+        float(count_row["refreshed_at"] or 0) if count_row else 0,
+        float(state_row["refreshed_at"] or 0) if state_row else 0,
+    )
+    return {
+        "posts": posts,
+        "total": int(count_row["count"] if count_row else 0),
+        "next_cursor": str(state_row["next_cursor"] or "") if state_row else "",
+        "refreshed_at": refreshed_at,
+    }
+
+
+def replace_imagine_discover_posts(
+    root: Path,
+    account_key: str,
+    records: list[dict],
+    *,
+    next_cursor: str = "",
+) -> int:
+    normalized_account = str(account_key or "").strip().lower()
+    if not normalized_account:
+        return 0
+    normalized_records: list[tuple[str, dict]] = []
+    seen_keys: set[str] = set()
+    for record in records if isinstance(records, list) else []:
+        if not isinstance(record, dict):
+            continue
+        post_key = str(record.get("post_key") or "").strip()
+        post = record.get("post")
+        if not post_key or post_key in seen_keys or not isinstance(post, dict):
+            continue
+        seen_keys.add(post_key)
+        normalized_records.append((post_key, post))
+        if len(normalized_records) >= 5000:
+            break
+    refreshed_at = time.time()
+    with _lock_for(root):
+        with _connection(root, write=True) as connection:
+            _create_schema(connection)
+            connection.execute(
+                "DELETE FROM imagine_discover_posts WHERE account_key = ?",
+                (normalized_account,),
+            )
+            if normalized_records:
+                connection.executemany(
+                    """
+                    INSERT INTO imagine_discover_posts(
+                        account_key, post_key, position, post_json, refreshed_at
+                    ) VALUES(?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (normalized_account, post_key, position, _json_text(post), refreshed_at)
+                        for position, (post_key, post) in enumerate(normalized_records)
+                    ],
+                )
+            connection.execute(
+                """
+                INSERT INTO imagine_discover_state(account_key, next_cursor, refreshed_at)
+                VALUES(?, ?, ?)
+                ON CONFLICT(account_key) DO UPDATE SET
+                    next_cursor = excluded.next_cursor,
+                    refreshed_at = excluded.refreshed_at
+                """,
+                (normalized_account, str(next_cursor or ""), refreshed_at),
+            )
+    return len(normalized_records)
 
 
 def upsert_imagine_remote_posts(

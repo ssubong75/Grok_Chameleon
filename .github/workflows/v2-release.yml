@@ -15,6 +15,7 @@ concurrency:
 env:
   COMMON_MAIN: common/app/electron/main.js
   COMMON_INDEX: common/app/web/index.html
+  COMMON_APP_STYLE: common/app/web/styles/app.css
   COMMON_STATE: common/app/web/scripts/state.js
   COMMON_BUILD_MAIN: common/app/web/scripts/build_main.js
   COMMON_B_SUBMIT: common/app/web/scripts/b_composer_submit.js
@@ -118,6 +119,7 @@ jobs:
             @{ Name = "imagine_accounts"; Relative = "runtime\imagine_accounts.py"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_IMAGINE_ACCOUNTS) },
             @{ Name = "imagine_routes"; Relative = "runtime\imagine_routes.py"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_IMAGINE_ROUTES) },
             @{ Name = "index"; Relative = "web\index.html"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_INDEX) },
+            @{ Name = "app_style"; Relative = "web\styles\app.css"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_APP_STYLE) },
             @{ Name = "state"; Relative = "web\scripts\state.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_STATE) },
             @{ Name = "build_main"; Relative = "web\scripts\build_main.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_BUILD_MAIN) },
             @{ Name = "b_submit"; Relative = "web\scripts\b_composer_submit.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_B_SUBMIT) },
@@ -335,7 +337,7 @@ jobs:
           }
           $libraryIndexText = Get-Content -Raw -LiteralPath $targetLibraryIndex
           foreach ($marker in @(
-            'SCHEMA_VERSION = 4',
+            'SCHEMA_VERSION = 5',
             'list_json TEXT NOT NULL',
             'CREATE INDEX IF NOT EXISTS library_posts_parent_idx',
             'def query_posts(',
@@ -601,6 +603,7 @@ jobs:
             runtime/imagine_accounts.py
             runtime/imagine_routes.py
             web/index.html
+            web/styles/app.css
             web/scripts/state.js
             web/scripts/build_main.js
             web/scripts/b_composer_submit.js
@@ -783,7 +786,7 @@ jobs:
           grep -F 'def query_library_posts(payload: dict) -> dict:' "$server_py"
           grep -F '"/api/library/posts": query_library_posts' "$server_py"
           grep -F '"/api/library/post": get_library_post' "$server_py"
-          grep -F 'SCHEMA_VERSION = 4' "$library_index_py"
+          grep -F 'SCHEMA_VERSION = 5' "$library_index_py"
           grep -F 'list_json TEXT NOT NULL' "$library_index_py"
           grep -F 'CREATE INDEX IF NOT EXISTS library_posts_parent_idx' "$library_index_py"
           grep -F 'def query_posts(' "$library_index_py"
@@ -929,6 +932,7 @@ jobs:
             runtime/imagine_accounts.py
             runtime/imagine_routes.py
             web/index.html
+            web/styles/app.css
             web/scripts/state.js
             web/scripts/build_main.js
             web/scripts/b_composer_submit.js
@@ -1294,6 +1298,7 @@ jobs:
             runtime/imagine_accounts.py
             runtime/imagine_routes.py
             web/index.html
+            web/styles/app.css
             web/scripts/state.js
             web/scripts/build_main.js
             web/scripts/b_composer_submit.js

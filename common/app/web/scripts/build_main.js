@@ -283,7 +283,8 @@
     if (!job?.id) return;
     const jobIdSelector = cssEscapeValue(job.id);
     const status = buildJobStatus(job);
-    const failed = status === "failed" || status === "moderated";
+    const moderated = status === "moderated" || isModerationError(job?.error);
+    const failed = status === "failed" || moderated;
     const creditLimit = failed && isCreditLimitError(job?.error);
     const label = buildJobLabel(job);
     const progress = String(Math.max(1, buildJobProgress(job)));
@@ -291,6 +292,8 @@
     for (const card of document.querySelectorAll(`.gallery_job_card[data-build-job-id="${jobIdSelector}"]`)) {
       const slotIndex = Number.parseInt(String(card.dataset.buildJobSlot || ""), 10) || 0;
       card.classList.toggle("failed", failed);
+      card.classList.toggle("moderated", moderated);
+      card.classList.toggle("is_generating", !failed);
       const overlay = card.querySelector(".gallery_generation_overlay");
       overlay?.classList.toggle("failed", failed);
       overlay?.classList.toggle("credit_limit", creditLimit);
@@ -321,13 +324,17 @@
   }
 
   function updateGenerationJobCardProgressDom(job, jobIdSelector) {
-    const failed = buildJobStatus(job) === "failed" || buildJobStatus(job) === "moderated";
+    const status = buildJobStatus(job);
+    const moderated = status === "moderated" || isModerationError(job?.error);
+    const failed = status === "failed" || moderated;
     const creditLimit = failed && isCreditLimitError(job?.error);
     const label = buildJobLabel(job);
 
     for (const card of document.querySelectorAll(`.gallery_job_card[${generationJobDataAttr(job)}="${jobIdSelector}"]`)) {
       const slotIndex = Number.parseInt(String(card.dataset.buildJobSlot || ""), 10) || 0;
       card.classList.toggle("failed", failed);
+      card.classList.toggle("moderated", moderated);
+      card.classList.toggle("is_generating", !failed);
       const overlay = card.querySelector(".gallery_generation_overlay");
       overlay?.classList.toggle("failed", failed);
       overlay?.classList.toggle("credit_limit", creditLimit);
@@ -603,8 +610,10 @@
 
     const type = buildJobTargetType(job);
     const status = buildJobStatus(job);
-    const failed = status === "failed" || status === "moderated";
     const moderated = status === "moderated" || isModerationError(job.error);
+    const failed = status === "failed" || moderated;
+    const detailJobPreview = generationJobPreviewInfo(job, basePost, selectedBaseItem);
+    const moderatedWithoutPreview = moderated && !detailJobPreview?.url;
     const selectedJobSlotIndex = Number.parseInt(String(post?.selected_job_slot_index || ""), 10) || 0;
     const progress = Math.max(1, buildJobSlotProgress(job, selectedJobSlotIndex));
     const label = buildJobSlotLabel(job, selectedJobSlotIndex);
@@ -635,16 +644,20 @@
 
     const jobThumbs = detailJobs.flatMap((candidate) => visibleSlotsForDetailJob(candidate).map((slotIndex) => {
       const candidateStatus = buildJobStatus(candidate);
-      const candidateFailed = candidateStatus === "failed" || candidateStatus === "moderated";
+      const candidateModerated = candidateStatus === "moderated" || isModerationError(candidate?.error);
+      const candidateFailed = candidateStatus === "failed" || candidateModerated;
       const candidateProgress = Math.max(1, buildJobSlotProgress(candidate, slotIndex));
       const itemId = `${generationJobProvider(candidate) === "imagine" ? "imagine-job" : "job"}-${candidate.id}-${slotIndex}`;
       const thumb = document.createElement("button");
-      thumb.className = `${prefix}_detail_thumb detail_job_thumb ${candidateFailed ? "failed" : "running"}${!selectedBaseItem && String(candidate.id || "") === String(job.id || "") && (!library_state.selectedDetailItemId || library_state.selectedDetailItemId === itemId) ? " active" : ""}`;
+      thumb.className = `${prefix}_detail_thumb detail_job_thumb ${candidateModerated ? "moderated" : (candidateFailed ? "failed" : "running")}${!selectedBaseItem && String(candidate.id || "") === String(job.id || "") && (!library_state.selectedDetailItemId || library_state.selectedDetailItemId === itemId) ? " active" : ""}`;
       thumb.type = "button";
       thumb.dataset[generationJobDatasetKey(candidate)] = candidate.id;
       thumb.dataset.jobSlotIndex = String(slotIndex);
       thumb.dataset.libraryItemId = itemId;
-      thumb.innerHTML = `${buildJobPreviewHtml(candidate, "detail_job_thumb_media", basePost)}
+      const thumbMedia = candidateModerated
+        ? `<div class="detail_job_thumb_media moderated_detail_thumb_media"></div>`
+        : buildJobPreviewHtml(candidate, "detail_job_thumb_media", basePost);
+      thumb.innerHTML = `${thumbMedia}
         <span class="${candidateFailed ? "detail_job_thumb_icon" : "detail_job_thumb_progress"}">${candidateFailed ? hiddenMediaIconSvg() : buildJobSlotProgressText(candidate, slotIndex)}</span>`;
       return thumb;
     }));
@@ -695,11 +708,14 @@
       const baseType = detailItemType(selectedBaseItem);
       const renderItem = detailRenderableItem(prefix, selectedBaseItem, basePost);
       const detailMediaUrl = detailMediaUrlForItem(prefix, selectedBaseItem, basePost);
-      const hasDetailMedia = Boolean(detailMediaUrl);
-      media.className = `${prefix}_detail_media ${prefix}_detail_media_${baseType}${hasDetailMedia ? " has_detail_media" : " has_detail_placeholder"}`;
+      const baseModerated = typeof mediaItemIsModerated === "function" && mediaItemIsModerated(selectedBaseItem);
+      const hasDetailMedia = !baseModerated && Boolean(detailMediaUrl);
+      media.className = `${prefix}_detail_media ${prefix}_detail_media_${baseType}${baseModerated ? " has_moderated_preview" : (hasDetailMedia ? " has_detail_media" : " has_detail_placeholder")}`;
       media.replaceChildren();
       setDetailMediaAspect(prefix, detailAspectFromItem(selectedBaseItem));
-      if (hasDetailMedia) {
+      if (baseModerated) {
+        media.append(hiddenMediaPreviewElement());
+      } else if (hasDetailMedia) {
         if (baseType === "video") {
           const player = createDetailVideoPlayer(prefix, renderItem);
           media.append(player);
@@ -746,7 +762,7 @@
           <button class="detail_generation_cancel" type="button" ${dataAttr}>Cancel</button>
         </div>`;
     media.innerHTML = `
-      <div class="detail_generation_frame ${failed ? "failed" : "running"}" ${dataAttr}>
+      <div class="detail_generation_frame ${failed ? "failed" : "running"}${moderated ? " moderated" : ""}${moderatedWithoutPreview ? " no_preview" : ""}" ${dataAttr}>
         ${buildJobPreviewHtml(job, "detail_generation_media", basePost)}
         ${failed ? "" : dotCssOverlayHtml("detail_generation_particles")}
         ${content}
@@ -854,7 +870,8 @@
 
   function buildJobOverlayElement(job, slotIndex = 0, hasSourcePreview = false) {
     const overlay = document.createElement("span");
-    const failed = buildJobStatus(job) === "failed" || buildJobStatus(job) === "moderated";
+    const status = buildJobStatus(job);
+    const failed = status === "failed" || status === "moderated" || isModerationError(job?.error);
     overlay.className = `gallery_generation_overlay${failed ? " failed" : ""}${hasSourcePreview ? " has_source_preview" : ""}${isCreditLimitError(job?.error) ? " credit_limit" : ""}`;
     overlay.dataset[generationJobDatasetKey(job)] = job.id || "";
     if (!failed) {
@@ -883,7 +900,8 @@
   }
 
   function buildJobActionButton(job, slotIndex = 0) {
-    const failed = buildJobStatus(job) === "failed" || buildJobStatus(job) === "moderated";
+    const status = buildJobStatus(job);
+    const failed = status === "failed" || status === "moderated" || isModerationError(job?.error);
     const jobAction = document.createElement("button");
     jobAction.className = `gallery_failed_dismiss_btn${failed ? "" : " gallery_job_cancel_btn"}`;
     jobAction.type = "button";
@@ -899,15 +917,18 @@
   }
 
 
-  function mediaCardForBuildJob(job, slotIndex = 0, basePost = null, backTargetOverride = null) {
+  function mediaCardForBuildJob(job, slotIndex = 0, basePost = null, backTargetOverride = null, classNameOverride = "") {
     if (slotIndex && generationJobSlotDismissed(job, slotIndex)) return null;
     const type = buildJobTargetType(job);
     const status = buildJobStatus(job);
-    const failed = status === "failed" || status === "moderated";
+    const moderated = status === "moderated" || isModerationError(job?.error);
+    const failed = status === "failed" || moderated;
     const provider = generationJobProvider(job);
+    const providerClass = provider === "imagine" ? "i_card" : "b_card";
+    const extraClass = classNameOverride && classNameOverride !== providerClass ? ` ${classNameOverride}` : "";
     const previewInfo = generationJobPreviewInfo(job, basePost);
     const article = document.createElement("article");
-    article.className = `card ${provider === "imagine" ? "i_card" : "b_card"} gallery_job_card is_generating${failed ? " failed" : ""}`;
+    article.className = `card ${providerClass}${extraClass} gallery_job_card${failed ? " failed" : " is_generating"}${moderated ? " moderated" : ""}`;
     article.tabIndex = 0;
     article.setAttribute("role", "button");
     article.dataset[generationJobDatasetKey(job)] = job.id;
@@ -920,6 +941,7 @@
         `${provider}:job:${job.id || ""}:${slotIndex || 0}:${basePost?.folder_path || ""}`,
         [
           provider,
+          classNameOverride,
           job.id || "",
           slotIndex || 0,
           basePost?.folder_path || "",
@@ -958,10 +980,7 @@
       }
     } else if (failed) {
       media.classList.add("has_moderated_preview");
-      const failedPreview = document.createElement("div");
-      failedPreview.className = "text2image_moderated_preview";
-      failedPreview.innerHTML = `<span class="text2image_moderated_label">${buildJobLabel(job)}</span>`;
-      media.append(failedPreview);
+      media.append(hiddenMediaPreviewElement(moderated ? "Moderated" : buildJobLabel(job)));
     }
     if (type === "video") {
       const icon = document.createElement("img");
@@ -970,7 +989,11 @@
       icon.alt = "";
       media.append(icon);
     }
-    media.append(buildJobOverlayElement(job, slotIndex, Boolean(preview)));
+    // A moderated job without source media uses the exact same placeholder as a
+    // stored moderated media item. Do not shade it with the failed-job overlay.
+    if (!(moderated && !preview)) {
+      media.append(buildJobOverlayElement(job, slotIndex, Boolean(preview)));
+    }
     article.append(media);
 
     article.append(buildJobActionButton(job, slotIndex));

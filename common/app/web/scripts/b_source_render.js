@@ -112,7 +112,7 @@ function renderBuildSourceCards() {
   const visibleJobs = buildVisibleJobs();
   const list = document.querySelector(".b_card_list");
   const t2iView = library_state.bMainView === "t2i";
-  const visiblePosts = pagedBuildPosts(posts, list);
+  const visiblePosts = t2iView ? pagedBuildPosts(posts, list) : posts;
   const mainJobEntries = visibleJobs.map((job) => ({
     key: mainGenerationActivityKey("job", job?.id),
     cards: (
@@ -172,6 +172,7 @@ function maybeLoadMoreBuildSourceCards() {
     loadIndexedBuildPosts({ append: true }).catch((error) => console.warn(error));
     return;
   }
+  if (library_state.bMainView !== "t2i") return;
   if (buildCardPagingState.key !== buildCardPagingKey()) return;
   const posts = filterPostsBySearch(buildSourcePosts());
   if (buildCardPagingState.visiblePosts >= posts.length) return;
