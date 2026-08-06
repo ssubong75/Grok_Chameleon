@@ -1641,9 +1641,8 @@ function renderImagineSourceCards() {
     } else {
       disableVirtualCardList(IMAGINE_VIRTUAL_LIST_KEY, list);
       replaceCardListChildren(list, [
-        ...(t2iView ? posts.map((post) => mediaCardForPost(post, "i_card")) : visibleJobs.map((job) => mediaCardForBuildJob(job))),
-        ...(t2iView ? visibleJobs.flatMap(mediaCardsForBuildJob) : []),
-        ...(!t2iView ? posts.map((post) => mediaCardForPost(post, "i_card")) : []),
+        ...(t2iView ? visibleJobs.flatMap(mediaCardsForBuildJob) : visibleJobs.map((job) => mediaCardForBuildJob(job))),
+        ...posts.map((post) => mediaCardForPost(post, "i_card")),
       ]);
     }
   }

@@ -1014,6 +1014,13 @@ html.landscape_six_card_grid .workspace .card_list {
   text-shadow: 0 1px 12px rgb(0 0 0 / 0.65);
 }
 
+.card.gallery_job_card.failed:not(.moderated)
+  .card_media:not(.has_preview)
+  > .gallery_generation_overlay.failed
+  .gallery_generation_progress {
+  transform: translateY(47px);
+}
+
 .gallery_generation_overlay.credit_limit .gallery_generation_progress {
   font-size: 14px;
 }
@@ -1092,6 +1099,10 @@ html.landscape_six_card_grid .workspace .card_list {
   width: 84px;
   height: 84px;
   color: rgb(255 255 255 / 0.96);
+}
+
+.text2image_moderated_preview.failed_preview .text2image_moderated_icon {
+  transform: translateY(-13px);
 }
 
 .text2image_moderated_icon svg {

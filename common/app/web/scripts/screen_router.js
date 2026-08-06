@@ -27,6 +27,7 @@ function showAccountScreen(show, options = {}) {
 }
 
 function openScreen(screenId, activeButtonId = "", options = {}) {
+  const previousScreenId = screen_state.current_screen;
   if (screenId === "b_t2i_view_main") {
     library_state.bMainView = "t2i";
     screenId = "b_main";
@@ -74,7 +75,12 @@ function openScreen(screenId, activeButtonId = "", options = {}) {
     prepareActiveImagineBridgeSession().catch((error) => console.warn(error));
   }
   if (typeof syncCardSelectionControls === "function") syncCardSelectionControls();
-  writeBrowserHistory(screenId, activeButtonId, options);
+  const historyOptions = (
+    previousScreenId === screenId
+    && (screenId === "i_detail" || screenId === "b_detail")
+    && !options.skipHistory
+  ) ? { ...options, replaceHistory: true } : options;
+  writeBrowserHistory(screenId, activeButtonId, historyOptions);
 }
 
 function usagePopupFeatures(width = 560, height = 760) {

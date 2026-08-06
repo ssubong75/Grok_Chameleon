@@ -4,13 +4,25 @@ const notifiedImagineJobs = new Set();
 const imagineT2iPartialCounts = new Map();
 const imagineT2iAppliedPaths = new Map();
 
+function markSessionImagineT2iPaths(paths) {
+  const orderedPaths = [...new Set(
+    (paths || []).map((path) => String(path || "").trim()).filter(Boolean),
+  )];
+  if (!orderedPaths.length) return;
+  const promoted = new Set(orderedPaths);
+  const existingPaths = Array.from(library_state.sessionImagineT2iPaths || []);
+  library_state.sessionImagineT2iPaths = new Set([
+    ...orderedPaths,
+    ...existingPaths.filter((path) => !promoted.has(String(path || ""))),
+  ]);
+}
+
 function applyImagineT2iPartialJobResult(job) {
   if (!(typeof isTextToImageBuildJob === "function" && isTextToImageBuildJob(job))) return false;
   const posts = Array.isArray(job?.partial_result?.posts) ? job.partial_result.posts.filter(Boolean) : [];
   const jobId = String(job?.id || "");
   const previousCount = imagineT2iPartialCounts.get(jobId) || 0;
   if (!posts.length || posts.length <= previousCount) return false;
-  if (!library_state.sessionImagineT2iPaths) library_state.sessionImagineT2iPaths = new Set();
   const appliedPaths = imagineT2iAppliedPaths.get(jobId) || new Set();
   let changed = false;
   for (const post of posts) {
@@ -19,11 +31,11 @@ function applyImagineT2iPartialJobResult(job) {
     const path = upsertImagineRemotePost(post);
     if (path) {
       appliedPaths.add(path);
-      library_state.sessionImagineT2iPaths.add(path);
       noteMainGenerationActivity("imagine", "post", path);
       changed = true;
     }
   }
+  markSessionImagineT2iPaths(posts.map((post) => post?.folder_path));
   imagineT2iAppliedPaths.set(jobId, appliedPaths);
   imagineT2iPartialCounts.set(jobId, posts.length);
   return changed;
@@ -624,11 +636,8 @@ function applyImagineDirectResult(result, options = {}) {
     selectedPath = sourcePath;
   }
   if (options.stayOnImagineMain) {
-    if (!library_state.sessionImagineT2iPaths) library_state.sessionImagineT2iPaths = new Set();
-    upsertedPaths.forEach((path) => {
-      if (!path) return;
-      library_state.sessionImagineT2iPaths.add(path);
-    });
+    const resultPaths = resultPosts.map((post) => post?.folder_path).filter(Boolean);
+    markSessionImagineT2iPaths(resultPaths.length ? resultPaths : upsertedPaths);
   }
   renderImagineSourceCards();
   if (options.stayOnImagineMain) {

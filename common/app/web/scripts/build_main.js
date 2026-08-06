@@ -798,12 +798,19 @@
     const paths = Array.isArray(result?.selected_paths)
       ? result.selected_paths
       : [result?.selected_path].filter(Boolean);
-    if (!library_state.sessionBuildT2iPaths) library_state.sessionBuildT2iPaths = new Set();
-    paths.forEach((path) => {
-      if (!path) return;
-      const alreadyTracked = library_state.sessionBuildT2iPaths.has(path);
-      library_state.sessionBuildT2iPaths.add(path);
-      if (!alreadyTracked) noteMainGenerationActivity("build", "post", path);
+    const orderedPaths = [...new Set(
+      paths.map((path) => String(path || "").trim()).filter(Boolean),
+    )];
+    if (!orderedPaths.length) return;
+    const existingPaths = Array.from(library_state.sessionBuildT2iPaths || []);
+    const existingSet = new Set(existingPaths.map((path) => String(path || "")));
+    const promoted = new Set(orderedPaths);
+    library_state.sessionBuildT2iPaths = new Set([
+      ...orderedPaths,
+      ...existingPaths.filter((path) => !promoted.has(String(path || ""))),
+    ]);
+    orderedPaths.forEach((path) => {
+      if (!existingSet.has(path)) noteMainGenerationActivity("build", "post", path);
     });
   }
 
@@ -957,7 +964,10 @@
     const media = document.createElement("div");
     media.className = `card_media card_${type}`;
     const preview = previewInfo.url || "";
-    if (preview) {
+    if (moderated) {
+      media.classList.add("has_moderated_preview");
+      media.append(hiddenMediaPreviewElement("Moderated"));
+    } else if (preview) {
       media.classList.add("has_preview");
       if (previewInfo.type === "video") {
         const video = document.createElement("video");
@@ -980,7 +990,11 @@
       }
     } else if (failed) {
       media.classList.add("has_moderated_preview");
-      media.append(hiddenMediaPreviewElement(moderated ? "Moderated" : buildJobLabel(job)));
+      const hiddenPreview = hiddenMediaPreviewElement(buildJobLabel(job));
+      hiddenPreview.classList.add("failed_preview");
+      const hiddenLabel = hiddenPreview.querySelector(".text2image_moderated_label");
+      if (hiddenLabel) hiddenLabel.remove();
+      media.append(hiddenPreview);
     }
     if (type === "video") {
       const icon = document.createElement("img");
@@ -989,9 +1003,9 @@
       icon.alt = "";
       media.append(icon);
     }
-    // A moderated job without source media uses the exact same placeholder as a
-    // stored moderated media item. Do not shade it with the failed-job overlay.
-    if (!(moderated && !preview)) {
+    // Moderated jobs use the same placeholder as stored moderated media items.
+    // Do not shade that placeholder with the failed-job overlay.
+    if (!moderated) {
       media.append(buildJobOverlayElement(job, slotIndex, Boolean(preview)));
     }
     article.append(media);

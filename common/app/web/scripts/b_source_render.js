@@ -138,8 +138,8 @@ function renderBuildSourceCards() {
         list,
         t2iView
           ? [
-            ...visiblePosts.map((post) => buildPostCardEntry(post, true)),
             ...visibleJobs.flatMap(mediaCardsForBuildJob),
+            ...visiblePosts.map((post) => buildPostCardEntry(post, true)),
           ]
           : orderedMainGenerationCards("build", [...mainJobEntries, ...mainPostEntries]),
       );
