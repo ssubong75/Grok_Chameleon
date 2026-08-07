@@ -553,6 +553,25 @@
       return postActions.some((value) => value === "t2i" || value === "texttoimage");
     }
 
+    function composerExternalReferenceMarker(source) {
+      const metadata = source?.metadata && typeof source.metadata === "object" ? source.metadata : {};
+      const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
+      const remoteView = String(metadata.remote_view || imagine.remote_view || "").trim().toLowerCase();
+      return Boolean(
+        source?.external_reference
+        || metadata.external_reference
+        || imagine.external_reference
+        || metadata.link_source
+        || imagine.link_source
+        || ["discover", "link", "search"].includes(remoteView)
+      );
+    }
+
+    function composerRequiresFreshImagineSource(post, item) {
+      if (composerExternalReferenceMarker(item) || composerExternalReferenceMarker(post)) return true;
+      return (post?.items || []).some((candidate) => composerExternalReferenceMarker(candidate));
+    }
+
     function composerAttachmentMetadataForItem(post, item) {
       const metadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
       const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
@@ -578,6 +597,8 @@
         || String(item?.relation || metadata.relation || imagine.relation || "").toLowerCase() === "upload"
       );
       const uploadOriginBundle = !recoveredStartFrame && postMetadata.upload_origin_bundle === true;
+      const externalReference = !recoveredStartFrame && composerExternalReferenceMarker(item);
+      const freshSourceRequired = !recoveredStartFrame && composerRequiresFreshImagineSource(post, item);
       return {
         detail_post_id: post?.post_id || "",
         detail_root_post_id: recoveredStartFrame
@@ -598,6 +619,8 @@
         parent_response_id: responseId,
         official_upload_source: officialUploadSource,
         upload_origin_bundle: uploadOriginBundle,
+        external_reference: externalReference,
+        fresh_source_required: freshSourceRequired,
         source_is_t2i: recoveredStartFrame ? false : composerSourceIsT2i(post, item),
         recovered_start_frame: recoveredStartFrame,
         account_id: item?.account_id || metadata.account_id || imagine.account_id || post?.account_id || "",

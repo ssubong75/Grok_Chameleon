@@ -134,6 +134,20 @@ function virtualCardRenderSpecForPost(post, className, backTargetOverride = null
   };
 }
 
+// Search mixes prompt cards in with media cards, so prompts need the same lazy spec
+// shape for the list to stay windowed.
+function virtualCardRenderSpecForPrompt(prompt) {
+  const key = String(prompt?.file_name || prompt?.path || prompt?.title || "");
+  return {
+    cardRenderKey: `prompt_card|${key}`,
+    get cardRenderHash() {
+      return ["prompt_card", key, prompt?.title || "", prompt?.text || ""]
+        .map((value) => String(value || "")).join("");
+    },
+    createCard: () => promptCardNode(prompt),
+  };
+}
+
 function replaceCardListChildren(list, entries) {
   if (!list) return;
   const existing = new Map();

@@ -237,11 +237,9 @@
     }
     const ok = await confirmAction({
       title: "Delete Posts",
-      message: (
-        targets.some((target) => target.items.some((item) => isImagineExternalReferenceItem(target.post, item)))
-          ? `${targets.length > 1 ? `Delete ${targets.length} selected Imagine posts?` : "Delete the selected Imagine post?"} External originals will only be removed from your list.`
-          : (targets.length > 1 ? `Delete ${targets.length} selected Imagine posts?` : "Delete the selected Imagine post?")
-      ),
+      message: targets.length > 1
+        ? `Delete ${targets.length} selected Imagine posts?`
+        : "Delete the selected Imagine post?",
       confirmLabel: "Delete",
     });
     if (!ok) return;
@@ -285,7 +283,6 @@
         deletedTargets.push({
           ...target,
           items: deletedItems,
-          externalOnly: target.items.every((item) => isImagineExternalReferenceItem(target.post, item)),
         });
       }
     }
@@ -300,12 +297,7 @@
       setRenderedCardPathsHidden(pendingPaths, false);
     }
     if (deletedTargets.length) {
-      const removedExternalOnly = deletedTargets.every((target) => target.externalOnly);
-      toast(
-        removedExternalOnly
-          ? (deletedTargets.length > 1 ? "Removed external Imagine posts." : "Removed external Imagine post.")
-          : (deletedTargets.length > 1 ? "Deleted Imagine posts." : "Deleted Imagine post."),
-      );
+      toast(deletedTargets.length > 1 ? "Deleted Imagine posts." : "Deleted Imagine post.");
     }
     if (failures.length) {
       showErrorPanel(
@@ -330,6 +322,11 @@
       message: posts.length > 1 ? `Delete ${posts.length} selected items?` : "Delete this local item?",
     });
     if (!ok) return;
+    const pendingPaths = posts.map((post) => post.folder_path).filter(Boolean);
+    if (typeof setRenderedCardPathsHidden === "function") {
+      setRenderedCardPathsHidden(pendingPaths, true);
+    }
+    clearCardSelection();
     let data = null;
     const currentScreen = screen_state.current_screen;
     const scrollState = captureLibraryCardListScroll();
@@ -338,13 +335,16 @@
         data = await qApi("/api/library/delete-post", { post_path: post.folder_path });
         applyLibrarySnapshot(data);
       }
-      library_state.selectedItems.clear();
       if (data) {
         restoreLibraryCardListScroll(scrollState);
         reconcileSecondMainAfterCardDelete(currentScreen);
       }
     } catch (error) {
       showErrorPanel("Delete failed", error?.message || "Delete failed.");
+    } finally {
+      if (typeof setRenderedCardPathsHidden === "function") {
+        setRenderedCardPathsHidden(pendingPaths, false);
+      }
     }
   }
 
@@ -401,6 +401,10 @@
       message: itemCount > 1 ? `Delete this post and ${itemCount} media item(s)?` : "Delete this local item?",
     });
     if (!ok) return;
+    const pendingPaths = [post.folder_path];
+    if (typeof setRenderedCardPathsHidden === "function") {
+      setRenderedCardPathsHidden(pendingPaths, true);
+    }
     button?.setAttribute("aria-busy", "true");
     const currentScreen = screen_state.current_screen;
     const currentDetailType = detailTypeForScreen();
@@ -421,6 +425,9 @@
     } catch (error) {
       showErrorPanel("Delete failed", error?.message || "Delete failed.");
     } finally {
+      if (typeof setRenderedCardPathsHidden === "function") {
+        setRenderedCardPathsHidden(pendingPaths, false);
+      }
       button?.removeAttribute("aria-busy");
     }
   }

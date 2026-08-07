@@ -3044,6 +3044,103 @@ def imagine_persist_generated_relation(
     })
 
 
+def imagine_persist_rematerialized_generated_relation(
+    root: Path,
+    source_post_path: str,
+    source_item_id: str,
+    items: list[dict],
+    action: str,
+    request_id: str,
+    upload_source_item: dict | None,
+) -> None:
+    imagine_persist_generated_relation(
+        root,
+        source_post_path,
+        source_item_id,
+        items,
+        action,
+        request_id,
+    )
+    source_id = imagine_relation_source_id(source_post_path)
+    bundle_id = next((
+        imagine_relation_conversation_id(item)
+        for item in items or []
+        if imagine_relation_conversation_id(item)
+    ), "")
+    if not source_id or not bundle_id or bundle_id == source_id:
+        return
+    upload_source_asset_id = imagine_item_asset_id(upload_source_item or {})
+    hidden_asset_ids = {
+        imagine_relation_item_key(item)
+        for item in items or []
+        if imagine_relation_item_key(item)
+    }
+    if upload_source_asset_id:
+        hidden_asset_ids.add(upload_source_asset_id)
+    ensure_imagine_state_migrated(root)
+    with IMAGINE_RELATION_STATE_LOCK:
+        relations = imagine_state.load_generated_relations(root)
+        source_record = relations.get(source_id) if isinstance(relations.get(source_id), dict) else {}
+        source_record.update({
+            "rematerialized_source_relation": True,
+            "rematerialized_bundle_id": bundle_id,
+            "updated_at": now_iso(),
+        })
+        imagine_state.upsert_generated_relation(root, source_id, source_record)
+        bundle_record = relations.get(bundle_id) if isinstance(relations.get(bundle_id), dict) else {}
+        bundle_record.update({
+            "source_post_id": bundle_id,
+            "source_post_path": f"imagine_saved/{bundle_id}",
+            "source_item_id": upload_source_asset_id,
+            "hidden_bundle_card": True,
+            "display_source_post_id": source_id,
+            "upload_source_asset_id": upload_source_asset_id,
+            "hidden_asset_ids": sorted(hidden_asset_ids),
+            "updated_at": now_iso(),
+            "items": bundle_record.get("items") if isinstance(bundle_record.get("items"), list) else [],
+        })
+        imagine_state.upsert_generated_relation(root, bundle_id, bundle_record)
+    imagine_debug_event("rematerialized_bundle_hidden", {
+        "request_id": request_id,
+        "action": action,
+        "bundle_id": bundle_id,
+        "display_source_post_id": source_id,
+        "hidden_asset_ids": sorted(hidden_asset_ids),
+    })
+
+
+def imagine_hidden_bundle_card(post: dict, relations: dict[str, dict]) -> bool:
+    if not isinstance(post, dict) or not isinstance(relations, dict):
+        return False
+    metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+    candidates = {
+        str(post.get("post_id") or "").strip(),
+        str(metadata.get("conversation_id") or "").strip(),
+    }
+    return any(
+        isinstance(relations.get(candidate), dict)
+        and relations[candidate].get("hidden_bundle_card") is True
+        for candidate in candidates
+        if candidate
+    )
+
+
+def imagine_hidden_bundle_asset_ids(relations: dict[str, dict]) -> set[str]:
+    hidden: set[str] = set()
+    for record in relations.values() if isinstance(relations, dict) else []:
+        if not isinstance(record, dict) or record.get("hidden_bundle_card") is not True:
+            continue
+        hidden.update(
+            str(value).strip()
+            for value in (record.get("hidden_asset_ids") or [])
+            if str(value).strip()
+        )
+        upload_source_asset_id = str(record.get("upload_source_asset_id") or "").strip()
+        if upload_source_asset_id:
+            hidden.add(upload_source_asset_id)
+    return hidden
+
+
 def imagine_restore_generated_relation_resolutions(
     post: dict,
     root: Path,
@@ -3396,6 +3493,7 @@ def imagine_apply_generated_relations(
             and not local_t2i_heart
             and not preserve_representative
             and not record.get("upload_origin_bundle")
+            and not record.get("rematerialized_source_relation")
         ):
             continue
         item = imagine_relation_materialized_item(stored, account, root)
@@ -4561,6 +4659,14 @@ def merge_imagine_local_heart_post(
                 item_imagine = item_metadata.get("imagine") if isinstance(item_metadata.get("imagine"), dict) else {}
                 combined_metadata["imagine"] = {**item_imagine, **existing_imagine}
                 combined_item["metadata"] = combined_metadata
+                # Keep the local timestamp so the merged item sorts the same whether or
+                # not the remote page happened to carry this group. Letting the remote
+                # value win here made link-source cards jump position between refreshes.
+                combined_item["created_at"] = (
+                    existing_item.get("created_at")
+                    or item.get("created_at")
+                    or ""
+                )
                 combined_item["liked"] = True
                 combined_item["favorite"] = True
                 items_by_id[item_id] = combined_item
@@ -4821,6 +4927,8 @@ def list_imagine_saved_cache(payload: dict) -> dict:
         if not isinstance(raw_post, dict):
             continue
         post = raw_post
+        if imagine_hidden_bundle_card(post, relations):
+            continue
         imagine_apply_generated_relations(post, root, account, relations)
         post["items"] = [
             item
@@ -4932,6 +5040,7 @@ def list_imagine_saved(payload: dict) -> dict:
                     })
     ensure_imagine_state_migrated(root)
     relations = imagine_state.load_generated_relations(root)
+    hidden_bundle_asset_ids = imagine_hidden_bundle_asset_ids(relations)
     pending_delete_ids = imagine_pending_delete_ids(root, account)
     local_exclusion_ids = imagine_local_exclusion_ids(root, account)
     hidden_remote_ids = pending_delete_ids | local_exclusion_ids
@@ -4952,6 +5061,8 @@ def list_imagine_saved(payload: dict) -> dict:
         conversation_id = str(conversation.get("conversationId") or "")
         post = imagine_saved_post_from_conversation(conversation, details.get(conversation_id, {}), account)
         if post:
+            if imagine_hidden_bundle_card(post, relations):
+                continue
             post = imagine_apply_generated_relations(post, root, account, relations)
             post["items"] = [
                 item
@@ -4978,7 +5089,7 @@ def list_imagine_saved(payload: dict) -> dict:
         else imagine_get_json("/rest/assets?" + urlencode(asset_query), account, timeout=20)
     )
     assets = asset_data.get("assets") if isinstance(asset_data.get("assets"), list) else []
-    grouped_asset_ids = {
+    grouped_asset_ids = hidden_bundle_asset_ids | {
         imagine_item_asset_id(item)
         for post in [*posts, *local_heart_posts]
         for item in post.get("items") or []
@@ -7263,24 +7374,14 @@ def delete_imagine_asset(payload: dict) -> dict:
     detail_post_id = str(payload.get("detail_post_id") or payload.get("post_id") or asset_id).strip()
     source_scope = str(payload.get("source_scope") or "").strip().lower()
     bundle_source_only = bool(payload.get("bundle_source_only"))
-    if bundle_source_only:
-        root = library_root()
-        if not root:
-            raise RuntimeError("Library path is not set.")
-        bundle_id = str(payload.get("bundle_post_id") or conversation_id or detail_post_id).strip()
-        set_imagine_upload_bundle_source_hidden(root, bundle_id, asset_id)
-        return {
-            "ok": True,
-            "asset_id": asset_id,
-            "action": "bundle-source-remove",
-        }
+    bundle_id = str(payload.get("bundle_post_id") or conversation_id or detail_post_id).strip()
     preserve_upload_bundle = source_scope == "upload_page"
     root = library_root() if preserve_upload_bundle else begin_imagine_delete_race_guard(account, asset_id)
     try:
         result = imagine_delete_json(
             f"/rest/assets/{quote(asset_id, safe='')}",
             account,
-            timeout=15,
+            timeout=5,
             referer=imagine_detail_referer(detail_post_id, conversation_id),
         )
     except Exception:
@@ -7294,20 +7395,30 @@ def delete_imagine_asset(payload: dict) -> dict:
             remove_asset_ids={asset_id},
             remove_entire_link_post=False,
         )
-        remove_imagine_generated_relation_state(root, asset_ids={asset_id})
+        if bundle_source_only:
+            set_imagine_upload_bundle_source_hidden(root, bundle_id, asset_id)
+        else:
+            remove_imagine_generated_relation_state(root, asset_ids={asset_id})
         update_imagine_account_setting_ids(
             root,
             "imagine_external_reference_asset_ids",
             account,
             remove={asset_id},
         )
-        remove_imagine_remote_cache_assets(root, account, {asset_id})
+        if bundle_source_only:
+            prune_imagine_remote_cache_assets(root, account, {asset_id})
+        else:
+            remove_imagine_remote_cache_assets(root, account, {asset_id})
     invalidate_imagine_saved_media_keys_cache(account)
     return {
         "ok": True,
         "asset_id": asset_id,
         "result": result,
-        "action": "upload-asset-delete" if preserve_upload_bundle else "asset-delete",
+        "action": (
+            "upload-asset-delete"
+            if preserve_upload_bundle
+            else ("bundle-source-delete" if bundle_source_only else "asset-delete")
+        ),
     }
 
 
@@ -7359,7 +7470,7 @@ def delete_imagine_asset_metadata(payload: dict) -> dict:
         result = imagine_delete_json(
             f"/rest/assets-metadata/{quote(asset_id, safe='')}",
             account,
-            timeout=15,
+            timeout=5,
             referer=IMAGINE_BASE + "/files",
         )
     except Exception:
@@ -8252,23 +8363,104 @@ def apply_cached_imagine_upload_asset(attachment: dict, account: dict, request_i
     return True
 
 
+def imagine_attachment_requires_fresh_source(attachment: dict) -> bool:
+    if not isinstance(attachment, dict):
+        return False
+    metadata = attachment.get("metadata") if isinstance(attachment.get("metadata"), dict) else {}
+    imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
+    return bool(
+        attachment.get("fresh_source_required")
+        or attachment.get("external_reference")
+        or attachment.get("link_source")
+        or metadata.get("external_reference")
+        or metadata.get("link_source")
+        or imagine.get("external_reference")
+        or imagine.get("link_source")
+    )
+
+
+def imagine_prepare_fresh_source_attachment(attachment: dict) -> dict[str, str]:
+    removed: dict[str, str] = {}
+    for key in (
+        "asset_id", "post_id", "parent_post_id", "root_post_id",
+        "original_post_id", "detail_root_post_id", "detail_item_id",
+        "item_id", "source_item_id", "upload_item_id", "conversation_id",
+        "source_conversation_id", "response_id", "parent_response_id",
+        "original_ref_type",
+    ):
+        value = attachment.pop(key, None)
+        if value:
+            removed[key] = str(value)
+    attachment["fresh_source_required"] = False
+    attachment["external_reference"] = False
+    attachment["official_upload_source"] = True
+    attachment["upload_origin_bundle"] = False
+    attachment["source_is_t2i"] = False
+    attachment["_imagine_fresh_source"] = True
+    return removed
+
+
+def imagine_mark_external_lineage_fresh_source(payload: dict, attachments: list[dict], account: dict) -> None:
+    if not attachments or not isinstance(attachments[0], dict):
+        return
+    root = library_root()
+    if not root:
+        return
+    ensure_imagine_state_migrated(root)
+    external_ids = imagine_state.external_reference_ids(root, imagine_account_settings_key(account))
+    if not external_ids:
+        return
+    source_path = str(payload.get("source_post_path") or "").strip("/")
+    candidates = {
+        extract_imagine_post_id_from_text(payload.get("source_item_id")),
+        extract_imagine_post_id_from_text(source_path.rsplit("/", 1)[-1] if source_path else ""),
+    }
+    candidates.update(
+        extract_imagine_post_id_from_text(attachments[0].get(key))
+        for key in ("item_id", "post_id", "source_item_id", "parent_post_id", "original_post_id", "root_post_id")
+    )
+    if {value for value in candidates if value} & external_ids:
+        attachments[0]["fresh_source_required"] = True
+
+
 def imagine_prepare_direct_image_attachments(attachments: list[dict], account: dict, request_id: str, action: str, promote_cached_post: bool = True) -> None:
     for index, attachment in enumerate(attachments):
         if not isinstance(attachment, dict):
             continue
+        fresh_source = imagine_attachment_requires_fresh_source(attachment)
         raw_url = imagine_attachment_raw_url(attachment)
-        asset_id = imagine_attachment_id(attachment, "asset_id")
-        if raw_url:
+        if raw_url and not fresh_source:
+            asset_id = imagine_attachment_id(attachment, "asset_id")
             if asset_id:
                 attachment["_imagine_file_attachment_id"] = asset_id
             continue
         source = imagine_attachment_local_upload_source(attachment)
         if not source:
+            if fresh_source:
+                raise RuntimeError("Recovered Imagine source could not be read for a fresh upload.")
             continue
         file_name, mime_type, data = source
+        removed_identity = imagine_prepare_fresh_source_attachment(attachment) if fresh_source else {}
+        if fresh_source:
+            imagine_debug_event("fresh_source_rematerialize_start", {
+                "request_id": request_id,
+                "action": action,
+                "index": index,
+                "removed_identity_keys": sorted(removed_identity),
+                "size": len(data),
+                "mime_type": mime_type,
+            })
         cache_key = imagine_local_upload_cache_key(data, mime_type)
         attachment["_imagine_upload_cache_key"] = cache_key
         if apply_cached_imagine_upload_asset(attachment, account, request_id, action, cache_key, promote_cached_post):
+            if fresh_source:
+                imagine_debug_event("fresh_source_rematerialize_ready", {
+                    "request_id": request_id,
+                    "action": action,
+                    "index": index,
+                    "cached": True,
+                    "asset_id": imagine_attachment_id(attachment, "asset_id", "_imagine_file_attachment_id"),
+                })
             continue
         result = imagine_upload_file_direct(account, file_name, mime_type, data, request_id, action)
         metadata = result.get("fileMetadata") if isinstance(result.get("fileMetadata"), dict) else {}
@@ -8295,6 +8487,14 @@ def imagine_prepare_direct_image_attachments(attachments: list[dict], account: d
             "file_metadata_id": file_id,
             "file_url": file_url,
         })
+        if fresh_source:
+            imagine_debug_event("fresh_source_rematerialize_ready", {
+                "request_id": request_id,
+                "action": action,
+                "index": index,
+                "cached": False,
+                "asset_id": file_id,
+            })
 
 
 def imagine_needs_upload_image_post(attachment: dict) -> bool:
@@ -11270,6 +11470,7 @@ def imagine_i2i_request(payload: dict, prompt: str, request_id: str, account: di
     image_attachments = media_attachments(payload, "image")
     if not image_attachments:
         raise RuntimeError("Imagine i2i needs one source image.")
+    imagine_mark_external_lineage_fresh_source(payload, image_attachments, account)
     imagine_prepare_direct_image_attachments(image_attachments, account, request_id, "i2i")
     source = image_attachments[0]
     conversation_id, parent_response_id = imagine_source_conversation_context(payload, source, account)
@@ -11362,6 +11563,7 @@ def imagine_i2i_request(payload: dict, prompt: str, request_id: str, account: di
         "parent_response_id": parent_response_id,
         "direct_upload": direct_upload,
         "start_new_conversation": start_new_conversation,
+        "fresh_source_rematerialized": bool(source.get("_imagine_fresh_source")),
         "attachment_source_ids": sorted(set([*input_asset_ids, *references])) if direct_upload else sorted(
             imagine_attachment_candidate_source_ids(image_attachments)
         ),
@@ -11386,6 +11588,7 @@ def imagine_aspect_ratio_request(payload: dict, request_id: str, account: dict) 
     image_attachments = media_attachments(payload, "image")
     if not image_attachments:
         raise RuntimeError("Imagine Aspect Ratio needs one source image.")
+    imagine_mark_external_lineage_fresh_source(payload, image_attachments, account)
     imagine_prepare_direct_image_attachments(image_attachments, account, request_id, "aspect")
     imagine_ensure_upload_image_posts(image_attachments[:1], account, request_id, "aspect")
     source = image_attachments[0]
@@ -11439,6 +11642,7 @@ def imagine_aspect_ratio_request(payload: dict, request_id: str, account: dict) 
     if parent_response_id:
         request["grokChameleonParentResponseId"] = parent_response_id
     root_post_id = imagine_attachment_real_post_id(source, "root_post_id", "detail_root_post_id") or parent_post_id
+    direct_upload = bool(source.get("_imagine_uploaded_direct") or imagine_attachment_upload_like(source))
     source_info = {
         "parent_post_id": parent_post_id,
         "root_post_id": root_post_id,
@@ -11447,6 +11651,8 @@ def imagine_aspect_ratio_request(payload: dict, request_id: str, account: dict) 
         "conversation_id": conversation_id,
         "parent_response_id": parent_response_id,
         "aspect_ratio": aspect_ratio,
+        "direct_upload": direct_upload,
+        "fresh_source_rematerialized": bool(source.get("_imagine_fresh_source")),
         "attachment_source_ids": sorted(imagine_attachment_candidate_source_ids([source])),
     }
     ignored = set(references)
@@ -11469,6 +11675,7 @@ def imagine_video_request(payload: dict, prompt: str, request_id: str, action: s
     if action == "extend":
         image_attachments = []
     if image_attachments:
+        imagine_mark_external_lineage_fresh_source(payload, image_attachments, account or {})
         imagine_prepare_direct_image_attachments(image_attachments, account or {}, request_id, action)
     context_attachment = video_attachment if action == "extend" else (image_attachments[0] if image_attachments else None)
     conversation_id, parent_response_id = imagine_source_conversation_context(payload, context_attachment, account)
@@ -11639,6 +11846,7 @@ def imagine_video_request(payload: dict, prompt: str, request_id: str, action: s
                 "parent_response_id": parent_response_id,
                 "direct_upload": direct_upload,
                 "upload_origin_i2v": upload_origin_i2v,
+                "fresh_source_rematerialized": bool(source.get("_imagine_fresh_source")),
                 "attachment_source_ids": sorted(set([*input_asset_ids, *references])) if direct_upload else sorted(
                     imagine_attachment_candidate_source_ids(image_attachments)
                 ),
@@ -12060,9 +12268,20 @@ def imagine_direct_rest_image_generate(
         raise RuntimeError("Imagine did not return a final image.")
 
     source_post_path = str(payload.get("source_post_path") or "")
+    fresh_source_rematerialized = bool(source_info.get("fresh_source_rematerialized"))
+    upload_source_item = None
+    if fresh_source_rematerialized and source_info.get("direct_upload"):
+        upload_source_context = dict(source_info)
+        upload_source_context["conversation_id"] = imagine_relation_conversation_id(item)
+        upload_source_context["root_post_id"] = imagine_relation_conversation_id(item)
+        upload_source_item = imagine_direct_uploaded_source_item(payload, upload_source_context, account)
+        imagine_link_direct_upload_source(direct_items, upload_source_item)
     target_folder_path = source_post_path if (
         source_post_path
-        and imagine_source_path_matches_source_info(source_post_path, source_info, item)
+        and (
+            fresh_source_rematerialized
+            or imagine_source_path_matches_source_info(source_post_path, source_info, item)
+        )
     ) else ""
     result = {
         "action": action,
@@ -12084,6 +12303,18 @@ def imagine_direct_rest_image_generate(
             if lineage_cards:
                 result["post"] = lineage_cards[-1]
         result["target_folder_path"] = result["post"]["folder_path"]
+    elif fresh_source_rematerialized:
+        root = library_root()
+        if root:
+            imagine_persist_rematerialized_generated_relation(
+                root,
+                source_post_path,
+                str(payload.get("source_item_id") or source_info.get("source_item_id") or ""),
+                direct_items,
+                action,
+                request_id,
+                upload_source_item,
+            )
     imagine_debug_event("direct_rest_image_generate_result", {
         "request_id": request_id,
         "action": action,
@@ -12439,9 +12670,10 @@ def imagine_native_bridge_generate(
                 mark_lucky_media_item(generated_item, lucky_reason)
 
     attach_to_source_actions = {"i2i", "i2v", "extend", "video_edit", "aspect"}
+    fresh_source_rematerialized = bool(source_info.get("fresh_source_rematerialized"))
     attach_to_existing_source = bool(
         source_post_path
-        and not source_info.get("start_new_conversation")
+        and (fresh_source_rematerialized or not source_info.get("start_new_conversation"))
         and (action in attach_to_source_actions or imagine_source_path_matches_source_info(source_post_path, source_info, item))
     )
     target_folder_path = source_post_path if (
@@ -12466,16 +12698,28 @@ def imagine_native_bridge_generate(
     if source_post_path and action in attach_to_source_actions:
         root = library_root()
         if root:
-            imagine_persist_generated_relation(
-                root,
-                source_post_path,
-                str(payload.get("source_item_id") or source_info.get("source_item_id") or ""),
-                generated_items,
-                action,
-                request_id,
-                upload_source_item=upload_source_item,
-                account=account,
-            )
+            source_item_id = str(payload.get("source_item_id") or source_info.get("source_item_id") or "")
+            if fresh_source_rematerialized:
+                imagine_persist_rematerialized_generated_relation(
+                    root,
+                    source_post_path,
+                    source_item_id,
+                    generated_items,
+                    action,
+                    request_id,
+                    upload_source_item,
+                )
+            else:
+                imagine_persist_generated_relation(
+                    root,
+                    source_post_path,
+                    source_item_id,
+                    generated_items,
+                    action,
+                    request_id,
+                    upload_source_item=upload_source_item,
+                    account=account,
+                )
     imagine_debug_event("native_bridge_generate_result", {
         "request_id": request_id,
         "action": action,

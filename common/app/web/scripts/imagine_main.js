@@ -17,13 +17,16 @@ const IMAGINE_MAIN_BUTTON_VIEWS = Object.freeze({
 const IMAGINE_MAIN_BUTTON_IDS = Object.freeze(Object.keys(IMAGINE_MAIN_BUTTON_VIEWS));
 const IMAGINE_BRIDGE_READY_MAX_AGE_MS = 20 * 60 * 1000;
 const IMAGINE_BRIDGE_STARTUP_RETRY_DELAYS_MS = Object.freeze([2000, 5000, 12000]);
+// A normal warm-up settles well inside this; past it the account row alone no longer
+// explains the wait, so say so rather than leaving the user guessing.
+const IMAGINE_BRIDGE_SLOW_PREPARE_NOTICE_MS = 10000;
 const imagineBridgePrepareStates = new Map();
 
 function imagineBridgePrepareState(accountId) {
   const id = String(accountId || "");
   let state = imagineBridgePrepareStates.get(id);
   if (!state) {
-    state = { ready: false, readyAt: 0, promise: null, retryTimer: null };
+    state = { ready: false, readyAt: 0, promise: null, retryTimer: null, controller: null };
     imagineBridgePrepareStates.set(id, state);
   }
   return state;
@@ -34,11 +37,21 @@ function invalidateImagineBridgePreparation(accountId = "") {
   if (id) {
     const state = imagineBridgePrepareStates.get(id);
     if (state?.retryTimer) clearTimeout(state.retryTimer);
+    if (state?.controller) {
+      try {
+        state.controller.abort();
+      } catch (_) {}
+    }
     imagineBridgePrepareStates.delete(id);
     return;
   }
   for (const state of imagineBridgePrepareStates.values()) {
     if (state?.retryTimer) clearTimeout(state.retryTimer);
+    if (state?.controller) {
+      try {
+        state.controller.abort();
+      } catch (_) {}
+    }
   }
   imagineBridgePrepareStates.clear();
 }
@@ -92,6 +105,45 @@ function openImagineDiscoverMain() {
   renderImagineDiscoverCards();
 }
 
+function imagineAccountIsPreparing(accountId) {
+  const id = String(accountId || "");
+  if (!id) return false;
+  return Boolean(imagineBridgePrepareStates.get(id)?.promise);
+}
+
+function notifyImaginePrepareStateChanged() {
+  if (typeof renderAccounts === "function") {
+    try {
+      renderAccounts();
+    } catch (error) {
+      console.warn(error);
+    }
+  }
+}
+
+// The main process abandons the previous account's warm-up when a new one starts, so
+// stop waiting on it here too. The abandoned account keeps no timers and is prepared
+// again only when the user selects it.
+function abandonOtherImaginePreparations(accountId) {
+  const keep = String(accountId || "");
+  for (const [id, state] of imagineBridgePrepareStates.entries()) {
+    if (id === keep) continue;
+    if (state.retryTimer) {
+      clearTimeout(state.retryTimer);
+      state.retryTimer = null;
+    }
+    if (state.controller) {
+      try {
+        state.controller.abort();
+      } catch (_) {}
+      state.controller = null;
+    }
+    state.promise = null;
+    state.ready = false;
+    state.readyAt = 0;
+  }
+}
+
 async function prepareActiveImagineBridgeSession({ force = false, silent = true, accountId: requestedAccountId = "" } = {}) {
   if (!library_state.apiReady) return { ok: true, status: "api_unavailable" };
   const accountId = String(requestedAccountId || account_state.imagine?.active_id || account_state.imagine?.accounts?.[0]?.id || "");
@@ -102,16 +154,32 @@ async function prepareActiveImagineBridgeSession({ force = false, silent = true,
     && Date.now() - state.readyAt < IMAGINE_BRIDGE_READY_MAX_AGE_MS;
   if (!force && readyIsFresh) return { ok: true, status: "ready", cached: true, account_id: accountId };
   if (!state.promise) {
+    abandonOtherImaginePreparations(accountId);
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    state.controller = controller;
+    const slowNotice = setTimeout(() => {
+      if (state.promise && typeof toast === "function") {
+        toast("Account is taking longer than usual. Still preparing…");
+      }
+    }, IMAGINE_BRIDGE_SLOW_PREPARE_NOTICE_MS);
     const promise = qApi("/api/imagine/bridge/prepare", {
       account_id: accountId,
       force_refresh: Boolean(force),
-    }).then((result) => {
+    }, controller ? { signal: controller.signal } : undefined).then((result) => {
       state.ready = result?.status === "ready";
       state.readyAt = state.ready ? Date.now() : 0;
       return result || { ok: true, status: "unknown", account_id: accountId };
     });
     state.promise = promise;
-    promise.finally(() => { if (state.promise === promise) state.promise = null; }).catch(() => {});
+    promise.finally(() => {
+      clearTimeout(slowNotice);
+      if (state.controller === controller) state.controller = null;
+      if (state.promise === promise) {
+        state.promise = null;
+        notifyImaginePrepareStateChanged();
+      }
+    }).catch(() => {});
+    notifyImaginePrepareStateChanged();
   }
   try { return await state.promise; }
   catch (error) {

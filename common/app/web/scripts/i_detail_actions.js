@@ -183,12 +183,6 @@ function imagineLinkRegistrationItem(post, fallbackItem = null) {
   return fallbackItem || representativeItem(items, post) || items[0] || null;
 }
 
-function isUnsavedImagineLinkPost(post, item = null) {
-  if (!isImagineLinkSourcePost(post, item)) return false;
-  const registrationItem = imagineLinkRegistrationItem(post, item);
-  return !registrationItem || !imaginePostLiked(post, registrationItem);
-}
-
 function imaginePostLiked(post, item = null) {
   const postMeta = imaginePostActionMetadata(post);
   const itemMeta = imaginePostActionMetadata(item);
@@ -830,15 +824,6 @@ async function deleteImagineRemoteItem(post, item) {
   if (!deletePayload) {
     throw new Error("This Imagine item has no asset id.");
   }
-  if (isImagineExternalReferenceItem(post, item) && !isImagineUnsavedPost(post, item)) {
-    const unsaved = await unsaveImagineExternalItems(post, [item], { wholeCard: false });
-    return {
-      deletedItems: unsaved.removedItems,
-      failures: [],
-      data: unsaved.data,
-      action: "external-unsave",
-    };
-  }
   const endpoint = isImagineUnsavedPost(post, item)
     ? "/api/imagine/asset-metadata/delete"
     : "/api/imagine/asset/delete";
@@ -866,58 +851,30 @@ async function deleteImagineCardAssets(post, items) {
   const deletedItems = [];
   const failures = [];
   const candidates = (items || []).filter(Boolean);
-  const externalItems = candidates.filter((item) => isImagineExternalReferenceItem(post, item));
-  const ownedItems = candidates.filter((item) => !isImagineExternalReferenceItem(post, item));
-  if (externalItems.length) {
-    try {
-      const unsaved = await unsaveImagineExternalItems(post, externalItems);
-      deletedItems.push(...unsaved.removedItems);
-    } catch (error) {
-      failures.push(error);
-    }
-  }
-  for (const item of ownedItems) {
+  const deletedAssetIds = new Set();
+  const failedAssetIds = new Set();
+  for (const item of candidates) {
     const payload = imagineDeletePayloadForItem(post, item);
     if (!payload) {
       failures.push(new Error("This Imagine item has no asset id."));
       continue;
     }
+    const assetId = String(payload.asset_id || payload.id || "").trim();
+    if (assetId && deletedAssetIds.has(assetId)) {
+      deletedItems.push(item);
+      continue;
+    }
+    if (assetId && failedAssetIds.has(assetId)) continue;
     try {
       await qApi("/api/imagine/asset/delete", payload);
+      if (assetId) deletedAssetIds.add(assetId);
       deletedItems.push(item);
     } catch (error) {
+      if (assetId) failedAssetIds.add(assetId);
       failures.push(error);
     }
   }
   return { deletedItems, failures };
-}
-
-async function unsaveImagineExternalItems(post, items, { wholeCard = true } = {}) {
-  const selectedItems = (items || []).filter(Boolean);
-  const linkSource = isImagineLinkSourcePost(post, selectedItems[0]);
-  const registrationItems = linkSource && wholeCard
-    ? [imagineLinkRegistrationItem(post, selectedItems[0])].filter(Boolean)
-    : selectedItems;
-  const targets = registrationItems
-    .map((item) => ({ item, target: imagineLikeTargetForItem(item) }))
-    .filter((entry) => entry.target.id);
-  if (!targets.length || targets.length !== registrationItems.length) {
-    throw new Error("This external Imagine post has no asset id.");
-  }
-  const data = await qApi("/api/imagine/post/unsave", {
-    account_id: post?.account_id || iDetailAccountId(targets[0].item, post),
-    scope: wholeCard ? "card" : "item",
-    items: targets.map(({ item, target }) => ({
-      ...target,
-      external_reference: true,
-      detail_post_id: imagineActionPostIdForPost(post),
-      conversation_id: imagineDeleteConversationIdForPost(post, item),
-    })),
-  });
-  return {
-    data,
-    removedItems: linkSource && wholeCard ? imagineLinkBundleItems(post, selectedItems) : selectedItems,
-  };
 }
 
 async function deleteImagineRemoteCard(post) {
@@ -951,9 +908,7 @@ async function deleteImagineRemoteCard(post) {
     ...result,
     data: {
       ok: result.failures.length === 0,
-      action: items.every((item) => isImagineExternalReferenceItem(post, item))
-        ? "external-unsave"
-        : "asset-delete",
+      action: "asset-delete",
     },
   };
 }
@@ -969,26 +924,16 @@ async function deleteImagineSelectedDetailItem() {
     showErrorPanel("Delete unavailable", "Select an Imagine thumbnail to delete.");
     return;
   }
-  const localLinkOnly = isUnsavedImagineLinkPost(post, item);
-  if (!localLinkOnly && !imagineDeletePayloadForItem(post, item)) {
+  if (!imagineDeletePayloadForItem(post, item)) {
     showErrorPanel("Delete unavailable", "This Imagine item has no asset id.");
     return;
   }
   const ok = await confirmAction({
     title: "Delete Item",
-    message: localLinkOnly
-      ? "Remove this temporary link item from the app?"
-      : isImagineExternalReferenceItem(post, item)
-      ? "Remove this external Imagine item from your list? The original will not be deleted."
-      : "Delete this Imagine Item?",
+    message: "Delete this Imagine Item?",
     confirmLabel: "Delete",
   });
   if (!ok) return;
-  if (localLinkOnly) {
-    removeImagineItemsFromPost(post, [item]);
-    toast("Removed temporary link item.");
-    return;
-  }
   if (
     !imagineDeleteItemIsRecoveredStartFrame(item)
     && typeof invalidateImagineSavedRequestsForDelete === "function"
@@ -1000,11 +945,20 @@ async function deleteImagineSelectedDetailItem() {
   const deleteButtonWasDisabled = Boolean(deleteButton?.disabled);
   if (deleteButton) deleteButton.disabled = true;
   deleteButton?.setAttribute("aria-busy", "true");
+  const removalSnapshot = captureImaginePostRemovalSnapshot(post);
+  removeImagineItemsFromPost(post, localDeleteItems);
+  const optimisticState = {
+    screenId: screen_state.current_screen,
+    selectedPostPath: library_state.selectedPostPath,
+    selectedDetailItemId: library_state.selectedDetailItemId,
+  };
   try {
     const result = await deleteImagineRemoteItem(post, item);
-    removeImagineItemsFromPost(post, localDeleteItems);
     discardImagineRecoveredDeleteItems(post, localDeleteItems);
-    toast(result.action === "external-unsave" ? "Removed external Imagine item." : "Deleted Imagine item.");
+    toast("Deleted Imagine item.");
+  } catch (error) {
+    restoreImaginePostRemovalSnapshot(removalSnapshot, optimisticState);
+    throw error;
   } finally {
     if (deleteButton) deleteButton.disabled = deleteButtonWasDisabled;
     deleteButton?.removeAttribute("aria-busy");
@@ -1021,9 +975,7 @@ async function deleteImagineCardPost(post, button = null) {
   const scrollTop = imagineListScrollTopForScreen(screenId);
   const ok = await confirmAction({
     title: "Delete Post",
-    message: items.every((item) => isImagineExternalReferenceItem(post, item))
-      ? "Remove this external Imagine post from your list? The original will not be deleted."
-      : (items.length > 1 ? `Delete this Imagine post and ${items.length} media item(s)?` : "Delete this Imagine post?"),
+    message: items.length > 1 ? `Delete this Imagine post and ${items.length} media item(s)?` : "Delete this Imagine post?",
     confirmLabel: "Delete",
   });
   if (!ok) return;
@@ -1044,7 +996,7 @@ async function deleteImagineCardPost(post, button = null) {
         screenId,
         scrollTop,
       });
-      toast(result.data?.action === "external-unsave" ? "Removed external Imagine post." : "Deleted Imagine post.");
+      toast("Deleted Imagine post.");
     }
     if (!fullyDeleted && pendingCard) pendingCard.hidden = false;
     if (result.failures.length) {

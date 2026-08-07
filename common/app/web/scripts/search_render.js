@@ -1,4 +1,5 @@
 // Unified sidebar search results
+const SEARCH_VIRTUAL_LIST_KEY = "search-main";
 let imagineSearchDebounceTimer = null;
 
 function searchQueryActive() {
@@ -132,6 +133,7 @@ function renderSearchResults() {
   const queryActive = searchQueryActive();
   if (!queryActive) {
     resetImagineSearchResults();
+    disableVirtualCardList(SEARCH_VIRTUAL_LIST_KEY, list);
     list.replaceChildren(emptyLibraryNode(""));
     if (count) count.textContent = "0 items";
     return;
@@ -149,35 +151,47 @@ function renderSearchResults() {
   const buildPosts = searchBuildPosts();
   const imaginePosts = searchImaginePosts();
   const prompts = searchPromptItems();
-  const nodes = [
-    ...buildPosts.map((post) => mediaCardForPost(post, "b_card", { screenId: "search_main", activeButtonId: "search_btn" })),
-    ...imaginePosts.map((post) => mediaCardForPost(post, "i_card", { screenId: "search_main", activeButtonId: "search_btn" })),
-    ...(typeof promptCardNode === "function" ? prompts.map((prompt) => promptCardNode(prompt)) : []),
+  const backTarget = { screenId: "search_main", activeButtonId: "search_btn" };
+  // Results page in as the user scrolls, so hand the list lazy specs rather than a node
+  // per hit. Building nodes eagerly kept one in the DOM for every result ever loaded
+  // and rebuilt all of them on each render.
+  const entries = [
+    ...buildPosts.map((post) => virtualCardRenderSpecForPost(post, "b_card", backTarget)),
+    ...imaginePosts.map((post) => virtualCardRenderSpecForPost(post, "i_card", backTarget)),
+    ...(typeof promptCardNode === "function"
+      ? prompts.map((prompt) => virtualCardRenderSpecForPrompt(prompt))
+      : []),
   ];
   const loadingImagine = Boolean(library_state.imagineSearchLoading || library_state.imagineSearchScheduledQuery);
   const loadingLocal = Boolean(library_state.libraryIndexEnabled && library_state.indexedSearchBuildLoading);
   const imagineError = String(library_state.imagineSearchError || "");
-  if (!nodes.length && (loadingImagine || loadingLocal)) {
+  if (!entries.length && (loadingImagine || loadingLocal)) {
+    disableVirtualCardList(SEARCH_VIRTUAL_LIST_KEY, list);
     list.replaceChildren(emptyLibraryNode("Loading . . ."));
-  } else if (!nodes.length) {
+  } else if (!entries.length) {
+    disableVirtualCardList(SEARCH_VIRTUAL_LIST_KEY, list);
     list.replaceChildren(emptyLibraryNode(imagineError || "No matching items."));
   } else {
-    replaceCardListChildren(list, nodes);
-    if (loadingImagine || loadingLocal) {
-      const loading = emptyLibraryNode("Loading . . .");
-      loading.classList.add("discover_loading_more");
-      list.append(loading);
-    }
+    renderVirtualCardList(SEARCH_VIRTUAL_LIST_KEY, list, entries, {
+      loading: loadingImagine || loadingLocal,
+    });
   }
   const resultCount = library_state.libraryIndexEnabled
     ? Number(library_state.indexedSearchBuildTotal || 0) + imaginePosts.length + prompts.length
-    : nodes.length;
+    : entries.length;
   if (count) count.textContent = `${resultCount} items`;
 }
 
-document.querySelector(".search_card_list")?.addEventListener("scroll", (event) => {
-  const list = event.currentTarget;
+function maybeLoadMoreSearchResults() {
+  const list = document.querySelector(".search_card_list");
+  if (!list) return;
   if (!library_state.libraryIndexEnabled || !library_state.indexedSearchBuildHasMore || library_state.indexedSearchBuildLoading) return;
   if (list.scrollHeight - list.scrollTop - list.clientHeight > 320) return;
   loadIndexedSearchBuildPosts(library_state.searchQuery, { append: true }).catch((error) => console.warn(error));
-});
+}
+
+bindVirtualCardListScroll(
+  SEARCH_VIRTUAL_LIST_KEY,
+  document.querySelector(".search_card_list"),
+  maybeLoadMoreSearchResults,
+);
