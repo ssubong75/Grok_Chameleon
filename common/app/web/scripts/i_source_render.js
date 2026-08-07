@@ -361,8 +361,37 @@ function imaginePostHasPreservedGeneratedRelations(post) {
   );
 }
 
+// Grok reports two different creation times for the same asset: the moment it was
+// generated, and the moment it was saved. Which one arrives depends on the page and
+// endpoint a refresh happens to hit. Card order is derived from these timestamps, so
+// letting a later response replace an earlier one made cards jump around the list.
+// Keep whichever time we already had for an asset we have seen before.
+function stabilizeImagineItemTimestamps(existingPost, refreshedPost) {
+  const existingItems = Array.isArray(existingPost?.items) ? existingPost.items : [];
+  const refreshedItems = Array.isArray(refreshedPost?.items) ? refreshedPost.items : [];
+  if (!existingItems.length || !refreshedItems.length) return refreshedPost;
+  const createdByAsset = new Map();
+  for (const item of existingItems) {
+    const assetId = imagineSavedItemAssetId(item);
+    const createdAt = String(item?.created_at || "");
+    if (assetId && createdAt) createdByAsset.set(assetId, createdAt);
+  }
+  if (!createdByAsset.size) return refreshedPost;
+  let changed = false;
+  const items = refreshedItems.map((item) => {
+    const assetId = imagineSavedItemAssetId(item);
+    const createdAt = assetId ? createdByAsset.get(assetId) : "";
+    if (!createdAt || String(item?.created_at || "") === createdAt) return item;
+    changed = true;
+    return { ...item, created_at: createdAt };
+  });
+  if (!changed) return refreshedPost;
+  return normalizeServerPost({ ...refreshedPost, items });
+}
+
 function mergeImaginePreservedGeneratedRelations(existingPost, refreshedPost) {
   if (!existingPost || !refreshedPost) return refreshedPost || existingPost;
+  refreshedPost = stabilizeImagineItemTimestamps(existingPost, refreshedPost);
   const preservedItems = (existingPost.items || []).filter(imagineItemIsPreservedGeneratedRelation);
   if (!preservedItems.length) return refreshedPost;
   const items = [...(refreshedPost.items || [])];
@@ -405,7 +434,7 @@ function mergeImagineExternalRefreshedPosts(existingPosts, refreshedPosts) {
 function mergeImagineRefreshedPosts(existingPosts, refreshedPosts) {
   const existing = reconcileImagineSavedDisplayPosts(existingPosts || []);
   const refreshed = reconcileImagineSavedDisplayPosts(refreshedPosts || []);
-  if (!existing.length) return [...refreshed].sort(comparePostsByRecentActivity);
+  if (!existing.length) return sortPostsIfNeeded([...refreshed], comparePostsByRecentActivity);
   if (!refreshed.length) return [];
 
   const existingIndex = imagineSavedPostMatchIndex(existing);
@@ -440,20 +469,20 @@ function mergeImagineRefreshedPosts(existingPosts, refreshedPosts) {
     );
   }
 
-  return [
+  return sortPostsIfNeeded([
     ...newPosts,
     ...existing.map((post, index) => (
       refreshedForExistingIndex.get(index)
       || (imaginePostHasPreservedGeneratedRelations(post) ? post : null)
     )).filter(Boolean),
-  ].sort(comparePostsByRecentActivity);
+  ], comparePostsByRecentActivity);
 }
 
 function mergeImagineSyncedPosts(existingPosts, refreshedPosts) {
   const existing = reconcileImagineSavedDisplayPosts(existingPosts || []);
   const refreshed = reconcileImagineSavedDisplayPosts(refreshedPosts || []);
-  if (!existing.length) return [...refreshed].sort(comparePostsByRecentActivity);
-  if (!refreshed.length) return [...existing].sort(comparePostsByRecentActivity);
+  if (!existing.length) return sortPostsIfNeeded([...refreshed], comparePostsByRecentActivity);
+  if (!refreshed.length) return sortPostsIfNeeded([...existing], comparePostsByRecentActivity);
 
   const existingIndex = imagineSavedPostMatchIndex(existing);
   const matchedExistingIndexes = new Set();
@@ -477,10 +506,10 @@ function mergeImagineSyncedPosts(existingPosts, refreshedPosts) {
     );
   }
 
-  return [
+  return sortPostsIfNeeded([
     ...newPosts,
     ...existing.map((post, index) => refreshedForExistingIndex.get(index) || post),
-  ].sort(comparePostsByRecentActivity);
+  ], comparePostsByRecentActivity);
 }
 
 function imagineSavedItemAssetId(item) {

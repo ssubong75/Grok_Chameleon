@@ -252,6 +252,11 @@
       return "denied";
     }
     if (provider === "imagine") {
+      // Warming an account's bridge takes several seconds. Say so on the row instead of
+      // leaving it looking idle while the switch is still in flight.
+      if (typeof imagineAccountIsPreparing === "function" && imagineAccountIsPreparing(account.id)) {
+        return "preparing";
+      }
       return account_state.imagineStatuses?.[account.id]?.status
         || account.status
         || (validImagineCookies(account).length ? "ok" : "expired");
@@ -265,6 +270,7 @@
     if (status === "ok") return "OK";
     if (status === "expired") return "Expired";
     if (status === "checking") return "Checking";
+    if (status === "preparing") return "Preparing…";
     if (status === "denied") return "Denied";
     if (status === "login_required") return "Expired";
     if (status === "oauth_error") return "Expired";
@@ -274,6 +280,7 @@
   function accountStatusClass(status) {
     if (status === "denied") return "expired";
     if (status === "login_required" || status === "oauth_error") return "expired";
+    if (status === "preparing") return "checking";
     return status || "unknown";
   }
 

@@ -21,6 +21,7 @@
   const capturedRuntimes = [];
   const capturedRuntimeCacheKeys = new WeakSet();
   const capturedMediaStores = [];
+  const mediaStoreReadyWaiters = [];
   const storeTrace = [];
   const runtimeScanTimers = new WeakMap();
   const runtimeScanTimerGroups = new Set();
@@ -929,11 +930,58 @@
       record.moduleId = record.moduleId || moduleId || "";
     }
     wrapMediaStoreStateMethods(state, record);
+    const firstCapture = !capturedMediaStore;
     capturedMediaStore = capturedMediaStore || value;
     capturedMediaStorePath = capturedMediaStorePath || record.path || "";
     capturedMediaStoreModule = capturedMediaStoreModule || record.moduleId || "";
     cancelAllRuntimeScans();
+    if (firstCapture) releaseMediaStoreReadyWaiters();
     return true;
+  }
+
+  // The main process used to discover readiness by re-injecting a status probe every
+  // 250ms. Those probes need the page's JS thread, which is exactly what the Grok
+  // bundle monopolises while it loads, so they timed out precisely when the answer
+  // mattered. Waiters registered here resolve from inside the page the moment the
+  // store appears, so the main process only has to ask once.
+  function releaseMediaStoreReadyWaiters() {
+    while (mediaStoreReadyWaiters.length) {
+      const waiter = mediaStoreReadyWaiters.shift();
+      try {
+        waiter();
+      } catch (_) {}
+    }
+  }
+
+  function whenMediaStoreReady(timeoutMs) {
+    if (capturedMediaStore) return Promise.resolve(true);
+    const limit = Math.max(0, Number(timeoutMs) || 0);
+    if (!limit) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      let settled = false;
+      let sweep = 0;
+      let expiry = 0;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        if (sweep) clearInterval(sweep);
+        if (expiry) clearTimeout(expiry);
+        const index = mediaStoreReadyWaiters.indexOf(notify);
+        if (index >= 0) mediaStoreReadyWaiters.splice(index, 1);
+        resolve(value);
+      };
+      const notify = () => finish(true);
+      mediaStoreReadyWaiters.push(notify);
+      // Module factories schedule their own scans as chunks arrive, but sweep here too
+      // so readiness never depends on one of those timers being the last to fire.
+      sweep = setInterval(() => {
+        try {
+          scanAllRuntimes();
+        } catch (_) {}
+        if (capturedMediaStore) finish(true);
+      }, 100);
+      expiry = setTimeout(() => finish(Boolean(capturedMediaStore)), limit);
+    });
   }
 
   function captureStoreV2Methods(value, path, moduleId = "") {
@@ -3382,6 +3430,15 @@
       };
     },
     acceptGenerationNetworkResponse,
+    async awaitMediaStore(timeoutMs = 0) {
+      const ready = await whenMediaStoreReady(timeoutMs);
+      return {
+        ok: true,
+        waited: true,
+        hasMediaStore: Boolean(ready && capturedMediaStore),
+        status: this.status(),
+      };
+    },
     mediaContext(ids = []) {
       const values = Array.isArray(ids) ? ids.map(String).filter(Boolean) : [];
       try {

@@ -17,7 +17,11 @@ const SERVER_BASE = `http://127.0.0.1:${PORT}`;
 const GROK_USAGE_URL = "https://grok.com/?_s=usage";
 const IMAGINE_BRIDGE_READY_MAX_AGE_MS = 20 * 60 * 1000;
 const IMAGINE_BRIDGE_PAGE_TIMEOUT_MS = 10000;
-const IMAGINE_BRIDGE_STORE_TIMEOUT_MS = 12000;
+const IMAGINE_BRIDGE_STORE_TIMEOUT_MS = 20000;
+// Bridge windows are expensive to warm, so keep a few of the most recently used
+// accounts alive. Switching back to one of them then reuses its prepared store
+// instead of reloading grok.com from scratch.
+const IMAGINE_BRIDGE_RETAINED_ACCOUNT_WINDOWS = 3;
 const IMAGINE_BRIDGE_SCRIPT_TIMEOUT_MS = 3000;
 const IMAGINE_BRIDGE_PREPARE_TIMEOUT_MS = 30000;
 
@@ -1370,25 +1374,54 @@ function bridgePartition(command) {
   return `persist:grok-chameleon-imagine-${raw}`;
 }
 
+// A warm-up that is still running when the user picks a different account keeps
+// loading grok.com in the background, so both accounts fight over CPU and network and
+// both finish late. Abandon the one the user moved away from; it is prepared again on
+// demand the next time that account is selected.
+function supersedeOtherAccountPreparations(command) {
+  const activeKey = bridgeAccountKey(command);
+  for (const win of bridgeWindows.values()) {
+    if (!win || win.isDestroyed()) continue;
+    if (win.__grokAccountKey === activeKey) continue;
+    if (!win.__grokPreparePromise) continue;
+    win.__grokPrepareGeneration = Number(win.__grokPrepareGeneration || 0) + 1;
+    win.__grokPreparedAt = 0;
+    try {
+      win.webContents.stop();
+    } catch (_) {}
+    appendLog(`bridge preparation abandoned account=${win.__grokAccountKey || ""} reason=account-switch`);
+  }
+}
+
 function closeInactiveAccountWindows(command) {
   const activeKey = bridgeAccountKey(command);
-  for (const [key, win] of bridgeWindows.entries()) {
-    if (win?.__grokAccountKey === activeKey) continue;
-    bridgeWindows.delete(key);
-    if (!win || win.isDestroyed()) continue;
+  const destroy = (map, key, win) => {
+    map.delete(key);
+    if (!win || win.isDestroyed()) return;
     try {
       win.removeAllListeners("close");
       win.destroy();
     } catch (_) {}
+  };
+  // Keep the most recently used accounts warm so switching back to one of them
+  // reuses its prepared store. Older accounts are still torn down.
+  const retained = new Set([activeKey]);
+  const candidates = [...bridgeWindows.values()]
+    .filter((win) => win && !win.isDestroyed() && win.__grokAccountKey !== activeKey)
+    .sort((left, right) => Number(right.__grokLastUsedAt || 0) - Number(left.__grokLastUsedAt || 0));
+  for (const win of candidates) {
+    if (retained.size >= IMAGINE_BRIDGE_RETAINED_ACCOUNT_WINDOWS) break;
+    retained.add(win.__grokAccountKey);
   }
+  for (const [key, win] of bridgeWindows.entries()) {
+    if (retained.has(win?.__grokAccountKey)) continue;
+    destroy(bridgeWindows, key, win);
+  }
+  // Usage windows are cheap to recreate and are not part of the prepared store, so
+  // they keep the previous single-account behaviour.
   for (const [key, win] of usageWindows.entries()) {
     if (win?.__grokAccountKey === activeKey) continue;
-    usageWindows.delete(key);
-    if (!win || win.isDestroyed()) continue;
-    try {
-      win.removeAllListeners("close");
-      win.destroy();
-    } catch (_) {}
+    destroy(usageWindows, key, win);
   }
 }
 
@@ -1593,7 +1626,10 @@ function installImagineGenerationNetworkCapture(win) {
 function bridgeWindow(command) {
   const key = bridgeWindowKey(command);
   const existing = bridgeWindows.get(key);
-  if (existing && !existing.isDestroyed()) return existing;
+  if (existing && !existing.isDestroyed()) {
+    existing.__grokLastUsedAt = Date.now();
+    return existing;
+  }
   const bounds = centeredWindowBounds();
   const partition = bridgePartition(command);
   installMediaPermissionGuard(session.fromPartition(partition));
@@ -1619,6 +1655,7 @@ function bridgeWindow(command) {
   win.__grokPreparePromise = null;
   win.__grokPrepareGeneration = 0;
   win.__grokDomReadyUrl = "";
+  win.__grokLastUsedAt = Date.now();
   installImagineGenerationNetworkCapture(win);
   win.webContents.on("did-start-navigation", (_event, _url, isInPlace, isMainFrame) => {
     if (!isMainFrame || isInPlace) return;
@@ -1992,19 +2029,52 @@ async function bridgeMediaStatus(win, timeoutMs = IMAGINE_BRIDGE_SCRIPT_TIMEOUT_
   }
 }
 
+async function bridgeWaitForMediaStore(win, timeoutMs) {
+  const budget = Math.max(0, Math.floor(Number(timeoutMs) || 0));
+  const script = `
+    (() => {
+      const bridge = window.__grokChameleonImagineBridge;
+      if (!bridge || typeof bridge.awaitMediaStore !== 'function') {
+        return { ok: false, error: 'bridge missing', hasMediaStore: false, status: null };
+      }
+      return bridge.awaitMediaStore(${budget});
+    })()
+  `;
+  try {
+    return await bridgePromiseWithTimeout(
+      win.webContents.executeJavaScript(script, true),
+      budget + IMAGINE_BRIDGE_SCRIPT_TIMEOUT_MS,
+      "Imagine bridge readiness wait did not return.",
+    );
+  } catch (error) {
+    return { ok: false, error: error.message || String(error), hasMediaStore: false, status: null };
+  }
+}
+
 async function waitForBridgeStoreReady(win, command, options = {}) {
   const ids = commandMediaIds(command);
   const needIdMatch = (Boolean(options.requireIdMatch) || command.type === "crop_image") && ids.length > 0;
   const timeoutMs = Math.max(1000, Number(options.timeoutMs || (needIdMatch ? 12000 : 8000)));
   const deadline = Date.now() + timeoutMs;
   let last = null;
+  // Ask the page to tell us when its media store lands instead of re-probing a
+  // renderer that is busy loading Grok's bundle. Polling stays as the fallback for
+  // pages whose preload bridge predates awaitMediaStore, and for id matching.
+  if (!needIdMatch) {
+    const awaited = await bridgeWaitForMediaStore(win, Math.max(0, deadline - Date.now()));
+    if (awaited?.hasMediaStore) return awaited;
+    if (awaited?.waited) last = awaited;
+  }
   while (Date.now() < deadline) {
     const remainingMs = Math.max(250, deadline - Date.now());
     const probeTimeoutMs = Math.min(IMAGINE_BRIDGE_SCRIPT_TIMEOUT_MS, remainingMs);
-    last = needIdMatch
+    const probe = needIdMatch
       ? await bridgeMediaContext(win, ids, probeTimeoutMs)
       : await bridgeMediaStatus(win, probeTimeoutMs);
-    if (last?.hasMediaStore && (!needIdMatch || last.matchedBy)) return last;
+    // A probe squeezed into the last few hundred milliseconds reports a timeout by
+    // construction. Do not let that overwrite a result that actually described the page.
+    if (probe?.status || !last) last = probe;
+    if (probe?.hasMediaStore && (!needIdMatch || probe.matchedBy)) return probe;
     await sleep(250);
   }
   return last;
@@ -2246,7 +2316,10 @@ async function handleBridgeCommand(command) {
       await sendBridgeResult(id, true, value);
       return;
     }
-    if (command.type === "prepare") closeInactiveAccountWindows(command);
+    if (command.type === "prepare") {
+      supersedeOtherAccountPreparations(command);
+      closeInactiveAccountWindows(command);
+    }
     win = await ensureBridgeReady(command);
     if (command.type === "prepare") {
       await sendBridgeResult(id, true, { ok: true, status: "ready" });

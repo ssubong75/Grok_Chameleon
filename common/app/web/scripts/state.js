@@ -403,6 +403,20 @@ function normalizeNfcText(value = "") {
       || String(left?.folder_path || "").localeCompare(String(right?.folder_path || ""));
   }
 
+  // Snapshots arrive far more often than the order actually changes, and a full sort
+  // walks every post each time. Checking order first is a single linear pass, so the
+  // common no-op snapshot stops paying for a sort it does not need.
+  function sortPostsIfNeeded(posts, compare) {
+    if (!Array.isArray(posts) || posts.length < 2) return posts;
+    for (let index = 1; index < posts.length; index += 1) {
+      if (compare(posts[index - 1], posts[index]) > 0) {
+        posts.sort(compare);
+        return posts;
+      }
+    }
+    return posts;
+  }
+
   function normalizeServerPost(post) {
     const items = Array.isArray(post?.items) ? post.items : [];
     const representative = representativeItem(items, post)
@@ -587,7 +601,7 @@ function normalizeNfcText(value = "") {
             : (typeof isBuildPost !== "function" || isBuildPost(post))
         ),
       );
-      library_state.indexedBuildPosts.sort(comparePostsByRecentActivity);
+      sortPostsIfNeeded(library_state.indexedBuildPosts, comparePostsByRecentActivity);
       library_state.indexedBuildOffset = library_state.indexedBuildPosts.length;
       library_state.indexedBuildHasMore = (
         library_state.indexedBuildOffset < library_state.indexedBuildTotal
@@ -597,9 +611,13 @@ function normalizeNfcText(value = "") {
         changedPosts,
         (post) => post.area === "upload",
       );
-      library_state.indexedUploadPosts = library_state.indexedUploadPosts
-        .sort((left, right) => String(right?.created_at || "").localeCompare(String(left?.created_at || "")))
-        .slice(0, uploadHistoryPageSize);
+      const compareUploadsByNewest = (left, right) => (
+        String(right?.created_at || "").localeCompare(String(left?.created_at || ""))
+      );
+      library_state.indexedUploadPosts = sortPostsIfNeeded(
+        library_state.indexedUploadPosts,
+        compareUploadsByNewest,
+      ).slice(0, uploadHistoryPageSize);
       if ((changedPosts.length || deletedPaths.length) && library_state.indexedSearchBuildQuery) {
         library_state.indexedSearchBuildQuery = "";
         library_state.indexedSearchBuildLoaded = false;
