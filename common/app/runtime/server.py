@@ -12600,12 +12600,25 @@ def imagine_native_bridge_generate(
             })
             raise RuntimeError(usage_limit_message)
 
-    if not item and expected_type == "image" and (post_candidates or action in {"i2i", "aspect"}):
+    # Text-to-video joins this recovery path because it starts from nothing: raising on
+    # moderation leaves no trace of the request at all, while Grok keeps a moderated card
+    # of its own. The progress chunk that precedes the verdict carries videoPostId, so the
+    # same re-fetch that recovers a moderated i2i result finds the card here too. Note it
+    # reports moderation as an "error" string rather than a boolean, so confirmed_moderation
+    # (which only reads flags) stays False and imagine_event_is_moderated is the right test.
+    t2v_moderation_recovery = (
+        action == "t2v"
+        and bool(post_candidates)
+        and any(imagine_event_is_moderated(event) for event in result_events)
+    )
+    if not item and (expected_type == "image" or t2v_moderation_recovery) and (
+        post_candidates or action in {"i2i", "aspect"}
+    ):
         confirmed_i2i_moderation = action == "i2i" and confirmed_moderation
         candidate_recheck_seconds = (
             IMAGINE_DIRECT_CONFIRMED_MODERATION_IMAGE_RECOVERY_SECONDS
             if confirmed_i2i_moderation
-            else (15 if action in {"i2i", "aspect"} else max_wait)
+            else (15 if action in {"i2i", "aspect"} or t2v_moderation_recovery else max_wait)
         )
         recheck_started_at = time.time()
         i2i_moderation_detected_at = (
