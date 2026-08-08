@@ -9778,6 +9778,10 @@ def imagine_t2i_send_payloads(prompt: str, request_id: str, aspect_ratio: str, e
                         "aspect_ratio": aspect_ratio,
                         "enable_pro": enable_pro,
                         "num_generations": count,
+                        # Grok added this alongside the 2026-08-08 imagine-x-1 rollout
+                        # and sends it on every request; a trace of grok.com confirmed
+                        # the value. Keep the frame identical to theirs.
+                        "enable_watermark": False,
                     },
                 }
             ],
