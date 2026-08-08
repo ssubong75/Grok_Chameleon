@@ -7377,6 +7377,30 @@ def delete_imagine_asset(payload: dict) -> dict:
     bundle_id = str(payload.get("bundle_post_id") or conversation_id or detail_post_id).strip()
     preserve_upload_bundle = source_scope == "upload_page"
     root = library_root() if preserve_upload_bundle else begin_imagine_delete_race_guard(account, asset_id)
+    # A link-opened item is never copied into this account, so Grok has nothing to
+    # delete — its own site issues no request at all for these. Asking it to delete the
+    # id anyway would be aimed at the original owner's asset, so drop the local record
+    # and stop there.
+    if imagine_asset_is_external_reference(root, account, asset_id):
+        update_imagine_local_heart_posts(
+            root,
+            account,
+            remove_asset_ids={asset_id},
+            remove_entire_link_post=False,
+        )
+        update_imagine_account_setting_ids(
+            root,
+            "imagine_external_reference_asset_ids",
+            account,
+            remove={asset_id},
+        )
+        prune_imagine_remote_cache_assets(root, account, {asset_id})
+        invalidate_imagine_saved_media_keys_cache(account)
+        imagine_debug_event("external_reference_delete_local_only", {
+            "account_id": str(account.get("id") or ""),
+            "asset_id": asset_id,
+        })
+        return {"ok": True, "asset_id": asset_id, "action": "external-reference-remove"}
     try:
         result = imagine_delete_json(
             f"/rest/assets/{quote(asset_id, safe='')}",
@@ -7420,6 +7444,19 @@ def delete_imagine_asset(payload: dict) -> dict:
             else ("bundle-source-delete" if bundle_source_only else "asset-delete")
         ),
     }
+
+
+def imagine_asset_is_external_reference(root: Path | None, account: dict, asset_id: str) -> bool:
+    if not root or not asset_id:
+        return False
+    try:
+        return asset_id in imagine_account_setting_ids(
+            root,
+            "imagine_external_reference_asset_ids",
+            account,
+        )
+    except Exception:
+        return False
 
 
 def discard_missing_imagine_asset(payload: dict) -> dict:
@@ -7718,13 +7755,31 @@ def _like_imagine_media_post(payload: dict) -> dict:
         for target in targets
         if target.get("external_reference")
     }
+    clone_result = {"cloned": [], "failed": []}
     if external_ids:
-        update_imagine_account_setting_ids(
-            root,
-            "imagine_external_reference_asset_ids",
-            account,
-            add=external_ids,
-        )
+        # Copy the asset into this account first. Only fall back to the local-only
+        # marker for ids Grok refused, so a successful save is a real Grok save.
+        clone_result = imagine_clone_external_assets(account, external_ids)
+        cloned_sources = {
+            entry.get("source_asset_id")
+            for entry in clone_result.get("cloned") or []
+            if entry.get("source_asset_id")
+        }
+        remaining_external = external_ids - cloned_sources
+        if remaining_external:
+            update_imagine_account_setting_ids(
+                root,
+                "imagine_external_reference_asset_ids",
+                account,
+                add=remaining_external,
+            )
+        if cloned_sources:
+            update_imagine_account_setting_ids(
+                root,
+                "imagine_external_reference_asset_ids",
+                account,
+                remove=cloned_sources,
+            )
     invalidate_imagine_saved_media_keys_cache(account)
     threading.Thread(
         target=sync_imagine_official_saved_registration,
@@ -7751,9 +7806,55 @@ def _like_imagine_media_post(payload: dict) -> dict:
         "local_saved": True,
         "official_saved": "pending",
         "official_verified_ids": [],
+        "cloned_external": clone_result.get("cloned") or [],
+        "clone_failed_external": clone_result.get("failed") or [],
         "result": {},
         "results": [],
     }
+
+
+# Saving someone else's post used to be a local-only heart: the card appeared in this
+# app but Grok never knew about it, so it vanished on any other device and could not be
+# used as a real generation source. Grok still exposes the clone endpoint its own site
+# once used, which copies the asset into this account and opens a conversation for it.
+def imagine_clone_external_assets(account: dict, asset_ids: set[str]) -> dict:
+    wanted = sorted({str(value).strip() for value in asset_ids if str(value or "").strip()})
+    if not wanted:
+        return {"cloned": [], "failed": []}
+    try:
+        result = imagine_post_json(
+            "/rest/assets/clone-batch",
+            {"assetIds": wanted, "createConversation": True},
+            account,
+            referer=IMAGINE_BASE + "/imagine",
+        )
+    except Exception as exc:
+        imagine_debug_event("external_asset_clone_failed", {
+            "account_id": str(account.get("id") or ""),
+            "asset_ids": wanted,
+            "error": str(exc)[:400],
+        })
+        return {"cloned": [], "failed": wanted, "error": str(exc)[:400]}
+    cloned = []
+    for asset in (result.get("assets") if isinstance(result.get("assets"), list) else []):
+        if not isinstance(asset, dict):
+            continue
+        aux = asset.get("auxKeys") if isinstance(asset.get("auxKeys"), dict) else {}
+        cloned.append({
+            "asset_id": str(asset.get("assetId") or ""),
+            "source_asset_id": str(aux.get("duplicated_from_asset_id") or ""),
+            "conversation_id": str(asset.get("sourceConversationId") or ""),
+            "response_id": str(asset.get("responseId") or ""),
+            "media_type": str(asset.get("mimeType") or ""),
+        })
+    imagine_debug_event("external_asset_cloned", {
+        "account_id": str(account.get("id") or ""),
+        "requested": wanted,
+        "cloned": [entry["asset_id"] for entry in cloned],
+    })
+    return {"cloned": cloned, "failed": [value for value in wanted if not any(
+        entry.get("source_asset_id") == value for entry in cloned
+    )]}
 
 
 def like_imagine_media_post(payload: dict) -> dict:

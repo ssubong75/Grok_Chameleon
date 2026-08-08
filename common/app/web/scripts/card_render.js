@@ -635,6 +635,15 @@ function cardVisualActionButton(className, label, html, onClick = null) {
   return button;
 }
 
+// Terminal failures keep their card so the attempt stays visible, but the media never
+// arrived — there is nothing to download or move.
+function cardIsTerminalFailure(post, item) {
+  if (typeof mediaItemIsModerated === "function" && mediaItemIsModerated(item)) return true;
+  const status = String(post?.status || item?.status || "").toLowerCase();
+  if (["failed", "moderated"].includes(status)) return true;
+  return Boolean(post?.failed || post?.is_failed || item?.failed || item?.moderated);
+}
+
 function cardVisualActions(post) {
   const actions = document.createElement("div");
   actions.className = "card-actions media-card-actions";
@@ -800,7 +809,11 @@ function mediaCardForPost(post, className, backTargetOverride = null) {
   meta.textContent = post.collection || post.area || "Media";
   caption.append(title, meta);
   article.append(media, caption);
-  if (!attachedJob) article.append(remoteOnly ? cardVisualActionsShell(post) : cardVisualActions(post));
+  // A failed or moderated card has nothing to download and nothing worth filing away,
+  // so the row of download/move/delete buttons is noise. The corner X still removes it.
+  if (!attachedJob && !cardIsTerminalFailure(post, rawRepresentative)) {
+    article.append(remoteOnly ? cardVisualActionsShell(post) : cardVisualActions(post));
+  }
   if (attachedJob && typeof buildJobActionButton === "function") article.append(buildJobActionButton(attachedJob));
 
   const activate = () => {

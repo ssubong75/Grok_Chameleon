@@ -18,10 +18,12 @@ const GROK_USAGE_URL = "https://grok.com/?_s=usage";
 const IMAGINE_BRIDGE_READY_MAX_AGE_MS = 20 * 60 * 1000;
 const IMAGINE_BRIDGE_PAGE_TIMEOUT_MS = 10000;
 const IMAGINE_BRIDGE_STORE_TIMEOUT_MS = 20000;
-// Bridge windows are expensive to warm, so keep a few of the most recently used
-// accounts alive. Switching back to one of them then reuses its prepared store
-// instead of reloading grok.com from scratch.
-const IMAGINE_BRIDGE_RETAINED_ACCOUNT_WINDOWS = 3;
+// A warmed bridge window costs roughly 460MB, so this is a memory budget as much as a
+// cache. Two covers the common habit of alternating between a pair of accounts —
+// switching back is then instant instead of a fresh ~4.4s warm-up. Holding more would
+// rarely pay off for someone rotating through ten accounts, while the memory cost
+// lands on every machine running the build.
+const IMAGINE_BRIDGE_RETAINED_ACCOUNT_WINDOWS = 2;
 const IMAGINE_BRIDGE_SCRIPT_TIMEOUT_MS = 3000;
 const IMAGINE_BRIDGE_PREPARE_TIMEOUT_MS = 30000;
 
