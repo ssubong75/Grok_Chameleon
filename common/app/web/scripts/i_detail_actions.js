@@ -965,7 +965,9 @@ async function deleteImagineSelectedDetailItem() {
   }
 }
 
-async function deleteImagineCardPost(post, button = null) {
+// skipConfirm is for the corner X on a failed or moderated card: there is no media to
+// lose, and the job card it replaces dismissed on a single click too.
+async function deleteImagineCardPost(post, button = null, { skipConfirm = false } = {}) {
   const items = (post?.items || []).filter(Boolean);
   if (!post || !items.length || !imagineCardHasDeleteTarget(post)) {
     showErrorPanel("Delete unavailable", "This Imagine card has no deletion target.");
@@ -973,7 +975,7 @@ async function deleteImagineCardPost(post, button = null) {
   }
   const screenId = screen_state.current_screen;
   const scrollTop = imagineListScrollTopForScreen(screenId);
-  const ok = await confirmAction({
+  const ok = skipConfirm || await confirmAction({
     title: "Delete Post",
     message: items.length > 1 ? `Delete this Imagine post and ${items.length} media item(s)?` : "Delete this Imagine post?",
     confirmLabel: "Delete",

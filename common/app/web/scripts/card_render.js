@@ -597,8 +597,8 @@ function cardTerminalFailureDismissButton(post, remoteOnly) {
   button.innerHTML = `<span class="delete_x_icon" aria-hidden="true"></span>`;
   button.addEventListener("click", (event) => {
     stopVisualCardAction(event);
-    if (remoteOnly && typeof deleteImagineCardPost === "function") deleteImagineCardPost(post, button);
-    else if (typeof deleteLibraryPost === "function") deleteLibraryPost(post, button);
+    if (remoteOnly && typeof deleteImagineCardPost === "function") deleteImagineCardPost(post, button, { skipConfirm: true });
+    else if (typeof deleteLibraryPost === "function") deleteLibraryPost(post, button, { skipConfirm: true });
   });
   return button;
 }
