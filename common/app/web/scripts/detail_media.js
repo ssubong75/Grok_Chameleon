@@ -1205,7 +1205,11 @@ function handleUnavailableImagineCardPreview(host, item, url, postPath) {
     cache: "no-store",
   }).then((response) => {
     const status = Number(response.status);
-    if (![404, 410].includes(status)) return false;
+    // Grok answers 403 — not 404 — for an asset that was deleted upstream, so a card
+    // pointing at one would otherwise sit there showing an empty preview forever. 403
+    // can also be a transient permission blip, so the server re-checks the asset before
+    // it prunes anything.
+    if (![403, 404, 410].includes(status)) return false;
     const { assetId, accountId } = missingImagineAssetIdentity(item, key);
     const cleanup = assetId
       ? qApi("/api/imagine/asset/missing", {
