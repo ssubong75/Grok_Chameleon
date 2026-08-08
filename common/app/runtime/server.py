@@ -95,10 +95,15 @@ BUILD_VIDEO_MAIN_DISPLAY_PROGRESS = 90
 BUILD_VIDEO_INITIAL_DISPLAY_RATIO = 0.10
 BUILD_VIDEO_MAIN_DISPLAY_RATIO = 0.85
 BUILD_VIDEO_PROGRESS_SMOOTH_TICKS = 6
-IMAGINE_DIRECT_FIRST_SIGNAL_SECONDS = 6
+# Grok's image model got slower: a 2026-08-08 trace measured 14.5s before the first
+# start_stage frame and 19.9s until all four images finished. The old 6s cut off a
+# healthy request long before Grok had said anything at all.
+IMAGINE_DIRECT_FIRST_SIGNAL_SECONDS = 25
 IMAGINE_DIRECT_VIDEO_FIRST_SIGNAL_SECONDS = 14
 IMAGINE_DIRECT_I2I_MAX_WAIT_SECONDS = 14
-IMAGINE_DIRECT_T2I_DISPLAY_SECONDS = 8
+# Measured 19.9s for a four-image request, so the bar no longer parks at 99% for the
+# second half of the wait. Results still finish the bar early when they arrive sooner.
+IMAGINE_DIRECT_T2I_DISPLAY_SECONDS = 20
 IMAGINE_DIRECT_T2I_DISPLAY_MAX_PROGRESS = 99
 IMAGINE_DIRECT_I2I_DISPLAY_SECONDS = 12
 IMAGINE_DIRECT_I2I_DISPLAY_MAX_PROGRESS = 99
@@ -7462,7 +7467,7 @@ def imagine_asset_is_external_reference(root: Path | None, account: dict, asset_
 def discard_missing_imagine_asset(payload: dict) -> dict:
     payload = payload if isinstance(payload, dict) else {}
     status = safe_int(payload.get("status"), 0)
-    if status not in {404, 410}:
+    if status not in {403, 404, 410}:
         raise RuntimeError("Missing Imagine asset confirmation is required.")
     root = library_root()
     if not root:
@@ -7473,6 +7478,20 @@ def discard_missing_imagine_asset(payload: dict) -> dict:
     asset_id = imagine_delete_target_id(payload)
     if not asset_id:
         raise RuntimeError("Imagine asset id is required.")
+    # A 403 on the media host means "deleted upstream" often enough to act on, but not
+    # always — a permission blip looks identical. Ask the asset API directly before
+    # pruning, and leave the card alone if the asset is still there.
+    if status == 403:
+        try:
+            imagine_get_json(f"/rest/assets/{quote(asset_id, safe='')}", account, timeout=5)
+        except Exception as exc:
+            imagine_debug_event("missing_asset_403_confirmed", {
+                "asset_id": asset_id,
+                "error": str(exc)[:200],
+            })
+        else:
+            imagine_debug_event("missing_asset_403_still_present", {"asset_id": asset_id})
+            return {"ok": True, "asset_id": asset_id, "action": "kept", "status": status}
     update_imagine_local_heart_posts(
         root,
         account,
@@ -9772,6 +9791,9 @@ def imagine_t2i_candidate_from_event(event: dict, prompt: str) -> dict | None:
     image_id = str(event.get("image_id") or event.get("job_id") or "").strip()
     if not image_id or not re.fullmatch(r"[0-9a-fA-F-]{32,36}", image_id):
         return None
+    # Successful images publish as .jpg (verified 200); only moderated frames carry
+    # .png urls, and those 404 because no file is ever written for them. The event
+    # normally carries the url, so this fallback only runs when it does not.
     raw_url = str(event.get("url") or "").strip() or f"https://imagine-public.x.ai/imagine-public/images/{image_id}.jpg"
     status = str(event.get("current_status") or "").strip().lower()
     progress = imagine_event_numeric_progress(event)

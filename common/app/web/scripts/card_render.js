@@ -586,6 +586,23 @@ function cardVisualSelectButton(post) {
   return button;
 }
 
+// A stored failed or moderated card has nothing to select — there is no media to act
+// on — so the corner offers the same X the job card showed while it was generating.
+function cardTerminalFailureDismissButton(post, remoteOnly) {
+  const button = document.createElement("button");
+  button.className = "gallery_failed_dismiss_btn";
+  button.type = "button";
+  button.dataset.libraryPostPath = post.folder_path || "";
+  button.setAttribute("aria-label", "Remove card");
+  button.innerHTML = `<span class="delete_x_icon" aria-hidden="true"></span>`;
+  button.addEventListener("click", (event) => {
+    stopVisualCardAction(event);
+    if (remoteOnly && typeof deleteImagineCardPost === "function") deleteImagineCardPost(post, button);
+    else if (typeof deleteLibraryPost === "function") deleteLibraryPost(post, button);
+  });
+  return button;
+}
+
 function imagineCardHeartIconHtml() {
   return `<span class="imagine-save-heart-icon" aria-hidden="true"><svg class="imagine-save-heart-svg" viewBox="0 0 24 24" focusable="false"><path class="imagine-save-heart-path" d="M12 20.2c-.28 0-.55-.1-.76-.29C6.15 15.32 3 12.48 3 8.62 3 5.78 5.12 3.7 7.9 3.7c1.62 0 3.16.75 4.1 1.94.94-1.19 2.48-1.94 4.1-1.94 2.78 0 4.9 2.08 4.9 4.92 0 3.86-3.15 6.7-8.24 11.29-.21.19-.48.29-.76.29Z"/></svg></span>`;
 }
@@ -779,7 +796,10 @@ function mediaCardForPost(post, className, backTargetOverride = null) {
   }
 
   if (remoteOnly) article.classList.add("remote_card");
-  if (!attachedJob) {
+  const terminalFailure = !attachedJob && cardIsTerminalFailure(post, rawRepresentative);
+  if (terminalFailure) {
+    article.append(cardTerminalFailureDismissButton(post, remoteOnly));
+  } else if (!attachedJob) {
     if (remoteOnly) {
       const unsavedPost = typeof isImagineUnsavedPost === "function" && isImagineUnsavedPost(post);
       const imagineCardScreenId = backTargetOverride?.screenId || "i_main";
@@ -811,7 +831,7 @@ function mediaCardForPost(post, className, backTargetOverride = null) {
   article.append(media, caption);
   // A failed or moderated card has nothing to download and nothing worth filing away,
   // so the row of download/move/delete buttons is noise. The corner X still removes it.
-  if (!attachedJob && !cardIsTerminalFailure(post, rawRepresentative)) {
+  if (!attachedJob && !terminalFailure) {
     article.append(remoteOnly ? cardVisualActionsShell(post) : cardVisualActions(post));
   }
   if (attachedJob && typeof buildJobActionButton === "function") article.append(buildJobActionButton(attachedJob));
