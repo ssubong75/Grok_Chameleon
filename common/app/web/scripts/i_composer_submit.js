@@ -827,7 +827,11 @@ async function submitImagineComposer() {
         focusJobThumb: true,
       });
     }
-    if (!isTextToImage && typeof prepareActiveImagineBridgeSession === "function") {
+    // Text-to-image used to skip this because it has no attachment to stage, but it
+    // still sends its request over the same bridge window. Submitting while the media
+    // store was mid-prepare put the request on a socket that never answered, and the
+    // job sat there until the DevTools connection dropped a minute later.
+    if (typeof prepareActiveImagineBridgeSession === "function") {
       await prepareActiveImagineBridgeSession({ force: false, silent: false, accountId: submissionAccountId });
     }
     await Promise.all(lockedAttachments.map((attachment) => ensureComposerAttachmentDataUrl(attachment)));
