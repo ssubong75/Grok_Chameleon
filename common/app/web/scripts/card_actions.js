@@ -385,7 +385,9 @@
   }
 
 
-  async function deleteLibraryPost(post, button = null) {
+  // skipConfirm is for the corner X on a failed or moderated card: there is no media to
+  // lose, and the job card it replaces dismissed on a single click too.
+  async function deleteLibraryPost(post, button = null, { skipConfirm = false } = {}) {
     if (!post?.folder_path) return;
     if (postRootFolderDeleteBlocked(post)) {
       showErrorPanel("Delete unavailable", "Open the detail view and delete a thumbnail.");
@@ -396,7 +398,7 @@
       return;
     }
     const itemCount = Math.max(1, (post.items || []).length);
-    const ok = await confirmDeleteAction({
+    const ok = skipConfirm || await confirmDeleteAction({
       title: "Delete item",
       message: itemCount > 1 ? `Delete this post and ${itemCount} media item(s)?` : "Delete this local item?",
     });
