@@ -101,9 +101,10 @@ BUILD_VIDEO_PROGRESS_SMOOTH_TICKS = 6
 IMAGINE_DIRECT_FIRST_SIGNAL_SECONDS = 25
 IMAGINE_DIRECT_VIDEO_FIRST_SIGNAL_SECONDS = 14
 IMAGINE_DIRECT_I2I_MAX_WAIT_SECONDS = 14
-# Measured 19.9s for a four-image request, so the bar no longer parks at 99% for the
-# second half of the wait. Results still finish the bar early when they arrive sooner.
-IMAGINE_DIRECT_T2I_DISPLAY_SECONDS = 20
+# Four-image requests measured 19.9s, 20.3s and 25.4s on 2026-08-08, so the bar is
+# sized to the slowest of them instead of parking at 99% for the last five seconds.
+# Results still finish the bar early when they arrive sooner.
+IMAGINE_DIRECT_T2I_DISPLAY_SECONDS = 26
 IMAGINE_DIRECT_T2I_DISPLAY_MAX_PROGRESS = 99
 IMAGINE_DIRECT_I2I_DISPLAY_SECONDS = 12
 IMAGINE_DIRECT_I2I_DISPLAY_MAX_PROGRESS = 99
@@ -9914,7 +9915,7 @@ def imagine_t2i_direct_items(
                     candidate_recovery_attempts += 1
                     if candidate_recovery_attempts >= 2 and completed_count > 0:
                         break
-                    completed_grace_deadline = time.monotonic() + 1.5
+                    completed_grace_deadline = time.monotonic() + 2
                 continue
             try:
                 text = ws.recv_text()
@@ -9966,12 +9967,12 @@ def imagine_t2i_direct_items(
                 if candidate.get("completed") and candidate["post_id"] not in completion_order:
                     completion_order.append(candidate["post_id"])
                 if completed_count >= count and completed_count != last_completed_count:
-                    completed_grace_deadline = time.monotonic() + 3.0
+                    completed_grace_deadline = time.monotonic() + 3
                     last_completed_count = completed_count
                 elif completed_count >= count and candidate_is_new:
-                    completed_grace_deadline = time.monotonic() + 3.0
+                    completed_grace_deadline = time.monotonic() + 3
                 elif completed_count > 0 and len(candidates) >= count and not completed_grace_deadline:
-                    completed_grace_deadline = time.monotonic() + 1.25
+                    completed_grace_deadline = time.monotonic() + 1
                 imagine_debug_event("t2i_candidate", {
                     "request_id": request_id,
                     "post_id": candidate.get("post_id"),
