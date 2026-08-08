@@ -832,7 +832,7 @@ async function submitImagineComposer() {
     // store was mid-prepare put the request on a socket that never answered, and the
     // job sat there until the DevTools connection dropped a minute later.
     if (typeof prepareActiveImagineBridgeSession === "function") {
-      await prepareActiveImagineBridgeSession({ force: false, silent: false, accountId: submissionAccountId });
+      await prepareActiveImagineBridgeSession({ force: false, revalidate: true, silent: false, accountId: submissionAccountId });
     }
     await Promise.all(lockedAttachments.map((attachment) => ensureComposerAttachmentDataUrl(attachment)));
     let attachments = lockedAttachments.map(composerSubmissionAttachment);

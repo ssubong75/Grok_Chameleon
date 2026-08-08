@@ -144,7 +144,7 @@ function abandonOtherImaginePreparations(accountId) {
   }
 }
 
-async function prepareActiveImagineBridgeSession({ force = false, silent = true, accountId: requestedAccountId = "" } = {}) {
+async function prepareActiveImagineBridgeSession({ force = false, revalidate = false, silent = true, accountId: requestedAccountId = "" } = {}) {
   if (!library_state.apiReady) return { ok: true, status: "api_unavailable" };
   const accountId = String(requestedAccountId || account_state.imagine?.active_id || account_state.imagine?.accounts?.[0]?.id || "");
   if (!accountId) return { ok: true, status: "no_account" };
@@ -152,7 +152,11 @@ async function prepareActiveImagineBridgeSession({ force = false, silent = true,
   const readyIsFresh = state.ready
     && state.readyAt > 0
     && Date.now() - state.readyAt < IMAGINE_BRIDGE_READY_MAX_AGE_MS;
-  if (!force && readyIsFresh) return { ok: true, status: "ready", cached: true, account_id: accountId };
+  // The 20 minute window records when this tab last heard "ready", not whether the
+  // media store is still there. Electron re-checks that and rebuilds when it is gone,
+  // but only when we actually ask. revalidate skips this shortcut so the check runs;
+  // force_refresh stays off so a live store is still reused in ~2ms.
+  if (!force && !revalidate && readyIsFresh) return { ok: true, status: "ready", cached: true, account_id: accountId };
   if (!state.promise) {
     abandonOtherImaginePreparations(accountId);
     const controller = typeof AbortController === "function" ? new AbortController() : null;
