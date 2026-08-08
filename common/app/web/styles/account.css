@@ -637,7 +637,11 @@
 
 .toast {
   position: fixed;
-  top: 84px;
+  /* Rest 2px above the top border of whichever framed screen is showing. toast() measures
+     that border and writes --toast-anchor-top; the fallback is where the frame lands in a
+     default layout, for detail screens that have no frame at all. The -100% lift keeps the
+     gap identical whether the message wraps to one line or three. */
+  top: calc(var(--toast-anchor-top, calc(24px + var(--topbar-min-height) + var(--workspace-row-gap))) - 2px);
   left: calc(var(--sidebar-width) + ((100vw - var(--sidebar-width)) / 2));
   z-index: 120;
   display: inline-flex;
@@ -654,7 +658,7 @@
   font-weight: 760;
   white-space: pre-wrap;
   box-shadow: var(--shadow);
-  transform: translateX(-50%);
+  transform: translate(-50%, -100%);
 }
 
 .toast-message {

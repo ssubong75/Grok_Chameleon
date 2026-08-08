@@ -113,10 +113,38 @@ function errorToastMessage(message) {
   return (readable || "Unknown error").slice(0, 240);
 }
 
+// Every framed screen draws the same bordered panel around its menu and cards, but the
+// border does not always land in the same place: portrait adds a margin, the selection
+// bar takes a grid row, and detail screens drop the frame entirely. Measure whichever one
+// is on screen so the toast keeps its 2px gap instead of guessing from a fixed offset.
+const TOAST_FRAME_SELECTOR = [
+  ".i_main",
+  ".b_main",
+  ".search_main",
+  ".i_discover_main",
+  ".i_unsaved_main",
+  ".collection_main",
+  ".second_main",
+  ".prompt_main",
+  ".usage",
+].join(", ");
+
+function toastFrameTop() {
+  for (const frame of document.querySelectorAll(TOAST_FRAME_SELECTOR)) {
+    if (frame.hidden) continue;
+    const rect = frame.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) return rect.top;
+  }
+  return 0;
+}
+
 function toast(message, kind = "info") {
   if (kind !== "error") return;
   const toastEl = document.getElementById("toast");
   if (!toastEl) return;
+  const frameTop = toastFrameTop();
+  if (frameTop > 0) toastEl.style.setProperty("--toast-anchor-top", `${Math.round(frameTop)}px`);
+  else toastEl.style.removeProperty("--toast-anchor-top");
   const text = String(message || "");
   const messageEl = document.createElement("span");
   messageEl.className = "toast-message";
