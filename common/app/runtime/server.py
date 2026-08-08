@@ -9972,7 +9972,7 @@ def imagine_t2i_direct_items(
                 elif completed_count >= count and candidate_is_new:
                     completed_grace_deadline = time.monotonic() + 3
                 elif completed_count > 0 and len(candidates) >= count and not completed_grace_deadline:
-                    completed_grace_deadline = time.monotonic() + 1
+                    completed_grace_deadline = time.monotonic() + 2
                 imagine_debug_event("t2i_candidate", {
                     "request_id": request_id,
                     "post_id": candidate.get("post_id"),
