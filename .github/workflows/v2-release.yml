@@ -277,8 +277,8 @@ jobs:
           $composerText = Get-Content -Raw -LiteralPath $targetComposer
           foreach ($marker in @(
             'const imageCountOptions = provider === "imagine"',
-            '? buildT2iCountOptions.filter((option) => option !== "1")',
-            'const imageCountDefault = "5";',
+            '? imagineT2iCountOptions',
+            'const imageCountDefault = provider === "imagine" ? "4" : "5";',
             'setControlVisible(composerControls.count, !isImageToImage'
           )) {
             if (-not $composerText.Contains($marker)) { throw "Windows composer marker missing: $marker" }
@@ -286,6 +286,9 @@ jobs:
           $stateText = Get-Content -Raw -LiteralPath $state
           if (-not $stateText.Contains('const buildT2iCountOptions = ["10", "8", "5", "4", "1"];')) {
             throw "Build count options changed unexpectedly."
+          }
+          if (-not $stateText.Contains('const imagineT2iCountOptions = ["12", "8", "4", "2"];')) {
+            throw "Imagine count options changed unexpectedly."
           }
           $preloadText = Get-Content -Raw -LiteralPath $targetPreload
           foreach ($marker in @(
@@ -741,8 +744,8 @@ jobs:
           ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
           PY
           grep -F 'const imageCountOptions = provider === "imagine"' "$target"
-          grep -F '? buildT2iCountOptions.filter((option) => option !== "1")' "$target"
-          grep -F 'const imageCountDefault = "5";' "$target"
+          grep -F '? imagineT2iCountOptions' "$target"
+          grep -F 'const imageCountDefault = provider === "imagine" ? "4" : "5";' "$target"
           grep -F 'const generationResponseCaptures = [];' "$preload_js"
           grep -F 'conversation_request_route_applied' "$preload_js"
           grep -F 'canonicalContainerId' "$preload_js"
