@@ -221,15 +221,10 @@ function syncImagineDetailHeartState(post, item) {
 function syncBuildDetailHeartState(post) {
   const button = document.querySelector(".b_detail_heart");
   if (!button) return;
-  const visible = !post?.is_job_post
-    && typeof isBuildT2iPost === "function"
-    && isBuildT2iPost(post);
-  button.hidden = !visible;
-  if (!visible) return;
-  const saved = typeof postBuildFavorite === "function" ? postBuildFavorite(post) : false;
-  button.classList.toggle("saved", saved);
-  button.setAttribute("aria-pressed", saved ? "true" : "false");
-  button.setAttribute("aria-label", saved ? "Unfavorite" : "Favorite");
+  // Build results land in the local library as files the moment they finish, so there is
+  // nothing here for a heart to save. Imagine needs one because a linked asset is not yours
+  // until clone-batch copies it; Build main lists on build_visible, never on favorite.
+  button.hidden = true;
 }
 
 function renderDetailViews() {

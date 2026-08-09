@@ -81,6 +81,10 @@ BUILD_VIDEO_TERMINAL_RECHECK_SECONDS = 15
 BUILD_VIDEO_TERMINAL_RECHECK_POLL_SECONDS = 3
 BUILD_VIDEO_NO_CANDIDATE_MODERATION_LIMIT = 5
 BUILD_VIDEO_CONFIRMED_MODERATION_LIMIT = 2
+# The second reading only exists to tell a real moderation from a one-off 400, and xAI
+# answers again immediately. Waiting a full poll interval for it held the verdict ~3.3s;
+# this keeps the confirmation while matching the 2s the Imagine side now spends.
+BUILD_VIDEO_CONFIRMED_MODERATION_POLL_SECONDS = 2
 BUILD_VIDEO_DISPLAY_MAX_PROGRESS = 98
 BUILD_VIDEO_DISPLAY_BASE_DURATION_SECONDS = 15
 BUILD_VIDEO_DISPLAY_SECONDS_BY_RESOLUTION = {
@@ -139,7 +143,6 @@ IMAGINE_DIRECT_EXTEND_CANDIDATE_MAX_WAIT_SECONDS = 10
 IMAGINE_DIRECT_VIDEO_TERMINAL_POLL_SECONDS = 3
 IMAGINE_DIRECT_VIDEO_CANDIDATE_STABILIZE_SECONDS = 10
 IMAGINE_DIRECT_LONG_I2V_CANDIDATE_STABILIZE_SECONDS = 30
-IMAGINE_DIRECT_CONFIRMED_MODERATION_IMAGE_RECOVERY_SECONDS = 5
 IMAGINE_DIRECT_CONFIRMED_MODERATION_NETWORK_TIMEOUT_SECONDS = 2
 IMAGINE_DIRECT_CONFIRMED_MODERATION_FINAL_PROBE_SECONDS = 2
 IMAGINE_SAVED_MEDIA_KEYS_CACHE_SECONDS = 45
@@ -9368,11 +9371,6 @@ def imagine_long_i2v_wait_policy(payload: dict, action: str | None = None) -> bo
     return imagine_i2v_wait_policy(payload, action)["tier"] == "long"
 
 
-def imagine_confirmed_moderation_recovery_seconds(value: int) -> int:
-    seconds = max(1, int(value or 0))
-    return max(1, (seconds * 2 + 1) // 3)
-
-
 def imagine_i2v_wait_policy(payload: dict, action: str | None = None) -> dict:
     resolved_action = action or imagine_direct_action(payload)
     options = payload.get("options") if isinstance(payload.get("options"), dict) else {}
@@ -13014,8 +13012,10 @@ def imagine_native_bridge_generate(
         post_candidates or action in {"i2i", "aspect"}
     ):
         confirmed_i2i_moderation = action == "i2i" and confirmed_moderation
+        # Same reasoning as the video branch: a confirmed image moderation arrives with its
+        # candidates already resolved, so only the probe pass is worth spending time on.
         candidate_recheck_seconds = (
-            IMAGINE_DIRECT_CONFIRMED_MODERATION_IMAGE_RECOVERY_SECONDS
+            IMAGINE_DIRECT_CONFIRMED_MODERATION_FINAL_PROBE_SECONDS
             if confirmed_i2i_moderation
             else (15 if action in {"i2i", "aspect"} or t2v_moderation_recovery else max_wait)
         )
@@ -13084,15 +13084,14 @@ def imagine_native_bridge_generate(
         candidate_recovery_grace_seconds = video_recovery_seconds
         confirmed_video_moderation = confirmed_moderation and moderation_detected_at is not None
         if confirmed_video_moderation and candidate_recovery_grace_seconds:
-            candidate_recovery_grace_seconds = imagine_confirmed_moderation_recovery_seconds(
-                candidate_recovery_grace_seconds
-            )
+            # Grok delivers the candidate ids and the moderated verdict in the same frame, so
+            # no window remains in which a file could still show up: every probe of those ids
+            # came back 404 with an empty body. Drop the grace budget entirely and let the
+            # probe pass alone decide, instead of holding a verdict the site already made.
+            candidate_recovery_grace_seconds = 0
             candidate_absolute_deadline = min(
                 video_absolute_deadline or float("inf"),
-                max(
-                    time.time() + IMAGINE_DIRECT_CONFIRMED_MODERATION_FINAL_PROBE_SECONDS,
-                    moderation_detected_at + candidate_recovery_grace_seconds,
-                ),
+                time.time() + IMAGINE_DIRECT_CONFIRMED_MODERATION_FINAL_PROBE_SECONDS,
             )
             imagine_debug_event("confirmed_moderation_fast_path", {
                 "request_id": request_id,
@@ -18618,6 +18617,13 @@ def poll_video_request(
             raise RuntimeError(f"Video request failed: {xai_error_text(result)}")
         return None
 
+    def next_poll_seconds() -> int:
+        # Only the wait for a moderation's second reading is shortened. Every other poll,
+        # including an unconfirmed moderation still being counted, keeps its usual interval.
+        if confirmed_moderation_count:
+            return min(interval_seconds, BUILD_VIDEO_CONFIRMED_MODERATION_POLL_SECONDS)
+        return interval_seconds
+
     def after_90_terminal_deadline() -> float:
         return max(display_deadline + BUILD_VIDEO_AFTER_90_TERMINAL_GRACE_SECONDS, deadline)
 
@@ -18739,7 +18745,7 @@ def poll_video_request(
                 "running",
                 error_result,
             )
-            sleep_with_cancel(min(max(0.1, interval_seconds), max(0.0, active_deadline() - time.time())))
+            sleep_with_cancel(min(max(0.1, next_poll_seconds()), max(0.0, active_deadline() - time.time())))
             continue
         last_data = data
         status = str(data.get("status") or "").lower()
@@ -18789,7 +18795,7 @@ def poll_video_request(
             "running" if terminal_recheck_deadline is not None else (status or "running"),
             data,
         )
-        sleep_with_cancel(min(max(0.1, interval_seconds), max(0.0, active_deadline() - time.time())))
+        sleep_with_cancel(min(max(0.1, next_poll_seconds()), max(0.0, active_deadline() - time.time())))
 
 
 def created_post_folder(root: Path, prompt: str) -> tuple[Path, str]:

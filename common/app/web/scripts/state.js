@@ -79,6 +79,9 @@ function normalizeNfcText(value = "") {
   const videoResolutionOptions = ["1080", "720", "480"];
   const countOptions = ["Auto", "1", "2", "4", "8", "10"];
   const buildT2iCountOptions = ["10", "8", "5", "4", "1"];
+  // Imagine keeps its own ladder: Grok clamps a T2I request to 12, and it has no real
+  // single-image flow, so the list starts at 2 rather than reusing Build's counts.
+  const imagineT2iCountOptions = ["12", "8", "4", "2"];
   const composerImageAttachmentLimit = 5;
   const composerBuildI2iAttachmentLimit = 3;
   const composerVideoAttachmentLimit = 7;
