@@ -2535,6 +2535,8 @@ def collect_imagine_media_entries(root_post: dict) -> list[dict]:
         for node in candidate_nodes
     }
     source_ids = {source_id for source_id in source_ids if source_id}
+    for node in candidate_nodes:
+        source_ids.update(imagine_public_asset_reference_ids(node))
 
     def input_collection_key(key: str) -> bool:
         compact = re.sub(r"[^a-z0-9]", "", str(key or "").lower())
@@ -2575,8 +2577,14 @@ def collect_imagine_media_entries(root_post: dict) -> list[dict]:
         root_post_id = imagine_node_relation_id(node, "rootPostId", "root_post_id") or root_id
         original_ref_type = str(node.get("originalRefType") or node.get("original_ref_type") or "").strip()
         width, height = imagine_node_resolution(node)
-        role = "source" if kind == "image" and post_id in source_ids else "result"
-        if relation == "input" and role != "source":
+        explicit_role = str(node.get("role") or "").strip().lower()
+        explicit_relation = str(node.get("relation") or "").strip().lower()
+        role = (
+            explicit_role
+            if explicit_role in {"source", "reference", "result"}
+            else ("source" if kind == "image" and post_id in source_ids else "result")
+        )
+        if (explicit_relation or relation) == "input" and role != "source":
             role = "reference"
         metadata = {
             "imagine_post_id": post_id,
@@ -2601,7 +2609,7 @@ def collect_imagine_media_entries(root_post: dict) -> list[dict]:
             "prompt": prompt,
             "created_at": created_at,
             "role": role,
-            "relation": relation or ("original" if role == "source" else "child"),
+            "relation": explicit_relation or relation or ("original" if role == "source" else "child"),
             "source_item_id": source_item_id,
             "original_post_id": original_post_id,
             "parent_post_id": parent_post_id,
@@ -3447,12 +3455,15 @@ def imagine_apply_generated_relations(
         relations = imagine_state.load_generated_relations(root)
     post_metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
     conversation_id = str(post_metadata.get("conversation_id") or "").strip()
+    link_source = imagine_post_is_link_source(post)
     record = relations.get(post_id) if isinstance(relations.get(post_id), dict) else None
     if conversation_id and isinstance(relations.get(conversation_id), dict) and relations[conversation_id].get("upload_origin_bundle"):
         record = relations[conversation_id]
+    if link_source and isinstance(record, dict) and record.get("upload_origin_bundle"):
+        record = None
     upload_record = (
         imagine_ensure_upload_bundle_record(post, root, account, relations)
-        if ensure_upload_bundle
+        if ensure_upload_bundle and not link_source
         else None
     )
     if upload_record:
@@ -3478,7 +3489,6 @@ def imagine_apply_generated_relations(
                 source_item["official_upload_source"] = True
                 existing_items.insert(0, source_item)
     existing_keys = {imagine_relation_item_key(item) for item in existing_items}
-    link_source = imagine_post_is_link_source(post)
     local_t2i_heart = imagine_post_is_local_t2i_heart(post)
     for stored in record.get("items") if isinstance(record.get("items"), list) else []:
         if not isinstance(stored, dict):
@@ -4420,6 +4430,20 @@ def merge_imagine_saved_lineage_cards(cards: list[dict]) -> list[dict]:
             parent_owner = source_owner_by_id.get(parent_id)
         if parent_id and parent_owner is not None and parent_owner != index:
             parent_indexes[index] = parent_owner
+            continue
+        # clone-batch copies an asset but leaves the original owner's id as its parent, so a
+        # cloned pair arrives with the chain cut: the video points at a foreign image this
+        # account does not own, no owner matches, and the pair stays as two cards even though
+        # Grok filed both under one conversation and one generation root. Fall back to that
+        # root only when the parent is unreachable, so cards whose parents do resolve keep
+        # their existing lineage.
+        if parent_id and parent_owner is None:
+            generation_root_id = str(candidate_metadata.get("root_generation_asset_id") or "").strip()
+            generation_owner = owner_by_item_id.get(generation_root_id)
+            if generation_owner is None:
+                generation_owner = source_owner_by_id.get(generation_root_id)
+            if generation_root_id and generation_owner is not None and generation_owner != index:
+                parent_indexes[index] = generation_owner
 
     resolved_roots: dict[int, int] = {}
     for start_index in range(len(active)):
@@ -5218,25 +5242,47 @@ def list_imagine_saved(payload: dict) -> dict:
 
 
 def imagine_media_post_with_asset_prompt(post: dict, post_id: str, account: dict, timeout: int = 12) -> dict:
-    if not isinstance(post, dict) or imagine_post_explicit_prompt(post):
-        return post
-    try:
-        data = imagine_get_json(
-            f"/rest/assets/{quote(post_id, safe='')}",
-            account,
-            timeout=timeout,
-            referer=f"{IMAGINE_BASE}/imagine/post/{quote(post_id, safe='')}",
-        )
-    except Exception:
-        return post
-    asset = data.get("asset") if isinstance(data.get("asset"), dict) else data
-    asset_prompt = imagine_post_explicit_prompt(asset) if isinstance(asset, dict) else ""
-    if not asset_prompt:
+    if not isinstance(post, dict):
         return post
     enriched = dict(post)
-    enriched["prompt"] = asset_prompt
-    if not imagine_text_value(enriched.get("originalPrompt")):
-        enriched["originalPrompt"] = asset_prompt
+    try:
+        asset_post = imagine_get_public_asset_post(post_id, account, timeout=timeout)
+    except Exception as exc:
+        imagine_debug_event("link_asset_context_failed", {
+            "post_id": post_id,
+            "error": str(exc)[:300],
+        })
+        return enriched
+    for key, value in asset_post.items():
+        if key == "images" or value in (None, "", [], {}):
+            continue
+        if key not in enriched or enriched.get(key) in (None, "", [], {}):
+            enriched[key] = value
+    existing_images = enriched.get("images") if isinstance(enriched.get("images"), list) else []
+    asset_images = asset_post.get("images") if isinstance(asset_post.get("images"), list) else []
+    merged_images: list[object] = []
+    seen_image_keys: set[str] = set()
+    for item in [*existing_images, *asset_images]:
+        if isinstance(item, dict):
+            item_key = imagine_post_id(item) or imagine_node_primary_media_url(item)
+        else:
+            item_key = str(item or "").strip()
+        if not item_key or item_key in seen_image_keys:
+            continue
+        seen_image_keys.add(item_key)
+        merged_images.append(item)
+    if merged_images:
+        enriched["images"] = merged_images
+    asset_prompt = imagine_post_explicit_prompt(asset_post)
+    if asset_prompt and not imagine_post_explicit_prompt(post):
+        enriched["prompt"] = asset_prompt
+        if not imagine_text_value(enriched.get("originalPrompt")):
+            enriched["originalPrompt"] = asset_prompt
+    if asset_images:
+        imagine_debug_event("link_asset_context_enriched", {
+            "post_id": post_id,
+            "reference_count": len(asset_images),
+        })
     return enriched
 
 
@@ -5286,29 +5332,62 @@ def imagine_get_media_post_direct(post_id: str, account: dict, timeout: int = 12
 def imagine_public_asset_reference_ids(asset: dict) -> list[str]:
     if not isinstance(asset, dict):
         return []
-    values: list[object] = []
+    keyed_values: list[object] = []
+    relation_tokens = (
+        "inputasset", "originalpost", "originalasset", "parentpost",
+        "parentasset", "sourcepost", "sourceasset", "rootpost",
+        "rootasset", "mediareference", "referenceasset", "referenceimage",
+    )
+
+    def is_relation_key(value: object) -> bool:
+        compact_key = re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+        if compact_key.endswith(("conversationid", "responseid", "userid")):
+            return False
+        return compact_key in {"reference", "references"} or any(
+            token in compact_key
+            for token in relation_tokens
+        )
+
+    def gather_relation_values(value: object) -> None:
+        if isinstance(value, list):
+            for item in value:
+                gather_relation_values(item)
+            return
+        if not isinstance(value, dict):
+            return
+        for key, item in value.items():
+            if is_relation_key(key):
+                keyed_values.append(item)
+            gather_relation_values(item)
+
+    for key, value in asset.items():
+        if is_relation_key(key):
+            keyed_values.append(value)
     aux_keys = asset.get("auxKeys")
     if isinstance(aux_keys, dict):
         for key, value in aux_keys.items():
-            compact_key = re.sub(r"[^a-z0-9]", "", str(key or "").lower())
-            if "reference" in compact_key or "inputasset" in compact_key:
-                values.append(value)
+            if is_relation_key(key):
+                keyed_values.append(value)
     media_gen_input = asset.get("mediaGenInput")
     if isinstance(media_gen_input, dict):
-        for value in media_gen_input.values():
-            if isinstance(value, dict) and isinstance(value.get("inputAssets"), list):
-                values.extend(value.get("inputAssets") or [])
+        gather_relation_values(media_gen_input)
     reference_ids: list[str] = []
     seen_ids: set[str] = set()
 
-    def collect(value: object) -> None:
+    def collect(value: object, *, include_keys: bool = False) -> None:
         if isinstance(value, list):
             for item in value:
-                collect(item)
+                collect(item, include_keys=include_keys)
             return
         if isinstance(value, dict):
-            for item in value.values():
-                collect(item)
+            for key, item in value.items():
+                compact_key = re.sub(r"[^a-z0-9]", "", str(key or "").lower())
+                if include_keys and IMAGINE_POST_ID_RE.fullmatch(str(key or "").strip()):
+                    collect(key)
+                if is_relation_key(key) or compact_key in {"id", "assetid", "postid", "mediaid", "itemid"}:
+                    collect(item, include_keys=True)
+                elif isinstance(item, (dict, list)):
+                    collect(item, include_keys=include_keys)
             return
         if not isinstance(value, str):
             return
@@ -5317,7 +5396,7 @@ def imagine_public_asset_reference_ids(asset: dict) -> list[str]:
             return
         if text[:1] in {"[", "{"}:
             try:
-                collect(json.loads(text))
+                collect(json.loads(text), include_keys=include_keys)
             except (TypeError, ValueError, json.JSONDecodeError):
                 pass
         for match in re.findall(
@@ -5329,8 +5408,8 @@ def imagine_public_asset_reference_ids(asset: dict) -> list[str]:
                 seen_ids.add(reference_id)
                 reference_ids.append(reference_id)
 
-    for value in values:
-        collect(value)
+    for value in keyed_values:
+        collect(value, include_keys=True)
     root_id = str(asset.get("assetId") or asset.get("id") or "").strip().lower()
     return [reference_id for reference_id in reference_ids if reference_id != root_id]
 
@@ -5351,7 +5430,13 @@ def imagine_get_public_asset_post(post_id: str, account: dict, timeout: int = 12
     public_post.setdefault("postId", str(asset.get("assetId") or post_id))
     public_post.setdefault("mediaUrl", imagine_asset_primary_media_url(asset))
     reference_assets: list[dict] = []
-    for reference_id in imagine_public_asset_reference_ids(asset):
+    pending_reference_ids = imagine_public_asset_reference_ids(asset)
+    seen_reference_ids = {str(asset.get("assetId") or post_id).strip().lower()}
+    while pending_reference_ids and len(seen_reference_ids) < 24:
+        reference_id = str(pending_reference_ids.pop(0) or "").strip().lower()
+        if not reference_id or reference_id in seen_reference_ids:
+            continue
+        seen_reference_ids.add(reference_id)
         try:
             reference_data = imagine_get_json(
                 f"/rest/assets/{quote(reference_id, safe='')}",
@@ -5371,12 +5456,19 @@ def imagine_get_public_asset_post(post_id: str, account: dict, timeout: int = 12
             if isinstance(reference_data.get("asset"), dict)
             else reference_data
         )
-        if not isinstance(reference_asset, dict) or not imagine_asset_primary_media_url(reference_asset):
+        if not isinstance(reference_asset, dict):
+            continue
+        for related_id in imagine_public_asset_reference_ids(reference_asset):
+            if related_id not in seen_reference_ids and related_id not in pending_reference_ids:
+                pending_reference_ids.append(related_id)
+        if not imagine_asset_primary_media_url(reference_asset):
             continue
         normalized_reference = dict(reference_asset)
         normalized_reference.setdefault("id", str(reference_asset.get("assetId") or reference_id))
         normalized_reference.setdefault("postId", str(reference_asset.get("assetId") or reference_id))
         normalized_reference.setdefault("mediaUrl", imagine_asset_primary_media_url(reference_asset))
+        normalized_reference.setdefault("role", "source")
+        normalized_reference.setdefault("relation", "input")
         reference_assets.append(normalized_reference)
     if reference_assets:
         first_reference_id = str(
@@ -5473,8 +5565,6 @@ def load_imagine_remote_link_post(payload: dict) -> dict:
         raise RuntimeError("Select or capture an Imagine account first.")
     raw_post = imagine_get_media_post_direct(post_id, account, timeout=12)
     post = imagine_saved_post_from_root(raw_post, account)
-    if post:
-        post = imagine_apply_generated_relations(post, root, account)
     if not post:
         raise RuntimeError("Could not load the linked Imagine post.")
     link_asset_ids = {
@@ -5491,7 +5581,7 @@ def load_imagine_remote_link_post(payload: dict) -> dict:
             released_exclusions,
         )
     saved_link_ids = link_asset_ids & imagine_local_heart_asset_ids(root, account)
-    link_is_saved = bool(saved_link_ids)
+    link_is_saved = imagine_local_heart_link_post(root, account, post_id) is not None
     metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
     metadata.update({
         "remote_view": "link",
@@ -5508,7 +5598,7 @@ def load_imagine_remote_link_post(payload: dict) -> dict:
         if not isinstance(item, dict):
             continue
         item_asset_id = imagine_item_asset_id(item)
-        item_is_saved = item_asset_id in saved_link_ids
+        item_is_saved = link_is_saved or item_asset_id in saved_link_ids
         item_metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
         imagine = item_metadata.get("imagine") if isinstance(item_metadata.get("imagine"), dict) else {}
         item_metadata.update({
@@ -6351,6 +6441,39 @@ def imagine_local_heart_asset_ids(root: Path | None, account: dict) -> set[str]:
         for item in post.get("items") or []
         if imagine_item_asset_id(item)
     }
+
+
+def imagine_local_heart_link_keys(post: dict) -> set[str]:
+    if not imagine_post_is_link_source(post):
+        return set()
+    metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+    imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
+    values = imagine_local_state_group_keys(post) | {
+        str(metadata.get("link_post_id") or "").strip(),
+        str(imagine.get("link_post_id") or "").strip(),
+    }
+    for item in post.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        item_metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        item_imagine = item_metadata.get("imagine") if isinstance(item_metadata.get("imagine"), dict) else {}
+        values.update({
+            str(item_metadata.get("link_post_id") or "").strip(),
+            str(item_imagine.get("link_post_id") or "").strip(),
+        })
+    values.discard("")
+    return values
+
+
+def imagine_local_heart_link_post(root: Path | None, account: dict, link_post_id: str) -> dict | None:
+    target_id = str(link_post_id or "").strip()
+    if not target_id:
+        return None
+    return next((
+        post
+        for post in imagine_account_local_heart_posts(root, account)
+        if target_id in imagine_local_heart_link_keys(post)
+    ), None)
 
 
 def imagine_local_heart_media_keys(root: Path | None, account: dict) -> set[str]:
@@ -7383,10 +7506,8 @@ def delete_imagine_asset(payload: dict) -> dict:
     bundle_id = str(payload.get("bundle_post_id") or conversation_id or detail_post_id).strip()
     preserve_upload_bundle = source_scope == "upload_page"
     root = library_root() if preserve_upload_bundle else begin_imagine_delete_race_guard(account, asset_id)
-    # A link-opened item is never copied into this account, so Grok has nothing to
-    # delete — its own site issues no request at all for these. Asking it to delete the
-    # id anyway would be aimed at the original owner's asset, so drop the local record
-    # and stop there.
+    # Legacy records from before clone-backed hearts can still contain only the source
+    # id. They have no account-owned asset to delete, so remove that stale local alias.
     if imagine_asset_is_external_reference(root, account, asset_id):
         update_imagine_local_heart_posts(
             root,
@@ -7745,21 +7866,6 @@ def _like_imagine_media_post(payload: dict) -> dict:
         for item in local_post.get("items") or []
         if imagine_item_asset_id(item)
     }
-    released_exclusions = local_post_asset_ids & imagine_local_exclusion_ids(root, account)
-    if released_exclusions:
-        imagine_state.remove_local_exclusions(
-            root,
-            imagine_account_settings_key(account),
-            released_exclusions,
-        )
-    update_imagine_local_heart_posts(root, account, add_post=local_post)
-    try:
-        cache_imagine_remote_posts(root, account, [local_post])
-    except Exception as exc:
-        imagine_debug_event("saved_cache_local_upsert_failed", {
-            "account_id": str(account.get("id") or ""),
-            "error": str(exc)[:400],
-        })
     visits: list[dict] = []
     seen_visit_post_ids: set[str] = set()
     for target in targets:
@@ -7776,22 +7882,35 @@ def _like_imagine_media_post(payload: dict) -> dict:
         if target.get("external_reference")
     }
     clone_result = {"cloned": [], "failed": []}
+    cloned_sources: set[str] = set()
     if external_ids:
-        # Copy the asset into this account first. Only fall back to the local-only
-        # marker for ids Grok refused, so a successful save is a real Grok save.
+        # A successful heart means every linked asset in the bundle was copied into
+        # this account. Never leave a partial clone looking like a completed save.
         clone_result = imagine_clone_external_assets(account, external_ids)
+        clone_records = imagine_normalize_external_clone_records(clone_result.get("cloned"))
         cloned_sources = {
-            entry.get("source_asset_id")
-            for entry in clone_result.get("cloned") or []
-            if entry.get("source_asset_id")
+            record["source_asset_id"]
+            for record in clone_records
         }
         remaining_external = external_ids - cloned_sources
         if remaining_external:
-            update_imagine_account_setting_ids(
-                root,
-                "imagine_external_reference_asset_ids",
-                account,
-                add=remaining_external,
+            cleanup_clone_ids = {
+                record["asset_id"]
+                for record in clone_records
+                if record.get("asset_id")
+            }
+            if cleanup_clone_ids:
+                ensure_imagine_state_migrated(root)
+                imagine_state.add_pending_deletes(
+                    root,
+                    imagine_account_settings_key(account),
+                    cleanup_clone_ids,
+                )
+                sync_imagine_official_saved_deletion(root, account, cleanup_clone_ids)
+            failed_count = len(remaining_external)
+            raise RuntimeError(
+                f"Grok copied only {len(cloned_sources)} of {len(external_ids)} linked asset(s); "
+                f"the incomplete save was cancelled ({failed_count} failed)."
             )
         if cloned_sources:
             update_imagine_account_setting_ids(
@@ -7800,12 +7919,47 @@ def _like_imagine_media_post(payload: dict) -> dict:
                 account,
                 remove=cloned_sources,
             )
+        if clone_records:
+            imagine_attach_external_clone_records(local_post, clone_records)
+    released_exclusions = local_post_asset_ids & imagine_local_exclusion_ids(root, account)
+    if released_exclusions:
+        imagine_state.remove_local_exclusions(
+            root,
+            imagine_account_settings_key(account),
+            released_exclusions,
+        )
+    # clone-batch hands the asset to this account and Grok saves the copy, so a fully cloned
+    # bundle already sits in the official list under its clone ids. A local heart record
+    # keyed on the original owner's ids would only shadow that, and it outlives the asset
+    # because deletes never reach it. Every other source still needs the local record.
+    fully_cloned = bool(external_ids) and not (external_ids - cloned_sources)
+    if fully_cloned:
+        imagine_debug_event("local_heart_skipped_after_clone", {
+            "account_id": str(account.get("id") or ""),
+            "cloned_sources": sorted(cloned_sources),
+        })
+    else:
+        update_imagine_local_heart_posts(root, account, add_post=local_post)
+        try:
+            cache_imagine_remote_posts(root, account, [local_post])
+        except Exception as exc:
+            imagine_debug_event("saved_cache_local_upsert_failed", {
+                "account_id": str(account.get("id") or ""),
+                "error": str(exc)[:400],
+            })
     invalidate_imagine_saved_media_keys_cache(account)
-    threading.Thread(
-        target=sync_imagine_official_saved_registration,
-        args=(root, dict(account), set(requested_ids), list(visits)),
-        daemon=True,
-    ).start()
+    registration_ids = requested_ids - cloned_sources
+    registration_visits = [
+        visit
+        for visit in visits
+        if str(visit.get("post_id") or "").strip() in registration_ids
+    ]
+    if registration_ids and registration_visits:
+        threading.Thread(
+            target=sync_imagine_official_saved_registration,
+            args=(root, dict(account), set(registration_ids), registration_visits),
+            daemon=True,
+        ).start()
     mappings = [{
         "source_id": target["source_id"],
         "source_item_id": target["source_item_id"],
@@ -7877,6 +8031,151 @@ def imagine_clone_external_assets(account: dict, asset_ids: set[str]) -> dict:
     )]}
 
 
+def imagine_normalize_external_clone_records(entries: object) -> list[dict]:
+    if not isinstance(entries, list):
+        return []
+    records: list[dict] = []
+    seen_asset_ids: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        asset_id = str(entry.get("asset_id") or entry.get("assetId") or "").strip()
+        source_asset_id = str(
+            entry.get("source_asset_id")
+            or entry.get("sourceAssetId")
+            or entry.get("duplicated_from_asset_id")
+            or ""
+        ).strip()
+        if not asset_id or not source_asset_id or asset_id in seen_asset_ids:
+            continue
+        seen_asset_ids.add(asset_id)
+        records.append({
+            "asset_id": asset_id,
+            "source_asset_id": source_asset_id,
+            "conversation_id": str(entry.get("conversation_id") or entry.get("conversationId") or "").strip(),
+            "response_id": str(entry.get("response_id") or entry.get("responseId") or "").strip(),
+            "media_type": str(entry.get("media_type") or entry.get("mimeType") or "").strip(),
+        })
+    return records
+
+
+def imagine_attach_external_clone_records(post: dict, entries: object) -> dict:
+    if not isinstance(post, dict):
+        return post
+    metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+    existing = imagine_normalize_external_clone_records(metadata.get("official_clone_assets"))
+    incoming = imagine_normalize_external_clone_records(entries)
+    if not incoming:
+        return post
+    records_by_id = {record["asset_id"]: record for record in existing}
+    for record in incoming:
+        records_by_id[record["asset_id"]] = record
+    metadata["official_clone_assets"] = list(records_by_id.values())
+    post["metadata"] = metadata
+    records_by_source_id = {
+        record["source_asset_id"]: record
+        for record in records_by_id.values()
+        if record.get("source_asset_id")
+    }
+    for item in post.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        source_asset_id = imagine_item_asset_id(item)
+        record = records_by_source_id.get(source_asset_id)
+        if not record:
+            continue
+        item_metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        item_imagine = item_metadata.get("imagine") if isinstance(item_metadata.get("imagine"), dict) else {}
+        clone_asset_id = record["asset_id"]
+        item["official_asset_id"] = clone_asset_id
+        item_metadata.update({
+            "official_asset_id": clone_asset_id,
+            "official_clone_asset_id": clone_asset_id,
+            "official_clone_source_asset_id": source_asset_id,
+            "official_clone_conversation_id": str(record.get("conversation_id") or ""),
+            "official_clone_response_id": str(record.get("response_id") or ""),
+        })
+        item_imagine.update({
+            "official_asset_id": clone_asset_id,
+            "official_clone_asset_id": clone_asset_id,
+            "official_clone_source_asset_id": source_asset_id,
+            "official_clone_conversation_id": str(record.get("conversation_id") or ""),
+            "official_clone_response_id": str(record.get("response_id") or ""),
+        })
+        item_metadata["imagine"] = item_imagine
+        item["metadata"] = item_metadata
+    return post
+
+
+def imagine_external_clone_records_for_post(post: dict) -> list[dict]:
+    if not isinstance(post, dict):
+        return []
+    metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+    return imagine_normalize_external_clone_records(metadata.get("official_clone_assets"))
+
+
+def imagine_find_external_asset_clones(
+    account: dict,
+    source_asset_ids: set[str],
+    *,
+    max_assets: int = 2000,
+) -> list[dict]:
+    wanted = {
+        str(value).strip().lower()
+        for value in source_asset_ids
+        if str(value or "").strip()
+    }
+    if not wanted:
+        return []
+    records: list[dict] = []
+    cursor = ""
+    seen_cursors: set[str] = set()
+    scanned = 0
+    while scanned < max_assets:
+        query_parts = [
+            ("pageSize", str(min(40, max_assets - scanned))),
+            ("orderBy", "ORDER_BY_CREATE_TIME"),
+            ("workspaceKind", "WORKSPACE_KIND_IMAGINE_ALL"),
+        ]
+        if cursor:
+            query_parts.append(("pageToken", cursor))
+        data = imagine_get_json(
+            "/rest/assets?" + urlencode(query_parts),
+            account,
+            timeout=20,
+        )
+        assets = data.get("assets") if isinstance(data.get("assets"), list) else []
+        if not assets:
+            break
+        scanned += len(assets)
+        for asset in assets:
+            if not isinstance(asset, dict) or bool(asset.get("isDeleted")):
+                continue
+            aux = asset.get("auxKeys") if isinstance(asset.get("auxKeys"), dict) else {}
+            source_asset_id = str(aux.get("duplicated_from_asset_id") or "").strip()
+            if source_asset_id.lower() not in wanted:
+                continue
+            records.append({
+                "asset_id": str(asset.get("assetId") or asset.get("id") or "").strip(),
+                "source_asset_id": source_asset_id,
+                "conversation_id": str(asset.get("sourceConversationId") or "").strip(),
+                "response_id": str(asset.get("responseId") or "").strip(),
+                "media_type": str(asset.get("mimeType") or "").strip(),
+            })
+        next_cursor = str(data.get("nextPageToken") or data.get("nextCursor") or "").strip()
+        if not next_cursor or next_cursor in seen_cursors:
+            break
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+    normalized = imagine_normalize_external_clone_records(records)
+    imagine_debug_event("external_asset_clones_resolved", {
+        "source_asset_ids": sorted(wanted),
+        "clone_asset_ids": [record["asset_id"] for record in normalized],
+        "scanned": scanned,
+    })
+    return normalized
+
+
 def like_imagine_media_post(payload: dict) -> dict:
     account_id = str((payload or {}).get("account_id") or "").strip().lower()
     operation_key = account_id or "active-imagine-account"
@@ -7892,24 +8191,40 @@ def like_imagine_media_post(payload: dict) -> dict:
 
 
 def unsave_imagine_media_post(payload: dict) -> dict:
+    payload = payload if isinstance(payload, dict) else {}
     root = library_root()
     if not root:
         raise RuntimeError("Library path is not set.")
-    account = active_imagine_account(root, str((payload or {}).get("account_id") or ""))
+    account = active_imagine_account(root, str(payload.get("account_id") or ""))
     if not account:
         raise RuntimeError("Select or capture an Imagine account first.")
-    targets = imagine_save_targets(payload or {})
+    targets = imagine_save_targets(payload)
     asset_ids = {target["id"] for target in targets}
     if not asset_ids:
         raise RuntimeError("Imagine asset id is required.")
+    scope = str(payload.get("scope") or "card").strip().lower()
+    operation = str(payload.get("operation") or "unsave").strip().lower()
+    delete_operation = operation == "delete"
+    remove_entire_link_post = scope != "item"
+    delete_bundle = scope == "bundle"
+    payload_link_source = bool(payload.get("link_source"))
+    requested_group_ids = {
+        str(value).strip()
+        for value in (
+            payload.get("local_group_id"),
+            payload.get("link_post_id"),
+        )
+        if str(value or "").strip()
+    }
     external_asset_ids = {
         target["id"]
         for target in targets
         if bool(target.get("external_reference"))
     }
-    owned_asset_ids = asset_ids - external_asset_ids
-    remove_entire_link_post = str((payload or {}).get("scope") or "card").strip().lower() != "item"
     local_asset_ids = set(asset_ids)
+    matched_group_ids: set[str] = set()
+    matched_link_asset_ids: set[str] = set()
+    matched_local_posts: list[dict] = []
     if remove_entire_link_post:
         for local_post in imagine_account_local_heart_posts(root, account):
             post_asset_ids = {
@@ -7917,12 +8232,88 @@ def unsave_imagine_media_post(payload: dict) -> dict:
                 for item in local_post.get("items") or []
                 if isinstance(item, dict) and imagine_item_asset_id(item)
             }
-            if imagine_post_is_link_source(local_post) and bool(post_asset_ids & asset_ids):
-                local_asset_ids.update(post_asset_ids)
+            group_keys = imagine_local_state_group_keys(local_post)
+            group_match = bool(group_keys & requested_group_ids)
+            link_asset_match = imagine_post_is_link_source(local_post) and bool(post_asset_ids & asset_ids)
+            if not group_match and not link_asset_match:
+                continue
+            matched_local_posts.append(local_post)
+            local_asset_ids.update(post_asset_ids)
+            local_group_id = imagine_local_state_group_id(local_post)
+            if local_group_id:
+                matched_group_ids.add(local_group_id)
+            matched_group_ids.update(group_keys & requested_group_ids)
+            if imagine_post_is_link_source(local_post):
+                matched_link_asset_ids.update(post_asset_ids)
+    removal_group_ids = requested_group_ids | matched_group_ids
+    known_external_ids = imagine_account_setting_ids(
+        root,
+        "imagine_external_reference_asset_ids",
+        account,
+    )
+    external_asset_ids.update(local_asset_ids & known_external_ids)
+    external_asset_ids.update(matched_link_asset_ids)
+    if payload_link_source:
+        external_asset_ids.update(
+            str(value).strip()
+            for value in (payload.get("link_post_id"), payload.get("post_id"))
+            if str(value or "").strip()
+        )
+    delete_asset_ids = local_asset_ids if delete_bundle else asset_ids
+    owned_asset_ids = delete_asset_ids - external_asset_ids
+    clone_records = [
+        record
+        for local_post in matched_local_posts
+        for record in imagine_external_clone_records_for_post(local_post)
+    ]
+    primary_source_ids: set[str] = set()
+    for local_post in matched_local_posts:
+        local_metadata = local_post.get("metadata") if isinstance(local_post.get("metadata"), dict) else {}
+        primary_source_ids.update(
+            str(value).strip()
+            for value in (
+                local_metadata.get("local_heart_primary_asset_ids")
+                if isinstance(local_metadata.get("local_heart_primary_asset_ids"), list)
+                else []
+            )
+            if str(value or "").strip()
+        )
+    if not primary_source_ids:
+        primary_source_ids.update(
+            str(value).strip()
+            for value in (payload.get("link_post_id"), payload.get("post_id"))
+            if str(value or "").strip()
+        )
+    if not primary_source_ids and (payload_link_source or matched_link_asset_ids):
+        primary_source_ids.update(asset_ids)
+    if delete_operation and (payload_link_source or matched_link_asset_ids):
+        try:
+            clone_records.extend(imagine_find_external_asset_clones(account, primary_source_ids))
+        except Exception as exc:
+            if not clone_records:
+                raise
+            imagine_debug_event("external_asset_clone_recovery_failed", {
+                "source_asset_ids": sorted(primary_source_ids),
+                "error": str(exc)[:300],
+            })
+    clone_records = imagine_normalize_external_clone_records(clone_records)
+    official_clone_ids = {
+        record["asset_id"]
+        for record in clone_records
+        if record.get("asset_id")
+    } if delete_operation else set()
+    clone_group_ids = {
+        str(record.get(key) or "").strip()
+        for record in clone_records
+        for key in ("asset_id", "conversation_id")
+        if str(record.get(key) or "").strip()
+    } if delete_operation else set()
+    official_delete_ids = owned_asset_ids | official_clone_ids
     update_imagine_local_heart_posts(
         root,
         account,
         remove_asset_ids=asset_ids,
+        remove_group_ids=removal_group_ids if remove_entire_link_post else None,
         remove_entire_link_post=remove_entire_link_post,
     )
     update_imagine_account_setting_ids(
@@ -7936,32 +8327,40 @@ def unsave_imagine_media_post(payload: dict) -> dict:
         imagine_state.add_local_exclusions(
             root,
             imagine_account_settings_key(account),
-            local_asset_ids,
+            external_asset_ids,
         )
-    if owned_asset_ids:
+    if payload_link_source or matched_link_asset_ids:
+        remove_imagine_generated_relation_state(root, group_ids=removal_group_ids)
+    elif owned_asset_ids:
         remove_imagine_generated_relation_state(root, asset_ids=owned_asset_ids)
-    remove_imagine_remote_cache_assets(root, account, local_asset_ids)
+    remove_imagine_remote_cache_assets(root, account, local_asset_ids | official_clone_ids)
+    cache_group_ids = removal_group_ids | clone_group_ids
+    if cache_group_ids:
+        remove_imagine_remote_cache_post_keys(root, account, cache_group_ids)
     invalidate_imagine_saved_media_keys_cache(account)
-    if owned_asset_ids:
+    if official_delete_ids:
         ensure_imagine_state_migrated(root)
         imagine_state.add_pending_deletes(
             root,
             imagine_account_settings_key(account),
-            owned_asset_ids,
+            official_delete_ids,
         )
         threading.Thread(
             target=sync_imagine_official_saved_deletion,
-            args=(root, dict(account), set(owned_asset_ids)),
+            args=(root, dict(account), set(official_delete_ids)),
             daemon=True,
         ).start()
     return {
         "ok": True,
-        "action": "unsave",
+        "action": "delete" if delete_operation else "unsave",
         "id": next(iter(asset_ids)),
         "ids": sorted(asset_ids),
+        "local_ids": sorted(local_asset_ids),
+        "group_ids": sorted(removal_group_ids),
+        "official_ids": sorted(official_delete_ids),
         "external_ids": sorted(external_asset_ids),
-        "local_only": not bool(owned_asset_ids),
-        "official_deleted": "pending" if owned_asset_ids else "not_requested",
+        "local_only": not bool(official_delete_ids),
+        "official_deleted": "pending" if official_delete_ids else "not_requested",
         "errors": [],
         "results": [],
     }

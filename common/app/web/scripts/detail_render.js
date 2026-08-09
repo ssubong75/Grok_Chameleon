@@ -172,8 +172,27 @@ function detailIsImagineLinkSource(post, item) {
   );
 }
 
+// i2i, i2v and extend results attach to the link card they were generated from, and so do
+// their in-flight jobs, but none of them carry the link metadata themselves. Offer the
+// heart only for the assets the card was opened with, so a generated result sitting in an
+// Imagine main card never asks to be saved.
+function detailImagineLinkItemIsSource(item) {
+  if (!item) return true;
+  const { metadata, imagine } = detailImagineMetadataFrom(item);
+  return Boolean(
+    metadata.link_source
+    || imagine.link_source
+    || metadata.remote_view === "link"
+    || imagine.remote_view === "link"
+  );
+}
+
 function detailCanSaveImaginePost(post, item) {
-  if (detailIsImagineLinkSource(post, item)) return true;
+  // A link-opened post carries folder_path "imagine_saved/{id}" whether or not it was
+  // ever hearted, so that prefix cannot stand in for "already saved" — testing it here
+  // hid the heart on every linked post and left no way to reach clone-batch. Whether the
+  // post is actually saved is decided by imaginePostLiked() in syncImagineDetailHeartState.
+  if (detailIsImagineLinkSource(post, item)) return detailImagineLinkItemIsSource(item);
   return Boolean(
     (typeof isImagineDiscoverPost === "function" && isImagineDiscoverPost(post, item))
     || (typeof isImagineT2iPost === "function" && isImagineT2iPost(post))

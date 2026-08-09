@@ -165,16 +165,24 @@ function imagineLinkBundleItems(post, fallbackItems = []) {
   return items.length ? items : fallback;
 }
 
-function imagineLinkRegistrationItem(post, fallbackItem = null) {
+function imagineLinkPostIdForPost(post, item = null) {
   const postMeta = imaginePostActionMetadata(post);
-  const fallbackMeta = imaginePostActionMetadata(fallbackItem);
-  const linkPostId = String(
+  const itemMeta = imaginePostActionMetadata(item);
+  const explicitId = String(
     postMeta.metadata.link_post_id
     || postMeta.imagine.link_post_id
-    || fallbackMeta.metadata.link_post_id
-    || fallbackMeta.imagine.link_post_id
+    || itemMeta.metadata.link_post_id
+    || itemMeta.imagine.link_post_id
     || "",
   ).trim();
+  if (explicitId) return explicitId;
+  return isImagineLinkSourcePost(post, item)
+    ? String(imagineActionPostIdForPost(post) || "").trim()
+    : "";
+}
+
+function imagineLinkRegistrationItem(post, fallbackItem = null) {
+  const linkPostId = imagineLinkPostIdForPost(post, fallbackItem);
   const items = (post?.items || []).filter(Boolean);
   if (linkPostId) {
     const linkedItem = items.find((item) => imagineLikeTargetForItem(item).id === linkPostId);
@@ -234,7 +242,8 @@ function imagineSavedGroupIdForPost(post) {
   const metadata = post?.metadata && typeof post.metadata === "object" ? post.metadata : {};
   const folderPath = String(post?.folder_path || "");
   return String(
-    metadata.local_saved_group_id
+    imagineLinkPostIdForPost(post)
+    || metadata.local_saved_group_id
     || metadata.group_id
     || (folderPath.startsWith("imagine_unsaved/") ? folderPath.slice("imagine_unsaved/".length) : "")
     || imagineActionPostIdForPost(post)
@@ -266,6 +275,69 @@ function imagineLikeResultMappings(data) {
       media_url: "",
       external_reference: false,
     }));
+}
+
+function imagineOfficialCloneRecords(data) {
+  const seenAssetIds = new Set();
+  return (Array.isArray(data?.cloned_external) ? data.cloned_external : [])
+    .filter((entry) => entry && typeof entry === "object")
+    .map((entry) => ({
+      asset_id: String(entry.asset_id || entry.assetId || "").trim(),
+      source_asset_id: String(
+        entry.source_asset_id
+        || entry.sourceAssetId
+        || entry.duplicated_from_asset_id
+        || "",
+      ).trim(),
+      conversation_id: String(entry.conversation_id || entry.conversationId || "").trim(),
+      response_id: String(entry.response_id || entry.responseId || "").trim(),
+      media_type: String(entry.media_type || entry.mimeType || "").trim(),
+    }))
+    .filter((entry) => {
+      if (!entry.asset_id || !entry.source_asset_id || seenAssetIds.has(entry.asset_id)) return false;
+      seenAssetIds.add(entry.asset_id);
+      return true;
+    });
+}
+
+function applyImagineOfficialCloneRecords(post, data, targetItems = null) {
+  const records = imagineOfficialCloneRecords(data);
+  if (!post || !records.length) return records;
+  const items = (Array.isArray(targetItems) ? targetItems : post.items || []).filter(Boolean);
+  for (const item of items) {
+    const itemKeys = typeof imaginePostIdKeysForItem === "function"
+      ? imaginePostIdKeysForItem(item)
+      : [imagineLikeTargetForItem(item).id].filter(Boolean);
+    const record = records.find((candidate) => itemKeys.includes(candidate.source_asset_id));
+    if (!record) continue;
+    item.official_asset_id = record.asset_id;
+    item.metadata = item.metadata && typeof item.metadata === "object" ? item.metadata : {};
+    item.metadata.official_asset_id = record.asset_id;
+    item.metadata.official_clone_asset_id = record.asset_id;
+    item.metadata.official_clone_source_asset_id = record.source_asset_id;
+    item.metadata.official_clone_conversation_id = record.conversation_id;
+    item.metadata.official_clone_response_id = record.response_id;
+    item.metadata.imagine = item.metadata.imagine && typeof item.metadata.imagine === "object"
+      ? item.metadata.imagine
+      : {};
+    item.metadata.imagine.official_asset_id = record.asset_id;
+    item.metadata.imagine.official_clone_asset_id = record.asset_id;
+    item.metadata.imagine.official_clone_source_asset_id = record.source_asset_id;
+    item.metadata.imagine.official_clone_conversation_id = record.conversation_id;
+    item.metadata.imagine.official_clone_response_id = record.response_id;
+  }
+  post.metadata = post.metadata && typeof post.metadata === "object" ? post.metadata : {};
+  const existing = Array.isArray(post.metadata.official_clone_assets)
+    ? post.metadata.official_clone_assets
+    : [];
+  const recordsById = new Map(
+    [...existing, ...records]
+      .filter((entry) => entry && typeof entry === "object")
+      .map((entry) => [String(entry.asset_id || entry.assetId || "").trim(), entry])
+      .filter(([assetId]) => assetId),
+  );
+  post.metadata.official_clone_assets = Array.from(recordsById.values());
+  return records;
 }
 
 function applyImagineLikedIdToItem(item, likedId) {
@@ -333,7 +405,15 @@ function applyImagineUnsavedLikeResult(post, data) {
 }
 
 function savedImagineSingleItemPost(post, item, data, savedItems = [item]) {
-  const mapping = imagineLikeResultMappings(data)[0];
+  const mappings = imagineLikeResultMappings(data);
+  const itemKeys = typeof imaginePostIdKeysForItem === "function"
+    ? imaginePostIdKeysForItem(item)
+    : [imagineActionPostIdForItem(item), item?.remote_url, item?.url].filter(Boolean);
+  const mapping = mappings.find((candidate) => (
+    (candidate.source_item_id && itemKeys.includes(candidate.source_item_id))
+    || (candidate.source_id && itemKeys.includes(candidate.source_id))
+    || (candidate.media_url && itemKeys.includes(candidate.media_url))
+  )) || mappings[0];
   if (!post || !item || !mapping?.liked_id) {
     throw new Error("The selected Imagine media item was not confirmed in Saved.");
   }
@@ -718,7 +798,12 @@ function imagineDeleteAssetIdForItem(item) {
   const metadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
   const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
   return String(
-    item?.asset_id
+    item?.official_asset_id
+    || metadata.official_asset_id
+    || metadata.official_clone_asset_id
+    || imagine.official_asset_id
+    || imagine.official_clone_asset_id
+    || item?.asset_id
     || metadata.asset_id
     || imagine.asset_id
     || item?.item_id
@@ -735,7 +820,9 @@ function imagineDeleteConversationIdForPost(post, item = null) {
   const postMetadata = post?.metadata && typeof post.metadata === "object" ? post.metadata : {};
   const postImagine = postMetadata.imagine && typeof postMetadata.imagine === "object" ? postMetadata.imagine : {};
   const explicitId = String(
-    item?.conversation_id
+    itemMetadata.official_clone_conversation_id
+    || itemImagine.official_clone_conversation_id
+    || item?.conversation_id
     || itemMetadata.conversation_id
     || itemImagine.conversation_id
     || post?.conversation_id
@@ -877,6 +964,35 @@ async function deleteImagineCardAssets(post, items) {
   return { deletedItems, failures };
 }
 
+async function deleteImagineLinkCardBundle(post, items) {
+  const bundleItems = (items || []).filter(Boolean);
+  const requestItems = bundleItems
+    .filter((item) => !imagineDeleteItemIsRecoveredStartFrame(item))
+    .map(imagineLikeTargetForItem)
+    .filter((target) => target.id);
+  if (!requestItems.length) {
+    throw new Error("This Imagine link card has no asset id.");
+  }
+  const linkPostId = imagineLinkPostIdForPost(post, bundleItems[0]);
+  const data = await qApi("/api/imagine/post/unsave", {
+    account_id: post?.account_id || iDetailAccountId(bundleItems[0], post),
+    operation: "delete",
+    scope: "bundle",
+    link_source: true,
+    local_group_id: imagineSavedGroupIdForPost(post),
+    link_post_id: linkPostId,
+    post_id: linkPostId,
+    items: requestItems,
+  });
+  discardImagineRecoveredDeleteItems(post, bundleItems);
+  return {
+    deletedItems: bundleItems,
+    failures: [],
+    data,
+    action: "link-bundle-delete",
+  };
+}
+
 async function deleteImagineRemoteCard(post) {
   const items = (post?.items || []).filter(Boolean);
   if (
@@ -902,6 +1018,9 @@ async function deleteImagineRemoteCard(post) {
       else failures.push(result.reason);
     }
     return { deletedItems, failures };
+  }
+  if (isImagineLinkSourcePost(post, items[0])) {
+    return deleteImagineLinkCardBundle(post, items);
   }
   const result = await deleteImagineCardAssets(post, items);
   return {
@@ -1039,7 +1158,7 @@ async function likeImagineCardPost(post) {
   const selectedItems = t2iPost ? [representative] : (post.items || []);
   const localItems = linkSource ? imagineLinkBundleItems(post, selectedItems) : selectedItems;
   const registrationItems = linkSource
-    ? [imagineLinkRegistrationItem(post, representative)].filter(Boolean)
+    ? localItems.filter((item) => !imagineDeleteItemIsRecoveredStartFrame(item))
     : selectedItems;
   payload.items = registrationItems
     .map(imagineLikeTargetForItem)
@@ -1054,6 +1173,7 @@ async function likeImagineCardPost(post) {
   } finally {
     post.__imagineSavePending = false;
   }
+  applyImagineOfficialCloneRecords(post, data, localItems);
   if (t2iPost) applyImagineLikeResultPostId(post, representative, data);
   else if (unsavedPost) applyImagineUnsavedLikeResult(post, data);
   if (typeof forgetHiddenImaginePost === "function") forgetHiddenImaginePost(post);
@@ -1134,8 +1254,13 @@ async function unsaveImaginePost(post, { item = null } = {}) {
   });
   if (!ok) return;
   const accountId = post.account_id || iDetailAccountId(registrationTargets[0], post);
+  const linkPostId = linkSource ? imagineLinkPostIdForPost(post, registrationTargets[0]) : "";
   await qApi("/api/imagine/post/unsave", {
     account_id: accountId,
+    scope: linkSource ? "card" : (item ? "item" : "card"),
+    link_source: linkSource,
+    local_group_id: imagineSavedGroupIdForPost(post),
+    link_post_id: linkPostId,
     items: targetEntries.map((entry) => ({
       ...entry.payload,
       detail_post_id: imagineActionPostIdForPost(post),
@@ -1182,7 +1307,12 @@ async function likeImagineSelectedDetailPost() {
   const localItems = linkSource ? imagineLinkBundleItems(post, [item]) : [item];
   const registrationItem = linkSource ? imagineLinkRegistrationItem(post, item) : item;
   const payload = { account_id: post.account_id || iDetailAccountId(registrationItem, post) };
-  payload.items = [imagineLikeTargetForItem(registrationItem)].filter((target) => target.id);
+  const registrationItems = linkSource
+    ? localItems.filter((candidate) => !imagineDeleteItemIsRecoveredStartFrame(candidate))
+    : [registrationItem];
+  payload.items = registrationItems
+    .map(imagineLikeTargetForItem)
+    .filter((target) => target.id);
   payload.local_group_id = imagineSavedGroupIdForPost(post);
   payload.local_post = imagineLocalHeartSnapshot(post, localItems);
   if (post.__imagineSavePending) return;
@@ -1193,6 +1323,7 @@ async function likeImagineSelectedDetailPost() {
   } finally {
     post.__imagineSavePending = false;
   }
+  applyImagineOfficialCloneRecords(post, data, localItems);
   const savedItemPost = savedImagineSingleItemPost(post, registrationItem, data, localItems);
   if (t2iPost) applyImagineLikeResultPostId(savedItemPost, registrationItem, data);
   if (linkSource) markImaginePostLiked(post, true);

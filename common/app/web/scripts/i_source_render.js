@@ -506,9 +506,33 @@ function mergeImagineSyncedPosts(existingPosts, refreshedPosts) {
     );
   }
 
+  // A refreshed card can absorb one that used to stand alone: clone-batch pairs arrive split
+  // and the server now files them under one root. Matching alone would keep the stale half
+  // on screen forever, so drop an unmatched card once every item it holds already appears in
+  // this page. Cards from later pages keep their place because none of their items are here.
+  const refreshedItemIds = new Set();
+  for (const post of refreshed) {
+    for (const item of post?.items || []) {
+      const assetId = imagineSavedItemAssetId(item);
+      if (assetId) refreshedItemIds.add(assetId);
+    }
+  }
+  const existingWasAbsorbed = (post) => {
+    const items = (post?.items || []).filter(Boolean);
+    return items.length > 0 && items.every((item) => {
+      const assetId = imagineSavedItemAssetId(item);
+      return Boolean(assetId) && refreshedItemIds.has(assetId);
+    });
+  };
+
   return sortPostsIfNeeded([
     ...newPosts,
-    ...existing.map((post, index) => refreshedForExistingIndex.get(index) || post),
+    ...existing
+      .map((post, index) => (
+        refreshedForExistingIndex.get(index)
+        || (existingWasAbsorbed(post) ? null : post)
+      ))
+      .filter(Boolean),
   ], comparePostsByRecentActivity);
 }
 
@@ -790,6 +814,20 @@ function mergeImagineSavedLineageCards(cards) {
     const parentOwner = ownerByItemId.get(parentId) ?? sourceOwnerById.get(parentId);
     if (parentId && parentOwner !== undefined && parentOwner !== index) {
       parentIndexes[index] = parentOwner;
+      return;
+    }
+    // clone-batch copies an asset but leaves the original owner's id as its parent, so a
+    // cloned pair arrives with the chain cut: the video points at a foreign image this
+    // account does not own and no owner matches. Grok still filed both under one generation
+    // root, so fall back to that only when the parent is unreachable. This mirrors
+    // merge_imagine_saved_lineage_cards on the server, which reruns the same grouping.
+    if (parentId && parentOwner === undefined) {
+      const generationRootId = String(candidate?.metadata?.root_generation_asset_id || "").trim();
+      const generationOwner = ownerByItemId.get(generationRootId)
+        ?? sourceOwnerById.get(generationRootId);
+      if (generationRootId && generationOwner !== undefined && generationOwner !== index) {
+        parentIndexes[index] = generationOwner;
+      }
     }
   });
 

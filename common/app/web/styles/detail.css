@@ -36,8 +36,11 @@
 .b_detail_back,
 .i_detail_forward,
 .b_detail_forward {
-  position: absolute;
-  top: -52px;
+  /* Mirror the return arrow: same line, and the same clearance from the window edge that
+     it keeps from the sidebar divider. Anchoring to the media box instead made these drift
+     with its aspect ratio. */
+  position: fixed;
+  top: var(--detail-return-top, 76px);
   z-index: 14;
   display: grid;
   place-items: center;
@@ -55,13 +58,13 @@
 
 .i_detail_back,
 .b_detail_back {
-  right: 74px;
+  right: calc(clamp(18px, 2vw, 30px) + 12px + 74px);
   left: auto;
 }
 
 .i_detail_forward,
 .b_detail_forward {
-  right: 0;
+  right: calc(clamp(18px, 2vw, 30px) + 12px);
   left: auto;
 }
 
