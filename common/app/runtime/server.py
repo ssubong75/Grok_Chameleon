@@ -11781,44 +11781,59 @@ def imagine_item_uses_data_url(item: dict | None) -> bool:
     return str((item or {}).get("url") or (item or {}).get("remote_url") or "").strip().startswith("data:image/")
 
 
+# Both the baseline and the recheck below used to ask /rest/media/post/list for
+# MEDIA_POST_SOURCE_LIKED, which is the hearted list. A result that was just generated has
+# never been hearted, so the fallback meant to find it always came back empty and a run
+# whose stream faltered was reported as failed while grok.com had in fact finished it.
+# grok.com no longer calls that endpoint at all — this is the asset list its own saved view
+# reads, newest first.
+def imagine_recent_media_entries(account: dict, limit: int = 40, timeout: int = 20) -> list[dict]:
+    query = urlencode([
+        ("pageSize", str(max(1, min(int(limit), 40)))),
+        ("orderBy", "ORDER_BY_CREATE_TIME"),
+        ("workspaceKind", "WORKSPACE_KIND_IMAGINE_ALL"),
+    ])
+    data = imagine_get_json("/rest/assets?" + query, account, timeout=timeout)
+    assets = data.get("assets") if isinstance(data.get("assets"), list) else []
+    entries: list[dict] = []
+    for asset in assets:
+        if not isinstance(asset, dict) or imagine_asset_upload_only(asset):
+            continue
+        post = imagine_flat_saved_post_from_asset(asset, account)
+        for item in (post or {}).get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            entry = dict(item)
+            if not entry.get("root_post_id"):
+                entry["root_post_id"] = entry.get("conversation_id") or ""
+            entries.append(entry)
+    return entries
+
+
 def imagine_saved_candidate_ids(account: dict, expected_type: str, parent_ids: set[str], ignored_urls: set[str]) -> set[str]:
-    data = imagine_post_json(
-        "/rest/media/post/list",
-        {
-            "limit": 40,
-            "includeCanvas": False,
-            "filter": {"source": "MEDIA_POST_SOURCE_LIKED", "safeForWork": False},
-        },
-        account,
-        timeout=20,
-    )
-    posts = data.get("posts") if isinstance(data.get("posts"), list) else []
     ids: set[str] = set()
     ignored = {imagine_media_candidate_key(value) for value in ignored_urls if value}
-    for root_post in posts:
-        if not isinstance(root_post, dict):
+    for entry in imagine_recent_media_entries(account):
+        if entry.get("type") != expected_type:
             continue
-        for entry in collect_imagine_media_entries(root_post):
-            if entry.get("type") != expected_type:
-                continue
-            media_key = imagine_media_candidate_key(str(entry.get("url") or ""))
-            entry_id = str(entry.get("item_id") or "")
-            if media_key in ignored:
-                if entry_id:
-                    ids.add(entry_id)
-                ids.add(media_key)
-                continue
-            related = {
-                entry_id,
-                str(entry.get("root_post_id") or ""),
-                str(entry.get("parent_post_id") or ""),
-                str(entry.get("original_post_id") or ""),
-                str(entry.get("source_item_id") or ""),
-            }
-            if parent_ids and not (related & parent_ids):
-                continue
-            ids.add(entry_id or media_key)
+        media_key = imagine_media_candidate_key(str(entry.get("url") or ""))
+        entry_id = str(entry.get("item_id") or "")
+        if media_key in ignored:
+            if entry_id:
+                ids.add(entry_id)
             ids.add(media_key)
+            continue
+        related = {
+            entry_id,
+            str(entry.get("root_post_id") or ""),
+            str(entry.get("parent_post_id") or ""),
+            str(entry.get("original_post_id") or ""),
+            str(entry.get("source_item_id") or ""),
+        }
+        if parent_ids and not (related & parent_ids):
+            continue
+        ids.add(entry_id or media_key)
+        ids.add(media_key)
     return {value for value in ids if value}
 
 
@@ -12135,16 +12150,7 @@ def imagine_wait_for_saved_direct_result(
         if list_timeout <= 0:
             break
         try:
-            data = imagine_post_json(
-                "/rest/media/post/list",
-                {
-                    "limit": 40,
-                    "includeCanvas": False,
-                    "filter": {"source": "MEDIA_POST_SOURCE_LIKED", "safeForWork": False},
-                },
-                account,
-                timeout=list_timeout,
-            )
+            recent_entries = imagine_recent_media_entries(account, timeout=list_timeout)
         except RuntimeError as exc:
             if network_timeout_cap_seconds is None:
                 raise
@@ -12155,55 +12161,51 @@ def imagine_wait_for_saved_direct_result(
                 "error": str(exc)[:500],
             })
             continue
-        posts = data.get("posts") if isinstance(data.get("posts"), list) else []
-        for root_post in posts:
-            if not isinstance(root_post, dict):
+        for entry in recent_entries:
+            if entry.get("type") != expected_type:
                 continue
-            for entry in collect_imagine_media_entries(root_post):
-                if entry.get("type") != expected_type:
-                    continue
-                media_key = imagine_media_candidate_key(str(entry.get("url") or ""))
-                entry_id = str(entry.get("item_id") or "")
-                if entry_id in baseline_ids or media_key in baseline_ids:
-                    continue
-                if media_key in ignored_keys or entry_id in source_ids or media_key in source_ids:
-                    continue
-                related = {
-                    entry_id,
-                    str(entry.get("root_post_id") or ""),
-                    str(entry.get("parent_post_id") or ""),
-                    str(entry.get("original_post_id") or ""),
-                    str(entry.get("source_item_id") or ""),
-                }
-                if strict_saved_candidate_ids and not (related & strict_saved_candidate_ids):
-                    continue
-                if parent_ids and not (related & parent_ids):
-                    continue
-                candidate = {
-                    "url": entry.get("url") or "",
-                    "type": expected_type,
-                    "post_id": entry_id,
-                    "root_post_id": entry.get("root_post_id") or "",
-                    "parent_post_id": entry.get("parent_post_id") or "",
-                    "original_post_id": entry.get("original_post_id") or "",
-                    "original_ref_type": entry.get("original_ref_type") or "",
-                    "thumbnail_url": entry.get("thumbnail_url") or "",
-                    "created_at": entry.get("created_at") or "",
-                    "prompt": entry.get("prompt") or prompt,
-                    "model": entry.get("model") or "",
-                    "resolution_name": entry.get("resolution_name") or "",
-                    "video_duration": entry.get("video_duration") or "",
-                }
-                imagine_debug_event("saved_recheck_found", {
-                    "request_id": request_id,
-                    "action": action,
-                    "elapsed_seconds": round(time.time() - progress_started_at, 3),
-                    "entry_id": entry_id,
-                    "media_key": media_key,
-                    "candidate": candidate,
-                })
-                item = imagine_direct_item_from_candidate(candidate, expected_type, account, prompt, action, request_id, source_info)
-                return item
+            media_key = imagine_media_candidate_key(str(entry.get("url") or ""))
+            entry_id = str(entry.get("item_id") or "")
+            if entry_id in baseline_ids or media_key in baseline_ids:
+                continue
+            if media_key in ignored_keys or entry_id in source_ids or media_key in source_ids:
+                continue
+            related = {
+                entry_id,
+                str(entry.get("root_post_id") or ""),
+                str(entry.get("parent_post_id") or ""),
+                str(entry.get("original_post_id") or ""),
+                str(entry.get("source_item_id") or ""),
+            }
+            if strict_saved_candidate_ids and not (related & strict_saved_candidate_ids):
+                continue
+            if parent_ids and not (related & parent_ids):
+                continue
+            candidate = {
+                "url": entry.get("url") or "",
+                "type": expected_type,
+                "post_id": entry_id,
+                "root_post_id": entry.get("root_post_id") or "",
+                "parent_post_id": entry.get("parent_post_id") or "",
+                "original_post_id": entry.get("original_post_id") or "",
+                "original_ref_type": entry.get("original_ref_type") or "",
+                "thumbnail_url": entry.get("thumbnail_url") or "",
+                "created_at": entry.get("created_at") or "",
+                "prompt": entry.get("prompt") or prompt,
+                "model": entry.get("model") or "",
+                "resolution_name": entry.get("resolution_name") or "",
+                "video_duration": entry.get("video_duration") or "",
+            }
+            imagine_debug_event("saved_recheck_found", {
+                "request_id": request_id,
+                "action": action,
+                "elapsed_seconds": round(time.time() - progress_started_at, 3),
+                "entry_id": entry_id,
+                "media_key": media_key,
+                "candidate": candidate,
+            })
+            item = imagine_direct_item_from_candidate(candidate, expected_type, account, prompt, action, request_id, source_info)
+            return item
     imagine_debug_event("saved_recheck_empty", {"request_id": request_id, "action": action})
     return None
 
