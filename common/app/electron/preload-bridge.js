@@ -498,9 +498,13 @@
     if (route && (!route.modelName || body.modelName === route.modelName)) {
       endpoint = `/rest/app-chat/conversations/${encodeURIComponent(route.conversationId)}/responses`;
       targetInput = new URL(endpoint, parsedUrl.origin).toString();
+      // Traced 2026-08-10: grok.com posts to {conversation}/responses with no
+      // parentResponseId — the path already names the thread. The id we were adding comes
+      // from the responseId the generation stream reports, and that id cannot be looked up
+      // afterwards: grok.com answered "Response not found." and the app killed a job whose
+      // video it had in fact finished. Send what the site sends and let the path route it.
       targetInit = requestInitForReroute(input, init, {
         ...body,
-        ...(route.parentResponseId ? { parentResponseId: route.parentResponseId } : {}),
         skipCancelCurrentInflightRequests: true,
       });
       clearConversationRequestRoute(route);
@@ -2857,7 +2861,11 @@
     if (payload.modelName === "imagine-video-gen" || ["imageToVideo", "referenceToVideo", "textToVideo", "videoExtension"].includes(variant.kind)) {
       let containerId = "";
       let parentPostId;
-      let mode = "normal";
+      // Grok stamps this straight into the message as "--mode=<value>" while the payload
+      // carries its own mode inside mediaGenInput. Leaving the default here sent a request
+      // that said normal in one place and custom in the other, and grok.com answered 403.
+      // Follow whatever the payload asked for, and only fall back when it names nothing.
+      let mode = String(params.mode || videoConfig.mode || "").trim() || "normal";
       const queryBarLocation = "imagine-query-bar-v2";
       const queryBarSource = "imagine_post_query_bar_v2";
       let location = queryBarLocation;

@@ -3069,6 +3069,7 @@ def imagine_persist_rematerialized_generated_relation(
     action: str,
     request_id: str,
     upload_source_item: dict | None,
+    link_source: bool = False,
 ) -> None:
     imagine_persist_generated_relation(
         root,
@@ -3085,6 +3086,18 @@ def imagine_persist_rematerialized_generated_relation(
         if imagine_relation_conversation_id(item)
     ), "")
     if not source_id or not bundle_id or bundle_id == source_id:
+        return
+    # Hiding the new bundle only makes sense when its display source is a card this account
+    # owns. A link or Liked source belongs to someone else and is not in the saved list, so
+    # the card had nowhere to show and vanished. grok.com files such a generation as its own
+    # card, so leave it visible.
+    if link_source:
+        imagine_debug_event("rematerialized_bundle_kept_link_source", {
+            "request_id": request_id,
+            "action": action,
+            "bundle_id": bundle_id,
+            "source_id": source_id,
+        })
         return
     upload_source_asset_id = imagine_item_asset_id(upload_source_item or {})
     hidden_asset_ids = {
@@ -4251,6 +4264,12 @@ def imagine_saved_lineage_cards(post: dict) -> list[dict]:
     upload_bundle = imagine_upload_origin_bundle_card(post, items)
     if upload_bundle:
         return [upload_bundle]
+    # A post already arrives as one grok.com conversation, which is exactly what the site's
+    # grouped view shows as one card. Splitting it by parent chain is what turned an i2v and
+    # an i2i off the same linked image into two cards; grok.com keeps them together. Only
+    # link-sourced posts skip the split, so a T2I batch still fans out into its own cards.
+    if imagine_post_is_link_source(post):
+        return [post]
 
     items_by_id = {imagine_item_asset_id(item): item for item in items}
     result_items = [item for item in items if not imagine_item_is_source(item)] or items
@@ -4434,19 +4453,11 @@ def merge_imagine_saved_lineage_cards(cards: list[dict]) -> list[dict]:
         if parent_id and parent_owner is not None and parent_owner != index:
             parent_indexes[index] = parent_owner
             continue
-        # clone-batch copies an asset but leaves the original owner's id as its parent, so a
-        # cloned pair arrives with the chain cut: the video points at a foreign image this
-        # account does not own, no owner matches, and the pair stays as two cards even though
-        # Grok filed both under one conversation and one generation root. Fall back to that
-        # root only when the parent is unreachable, so cards whose parents do resolve keep
-        # their existing lineage.
-        if parent_id and parent_owner is None:
-            generation_root_id = str(candidate_metadata.get("root_generation_asset_id") or "").strip()
-            generation_owner = owner_by_item_id.get(generation_root_id)
-            if generation_owner is None:
-                generation_owner = source_owner_by_id.get(generation_root_id)
-            if generation_root_id and generation_owner is not None and generation_owner != index:
-                parent_indexes[index] = generation_owner
+        # This used to fall back to the generation root when the parent was unreachable, to
+        # rejoin a clone-batch pair whose chain was cut. Nothing is cloned any more, so the
+        # only unreachable parents are other people's assets, and the fallback dragged the
+        # owner's own media and everything generated from it into one card. grok.com files a
+        # generation off someone else's asset as its own card, so leave it as its own root.
 
     resolved_roots: dict[int, int] = {}
     for start_index in range(len(active)):
@@ -5144,11 +5155,43 @@ def list_imagine_saved(payload: dict) -> dict:
             or ""
         ).strip()
     }
-    saved_groups: dict[str, dict] = {
-        str(post.get("folder_path") or ""): post
-        for post in posts
-        if str(post.get("folder_path") or "")
-    }
+    # Two cards can carry the same folder_path: an image edit started from a T2I result opens
+    # its own conversation but keeps the source asset as its root, so it collides with the
+    # standalone card for that same source. Keying the dict on the path alone let one silently
+    # overwrite the other and the edit never reached the list. Merge collisions instead, the
+    # way the asset and local-heart passes below already do.
+    saved_groups: dict[str, dict] = {}
+    for post in posts:
+        folder_path = str(post.get("folder_path") or "")
+        if not folder_path:
+            continue
+        existing = saved_groups.get(folder_path)
+        if not existing:
+            saved_groups[folder_path] = post
+            continue
+        known_ids = {
+            imagine_item_asset_id(item)
+            for item in existing.get("items") or []
+            if imagine_item_asset_id(item)
+        }
+        merged_items = list(existing.get("items") or [])
+        for item in post.get("items") or []:
+            item_id = imagine_item_asset_id(item)
+            if item_id and item_id in known_ids:
+                continue
+            merged_items.append(item)
+            if item_id:
+                known_ids.add(item_id)
+        existing["items"] = merged_items
+        representative = imagine_representative_item(merged_items) or merged_items[-1]
+        existing["representative_item"] = representative
+        existing["representative"] = (
+            representative.get("url")
+            or representative.get("remote_url")
+            or representative.get("item_id")
+            or existing.get("representative")
+            or ""
+        )
     for asset in assets:
         if not isinstance(asset, dict) or imagine_asset_upload_only(asset):
             continue
@@ -5549,6 +5592,110 @@ def imagine_get_public_page_post(post_id: str, account: dict, timeout: int = 12)
     }
 
 
+# The Liked view on grok.com is two steps: the collection hands back bare asset ids, then
+# each one is looked up for its media. Nothing about it goes through /rest/media/post/list,
+# and the assets stay under their original owner, so this cannot be served from the saved
+# list. imagine_get_media_post_direct already falls back to the public asset lookup, which
+# is what pulls in the source image alongside a video.
+def list_imagine_liked(payload: dict) -> dict:
+    root = library_root()
+    if not root:
+        raise RuntimeError("Library path is not set.")
+    account = active_imagine_account(root, str((payload or {}).get("account_id") or ""))
+    if not account:
+        raise RuntimeError("Select or capture an Imagine account first.")
+    try:
+        limit = int((payload or {}).get("limit") or 100)
+    except (TypeError, ValueError):
+        limit = 100
+    entries = imagine_collection_asset_entries(account, limit=max(1, min(limit, 200)))
+    posts: list[dict] = []
+    errors: list[dict] = []
+    # One heart puts one id in, so a second entry is a genuinely separate card. Nothing is
+    # filtered out here any more.
+    covered_asset_ids: set[str] = set()
+    collection_ids = {entry.get("asset_id") for entry in entries if entry.get("asset_id")}
+    for entry in entries:
+        asset_id = entry.get("asset_id") or ""
+        if not asset_id:
+            continue
+        try:
+            raw_post = imagine_get_media_post_direct(asset_id, account, timeout=12)
+            post = imagine_saved_post_from_root(raw_post, account)
+        except Exception as exc:
+            errors.append({"asset_id": asset_id, "error": str(exc)[:300]})
+            continue
+        if not post:
+            errors.append({"asset_id": asset_id, "error": "Liked asset returned no post."})
+            continue
+        # Liked shows what the heart was pressed on and the source it came from, nothing
+        # else. Anything generated from it afterwards lands in its own card on grok.com's
+        # saved view, and it was turning up glued onto the Liked card here.
+        kept_items = []
+        for item in post.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            item_asset_id = imagine_item_asset_id(item)
+            if item_asset_id == asset_id or imagine_item_is_source(item):
+                kept_items.append(item)
+        if kept_items:
+            post["items"] = kept_items
+            representative = imagine_representative_item(kept_items) or kept_items[-1]
+            post["representative_item"] = representative
+        metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+        metadata.update({
+            "remote_view": "link",
+            "link_source": True,
+            "link_post_id": asset_id,
+            "liked": True,
+            "collection_add_time": entry.get("add_time") or "",
+        })
+        post["metadata"] = metadata
+        post["mode"] = "link"
+        post["liked"] = True
+        post["favorite"] = True
+        for item in post.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            item_asset_id = imagine_item_asset_id(item)
+            if item_asset_id:
+                covered_asset_ids.add(item_asset_id)
+            # Same stamps the link loader puts on its items. Without them the detail view has
+            # no way to tell this came from a link, and it drew no heart at all — leaving a
+            # card in Liked that could not be un-hearted.
+            item_metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            imagine = item_metadata.get("imagine") if isinstance(item_metadata.get("imagine"), dict) else {}
+            item_is_saved = item_asset_id in collection_ids if item_asset_id else False
+            item_metadata.update({
+                "remote_view": "link",
+                "link_source": True,
+                "link_post_id": asset_id,
+                "liked": item_is_saved,
+            })
+            imagine.update({
+                "remote_view": "link",
+                "link_source": True,
+                "link_post_id": asset_id,
+                "liked": item_is_saved,
+            })
+            item_metadata["imagine"] = imagine
+            item["metadata"] = item_metadata
+        covered_asset_ids.add(asset_id)
+        posts.append(post)
+    imagine_debug_event("liked_collection_listed", {
+        "account_id": str(account.get("id") or ""),
+        "requested": len(entries),
+        "posts": len(posts),
+        "errors": len(errors),
+    })
+    return {
+        "ok": True,
+        "posts": posts,
+        "errors": errors,
+        "collection_id": imagine_liked_collection_id(account),
+    }
+
+
 def load_imagine_remote_link_post(payload: dict) -> dict:
     root = library_root()
     if not root:
@@ -5583,8 +5730,16 @@ def load_imagine_remote_link_post(payload: dict) -> dict:
             imagine_account_settings_key(account),
             released_exclusions,
         )
-    saved_link_ids = link_asset_ids & imagine_local_heart_asset_ids(root, account)
-    link_is_saved = imagine_local_heart_link_post(root, account, post_id) is not None
+    # The Liked collection is what the heart writes to now, so it decides the state. The
+    # local record outlives an un-heart and kept reporting the post as saved, which left the
+    # heart hidden with no way to save it again.
+    collection_asset_ids = {
+        entry.get("asset_id")
+        for entry in imagine_collection_asset_entries(account)
+        if entry.get("asset_id")
+    }
+    saved_link_ids = link_asset_ids & collection_asset_ids
+    link_is_saved = bool(saved_link_ids)
     metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
     metadata.update({
         "remote_view": "link",
@@ -7367,6 +7522,11 @@ def imagine_media_post_action(payload: dict, action: str) -> dict:
         or ""
     ).strip().lower()
     action_name = "delete" if action == "delete" else "unsave"
+    # Un-hearting is a collection removal on grok.com, so take the id out of Liked first.
+    # /rest/media/post/unlike still runs below because a post created by this account also
+    # carries a like flag of its own; the collection entry is the part the site shows.
+    if action_name == "unsave":
+        imagine_collection_remove_assets(account, {post_id_value})
     path = "/rest/media/post/delete" if action_name == "delete" else "/rest/media/post/unlike"
     deleted_id = post_id_value
     try:
@@ -7886,44 +8046,40 @@ def _like_imagine_media_post(payload: dict) -> dict:
     }
     clone_result = {"cloned": [], "failed": []}
     cloned_sources: set[str] = set()
+    # grok.com hearts an asset by dropping its id into the account's default collection and
+    # copies nothing, so someone else's asset keeps its own id. Cloning it here instead put
+    # a second copy in the saved list and cut the lineage chain, because the clone still
+    # named the original owner's asset as its parent. Match the site.
+    collection_result = {"added": [], "failed": []}
     if external_ids:
-        # A successful heart means every linked asset in the bundle was copied into
-        # this account. Never leave a partial clone looking like a completed save.
-        clone_result = imagine_clone_external_assets(account, external_ids)
-        clone_records = imagine_normalize_external_clone_records(clone_result.get("cloned"))
-        cloned_sources = {
-            record["source_asset_id"]
-            for record in clone_records
-        }
-        remaining_external = external_ids - cloned_sources
-        if remaining_external:
-            cleanup_clone_ids = {
-                record["asset_id"]
-                for record in clone_records
-                if record.get("asset_id")
-            }
-            if cleanup_clone_ids:
-                ensure_imagine_state_migrated(root)
-                imagine_state.add_pending_deletes(
-                    root,
-                    imagine_account_settings_key(account),
-                    cleanup_clone_ids,
-                )
-                sync_imagine_official_saved_deletion(root, account, cleanup_clone_ids)
-            failed_count = len(remaining_external)
+        # grok.com puts exactly one id in: the asset the heart was pressed on. Sending the
+        # whole bundle also filed the source image, which came back as a second Liked card.
+        # Pick what the heart was pressed on, then the first result in target order. Sorting
+        # the ids picked whichever sorted first, which was the source image, so only that
+        # came into Liked instead of the video.
+        pressed_id = str(
+            (payload or {}).get("id")
+            or (payload or {}).get("post_id")
+            or (payload or {}).get("asset_id")
+            or ""
+        ).strip()
+        primary_id = ""
+        if pressed_id in external_ids:
+            primary_id = pressed_id
+        else:
+            for target in targets:
+                target_id = target.get("id")
+                if target_id in external_ids and not target.get("is_source"):
+                    primary_id = target_id
+                    break
+        if not primary_id:
+            primary_id = next((t.get("id") for t in targets if t.get("id") in external_ids), sorted(external_ids)[0])
+        collection_result = imagine_collection_add_assets(account, {primary_id})
+        if collection_result.get("failed"):
             raise RuntimeError(
-                f"Grok copied only {len(cloned_sources)} of {len(external_ids)} linked asset(s); "
-                f"the incomplete save was cancelled ({failed_count} failed)."
+                collection_result.get("error")
+                or f"Grok did not add {len(collection_result['failed'])} linked asset(s) to Liked."
             )
-        if cloned_sources:
-            update_imagine_account_setting_ids(
-                root,
-                "imagine_external_reference_asset_ids",
-                account,
-                remove=cloned_sources,
-            )
-        if clone_records:
-            imagine_attach_external_clone_records(local_post, clone_records)
     released_exclusions = local_post_asset_ids & imagine_local_exclusion_ids(root, account)
     if released_exclusions:
         imagine_state.remove_local_exclusions(
@@ -7931,25 +8087,10 @@ def _like_imagine_media_post(payload: dict) -> dict:
             imagine_account_settings_key(account),
             released_exclusions,
         )
-    # clone-batch hands the asset to this account and Grok saves the copy, so a fully cloned
-    # bundle already sits in the official list under its clone ids. A local heart record
-    # keyed on the original owner's ids would only shadow that, and it outlives the asset
-    # because deletes never reach it. Every other source still needs the local record.
-    fully_cloned = bool(external_ids) and not (external_ids - cloned_sources)
-    if fully_cloned:
-        imagine_debug_event("local_heart_skipped_after_clone", {
-            "account_id": str(account.get("id") or ""),
-            "cloned_sources": sorted(cloned_sources),
-        })
-    else:
-        update_imagine_local_heart_posts(root, account, add_post=local_post)
-        try:
-            cache_imagine_remote_posts(root, account, [local_post])
-        except Exception as exc:
-            imagine_debug_event("saved_cache_local_upsert_failed", {
-                "account_id": str(account.get("id") or ""),
-                "error": str(exc)[:400],
-            })
+    # grok.com keeps no second copy of a hearted asset: the collection holds the id and the
+    # Liked view reads it back. The local record here was the app's own invention, and it
+    # outlived un-hearting and the owner deleting the asset, so it is gone. Hearted assets
+    # now show in Liked only, exactly as they do on the site.
     invalidate_imagine_saved_media_keys_cache(account)
     registration_ids = requested_ids - cloned_sources
     registration_visits = [
@@ -7988,6 +8129,138 @@ def _like_imagine_media_post(payload: dict) -> dict:
         "result": {},
         "results": [],
     }
+
+
+# grok.com's heart is a collection, not a like. Traced 2026-08-09: the site reads the one
+# default collection (named "Liked"), posts asset ids into it, and takes them out again by
+# id. Someone else's asset goes in unchanged — no copy is made — so the id stays the
+# original owner's and the entry disappears if they delete the asset.
+IMAGINE_LIKED_COLLECTION_IDS: dict[str, str] = {}
+
+
+def imagine_liked_collection_id(account: dict, refresh: bool = False) -> str:
+    key = imagine_account_settings_key(account)
+    if not refresh:
+        cached = IMAGINE_LIKED_COLLECTION_IDS.get(key)
+        if cached:
+            return cached
+    try:
+        result = imagine_post_json(
+            "/rest/media/collection/list",
+            {"limit": 100},
+            account,
+            referer=IMAGINE_BASE + "/imagine/saved",
+        )
+    except Exception as exc:
+        imagine_debug_event("liked_collection_list_failed", {
+            "account_id": str(account.get("id") or ""),
+            "error": str(exc)[:400],
+        })
+        return ""
+    collections = result.get("collections") if isinstance(result.get("collections"), list) else []
+    chosen = ""
+    for entry in collections:
+        if not isinstance(entry, dict):
+            continue
+        entry_id = str(entry.get("id") or "").strip()
+        if not entry_id:
+            continue
+        if entry.get("isDefault") is True:
+            chosen = entry_id
+            break
+        if not chosen and str(entry.get("name") or "") == "Liked":
+            chosen = entry_id
+    if chosen:
+        IMAGINE_LIKED_COLLECTION_IDS[key] = chosen
+    return chosen
+
+
+def imagine_collection_add_assets(account: dict, asset_ids) -> dict:
+    wanted = sorted({str(value).strip() for value in asset_ids if str(value or "").strip()})
+    if not wanted:
+        return {"added": [], "failed": []}
+    try:
+        # The add call names no collection: Grok drops the ids into the default one.
+        imagine_post_json(
+            "/rest/media/collection/assets/add",
+            {"assetIds": wanted},
+            account,
+            referer=IMAGINE_BASE + "/imagine/saved",
+        )
+    except Exception as exc:
+        imagine_debug_event("liked_collection_add_failed", {
+            "account_id": str(account.get("id") or ""),
+            "asset_ids": wanted,
+            "error": str(exc)[:400],
+        })
+        return {"added": [], "failed": wanted, "error": str(exc)[:400]}
+    imagine_debug_event("liked_collection_added", {
+        "account_id": str(account.get("id") or ""),
+        "asset_ids": wanted,
+    })
+    return {"added": wanted, "failed": []}
+
+
+def imagine_collection_remove_assets(account: dict, asset_ids) -> dict:
+    wanted = sorted({str(value).strip() for value in asset_ids if str(value or "").strip()})
+    if not wanted:
+        return {"removed": [], "failed": []}
+    collection_id = imagine_liked_collection_id(account)
+    if not collection_id:
+        return {"removed": [], "failed": wanted, "error": "Liked collection was not found."}
+    try:
+        # Unlike add, remove insists on the collection id.
+        imagine_post_json(
+            "/rest/media/collection/assets/remove",
+            {"collectionId": collection_id, "assetIds": wanted},
+            account,
+            referer=IMAGINE_BASE + "/imagine/saved",
+        )
+    except Exception as exc:
+        imagine_debug_event("liked_collection_remove_failed", {
+            "account_id": str(account.get("id") or ""),
+            "asset_ids": wanted,
+            "error": str(exc)[:400],
+        })
+        return {"removed": [], "failed": wanted, "error": str(exc)[:400]}
+    imagine_debug_event("liked_collection_removed", {
+        "account_id": str(account.get("id") or ""),
+        "asset_ids": wanted,
+    })
+    return {"removed": wanted, "failed": []}
+
+
+def imagine_collection_asset_entries(account: dict, limit: int = 100) -> list[dict]:
+    collection_id = imagine_liked_collection_id(account)
+    if not collection_id:
+        return []
+    try:
+        result = imagine_post_json(
+            "/rest/media/collection/assets/list",
+            {"collectionId": collection_id, "limit": int(limit)},
+            account,
+            referer=IMAGINE_BASE + "/imagine/saved",
+        )
+    except Exception as exc:
+        imagine_debug_event("liked_collection_assets_failed", {
+            "account_id": str(account.get("id") or ""),
+            "error": str(exc)[:400],
+        })
+        return []
+    items = result.get("items") if isinstance(result.get("items"), list) else []
+    entries: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        asset_id = str(item.get("assetId") or "").strip()
+        if not asset_id:
+            continue
+        entries.append({
+            "asset_id": asset_id,
+            "media_type": str(item.get("mimeType") or ""),
+            "add_time": str(item.get("addTime") or ""),
+        })
+    return entries
 
 
 # Saving someone else's post used to be a local-only heart: the card appeared in this
@@ -8208,6 +8481,11 @@ def unsave_imagine_media_post(payload: dict) -> dict:
     scope = str(payload.get("scope") or "card").strip().lower()
     operation = str(payload.get("operation") or "unsave").strip().lower()
     delete_operation = operation == "delete"
+    # This is the path the heart button uses. Taking the local record out is not enough now:
+    # grok.com un-hearts by removing the ids from the Liked collection, and without this the
+    # asset stayed in Liked on the site while the app showed it as unsaved.
+    if not delete_operation:
+        imagine_collection_remove_assets(account, asset_ids)
     remove_entire_link_post = scope != "item"
     delete_bundle = scope == "bundle"
     payload_link_source = bool(payload.get("link_source"))
@@ -8745,6 +9023,17 @@ def imagine_source_conversation_context(
 ) -> tuple[str, str]:
     source = attachment if isinstance(attachment, dict) else {}
     if source.get("_imagine_uploaded_direct") or imagine_attachment_upload_like(source):
+        return "", ""
+    # Every image of a T2I batch belongs to the one conversation that produced the batch, so
+    # both the id on the attachment and the one /rest/assets reports are the group's. Feeding
+    # either back filed the edit inside the T2I group card. grok.com does not resolve anything
+    # here — it posts to /conversations/new and lets the edit start its own thread — so match
+    # that and return nothing, which sends this through the new-conversation path.
+    source_is_t2i = (
+        source.get("source_is_t2i") is True
+        or (payload or {}).get("source_is_t2i") is True
+    )
+    if source_is_t2i:
         return "", ""
     conversation_id = str(
         source.get("conversation_id")
@@ -12029,17 +12318,13 @@ def imagine_i2i_request(payload: dict, prompt: str, request_id: str, account: di
     except (TypeError, ValueError):
         count = 1
     count = max(1, min(4, count))
+    # Traced 2026-08-09: grok.com's own image edit carries no post ids at all. It sends
+    # modelMap.imageEditModel="imagine" and nothing else, and ties the edit to its thread
+    # with a top-level parentResponseId. The ids below were ours, and feeding them back is
+    # what filed edits inside the wrong card. The bridge still gets the conversation and
+    # parent response through grokChameleon* keys further down.
     image_config = {"imageReferences": references}
-    if parent_post_id:
-        image_config["parentPostId"] = parent_post_id
-    if root_post_id and not start_new_conversation:
-        image_config["rootPostId"] = root_post_id
-        image_config["containerPostId"] = root_post_id
-    elif parent_post_id and not start_new_conversation:
-        image_config["containerPostId"] = parent_post_id
     original_post_id = "" if direct_upload else imagine_attachment_real_post_id(source, "original_post_id")
-    if original_post_id:
-        image_config["originalPostId"] = original_post_id
     requested_aspect_ratio = normalize_aspect_ratio_value(options.get("aspect_ratio"))
     aspect_ratio = requested_aspect_ratio or (attachment_aspect_ratio(source) if direct_upload else "")
     if aspect_ratio:
@@ -12153,7 +12438,6 @@ def imagine_aspect_ratio_request(payload: dict, request_id: str, account: dict) 
                     "imageEditModelConfig": {
                         "imageReferences": references,
                         "aspectRatio": aspect_ratio,
-                        "parentPostId": parent_post_id,
                     },
                     "imageEditModel": "imagine",
                 }
@@ -12267,6 +12551,10 @@ def imagine_video_request(payload: dict, prompt: str, request_id: str, action: s
             or imagine_attachment_id(video_attachment, "root_post_id", "detail_root_post_id")
             or extend_post_id
         )
+        # These never reach grok.com's request body — the bridge reads them to pick the
+        # container and input asset it hands to the site's own generate call. Dropping them
+        # left the video branch with nothing to resolve the container from, and grok.com
+        # answered 403 whenever the generation had to attach to an existing conversation.
         model_config.update({
             "isVideoExtension": True,
             "videoExtensionStartTime": round(source_trim, 3),
@@ -12347,6 +12635,12 @@ def imagine_video_request(payload: dict, prompt: str, request_id: str, action: s
             if not direct_upload and original_post_id and (not root_post_id or root_post_id == parent_post_id):
                 root_post_id = original_post_id
             file_attachment_ids = [parent_post_id] if parent_post_id else []
+            # grok.com's own body carries none of these, and neither does ours — the bridge
+            # reads them to work out the container and input asset it passes to the site's
+            # generate call. With them gone the container could not be resolved once the
+            # video had to attach to an existing conversation, and grok.com answered 403.
+            # A link or Liked source is re-uploaded before this point, which empties all
+            # three, so this block only fires for a source this account already owns.
             if parent_post_id:
                 model_config["parentPostId"] = parent_post_id
             if root_post_id and not start_new_conversation:
@@ -12839,6 +13133,11 @@ def imagine_direct_rest_image_generate(
                 action,
                 request_id,
                 upload_source_item,
+                # Nothing puts a link_source key on the payload or on source_info, so asking
+                # for one always answered no and the bundle was hidden anyway. The source is
+                # only rematerialized when the attachment was a link or an external
+                # reference, which makes this flag the answer we were looking for.
+                fresh_source_rematerialized,
             )
     imagine_debug_event("direct_rest_image_generate_result", {
         "request_id": request_id,
@@ -13247,6 +13546,7 @@ def imagine_native_bridge_generate(
                     action,
                     request_id,
                     upload_source_item,
+                    fresh_source_rematerialized,
                 )
             else:
                 imagine_persist_generated_relation(
@@ -21713,6 +22013,7 @@ POST_JSON_ROUTES = {
         list_imagine_unsaved=list_imagine_unsaved,
         search_imagine_media=search_imagine_media,
         load_imagine_remote_link_post=load_imagine_remote_link_post,
+        list_imagine_liked=list_imagine_liked,
         list_imagine_uploads=list_imagine_uploads,
         start_imagine_job=start_imagine_job,
         get_imagine_job=get_imagine_job,

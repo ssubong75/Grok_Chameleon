@@ -4,9 +4,9 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Grok Chameleon</title>
-    <link rel="stylesheet" href="./styles/app.css?v=20260806-12" />
+    <link rel="stylesheet" href="./styles/app.css?v=20260809-1" />
     <link rel="stylesheet" href="./styles/composer.css" />
-    <script src="./scripts/state.js?v=20260806-14" defer></script>
+    <script src="./scripts/state.js?v=20260809-4" defer></script>
     <script src="./scripts/library_utils.js" defer></script>
     <script src="./scripts/ui_feedback.js" defer></script>
     <script src="./scripts/dialog.js" defer></script>
@@ -21,10 +21,10 @@
     <script src="./scripts/detail_video_player.js" defer></script>
     <script src="./scripts/detail_common_actions.js" defer></script>
     <script src="./scripts/b_detail_actions.js" defer></script>
-    <script src="./scripts/i_detail_actions.js" defer></script>
+    <script src="./scripts/i_detail_actions.js?v=20260809-6" defer></script>
     <script src="./scripts/detail_state.js" defer></script>
     <script src="./scripts/detail_navigation.js" defer></script>
-    <script src="./scripts/detail_render.js?v=20260806-12" defer></script>
+    <script src="./scripts/detail_render.js?v=20260809-3" defer></script>
     <script src="./scripts/library_scan.js?v=20260806-14" defer></script>
     <script src="./scripts/render.js" defer></script>
     <script src="./scripts/build_main.js?v=20260806-12" defer></script>
@@ -34,12 +34,12 @@
     <script src="./scripts/card_render.js?v=20260806-13" defer></script>
     <script src="./scripts/source_filter.js" defer></script>
     <script src="./scripts/b_source_render.js?v=20260806-14" defer></script>
-    <script src="./scripts/i_source_render.js?v=20260806-15" defer></script>
+    <script src="./scripts/i_source_render.js?v=20260809-3" defer></script>
     <script src="./scripts/source_render.js" defer></script>
     <script src="./scripts/navigation_history.js" defer></script>
     <script src="./scripts/screen_router.js" defer></script>
     <script src="./scripts/image_editor_flow.js" defer></script>
-    <script src="./scripts/imagine_main.js" defer></script>
+    <script src="./scripts/imagine_main.js?v=20260809-3" defer></script>
     <script src="./scripts/card_actions.js" defer></script>
     <script src="./scripts/collection_render.js" defer></script>
     <script src="./scripts/prompt_render.js" defer></script>
@@ -98,11 +98,6 @@
               <span>Search</span>
             </button>
             <input id="searchInput" class="sidebar_search_input" type="search" placeholder="" aria-label="Search" />
-            <button id="i_link_btn" class="nav_item link_btn" type="button">
-              <span class="nav_icon" aria-hidden="true">L</span>
-              <span>Link</span>
-            </button>
-            <input id="i_link_input" class="sidebar_search_input sidebar_link_input" type="url" placeholder="Paste" aria-label="Imagine link" />
           </nav>
 
         <section class="account-card" aria-label="Account">
@@ -184,7 +179,8 @@
 	            <header class="i_main_header">
 	              <div class="i_main_actions" aria-label="Imagine views">
 	                <button id="i_imagine_tab_btn" class="i_main_title_btn i_main_btn active" type="button">Imagine</button>
-	                <button id="i_upload_image_btn" class="i_main_btn" type="button">Upload-Image</button>
+	                <button id="i_upload_image_btn" class="i_main_btn" type="button">Liked</button>
+	                <input id="i_link_input" class="sidebar_search_input sidebar_link_input" type="url" placeholder="Paste" aria-label="Imagine link" />
 	              </div>
 	              <div class="i_main_right_actions">
 	                <button id="i_t2i_btn" class="i_main_btn" type="button" hidden>T2I View</button>

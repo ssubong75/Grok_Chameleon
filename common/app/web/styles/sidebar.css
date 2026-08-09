@@ -34,7 +34,7 @@
 
 .app_shell.sidebar_collapsed .nav_item span:not(.nav_icon),
 .app_shell.sidebar_collapsed .account-copy,
-.app_shell.sidebar_collapsed .sidebar_search_input,
+.app_shell.sidebar_collapsed .sidebar .sidebar_search_input,
 .app_shell.sidebar_collapsed .sidebar_close {
   display: none;
 }
@@ -446,26 +446,16 @@
   background: transparent;
 }
 
+/* 40px between the groups: the nav grid adds its own 6px on each side of the spacer. */
 .nav_spacer {
   position: relative;
-  height: 17px;
-  min-height: 17px;
-}
-
-.nav_spacer::after {
-  content: "";
-  position: absolute;
-  top: 50%;
-  right: 12px;
-  left: 12px;
-  height: 1px;
-  background: rgb(255 255 255 / 0.08);
-  transform: translateY(-50%);
+  height: 28px;
+  min-height: 28px;
 }
 
 .account-card {
   display: grid;
-  gap: 42px;
+  gap: 40px;
   margin-top: auto;
 }
 
@@ -473,16 +463,6 @@
   position: relative;
   display: grid;
   gap: 6px;
-}
-
-.sidebar_library_actions::after {
-  content: "";
-  position: absolute;
-  right: 12px;
-  bottom: -21px;
-  left: 12px;
-  height: 1px;
-  background: rgb(255 255 255 / 0.08);
 }
 
 .sidebar_account_actions {
@@ -601,8 +581,10 @@
 }
 
 @media (aspect-ratio < 1/1) {
+  /* Lifted by the composer's height with the image/video mode row showing, which
+     composer_events.js measures. The 72px fallback is the old fixed value. */
   .sidebar .account-card {
-    margin-bottom: 72px;
+    margin-bottom: var(--composer-open-height, 72px);
   }
 }
 
@@ -650,15 +632,8 @@
     min-height: 28px;
   }
 
-  .nav_spacer,
-  .app_shell.sidebar_collapsed .sidebar .nav_spacer {
-    height: 4px;
-    min-height: 4px;
-  }
-
   .account-card,
   .app_shell.sidebar_collapsed .sidebar .account-card {
-    gap: 6px;
     margin-bottom: 0;
   }
 
@@ -731,26 +706,6 @@
     gap: 6px;
   }
 
-  body .app_shell.sidebar_collapsed .nav_spacer {
-    height: 12px;
-    min-height: 12px;
-  }
-
-  body .app_shell.sidebar_collapsed .nav_spacer::after {
-    content: "";
-    position: absolute;
-    top: 50%;
-    right: 8px;
-    left: 8px;
-    height: 1px;
-    background: rgb(255 255 255 / 0.08);
-    transform: translateY(-50%);
-  }
-
-  body .app_shell.sidebar_collapsed .account-card {
-    gap: 24px;
-  }
-
   body .app_shell.sidebar_collapsed .account-button,
   body .app_shell.sidebar_collapsed .account-button:hover,
   body .app_shell.sidebar_collapsed .account-button.active {
@@ -804,16 +759,6 @@
   body .app_shell .sidebar_search_input {
     height: 26px;
     min-height: 26px;
-  }
-
-  body .app_shell.sidebar_collapsed .sidebar .nav_spacer {
-    height: 3px;
-    min-height: 3px;
-  }
-
-  body .app_shell.sidebar_collapsed .sidebar .account-card {
-    gap: 2px;
-    margin-bottom: 0;
   }
 
   body .app_shell.sidebar_collapsed .sidebar .sidebar_library_actions,

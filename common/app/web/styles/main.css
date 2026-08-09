@@ -372,7 +372,6 @@
   border-radius: 0;
   background: transparent;
   color: var(--text);
-  transform: none;
 }
 
 #i_upload_image_btn:hover,
@@ -482,6 +481,47 @@
   position: relative;
   align-items: baseline;
   gap: 70px;
+}
+
+/* Liked and the paste box line up with the card columns below, which are fluid and
+   change count across breakpoints, so syncImagineHeaderLayout writes their left in px.
+   Taking them out of flow also keeps the 24px box from growing the header row, which
+   sits in `grid-template-rows: auto ...` and would push the cards down. */
+#i_upload_image_btn,
+#i_link_input.sidebar_link_input {
+  position: absolute;
+}
+
+/* The clipboard glyph came from the sidebar row; the header box shows the label alone. */
+#i_link_input.sidebar_link_input,
+#i_link_input.sidebar_link_input:hover,
+#i_link_input.sidebar_link_input:focus,
+#i_link_input.sidebar_link_input:not(:placeholder-shown) {
+  width: 220px;
+  height: 24px;
+  min-height: 24px;
+  padding: 0 8px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background-image: none;
+  font-size: 12px;
+  text-align: center;
+  text-indent: 0;
+}
+
+/* Hover kept the sidebar's purple placeholder; the header box holds one colour. The
+   sidebar drew it at 720, which reads as bold at 12px, so it is lighter here. */
+#i_link_input.sidebar_link_input::placeholder,
+#i_link_input.sidebar_link_input:hover::placeholder {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+/* Clicking in clears the label. Needed by id because the rules above outrank the
+   sidebar's own focus rule. */
+#i_link_input.sidebar_link_input:focus::placeholder {
+  color: transparent;
 }
 
 	.i_main_btn,
@@ -749,6 +789,14 @@ body .app_shell.sidebar_collapsed .composer {
     border: 0;
     background: transparent;
     box-shadow: none;
+    font-size: var(--composer-control-font-size-compact);
+  }
+
+  /* Sits beside those buttons, so it drops to the same compact size here. The 34px
+     default outgrew every other control in this row, and showing it lifted the whole
+     composer by 2px, so it matches the badge and tabs. */
+  body .app_shell .composer .composer_option_note {
+    min-height: 32px;
     font-size: var(--composer-control-font-size-compact);
   }
 

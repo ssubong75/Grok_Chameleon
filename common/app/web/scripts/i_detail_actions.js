@@ -1247,12 +1247,8 @@ async function unsaveImaginePost(post, { item = null } = {}) {
     showErrorPanel("Unsave unavailable", "This Imagine post has no asset id.");
     return;
   }
-  const ok = await confirmAction({
-    title: "Unsave post",
-    message: localTargets.length > 1 ? `Remove ${localTargets.length} media item(s) from Saved?` : "Remove this media item from Saved?",
-    confirmLabel: "Unsave",
-  });
-  if (!ok) return;
+  // grok.com takes the asset out of Liked the moment the heart is pressed, with no prompt.
+  // The dialog also left the button stuck on "Unsaving" while it waited for an answer.
   const accountId = post.account_id || iDetailAccountId(registrationTargets[0], post);
   const linkPostId = linkSource ? imagineLinkPostIdForPost(post, registrationTargets[0]) : "";
   await qApi("/api/imagine/post/unsave", {
@@ -2077,18 +2073,35 @@ function bindImagineDetailActions() {
       && detailCanSaveImaginePost(post, item);
     const saved = typeof imaginePostLiked === "function"
       && (imaginePostLiked(post, item) || imaginePostLiked(post));
-    if (!canSave || saved) {
+    if (!canSave) {
       syncImagineDetailHeartState(post, item);
       return;
     }
     heart.classList.add("saved");
     heart.setAttribute("aria-pressed", "true");
-    heart.setAttribute("aria-label", "Saving");
+    heart.setAttribute("aria-label", saved ? "Unsaving" : "Saving");
     heart.setAttribute("aria-busy", "true");
-    likeImagineSelectedDetailPost()
+    // The heart used to vanish once saved, so pressing it again was a no-op. It stays on
+    // screen now, and a second press takes the asset back out of the Liked collection.
+    (saved ? unsaveImagineSelectedDetailPost() : likeImagineSelectedDetailPost())
       .catch((error) => {
         console.warn(error);
-        showErrorPanel("Save failed", error?.message || "Save failed.");
+        showErrorPanel(saved ? "Unsave failed" : "Save failed", error?.message || "Save failed.");
+      })
+      .then(() => {
+        // Un-hearting takes the card out of Liked, so there is nothing left to show in the
+        // detail. Reload the list and go back to it, the way grok.com drops the card.
+        if (!saved) return;
+        if (typeof loadImagineLikedCards === "function") {
+          loadImagineLikedCards({ force: true }).catch((error) => console.warn(error));
+        }
+        if (typeof openImagineMainView === "function"
+          && library_state.iMainView === "liked") {
+          // The Liked button toggles, so calling it while already on Liked would bounce to
+          // Imagine. Step off the view first so the call lands back on Liked.
+          library_state.iMainView = "imagine";
+          openImagineMainView("i_upload_image_btn");
+        }
       })
       .finally(() => {
         heart.removeAttribute("aria-busy");
