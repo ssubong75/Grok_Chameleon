@@ -1092,3 +1092,42 @@
       if (count) count.textContent = `${posts.length + jobSlots} items`;
       document.getElementById("b_t2i_view_btn")?.classList.toggle("active", library_state.bMainView === "t2i");
     }
+
+// Collection ends 10px inside the first card column below it. The grid is fluid and its
+// column count changes across breakpoints, so read the tracks the browser resolved. The
+// button stays in flow and only its left margin moves, which keeps the baseline it shares
+// with the Build heading.
+function syncBuildCollectionButtonPosition() {
+  const button = document.getElementById("b_collection_filter_btn");
+  const list = document.querySelector(".b_card_list");
+  if (!button || !list || button.closest("[hidden]")) return;
+  const style = getComputedStyle(list);
+  const firstColumn = String(style.gridTemplateColumns || "")
+    .split(" ")
+    .map((value) => Number.parseFloat(value))
+    .find((value) => Number.isFinite(value) && value > 0);
+  if (!firstColumn) return;
+  const listLeft = list.getBoundingClientRect().left + (Number.parseFloat(style.paddingLeft) || 0);
+  button.style.marginLeft = "0px";
+  const delta = (listLeft + firstColumn - 10) - button.getBoundingClientRect().right;
+  button.style.marginLeft = `${Math.round(delta)}px`;
+}
+
+let buildCollectionButtonFrame = 0;
+function scheduleBuildCollectionButtonPosition() {
+  if (buildCollectionButtonFrame) return;
+  buildCollectionButtonFrame = requestAnimationFrame(() => {
+    buildCollectionButtonFrame = 0;
+    syncBuildCollectionButtonPosition();
+  });
+}
+
+window.addEventListener("resize", scheduleBuildCollectionButtonPosition);
+window.addEventListener("orientationchange", scheduleBuildCollectionButtonPosition);
+if (typeof ResizeObserver === "function") {
+  const buildCardListForLayout = document.querySelector(".b_card_list");
+  if (buildCardListForLayout) {
+    new ResizeObserver(scheduleBuildCollectionButtonPosition).observe(buildCardListForLayout);
+  }
+}
+scheduleBuildCollectionButtonPosition();

@@ -15,7 +15,6 @@ const PORT = String(process.env.GROK_CHAMELEON_PORT || "8797");
 const CDP_PORT = String(process.env.GROK_CHAMELEON_CDP_PORT || "0");
 const SERVER_BASE = `http://127.0.0.1:${PORT}`;
 const GROK_USAGE_URL = "https://grok.com/?_s=usage";
-const IMAGINE_BRIDGE_READY_MAX_AGE_MS = 20 * 60 * 1000;
 const IMAGINE_BRIDGE_PAGE_TIMEOUT_MS = 10000;
 const IMAGINE_BRIDGE_STORE_TIMEOUT_MS = 20000;
 // A warmed bridge window costs roughly 460MB, so this is a memory budget as much as a
@@ -2093,12 +2092,15 @@ async function prepareBridgeWindow(win, command, prepareGeneration = 0) {
     : (command.url || "https://grok.com/imagine");
   const cookiesChanged = await applyBridgeCookies(win, command);
   const currentUrl = win.webContents.getURL() || "";
+  // A window that is still open with a live media store stays usable however long it has
+  // been there, the same way a browser tab does. Ageing it out on a clock only made the
+  // next call take the "initial" path and log a fresh preparation while reusing the very
+  // same window, so the store check below is what actually decides.
   const preparedRecently = (
     storePageCommand
     && !command.force_refresh
     && !cookiesChanged
     && Number(win.__grokPreparedAt || 0) > 0
-    && Date.now() - Number(win.__grokPreparedAt || 0) < IMAGINE_BRIDGE_READY_MAX_AGE_MS
     && grokUrlMatches(currentUrl, targetUrl)
   );
   if (preparedRecently) {

@@ -281,15 +281,14 @@ function normalizeNfcText(value = "") {
   }
 
   function syncSidebarTogglePosition() {
-    const linkRect = document.querySelector("#i_link_btn .nav_icon")?.getBoundingClientRect();
-    const lowerAnchorSelector = document.getElementById("i_unsaved_nav_btn")
-      ? "#set_library_path_btn img"
-      : "#folder_btn .nav_icon";
-    const lowerAnchorRect = document.querySelector(lowerAnchorSelector)?.getBoundingClientRect();
-    if (!linkRect || !lowerAnchorRect || linkRect.height === 0 || lowerAnchorRect.height === 0) return;
-    const linkCenter = linkRect.top + (linkRect.height / 2);
-    const lowerAnchorCenter = lowerAnchorRect.top + (lowerAnchorRect.height / 2);
-    const rawToggleTop = (linkCenter + lowerAnchorCenter) / 2;
+    // Halfway between Search and Open Folder. Both rows survive collapsing and the narrow
+    // layouts — only their labels go — so the same two anchors serve every state.
+    const upperRect = document.getElementById("search_btn")?.getBoundingClientRect();
+    const lowerRect = document.getElementById("folder_btn")?.getBoundingClientRect();
+    if (!upperRect || !lowerRect || upperRect.height === 0 || lowerRect.height === 0) return;
+    const upperCenter = upperRect.top + (upperRect.height / 2);
+    const lowerCenter = lowerRect.top + (lowerRect.height / 2);
+    const rawToggleTop = (upperCenter + lowerCenter) / 2;
     const rootStyle = getComputedStyle(document.documentElement);
     const toggleHalf = Number.parseFloat(rootStyle.getPropertyValue("--sidebar-toggle-half-size")) || 19;
     const viewportHeight = document.documentElement.clientHeight || window.innerHeight;
@@ -318,13 +317,13 @@ function normalizeNfcText(value = "") {
   function syncTopbarCollapsedInputs(collapsed) {
     if (!topbarCollapsedInputs) return;
     topbarCollapsedInputs.dataset.activeInput = "";
+    // The paste box lives beside Liked in the Imagine header now, so it stays there
+    // whether the sidebar is open or collapsed. Only the sidebar's own search box moves.
     if (collapsed) {
       if (searchInput) topbarCollapsedInputs.append(searchInput);
-      if (imagineLinkInput) topbarCollapsedInputs.append(imagineLinkInput);
       return;
     }
     if (searchInput && searchBtnElement) searchBtnElement.after(searchInput);
-    if (imagineLinkInput && imagineLinkBtn) imagineLinkBtn.after(imagineLinkInput);
   }
 
   function setSidebarCollapsed(collapsed) {
@@ -683,6 +682,7 @@ function normalizeNfcText(value = "") {
       && memo.unsavedPosts === library_state.imagineUnsavedPosts
       && memo.searchPosts === library_state.imagineSearchPosts
       && memo.uploadPosts === library_state.imagineUploadPosts
+      && memo.likedPosts === library_state.imagineLikedPosts
     ) {
       return;
     }
@@ -713,12 +713,18 @@ function normalizeNfcText(value = "") {
     const uploadPosts = Array.isArray(library_state.imagineUploadPosts)
       ? library_state.imagineUploadPosts.map(normalizeServerPost)
       : [];
+    // Liked cards were left out, so a detail opened from Liked or from a link had no post in
+    // library_state: selectedLibraryPost() came back empty and the heart hid itself.
+    const likedPosts = Array.isArray(library_state.imagineLikedPosts)
+      ? library_state.imagineLikedPosts.map(normalizeServerPost)
+      : [];
     library_state.imagineRemotePosts = remotePosts;
     library_state.imagineDiscoverPosts = discoverPosts;
     library_state.imagineUnsavedPosts = unsavedPosts;
     library_state.imagineSearchPosts = searchPosts;
     library_state.imagineUploadPosts = uploadPosts;
-    const posts = [...localPosts, ...savedDisplayPosts, ...discoverPosts, ...unsavedPosts, ...searchPosts, ...uploadPosts];
+    library_state.imagineLikedPosts = likedPosts;
+    const posts = [...localPosts, ...savedDisplayPosts, ...discoverPosts, ...unsavedPosts, ...searchPosts, ...uploadPosts, ...likedPosts];
     library_state.posts = posts;
     imagineRemoteLibrarySyncMemo = {
       posts,
@@ -727,5 +733,6 @@ function normalizeNfcText(value = "") {
       unsavedPosts,
       searchPosts,
       uploadPosts,
+      likedPosts,
     };
   }

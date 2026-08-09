@@ -107,7 +107,24 @@ function syncComposerScrollClearance() {
     return Math.ceil(listRect.bottom - composerRect.top + 16);
   }));
   document.documentElement.style.setProperty("--composer-scroll-clearance", `${clearance}px`);
+  syncComposerOpenHeight();
   syncResponsiveCardHeight();
+}
+
+// The sidebar's bottom block clears the composer at the height it has once the mode row
+// is showing. That row only appears on hover, focus, or tools-open, so when it is closed
+// its own scrollHeight plus the margin it takes when open stands in for it.
+function syncComposerOpenHeight() {
+  if (!composer) return;
+  const options = composer.querySelector(".composer_options");
+  let height = composer.getBoundingClientRect().height;
+  if (options && options.getBoundingClientRect().height <= 0) {
+    const openMargin = Number.parseFloat(
+      getComputedStyle(options).getPropertyValue("--composer-options-open-margin"),
+    ) || 0;
+    height += options.scrollHeight + openMargin;
+  }
+  document.documentElement.style.setProperty("--composer-open-height", `${Math.ceil(height)}px`);
 }
 
 const composerScrollClearanceObserver = typeof ResizeObserver === "function"

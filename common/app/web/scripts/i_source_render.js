@@ -478,11 +478,15 @@ function mergeImagineRefreshedPosts(existingPosts, refreshedPosts) {
   ], comparePostsByRecentActivity);
 }
 
-function mergeImagineSyncedPosts(existingPosts, refreshedPosts) {
+function mergeImagineSyncedPosts(existingPosts, refreshedPosts, { replacesList = false } = {}) {
   const existing = reconcileImagineSavedDisplayPosts(existingPosts || []);
   const refreshed = reconcileImagineSavedDisplayPosts(refreshedPosts || []);
   if (!existing.length) return sortPostsIfNeeded([...refreshed], comparePostsByRecentActivity);
-  if (!refreshed.length) return sortPostsIfNeeded([...existing], comparePostsByRecentActivity);
+  if (!refreshed.length) {
+    // A full reload that comes back empty means the account has nothing saved any more.
+    if (replacesList) return [];
+    return sortPostsIfNeeded([...existing], comparePostsByRecentActivity);
+  }
 
   const existingIndex = imagineSavedPostMatchIndex(existing);
   const matchedExistingIndexes = new Set();
@@ -506,10 +510,11 @@ function mergeImagineSyncedPosts(existingPosts, refreshedPosts) {
     );
   }
 
-  // A refreshed card can absorb one that used to stand alone: clone-batch pairs arrive split
-  // and the server now files them under one root. Matching alone would keep the stale half
-  // on screen forever, so drop an unmatched card once every item it holds already appears in
-  // this page. Cards from later pages keep their place because none of their items are here.
+  // An unmatched card was not in this response. On a reload that starts from an empty cursor
+  // the response is the authoritative head of the list, so the card is gone upstream — from a
+  // delete on grok.com, or absorbed into another card — and keeping it left deletions on
+  // screen until the app restarted. An append carries one page of many and proves nothing
+  // about the rest, so there nothing is dropped.
   const refreshedItemIds = new Set();
   for (const post of refreshed) {
     for (const item of post?.items || []) {
@@ -524,13 +529,14 @@ function mergeImagineSyncedPosts(existingPosts, refreshedPosts) {
       return Boolean(assetId) && refreshedItemIds.has(assetId);
     });
   };
+  const keepUnmatched = (post) => (replacesList ? false : !existingWasAbsorbed(post));
 
   return sortPostsIfNeeded([
     ...newPosts,
     ...existing
       .map((post, index) => (
         refreshedForExistingIndex.get(index)
-        || (existingWasAbsorbed(post) ? null : post)
+        || (keepUnmatched(post) ? post : null)
       ))
       .filter(Boolean),
   ], comparePostsByRecentActivity);
@@ -660,6 +666,11 @@ function imagineSavedLineageCards(post) {
   if (!items.length) return [post];
   const uploadBundle = imagineUploadOriginBundleCard(post, items);
   if (uploadBundle) return [uploadBundle];
+  // Mirrors imagine_saved_lineage_cards: a link-sourced post is one grok.com conversation
+  // and the site shows it as one grouped card, so leave it whole instead of splitting the
+  // parent chain. Everything else, T2I batches included, still fans out below.
+  const linkSourced = Boolean(metadata.link_source || post.link_source || metadata.remote_view === "link");
+  if (linkSourced) return [post];
 
   const itemsById = new Map(items.map((item) => [imagineSavedItemAssetId(item), item]));
   const resultItems = items.filter((item) => !imagineSavedItemIsSource(item));
@@ -1100,7 +1111,7 @@ function finishImagineSavedRequest(context) {
   }
 }
 
-function applyImagineSavedRemotePage(data, { updatePosts = true } = {}) {
+function applyImagineSavedRemotePage(data, { updatePosts = true, replacesList = false } = {}) {
   if (updatePosts) {
     const normalized = normalizeImagineRemotePosts(
       Array.isArray(data.posts) ? data.posts : [],
@@ -1113,7 +1124,7 @@ function applyImagineSavedRemotePage(data, { updatePosts = true } = {}) {
       .filter((post) => !imagineSavedPostIsPending(post));
     library_state.imagineRemotePosts = reconcileImagineSavedDisplayPosts(
       reconcileImaginePendingSavedPosts(
-        mergeImagineSyncedPosts(currentPosts, normalized),
+        mergeImagineSyncedPosts(currentPosts, normalized, { replacesList }),
         pending,
       ),
     );
@@ -1147,7 +1158,10 @@ async function syncImagineSavedCards(
       sync_token: library_state.imagineRemoteSyncToken,
     }, { signal: context.controller.signal });
     if (!imagineSavedResponseMatches(context, data)) return;
-    applyImagineSavedRemotePage(data, { updatePosts });
+    // A request that starts from an empty cursor answers with the whole first page, so
+    // anything the list still holds from that range is gone upstream. Only then may the
+    // merge drop it; an append is one page of many and says nothing about the rest.
+    applyImagineSavedRemotePage(data, { updatePosts, replacesList: !append });
     library_state.imagineRemoteError = "";
   } catch (error) {
     if (!imagineSavedRequestCancelled(error, context) && !library_state.imagineRemotePosts.length) {
@@ -1564,7 +1578,41 @@ async function loadImagineUploadCards({ force = false, append = false } = {}) {
   }
 }
 
+// Liked is the account's default grok.com collection. It holds bare asset ids that stay
+// under their original owner, so it cannot be filtered out of the saved list and needs its
+// own fetch. No cursor: the collection call takes a limit and returns the lot.
+async function loadImagineLikedCards({ force = false } = {}) {
+  if (library_state.imagineLikedLoading) return;
+  if (!force && library_state.imagineLikedLoaded) return;
+  if (!canLoadImagineSavedList()) return;
+  const accountId = imaginePendingSavedAccountId();
+  const requestEpoch = Number(library_state.imagineRemoteRequestEpoch || 0);
+  if (!accountId) return;
+  library_state.imagineLikedLoading = true;
+  library_state.imagineLikedError = "";
+  renderImagineSourceCards();
+  try {
+    const data = await qApi("/api/imagine/liked", { account_id: accountId, limit: 100 });
+    if (!imagineAccountResponseIsCurrent(accountId, requestEpoch, data)) return;
+    library_state.imagineLikedPosts = (Array.isArray(data.posts) ? data.posts : []).map(normalizeServerPost);
+    library_state.imagineLikedLoaded = true;
+    syncImagineRemotePostsIntoLibrary();
+  } catch (error) {
+    if (imagineAccountResponseIsCurrent(accountId, requestEpoch)) {
+      library_state.imagineLikedError = error?.message || "Imagine liked failed.";
+    }
+  } finally {
+    if (imagineAccountResponseIsCurrent(accountId, requestEpoch)) {
+      library_state.imagineLikedLoading = false;
+      renderImagineSourceCards();
+    }
+  }
+}
+
 function imagineSourcePosts() {
+  if (library_state.iMainView === imagineViewValue("LIKED", "liked")) {
+    return library_state.imagineLikedPosts || [];
+  }
   if (library_state.iMainView === imagineViewValue("UPLOAD", "upload")) {
     return library_state.imagineUploadPosts || [];
   }
@@ -1714,7 +1762,11 @@ function renderImagineSourceCards() {
     }
   }
   document.getElementById("i_imagine_tab_btn")?.classList.toggle("active", library_state.iMainView === imagineViewValue("IMAGINE", "imagine"));
-  document.getElementById("i_upload_image_btn")?.classList.toggle("active", uploadView);
+  // That button is Liked now, so it lights up for the Liked view, not the upload one.
+  document.getElementById("i_upload_image_btn")?.classList.toggle(
+    "active",
+    library_state.iMainView === imagineViewValue("LIKED", "liked"),
+  );
   document.getElementById("i_t2i_btn")?.classList.toggle("active", t2iView);
   const count = document.querySelector(".i_main_header p");
   const jobSlots = visibleJobs.reduce((total, job) => total + (

@@ -211,11 +211,13 @@ function syncImagineDetailHeartState(post, item) {
   }
   const saved = typeof imaginePostLiked === "function"
     && (imaginePostLiked(post, item) || imaginePostLiked(post));
-  const visible = detailCanSaveImaginePost(post, item) && !saved;
+  // Hiding the heart once saved left no way to un-heart: grok.com keeps it on screen and
+  // filled, and pressing it again takes the asset out of the Liked collection.
+  const visible = detailCanSaveImaginePost(post, item);
   button.hidden = !visible;
-  button.classList.remove("saved");
-  button.setAttribute("aria-pressed", "false");
-  button.setAttribute("aria-label", "Save");
+  button.classList.toggle("saved", Boolean(saved));
+  button.setAttribute("aria-pressed", saved ? "true" : "false");
+  button.setAttribute("aria-label", saved ? "Unsave" : "Save");
 }
 
 function syncBuildDetailHeartState(post) {
