@@ -189,14 +189,17 @@ function renderComposerOptions() {
     const isBuildDetailImageEdit = composerIsBuildDetailImageEdit();
     const isImageToImage = isBuildDetailImageEdit || composerEffectiveImageAttachmentCount() > 0;
     const hideImagineImageToImageOptions = provider === "imagine" && isImageToImage;
-    const showImageModel = provider === "build"
-      || isBuildDetailImageEdit
-      || (!isImageToImage && !hideImagineImageToImageOptions);
+    // Build image edits always go out as grok-imagine-image-quality: the composer sends an
+    // empty image_model once a picture is attached, and image_model_from_option only picks
+    // grok-imagine-image on an explicit "Speed". Offering the choice implied it mattered.
+    const showImageModel = isImageToImage
+      ? false
+      : (provider === "build" || !hideImagineImageToImageOptions);
     const imageAspectDefault = "Auto";
     const imageCountOptions = provider === "imagine"
-      ? buildT2iCountOptions.filter((option) => option !== "1")
+      ? imagineT2iCountOptions
       : buildT2iCountOptions;
-    const imageCountDefault = "5";
+    const imageCountDefault = provider === "imagine" ? "4" : "5";
     setControlVisible(composerControls.aspect, !hideImagineImageToImageOptions);
     setControlVisible(composerControls.imageModel, showImageModel);
     setControlVisible(composerControls.resolution, provider === "build");
