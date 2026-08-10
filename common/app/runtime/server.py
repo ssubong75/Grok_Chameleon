@@ -5592,6 +5592,74 @@ def imagine_get_public_page_post(post_id: str, account: dict, timeout: int = 12)
     }
 
 
+def imagine_liked_cache_account_key(account: dict) -> str:
+    return f"{imagine_account_settings_key(account)}:liked"
+
+
+def imagine_store_liked_cache(root: Path, account: dict, posts: list[dict]) -> None:
+    if not root:
+        return
+    records = imagine_remote_cache_records(posts)
+    account_key = imagine_liked_cache_account_key(account)
+    try:
+        # A card the collection no longer holds has to leave the cache too, or un-hearting
+        # would keep showing it from here.
+        current = library_index.query_imagine_remote_posts(root, account_key, offset=0, limit=5000)
+        live_keys = {record["post_key"] for record in records}
+        stale = {
+            imagine_remote_cache_post_key(post)
+            for post in current.get("posts") or []
+            if isinstance(post, dict) and imagine_remote_cache_post_key(post)
+        } - live_keys
+        if stale:
+            library_index.delete_imagine_remote_post_keys(root, account_key, stale)
+        if records:
+            library_index.upsert_imagine_remote_posts(root, account_key, records)
+    except Exception as exc:  # noqa: BLE001
+        imagine_debug_event("liked_cache_store_failed", {
+            "account_id": str(account.get("id") or ""),
+            "error": str(exc)[:300],
+        })
+
+
+def list_imagine_liked_cache(payload: dict) -> dict:
+    root = library_root()
+    if not root:
+        raise RuntimeError("Library path is not set.")
+    account = active_imagine_account(root, str((payload or {}).get("account_id") or ""))
+    if not account:
+        raise RuntimeError("Select or capture an Imagine account first.")
+    try:
+        limit = min(5000, max(1, int((payload or {}).get("limit") or 200)))
+    except (TypeError, ValueError):
+        limit = 200
+    cached = library_index.query_imagine_remote_posts(
+        root,
+        imagine_liked_cache_account_key(account),
+        offset=0,
+        limit=limit,
+    )
+    hidden = imagine_pending_delete_ids(root, account) | imagine_local_exclusion_ids(root, account)
+    posts: list[dict] = []
+    for post in cached.get("posts") or []:
+        if not isinstance(post, dict):
+            continue
+        post["items"] = [
+            item
+            for item in post.get("items") or []
+            if isinstance(item, dict) and imagine_item_asset_id(item) not in hidden
+        ]
+        if not post["items"]:
+            continue
+        representative = imagine_representative_item(post["items"]) or post["items"][-1]
+        post["representative_item"] = representative
+        post["representative"] = (
+            representative.get("url") or representative.get("remote_url") or representative.get("item_id") or ""
+        )
+        posts.append(post)
+    return {"ok": True, "posts": posts, "errors": [], "cached": True}
+
+
 # The Liked view on grok.com is two steps: the collection hands back bare asset ids, then
 # each one is looked up for its media. Nothing about it goes through /rest/media/post/list,
 # and the assets stay under their original owner, so this cannot be served from the saved
@@ -5615,19 +5683,41 @@ def list_imagine_liked(payload: dict) -> dict:
     # filtered out here any more.
     covered_asset_ids: set[str] = set()
     collection_ids = {entry.get("asset_id") for entry in entries if entry.get("asset_id")}
-    for entry in entries:
+    # Each card costs a media-post lookup plus the asset lookup behind it, and walking one
+    # after another put a card's worth of round trips between the button and every single
+    # card. The saved list already fetches its conversation details in parallel for the same
+    # reason; do the same here so the wait stops growing with the collection.
+    wanted_entries = [entry for entry in entries if entry.get("asset_id")]
+
+    def fetch_liked_entry(entry: dict) -> dict:
         asset_id = entry.get("asset_id") or ""
-        if not asset_id:
-            continue
         try:
             raw_post = imagine_get_media_post_direct(asset_id, account, timeout=12)
             post = imagine_saved_post_from_root(raw_post, account)
-        except Exception as exc:
-            errors.append({"asset_id": asset_id, "error": str(exc)[:300]})
-            continue
+        except Exception as exc:  # noqa: BLE001
+            return {"asset_id": asset_id, "error": str(exc)[:300]}
         if not post:
-            errors.append({"asset_id": asset_id, "error": "Liked asset returned no post."})
+            return {"asset_id": asset_id, "error": "Liked asset returned no post."}
+        return {"entry": entry, "asset_id": asset_id, "post": post}
+
+    fetched: list[dict] = []
+    if wanted_entries:
+        with ThreadPoolExecutor(max_workers=min(8, len(wanted_entries))) as executor:
+            futures = {executor.submit(fetch_liked_entry, entry): entry for entry in wanted_entries}
+            results = {}
+            for future in as_completed(futures):
+                record = future.result()
+                results[futures[future].get("asset_id")] = record
+        # Keep the collection's own order; as_completed hands them back by whoever finished.
+        fetched = [results[entry["asset_id"]] for entry in wanted_entries if entry["asset_id"] in results]
+
+    for record in fetched:
+        if record.get("error"):
+            errors.append({"asset_id": record.get("asset_id"), "error": record["error"]})
             continue
+        entry = record["entry"]
+        asset_id = record["asset_id"]
+        post = record["post"]
         # Liked shows what the heart was pressed on and the source it came from, nothing
         # else. Anything generated from it afterwards lands in its own card on grok.com's
         # saved view, and it was turning up glued onto the Liked card here.
@@ -5682,6 +5772,7 @@ def list_imagine_liked(payload: dict) -> dict:
             item["metadata"] = item_metadata
         covered_asset_ids.add(asset_id)
         posts.append(post)
+    imagine_store_liked_cache(root, account, posts)
     imagine_debug_event("liked_collection_listed", {
         "account_id": str(account.get("id") or ""),
         "requested": len(entries),
@@ -21788,6 +21879,7 @@ POST_JSON_ROUTES = {
         search_imagine_media=search_imagine_media,
         load_imagine_remote_link_post=load_imagine_remote_link_post,
         list_imagine_liked=list_imagine_liked,
+        list_imagine_liked_cache=list_imagine_liked_cache,
         list_imagine_uploads=list_imagine_uploads,
         start_imagine_job=start_imagine_job,
         get_imagine_job=get_imagine_job,

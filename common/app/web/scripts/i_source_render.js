@@ -1591,6 +1591,22 @@ async function loadImagineLikedCards({ force = false } = {}) {
   library_state.imagineLikedLoading = true;
   library_state.imagineLikedError = "";
   renderImagineSourceCards();
+  // Every card here costs two round trips to grok.com, so the view stayed empty for seconds
+  // after the button. Paint what was stored last time first, the way the saved list does,
+  // and let the fetch below replace it.
+  try {
+    const cached = await qApi("/api/imagine/liked/cache", { account_id: accountId, limit: 200 });
+    if (imagineAccountResponseIsCurrent(accountId, requestEpoch, cached)) {
+      const cachedPosts = (Array.isArray(cached?.posts) ? cached.posts : []).map(normalizeServerPost);
+      if (cachedPosts.length) {
+        library_state.imagineLikedPosts = cachedPosts;
+        syncImagineRemotePostsIntoLibrary();
+        renderImagineSourceCards();
+      }
+    }
+  } catch (error) {
+    console.warn(error);
+  }
   try {
     const data = await qApi("/api/imagine/liked", { account_id: accountId, limit: 100 });
     if (!imagineAccountResponseIsCurrent(accountId, requestEpoch, data)) return;
