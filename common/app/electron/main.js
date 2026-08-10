@@ -17,12 +17,19 @@ const SERVER_BASE = `http://127.0.0.1:${PORT}`;
 const GROK_USAGE_URL = "https://grok.com/?_s=usage";
 const IMAGINE_BRIDGE_PAGE_TIMEOUT_MS = 10000;
 const IMAGINE_BRIDGE_STORE_TIMEOUT_MS = 20000;
-// A warmed bridge window costs roughly 460MB, so this is a memory budget as much as a
-// cache. Two covers the common habit of alternating between a pair of accounts —
-// switching back is then instant instead of a fresh ~4.4s warm-up. Holding more would
-// rarely pay off for someone rotating through ten accounts, while the memory cost
-// lands on every machine running the build.
-const IMAGINE_BRIDGE_RETAINED_ACCOUNT_WINDOWS = 2;
+// A browser does not evict tabs on a count; it keeps them loaded and reclaims memory
+// when the machine actually needs it back. Retaining two accounts meant anyone rotating
+// through more than two reused a window 0% of the time: measured over 20 switches across
+// 10 accounts, every one took the full grok.com boot (median 5.5s, two outright
+// failures), while a live window answers in ~1ms. Keep every account the budget allows.
+const IMAGINE_BRIDGE_MEMORY_BUDGET_RATIO = 0.6;
+const IMAGINE_BRIDGE_MIN_BUDGET_BYTES = 1024 * 1024 * 1024;
+const IMAGINE_BRIDGE_MIN_FREE_BYTES = 1536 * 1024 * 1024;
+// Only used when app.getAppMetrics() has no reading yet for a window's process.
+const IMAGINE_BRIDGE_ASSUMED_WINDOW_BYTES = 480 * 1024 * 1024;
+const IMAGINE_BRIDGE_MAX_ACCOUNT_WINDOWS = 40;
+const IMAGINE_BRIDGE_NETWORK_BUFFER_BYTES = 50 * 1024 * 1024;
+const IMAGINE_BRIDGE_NETWORK_RESOURCE_BUFFER_BYTES = 10 * 1024 * 1024;
 const IMAGINE_BRIDGE_SCRIPT_TIMEOUT_MS = 3000;
 const IMAGINE_BRIDGE_PREPARE_TIMEOUT_MS = 30000;
 
@@ -1394,6 +1401,97 @@ function supersedeOtherAccountPreparations(command) {
   }
 }
 
+function bridgeWindowIsBusy(win) {
+  return Boolean(win?.__grokPreparePromise) || Number(win?.__grokBusyCount || 0) > 0;
+}
+
+function markBridgeWindowBusy(win, delta) {
+  if (!win || win.isDestroyed()) return;
+  win.__grokBusyCount = Math.max(0, Number(win.__grokBusyCount || 0) + delta);
+}
+
+// Asleep is what a browser does to a background tab: clamp the timers, stop the frame
+// work, drop the buffers nobody is reading — and keep the document and its media store
+// resident, so coming back is a repaint instead of a reload.
+function sleepBridgeWindow(win) {
+  if (!win || win.isDestroyed() || win.__grokAsleep) return;
+  win.__grokAsleep = true;
+  try {
+    win.webContents.setBackgroundThrottling(true);
+  } catch (_) {}
+  disableBridgeNetworkCapture(win);
+  // Do not try to reclaim the renderer's JS heap here. Memory.forciblyPurgeJavaScriptMemory
+  // takes the official media store down with it: the window survives, the store does not,
+  // and waking then spends the full 20s store wait before failing. Measured on 2026-08-10,
+  // 11 accounts collapsed to 1 over 20 switches with every prepare erroring at ~23s.
+}
+
+function wakeBridgeWindow(win) {
+  if (!win || win.isDestroyed()) return;
+  if (win.__grokAsleep) win.__grokWokeFromSleep = true;
+  win.__grokAsleep = false;
+  try {
+    win.webContents.setBackgroundThrottling(false);
+  } catch (_) {}
+  enableBridgeNetworkCapture(win);
+}
+
+function bridgeWindowProcessId(win) {
+  try {
+    return Number(win.webContents.getOSProcessId() || 0);
+  } catch (_) {
+    return 0;
+  }
+}
+
+function bridgeProcessMemoryBytes() {
+  const byPid = new Map();
+  let totalBytes = 0;
+  let rendererBytes = 0;
+  try {
+    for (const metric of app.getAppMetrics()) {
+      const pid = Number(metric?.pid || 0);
+      const kilobytes = Number(metric?.memory?.workingSetSize || 0);
+      if (pid <= 0 || kilobytes <= 0) continue;
+      const bytes = kilobytes * 1024;
+      byPid.set(pid, bytes);
+      totalBytes += bytes;
+      if (String(metric?.type || "") === "Tab") rendererBytes += bytes;
+    }
+  } catch (_) {}
+  return { byPid, totalBytes, rendererBytes };
+}
+
+// A grok.com page is not one process. The main frame renderer is joined by site-isolated
+// subframe renderers, and getAppMetrics() cannot map those back to a window: ten accounts
+// produced 31 renderers. Charging an account only for the frame we can name understated
+// it by about 40%, so measure what the account windows brought in as a whole and divide.
+function bridgeAccountWindowShareBytes(metrics, windowCount) {
+  if (windowCount <= 0) return 0;
+  const excluded = new Set();
+  const addPid = (win) => {
+    if (!win || win.isDestroyed()) return;
+    const pid = bridgeWindowProcessId(win);
+    if (pid > 0) excluded.add(pid);
+  };
+  addPid(mainWindow);
+  for (const win of usageWindows.values()) addPid(win);
+  let othersBytes = 0;
+  for (const pid of excluded) othersBytes += metrics.byPid.get(pid) || 0;
+  const accountBytes = Math.max(0, metrics.rendererBytes - othersBytes);
+  return Math.max(
+    Math.round(IMAGINE_BRIDGE_ASSUMED_WINDOW_BYTES / 2),
+    Math.round(accountBytes / windowCount),
+  );
+}
+
+function bridgeMemoryBudgetBytes() {
+  return Math.max(
+    IMAGINE_BRIDGE_MIN_BUDGET_BYTES,
+    Math.floor(os.totalmem() * IMAGINE_BRIDGE_MEMORY_BUDGET_RATIO),
+  );
+}
+
 function closeInactiveAccountWindows(command) {
   const activeKey = bridgeAccountKey(command);
   const destroy = (map, key, win) => {
@@ -1404,20 +1502,56 @@ function closeInactiveAccountWindows(command) {
       win.destroy();
     } catch (_) {}
   };
-  // Keep the most recently used accounts warm so switching back to one of them
-  // reuses its prepared store. Older accounts are still torn down.
-  const retained = new Set([activeKey]);
-  const candidates = [...bridgeWindows.values()]
-    .filter((win) => win && !win.isDestroyed() && win.__grokAccountKey !== activeKey)
-    .sort((left, right) => Number(right.__grokLastUsedAt || 0) - Number(left.__grokLastUsedAt || 0));
-  for (const win of candidates) {
-    if (retained.size >= IMAGINE_BRIDGE_RETAINED_ACCOUNT_WINDOWS) break;
-    retained.add(win.__grokAccountKey);
+  // The account the user picked wakes up; every other one goes to sleep but stays loaded.
+  for (const win of bridgeWindows.values()) {
+    if (!win || win.isDestroyed()) continue;
+    if (win.__grokAccountKey === activeKey) wakeBridgeWindow(win);
+    else sleepBridgeWindow(win);
   }
-  for (const [key, win] of bridgeWindows.entries()) {
-    if (retained.has(win?.__grokAccountKey)) continue;
+  const liveEntries = () => [...bridgeWindows.entries()].filter(([, win]) => win && !win.isDestroyed());
+  const metrics = bridgeProcessMemoryBytes();
+  const budget = bridgeMemoryBudgetBytes();
+  const entries = liveEntries();
+  const perWindow = bridgeAccountWindowShareBytes(metrics, entries.length);
+  // Budget the whole app, not just the account windows: the ceiling the machine cares
+  // about is what this process tree costs it, and releasing a window is the only lever
+  // available for staying under it.
+  let used = metrics.totalBytes || entries.length * IMAGINE_BRIDGE_ASSUMED_WINDOW_BYTES;
+  let live = entries.length;
+  // Sweeping only what is already there means the window about to be built pushes the
+  // total past the ceiling, and booting grok.com on a machine already at the ceiling is
+  // what produced the two 30s prepare timeouts measured across 13 accounts. Clear room
+  // for the newcomer first when this account has nothing open yet.
+  const headroom = entries.some(([, win]) => win.__grokAccountKey === activeKey) ? 0 : perWindow;
+  // Least recently used first. The active account is never taken, and neither is one
+  // that is mid-generation — a video run can hold its window for three minutes.
+  const candidates = entries
+    .filter(([, win]) => win.__grokAccountKey !== activeKey && !bridgeWindowIsBusy(win))
+    .sort((left, right) => Number(left[1].__grokLastUsedAt || 0) - Number(right[1].__grokLastUsedAt || 0));
+  // A single release per pressure signal, the way a browser unloads one tab at a time,
+  // so an unrelated memory spike elsewhere on the machine cannot clear the whole set.
+  let pressureReleases = os.freemem() < IMAGINE_BRIDGE_MIN_FREE_BYTES ? 1 : 0;
+  let evicted = 0;
+  for (const [key, win] of candidates) {
+    const overBudget = used + headroom > budget;
+    const overCount = live > IMAGINE_BRIDGE_MAX_ACCOUNT_WINDOWS;
+    if (!overBudget && !overCount) {
+      if (pressureReleases <= 0) break;
+      pressureReleases -= 1;
+    }
+    used -= perWindow;
+    live -= 1;
+    evicted += 1;
     destroy(bridgeWindows, key, win);
   }
+  const kept = liveEntries();
+  appendLog(
+    `bridge windows account=${command?.account_id || ""}`
+    + ` kept=${kept.length} asleep=${kept.filter(([, win]) => win.__grokAsleep).length} evicted=${evicted}`
+    + ` usedMB=${Math.round(used / (1024 * 1024))} budgetMB=${Math.round(budget / (1024 * 1024))}`
+    + ` perWindowMB=${Math.round(perWindow / (1024 * 1024))}`
+    + ` freeMB=${Math.round(os.freemem() / (1024 * 1024))}`,
+  );
   // Usage windows are cheap to recreate and are not part of the prepared store, so
   // they keep the previous single-account behaviour.
   for (const [key, win] of usageWindows.entries()) {
@@ -1608,13 +1742,8 @@ function installImagineGenerationNetworkCapture(win) {
     });
   });
   debuggerApi.on("detach", (_event, reason) => {
+    win.__grokNetworkCaptureEnabled = false;
     appendLog(`bridge generation response capture detached reason=${reason || ""}`);
-  });
-  debuggerApi.sendCommand("Network.enable", {
-    maxTotalBufferSize: 50 * 1024 * 1024,
-    maxResourceBufferSize: 10 * 1024 * 1024,
-  }).catch((error) => {
-    appendLog(`bridge generation response capture enable failed error=${error.message || String(error)}`);
   });
   win.once("closed", () => {
     pending.clear();
@@ -1624,11 +1753,43 @@ function installImagineGenerationNetworkCapture(win) {
   });
 }
 
+// The CDP buffer holds every response body the page receives, not only the generation
+// calls the filter above keeps, so on an Imagine page it fills with media and becomes the
+// largest single cost of an account window nobody is looking at. Arm it for the account
+// being used and drop it for the rest; the debugger itself stays attached either way.
+function enableBridgeNetworkCapture(win) {
+  if (!win || win.isDestroyed() || win.__grokNetworkCaptureEnabled) return;
+  const debuggerApi = win.webContents.debugger;
+  if (!debuggerApi.isAttached()) return;
+  win.__grokNetworkCaptureEnabled = true;
+  debuggerApi.sendCommand("Network.enable", {
+    maxTotalBufferSize: IMAGINE_BRIDGE_NETWORK_BUFFER_BYTES,
+    maxResourceBufferSize: IMAGINE_BRIDGE_NETWORK_RESOURCE_BUFFER_BYTES,
+  }).catch((error) => {
+    win.__grokNetworkCaptureEnabled = false;
+    appendLog(`bridge generation response capture enable failed error=${error.message || String(error)}`);
+  });
+}
+
+function disableBridgeNetworkCapture(win) {
+  if (!win || win.isDestroyed() || !win.__grokNetworkCaptureEnabled) return;
+  const debuggerApi = win.webContents.debugger;
+  win.__grokNetworkCaptureEnabled = false;
+  if (!debuggerApi.isAttached()) return;
+  debuggerApi.sendCommand("Network.disable").catch((error) => {
+    appendLog(`bridge generation response capture disable failed error=${error.message || String(error)}`);
+  });
+}
+
 function bridgeWindow(command) {
   const key = bridgeWindowKey(command);
   const existing = bridgeWindows.get(key);
   if (existing && !existing.isDestroyed()) {
     existing.__grokLastUsedAt = Date.now();
+    // Asking for the window is the signal that this account is in use again. Let
+    // wakeBridgeWindow own the from-sleep flag; the budget sweep usually wakes the
+    // active account before this runs, and assigning here would erase what it recorded.
+    wakeBridgeWindow(existing);
     return existing;
   }
   const bounds = centeredWindowBounds();
@@ -1657,7 +1818,11 @@ function bridgeWindow(command) {
   win.__grokPrepareGeneration = 0;
   win.__grokDomReadyUrl = "";
   win.__grokLastUsedAt = Date.now();
+  win.__grokAsleep = false;
+  win.__grokBusyCount = 0;
+  win.__grokNetworkCaptureEnabled = false;
   installImagineGenerationNetworkCapture(win);
+  wakeBridgeWindow(win);
   win.webContents.on("did-start-navigation", (_event, _url, isInPlace, isMainFrame) => {
     if (!isMainFrame || isInPlace) return;
     win.__grokDomReadyUrl = "";
@@ -2092,6 +2257,12 @@ async function prepareBridgeWindow(win, command, prepareGeneration = 0) {
     : (command.url || "https://grok.com/imagine");
   const cookiesChanged = await applyBridgeCookies(win, command);
   const currentUrl = win.webContents.getURL() || "";
+  // force_refresh and a cookie rotation both defeat the reuse shortcut below, so
+  // "initial" on its own does not tell us whether the page was actually rebuilt.
+  // Record what the window was really holding before we touch it.
+  const pageWasLoaded = grokUrlMatches(win.__grokDomReadyUrl || "", targetUrl);
+  const wasAsleep = Boolean(win.__grokWokeFromSleep);
+  win.__grokWokeFromSleep = false;
   // A window that is still open with a live media store stays usable however long it has
   // been there, the same way a browser tab does. Ageing it out on a clock only made the
   // next call take the "initial" path and log a fresh preparation while reusing the very
@@ -2107,7 +2278,11 @@ async function prepareBridgeWindow(win, command, prepareGeneration = 0) {
     const context = await bridgeMediaStatus(win);
     if (context?.hasMediaStore) {
       if (command.type === "prepare") {
-        appendLog(`bridge prepared account=${command?.account_id || ""} mode=reused elapsed_ms=${Date.now() - prepareStartedAt}`);
+        appendLog(
+          `bridge prepared account=${command?.account_id || ""} mode=reused`
+          + ` asleep_before=${wasAsleep ? "yes" : "no"}`
+          + ` elapsed_ms=${Date.now() - prepareStartedAt}`,
+        );
       }
       return win;
     }
@@ -2144,6 +2319,8 @@ async function prepareBridgeWindow(win, command, prepareGeneration = 0) {
       const status = context?.status || {};
       appendLog(
         `bridge prepared account=${command?.account_id || ""} mode=initial`
+        + ` reloaded=${pageWasLoaded ? "no" : "yes"}`
+        + ` asleep_before=${wasAsleep ? "yes" : "no"}`
         + ` elapsed_ms=${Date.now() - prepareStartedAt}`
         + ` runtimes=${Number(status?.turbopackRuntimeCount || 0)}`
         + ` modules=${Array.isArray(status?.turbopackModuleCounts) ? status.turbopackModuleCounts.join(",") : ""}`,
@@ -2325,6 +2502,9 @@ async function handleBridgeCommand(command) {
       closeInactiveAccountWindows(command);
     }
     win = await ensureBridgeReady(command);
+    // Held for the whole command so the budget sweep cannot evict a window that is
+    // still streaming a generation.
+    markBridgeWindowBusy(win, 1);
     if (command.type === "prepare") {
       await sendBridgeResult(id, true, { ok: true, status: "ready" });
     } else if (command.type === "fetch_stream") {
@@ -2342,6 +2522,7 @@ async function handleBridgeCommand(command) {
   } catch (error) {
     await sendBridgeResult(id, false, {}, error.message || String(error));
   } finally {
+    markBridgeWindowBusy(win, -1);
     if (bridgeCommandUsesEphemeralWindow(command) && win && !win.isDestroyed()) {
       win.close();
     }

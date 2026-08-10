@@ -274,6 +274,24 @@ function dotCssOverlayHtml(extraClass = "") {
   </span>`;
 }
 
+// Everything a thumbnail's contents depend on. Anything not in here is state a reused node
+// can be re-dressed with, so it decides whether the node survives a re-render.
+function detailThumbSignature(prefix, item, post) {
+  const type = item.type || mediaTypeForName(item.file || item.url) || "image";
+  const moderated = typeof mediaItemIsModerated === "function" && mediaItemIsModerated(item);
+  const previewUrl = moderated ? "" : detailPreviewUrlForItem(prefix, { ...item, type }, post);
+  const videoUrl = !moderated && type === "video"
+    ? detailVideoPreviewUrlForItem(prefix, { ...item, type }, post)
+    : "";
+  return JSON.stringify([type, moderated, previewUrl, videoUrl]);
+}
+
+function applyDetailThumbState(button, type, options = {}) {
+  button.classList.toggle("active", Boolean(options.active));
+  button.classList.toggle("source_pick_candidate", Boolean(options.sourcePickActive) && type === "image");
+  button.classList.toggle("split_pick_candidate", Boolean(options.splitPickActive));
+}
+
 function detailThumbButtonForItem(prefix, item, post, options = {}) {
   const key = mediaItemKey(item);
   const type = item.type || mediaTypeForName(item.file || item.url) || "image";
@@ -284,13 +302,8 @@ function detailThumbButtonForItem(prefix, item, post, options = {}) {
   button.type = "button";
   button.dataset.libraryItemId = key;
   button.dataset.libraryItemType = type;
-  const recoveredStartFrame = typeof isImagineRecoveredStartFrame === "function"
-    && isImagineRecoveredStartFrame(item);
-  const thumbLabel = recoveredStartFrame
-    ? "Recovered start frame"
-    : `${type === "video" ? "Video" : "Image"} version`;
-  button.setAttribute("aria-label", thumbLabel);
-  if (recoveredStartFrame) button.title = thumbLabel;
+  button.dataset.thumbSignature = detailThumbSignature(prefix, item, post);
+  button.setAttribute("aria-label", `${type === "video" ? "Video" : "Image"} version`);
 
   const fill = document.createElement("span");
   fill.className = `${prefix}_detail_thumb_fill`;
@@ -464,9 +477,6 @@ function renderDetailView(prefix, post) {
     return;
   }
   if (!post?.items?.length) return;
-  if ((prefix === "i" || prefix === "b") && typeof attachCachedImagineRecoveredStartFrames === "function") {
-    attachCachedImagineRecoveredStartFrames(post);
-  }
   const selectedItem = selectedDetailItem(post);
   if (prefix === "i") syncImagineDetailHeartState(post, selectedItem);
   if (prefix === "b") syncBuildDetailHeartState(post);
@@ -477,19 +487,45 @@ function renderDetailView(prefix, post) {
   thumbList.classList.toggle("source_pick_active", sourcePickActive);
   thumbList.classList.toggle("split_pick_active", splitPickActive);
   let selectedThumb = null;
+  // Selecting a thumbnail re-renders the whole strip. Rebuilding it threw every node away,
+  // and disposing a node cancels its queued preview, so each click restarted work that had
+  // already been done or was halfway there. Keep the nodes whose contents did not change
+  // and only re-dress them; a thumbnail resolved once now stays resolved.
+  const previousThumbs = new Map();
   for (const oldThumb of Array.from(thumbList.children)) {
-    if (typeof disposeCardPreviewNode === "function") disposeCardPreviewNode(oldThumb);
+    const oldKey = String(oldThumb?.dataset?.libraryItemId || "");
+    if (oldKey && !previousThumbs.has(oldKey)) previousThumbs.set(oldKey, oldThumb);
   }
-  thumbList.replaceChildren(...detailItems.map((item) => {
+  const reusedThumbs = new Set();
+  const thumbs = detailItems.map((item) => {
     const key = mediaItemKey(item);
+    const active = key === selectedKey;
+    const existing = previousThumbs.get(key);
+    const type = existing?.dataset?.libraryItemType || "";
+    if (existing && existing.dataset.thumbSignature === detailThumbSignature(prefix, item, post)) {
+      reusedThumbs.add(existing);
+      applyDetailThumbState(existing, type, { active, sourcePickActive, splitPickActive });
+      if (active) selectedThumb = existing;
+      return existing;
+    }
     const button = detailThumbButtonForItem(prefix, item, post, {
-      active: key === selectedKey,
+      active,
       sourcePickActive,
       splitPickActive,
     });
-    if (key === selectedKey) selectedThumb = button;
+    if (active) selectedThumb = button;
     return button;
-  }));
+  });
+  for (const oldThumb of previousThumbs.values()) {
+    if (reusedThumbs.has(oldThumb)) continue;
+    if (typeof disposeCardPreviewNode === "function") disposeCardPreviewNode(oldThumb);
+  }
+  // replaceChildren detaches and re-attaches even identical children, and an in-flight
+  // preview that resolves during that gap sees isConnected === false and drops its result.
+  const currentThumbs = Array.from(thumbList.children);
+  const orderUnchanged = currentThumbs.length === thumbs.length
+    && currentThumbs.every((node, index) => node === thumbs[index]);
+  if (!orderUnchanged) thumbList.replaceChildren(...thumbs);
   if (selectedThumb) {
     requestAnimationFrame(() => {
       syncDetailThumbListOverflow(thumbList);
@@ -503,11 +539,6 @@ function renderDetailView(prefix, post) {
   }
 
   const type = detailItemType(selectedItem);
-  const recoveredStartFrame = typeof isImagineRecoveredStartFrame === "function"
-    && isImagineRecoveredStartFrame(selectedItem);
-  if ((prefix === "i" || prefix === "b") && type === "video" && typeof scheduleImagineRecoveredStartFrame === "function") {
-    scheduleImagineRecoveredStartFrame(post, selectedItem);
-  }
   if (prefix === "i") syncImagineDetailToolButtons(type, selectedItem, post);
   if (prefix === "i") renderImagineDetailAspectMenu(selectedItem);
   const renderItem = detailRenderableItem(prefix, selectedItem, post);
@@ -556,9 +587,7 @@ function renderDetailView(prefix, post) {
     providerBadge.classList.toggle(`${prefix}_detail_provider_video`, type === "video");
     providerBadge.classList.toggle(`${prefix}_detail_provider_image`, type !== "video");
     const icon = document.createElement("img");
-    icon.src = recoveredStartFrame && typeof imagineRecoveredStartFrameIconUrl === "function"
-      ? imagineRecoveredStartFrameIconUrl()
-      : `./assets/icons/${type === "video" ? "video" : "image"}.svg`;
+    icon.src = `./assets/icons/${type === "video" ? "video" : "image"}.svg`;
     icon.alt = "";
     providerBadge.replaceChildren(icon);
   }

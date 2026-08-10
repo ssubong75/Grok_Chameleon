@@ -46,26 +46,9 @@ async function setDetailSourceImage(sourceItem) {
     return;
   }
   const sourceKey = mediaItemKey(sourceItem);
-  const recoveredStartFrame = typeof isImagineRecoveredStartFrame === "function"
-    && isImagineRecoveredStartFrame(sourceItem);
-  const recoveredSourceItem = recoveredStartFrame ? {
-    item_id: sourceKey,
-    type: "image",
-    mime_type: sourceItem.mime_type || "image/png",
-    role: "source",
-    relation: "recovered_start_frame",
-    recovered_start_frame: true,
-    recovered_from_item_id: typeof imagineRecoveredStartFrameSourceKey === "function"
-      ? imagineRecoveredStartFrameSourceKey(sourceItem)
-      : String(sourceItem.recovered_from_item_id || ""),
-    data_url: String(sourceItem.data_url || ""),
-    width: Number(sourceItem.width || 0),
-    height: Number(sourceItem.height || 0),
-  } : null;
   const data = await qApi("/api/library/set-source", {
     post_path: post.folder_path,
     source_item_key: sourceKey,
-    ...(recoveredSourceItem ? { source_item: recoveredSourceItem } : {}),
   });
   library_state.sourcePickPending = false;
   library_state.splitPickPending = false;
@@ -154,21 +137,10 @@ async function deleteBuildSelectedDetailItemFromLibrary() {
   const currentDetailType = detailTypeForScreen() || detailTypeForPost(post, "build");
   const backTarget = detailBackTarget(currentDetailType);
   try {
-    const recoveredStartFrame = Boolean(
-      typeof isImagineRecoveredStartFrame === "function"
-      && isImagineRecoveredStartFrame(item)
-    );
     const data = await qApi("/api/library/delete-item", {
       post_path: post.folder_path,
       item_key: mediaItemKey(item),
-      recovered_start_frame: recoveredStartFrame,
-      recovered_from_item_id: recoveredStartFrame && typeof imagineRecoveredStartFrameSourceKey === "function"
-        ? imagineRecoveredStartFrameSourceKey(item)
-        : "",
     });
-    if (recoveredStartFrame && typeof discardImagineRecoveredStartFrame === "function") {
-      discardImagineRecoveredStartFrame(post, item);
-    }
     const hasRemainingPost = Boolean(data?.selected_path);
     applyLibrarySnapshot(data);
     if (hasRemainingPost) {

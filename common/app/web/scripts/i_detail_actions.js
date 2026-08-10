@@ -881,31 +881,6 @@ function imagineConversationDeletePayloadForPost(post) {
   };
 }
 
-function imagineDeleteItemIsRecoveredStartFrame(item) {
-  return Boolean(
-    typeof isImagineRecoveredStartFrame === "function"
-    && isImagineRecoveredStartFrame(item)
-  );
-}
-
-function imagineRecoveredDeleteCompanions(post, item) {
-  if (!post || !item || imagineDeleteItemIsRecoveredStartFrame(item)) return [];
-  const sourceKey = String(mediaItemKey(item) || "");
-  if (!sourceKey) return [];
-  return (post.items || []).filter((candidate) => (
-    imagineDeleteItemIsRecoveredStartFrame(candidate)
-    && typeof imagineRecoveredStartFrameSourceKey === "function"
-    && imagineRecoveredStartFrameSourceKey(candidate) === sourceKey
-  ));
-}
-
-function discardImagineRecoveredDeleteItems(post, items) {
-  if (typeof discardImagineRecoveredStartFrame !== "function") return;
-  for (const item of items || []) {
-    if (imagineDeleteItemIsRecoveredStartFrame(item)) discardImagineRecoveredStartFrame(post, item);
-  }
-}
-
 async function deleteImagineRemoteItem(post, item) {
   const deletePayload = imagineDeletePayloadForItem(post, item);
   if (!deletePayload) {
@@ -967,7 +942,6 @@ async function deleteImagineCardAssets(post, items) {
 async function deleteImagineLinkCardBundle(post, items) {
   const bundleItems = (items || []).filter(Boolean);
   const requestItems = bundleItems
-    .filter((item) => !imagineDeleteItemIsRecoveredStartFrame(item))
     .map(imagineLikeTargetForItem)
     .filter((target) => target.id);
   if (!requestItems.length) {
@@ -984,7 +958,6 @@ async function deleteImagineLinkCardBundle(post, items) {
     post_id: linkPostId,
     items: requestItems,
   });
-  discardImagineRecoveredDeleteItems(post, bundleItems);
   return {
     deletedItems: bundleItems,
     failures: [],
@@ -996,10 +969,7 @@ async function deleteImagineLinkCardBundle(post, items) {
 async function deleteImagineRemoteCard(post) {
   const items = (post?.items || []).filter(Boolean);
   if (
-    items.some((item) => (
-      !imagineDeleteItemIsRecoveredStartFrame(item)
-      && imagineDeletePayloadForItem(post, item)
-    ))
+    items.some((item) => imagineDeletePayloadForItem(post, item))
     && typeof invalidateImagineSavedRequestsForDelete === "function"
   ) {
     invalidateImagineSavedRequestsForDelete();
@@ -1053,13 +1023,10 @@ async function deleteImagineSelectedDetailItem() {
     confirmLabel: "Delete",
   });
   if (!ok) return;
-  if (
-    !imagineDeleteItemIsRecoveredStartFrame(item)
-    && typeof invalidateImagineSavedRequestsForDelete === "function"
-  ) {
+  if (typeof invalidateImagineSavedRequestsForDelete === "function") {
     invalidateImagineSavedRequestsForDelete();
   }
-  const localDeleteItems = [item, ...imagineRecoveredDeleteCompanions(post, item)];
+  const localDeleteItems = [item];
   const deleteButton = document.querySelector(".i_detail_delete");
   const deleteButtonWasDisabled = Boolean(deleteButton?.disabled);
   if (deleteButton) deleteButton.disabled = true;
@@ -1073,7 +1040,6 @@ async function deleteImagineSelectedDetailItem() {
   };
   try {
     const result = await deleteImagineRemoteItem(post, item);
-    discardImagineRecoveredDeleteItems(post, localDeleteItems);
     toast("Deleted Imagine item.");
   } catch (error) {
     restoreImaginePostRemovalSnapshot(removalSnapshot, optimisticState);
@@ -1157,9 +1123,7 @@ async function likeImagineCardPost(post) {
   const payload = { account_id: iDetailAccountId(representative, post) };
   const selectedItems = t2iPost ? [representative] : (post.items || []);
   const localItems = linkSource ? imagineLinkBundleItems(post, selectedItems) : selectedItems;
-  const registrationItems = linkSource
-    ? localItems.filter((item) => !imagineDeleteItemIsRecoveredStartFrame(item))
-    : selectedItems;
+  const registrationItems = linkSource ? localItems : selectedItems;
   payload.items = registrationItems
     .map(imagineLikeTargetForItem)
     .filter((target) => target.id);
@@ -1303,9 +1267,7 @@ async function likeImagineSelectedDetailPost() {
   const localItems = linkSource ? imagineLinkBundleItems(post, [item]) : [item];
   const registrationItem = linkSource ? imagineLinkRegistrationItem(post, item) : item;
   const payload = { account_id: post.account_id || iDetailAccountId(registrationItem, post) };
-  const registrationItems = linkSource
-    ? localItems.filter((candidate) => !imagineDeleteItemIsRecoveredStartFrame(candidate))
-    : [registrationItem];
+  const registrationItems = linkSource ? localItems : [registrationItem];
   payload.items = registrationItems
     .map(imagineLikeTargetForItem)
     .filter((target) => target.id);

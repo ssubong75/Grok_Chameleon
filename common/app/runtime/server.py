@@ -17440,9 +17440,6 @@ def serializable_media_item(item: dict) -> dict:
         "editor_save_target",
         "lucky",
         "lucky_reason",
-        "recovered_start_frame",
-        "recovered_from_item_id",
-        "recovered_start_frame_disabled",
     ):
         if item.get(key):
             data[key] = item.get(key)
@@ -20435,33 +20432,6 @@ def delete_library_item(payload: dict) -> dict:
     if not post:
         raise RuntimeError("Selected post was not found.")
     selected_item = next((item for item in post.get("items", []) if media_item_key(item) == item_key), None)
-    recovered_source_key = str(payload.get("recovered_from_item_id") or "").strip()
-    recovered_delete = bool(payload.get("recovered_start_frame") and recovered_source_key)
-    if not selected_item and recovered_delete:
-        source_item_found = False
-        updated_items = []
-        for item in post.get("items", []):
-            updated_item = dict(item)
-            if media_item_key(item) == recovered_source_key:
-                updated_item["recovered_start_frame_disabled"] = True
-                source_item_found = True
-            updated_items.append(updated_item)
-        if not source_item_found:
-            raise RuntimeError("Recovered start frame source was not found.")
-        post_dir = assert_deletable_library_path(root, post.get("folder_path") or "")
-        if not post_dir.is_dir():
-            raise RuntimeError("Selected post folder was not found.")
-        post_json = post_json_from_post(
-            post,
-            items=updated_items,
-            representative=representative_for_remaining_items(updated_items),
-        )
-        write_json(post_dir / "post.json", post_json)
-        refresh_library_index_paths(root, [post.get("folder_path") or ""])
-        data = current_library_snapshot(root)
-        data["selected_path"] = post.get("folder_path") or ""
-        data["selected_item_id"] = recovered_source_key
-        return data
     if not selected_item:
         raise RuntimeError("Selected media item was not found.")
     post_dir = assert_deletable_library_path(root, post.get("folder_path") or "")
@@ -20480,21 +20450,6 @@ def delete_library_item(payload: dict) -> dict:
         for item in post.get("items", [])
         if media_item_key(item) != item_key
     ]
-    if selected_item.get("recovered_start_frame"):
-        recovered_source_key = str(
-            selected_item.get("recovered_from_item_id")
-            or selected_item.get("source_item_id")
-            or recovered_source_key
-            or ""
-        ).strip()
-        if recovered_source_key:
-            remaining_items = [
-                {
-                    **item,
-                    **({"recovered_start_frame_disabled": True} if media_item_key(item) == recovered_source_key else {}),
-                }
-                for item in remaining_items
-            ]
     if not remaining_items:
         remove_build_previews_for_items(root, post_dir, post.get("items") or [])
         move_path_to_trash(post_dir)
@@ -20524,81 +20479,6 @@ def delete_library_item(payload: dict) -> dict:
     return data
 
 
-def materialize_recovered_start_frame_source(
-    post: dict,
-    post_dir: Path,
-    source_key: str,
-    payload: dict,
-) -> tuple[dict | None, Path | None]:
-    payload_item = payload.get("source_item") if isinstance(payload.get("source_item"), dict) else {}
-    if not payload_item.get("recovered_start_frame"):
-        return None, None
-    if media_item_key(payload_item) != source_key:
-        raise RuntimeError("Recovered source image identity did not match.")
-
-    recovered_from_key = str(payload_item.get("recovered_from_item_id") or "").strip()
-    source_video = next((
-        item for item in post.get("items") or []
-        if media_item_key(item) == recovered_from_key
-    ), None)
-    if not source_video or str(source_video.get("type") or "").lower() != "video":
-        raise RuntimeError("Recovered source video was not found.")
-    if source_video.get("recovered_start_frame_disabled"):
-        raise RuntimeError("Recovered source image was deleted.")
-
-    existing = next((
-        item for item in post.get("items") or []
-        if item.get("recovered_start_frame")
-        and str(item.get("recovered_from_item_id") or "") == recovered_from_key
-    ), None)
-    if existing:
-        return existing, None
-
-    data_url = str(payload_item.get("data_url") or "").strip()
-    mime_type = data_url_mime_type(data_url)
-    if mime_type not in {"image/png", "image/jpeg", "image/webp"}:
-        raise RuntimeError("Recovered source image must be PNG, JPEG, or WebP.")
-    raw = decode_data_url(data_url)
-    if not raw:
-        raise RuntimeError("Recovered source image is empty.")
-    if len(raw) > 32 * 1024 * 1024:
-        raise RuntimeError("Recovered source image is too large.")
-
-    extension = extension_from_mime_type(mime_type, "png")
-    video_stem = file_stem(str(source_video.get("file") or "video")) or "video"
-    file_name = unique_file_name(post_dir, f"{video_stem}-recovered-start-frame", extension)
-    target_path = post_dir / file_name
-    temp_path = post_dir / f".{file_name}.{uuid.uuid4().hex}.tmp"
-    try:
-        temp_path.write_bytes(raw)
-        valid, _ = media_container_validation(temp_path, "image")
-        if not valid:
-            raise RuntimeError("Recovered source image data is incomplete.")
-        os.replace(temp_path, target_path)
-    finally:
-        try:
-            temp_path.unlink()
-        except FileNotFoundError:
-            pass
-
-    item = serializable_media_item({
-        "item_id": source_key,
-        "type": "image",
-        "file": file_name,
-        "mime_type": mime_type,
-        "role": "source",
-        "relation": "recovered_start_frame",
-        "recovered_start_frame": True,
-        "recovered_from_item_id": recovered_from_key,
-        "created_at": source_video.get("created_at") or post.get("created_at") or now_iso(),
-        "prompt": source_video.get("prompt") or post.get("prompt") or "",
-        "width": safe_int(payload_item.get("width"), 0),
-        "height": safe_int(payload_item.get("height"), 0),
-        "size": len(raw),
-    })
-    return item, target_path
-
-
 def set_post_source_item(payload: dict) -> dict:
     root = library_root()
     if not root:
@@ -20616,15 +20496,6 @@ def set_post_source_item(payload: dict) -> dict:
     post_items = [item for item in post.get("items") or [] if isinstance(item, dict)]
     source_item = next((item for item in post_items if media_item_key(item) == source_key), None)
     materialized_path = None
-    if not source_item:
-        source_item, materialized_path = materialize_recovered_start_frame_source(
-            post,
-            post_dir,
-            source_key,
-            payload,
-        )
-        if source_item:
-            post_items.append(source_item)
     if not source_item:
         raise RuntimeError("Select an image thumbnail to use as source.")
     source_type = source_item.get("type") or media_type_for_name(source_item.get("file") or source_item.get("url") or "")
@@ -21066,98 +20937,6 @@ def representative_for_merged_items(items: list[dict]) -> str:
     return selected.get("file") or selected.get("url") or media_item_key(selected)
 
 
-def post_uses_imagine_recovered_start_frames(post: dict) -> bool:
-    items = [item for item in post.get("items") or [] if isinstance(item, dict)]
-    if not items or any(str(item.get("type") or "").lower() == "image" for item in items):
-        return False
-    if not any(str(item.get("type") or "").lower() == "video" for item in items):
-        return False
-    if str(post.get("source") or "").strip().lower() == "imagine":
-        return True
-    folder_name = Path(str(post.get("folder_path") or "").strip("/")).name
-    account_id = str(post.get("account_id") or "").strip().lower()
-    return bool(
-        str(post.get("source") or "").strip().lower() == "build"
-        and account_id.startswith("imagine_")
-        and re.fullmatch(r"merged-item(?:-\d+)?", folder_name, flags=re.IGNORECASE)
-    )
-
-
-def recovered_start_frame_preview_path(root: Path, source_dir: Path, video_item: dict) -> Path | None:
-    for key in ("thumbnail", "poster"):
-        file_name = str(video_item.get(key) or "").strip()
-        if file_name and Path(file_name).name == file_name:
-            candidate = source_dir / file_name
-            if candidate.is_file():
-                return candidate
-    video_name = str(video_item.get("file") or "").strip()
-    if not video_name or Path(video_name).name != video_name:
-        return None
-    video_path = source_dir / video_name
-    if not video_path.is_file():
-        return None
-    try:
-        preview_key = preview_key_for_source(root, video_path)
-    except (OSError, ValueError):
-        return None
-    for kind in ("thumbnail", "card"):
-        candidate = build_preview_path(kind, preview_key, root)
-        if candidate and candidate.is_file():
-            return candidate
-    return None
-
-
-def copy_imagine_recovered_start_frames_for_merge(
-    root: Path,
-    post: dict,
-    source_dir: Path,
-    target_dir: Path,
-    seen_keys: set[tuple[str, str]],
-) -> list[dict]:
-    if not post_uses_imagine_recovered_start_frames(post):
-        return []
-    recovered_items = []
-    for video_item in post.get("items") or []:
-        if not isinstance(video_item, dict) or str(video_item.get("type") or "").lower() != "video":
-            continue
-        if video_item.get("recovered_start_frame_disabled"):
-            continue
-        source_key = media_item_key(video_item)
-        if not source_key:
-            continue
-        item_id = f"recovered-start-frame-{source_key}"
-        candidate_item = {
-            "item_id": item_id,
-            "type": "image",
-            "file": "",
-            "mime_type": "image/jpeg",
-            "role": "source",
-            "relation": "recovered_start_frame",
-            "source_item_id": source_key,
-            "recovered_start_frame": True,
-            "recovered_from_item_id": source_key,
-        }
-        candidate_keys = media_item_merge_keys(post, candidate_item)
-        if candidate_keys and seen_keys.intersection(candidate_keys):
-            continue
-        preview_path = recovered_start_frame_preview_path(root, source_dir, video_item)
-        if not preview_path:
-            continue
-        video_stem = file_stem(str(video_item.get("file") or "video")) or "video"
-        target_path = unique_path(target_dir / f"{video_stem}-recovered-start-frame.jpg")
-        shutil.copy2(preview_path, target_path)
-        recovered_item = serializable_media_item({
-            **candidate_item,
-            "file": target_path.name,
-            "created_at": video_item.get("created_at") or post.get("created_at") or "",
-            "prompt": video_item.get("prompt") or post.get("prompt") or "",
-        })
-        recovered_items.append(recovered_item)
-        seen_keys.update(candidate_keys)
-        seen_keys.update(media_item_merge_keys({"folder_path": target_dir.name}, recovered_item))
-    return recovered_items
-
-
 def merge_target_parent(root: Path, payload: dict) -> tuple[Path, str | None]:
     target_path = str(payload.get("target_path") or "created").strip("/")
     if target_path == "created":
@@ -21231,13 +21010,6 @@ def merge_selected_posts(payload: dict) -> dict:
                 merged_items.append(copied_item)
                 seen_keys.update(item_keys)
                 seen_keys.update(media_item_merge_keys({"folder_path": target_name}, copied_item))
-            merged_items.extend(copy_imagine_recovered_start_frames_for_merge(
-                root,
-                post,
-                source_dir,
-                temp_dir,
-                seen_keys,
-            ))
         if not merged_items:
             raise RuntimeError("Selected cards have no media to merge.")
 
