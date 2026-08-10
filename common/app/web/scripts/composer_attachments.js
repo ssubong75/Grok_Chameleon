@@ -576,44 +576,37 @@
       const metadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
       const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
       const postMetadata = post?.metadata && typeof post.metadata === "object" ? post.metadata : {};
-      const recoveredStartFrame = Boolean(
-        item?.recovered_start_frame
-        || metadata.recovered_start_frame
-        || imagine.recovered_start_frame
-      );
-      const conversationId = recoveredStartFrame ? "" : (item?.conversation_id
+      const conversationId = item?.conversation_id
         || metadata.conversation_id
         || imagine.conversation_id
         || postMetadata.conversation_id
-        || "");
-      const responseId = recoveredStartFrame ? "" : (item?.response_id
+        || "";
+      const responseId = item?.response_id
         || metadata.response_id
         || imagine.response_id
-        || "");
-      const officialUploadSource = !recoveredStartFrame && Boolean(
+        || "";
+      const officialUploadSource = Boolean(
         item?.official_upload_source
         || metadata.official_upload_source
         || imagine.official_upload_source
         || String(item?.relation || metadata.relation || imagine.relation || "").toLowerCase() === "upload"
       );
-      const uploadOriginBundle = !recoveredStartFrame && postMetadata.upload_origin_bundle === true;
-      const externalReference = !recoveredStartFrame && composerExternalReferenceMarker(item);
-      const freshSourceRequired = !recoveredStartFrame && composerRequiresFreshImagineSource(post, item);
+      const uploadOriginBundle = postMetadata.upload_origin_bundle === true;
+      const externalReference = composerExternalReferenceMarker(item);
+      const freshSourceRequired = composerRequiresFreshImagineSource(post, item);
       return {
         detail_post_id: post?.post_id || "",
-        detail_root_post_id: recoveredStartFrame
-          ? ""
-          : (post?.metadata?.imagine_root_post_id || post?.metadata?.raw_root_post_id || ""),
+        detail_root_post_id: post?.metadata?.imagine_root_post_id || post?.metadata?.raw_root_post_id || "",
         item_id: item?.item_id || "",
         raw_url: composerRawMediaUrlForItem(item),
         remote_url: item?.remote_url || metadata.remote_url || "",
-        post_id: recoveredStartFrame ? "" : (item?.post_id || metadata.post_id || imagine.post_id || item?.item_id || ""),
-        root_post_id: recoveredStartFrame ? "" : (item?.root_post_id || metadata.root_post_id || imagine.root_post_id || post?.post_id || ""),
-        original_post_id: recoveredStartFrame ? "" : (item?.original_post_id || metadata.original_post_id || imagine.original_post_id || ""),
-        parent_post_id: recoveredStartFrame ? "" : (item?.parent_post_id || metadata.parent_post_id || imagine.parent_post_id || ""),
-        source_item_id: recoveredStartFrame ? "" : (item?.source_item_id || metadata.source_item_id || imagine.source_item_id || ""),
-        original_ref_type: recoveredStartFrame ? "" : (item?.original_ref_type || metadata.original_ref_type || imagine.original_ref_type || ""),
-        asset_id: recoveredStartFrame ? "" : (item?.asset_id || metadata.asset_id || imagine.asset_id || ""),
+        post_id: item?.post_id || metadata.post_id || imagine.post_id || item?.item_id || "",
+        root_post_id: item?.root_post_id || metadata.root_post_id || imagine.root_post_id || post?.post_id || "",
+        original_post_id: item?.original_post_id || metadata.original_post_id || imagine.original_post_id || "",
+        parent_post_id: item?.parent_post_id || metadata.parent_post_id || imagine.parent_post_id || "",
+        source_item_id: item?.source_item_id || metadata.source_item_id || imagine.source_item_id || "",
+        original_ref_type: item?.original_ref_type || metadata.original_ref_type || imagine.original_ref_type || "",
+        asset_id: item?.asset_id || metadata.asset_id || imagine.asset_id || "",
         conversation_id: conversationId,
         response_id: responseId,
         parent_response_id: responseId,
@@ -621,8 +614,7 @@
         upload_origin_bundle: uploadOriginBundle,
         external_reference: externalReference,
         fresh_source_required: freshSourceRequired,
-        source_is_t2i: recoveredStartFrame ? false : composerSourceIsT2i(post, item),
-        recovered_start_frame: recoveredStartFrame,
+        source_is_t2i: composerSourceIsT2i(post, item),
         account_id: item?.account_id || metadata.account_id || imagine.account_id || post?.account_id || "",
         account_email: item?.account_email || metadata.account_email || imagine.account_email || post?.account_email || "",
       };
@@ -653,19 +645,7 @@
         if (matched) return matched;
       }
       const ordered = detailOrderedItems(post);
-      const realSource = ordered.find((item) => (
-        isExplicitDetailSourceImage(item)
-        && !(typeof isImagineRecoveredStartFrame === "function" && isImagineRecoveredStartFrame(item))
-      ));
-      if (realSource) return realSource;
-      const selectedKey = String(mediaItemKey(selected) || "").trim();
-      const recoveredMatch = ordered.find((item) => (
-        typeof isImagineRecoveredStartFrame === "function"
-        && isImagineRecoveredStartFrame(item)
-        && typeof imagineRecoveredStartFrameSourceKey === "function"
-        && imagineRecoveredStartFrameSourceKey(item) === selectedKey
-      ));
-      return recoveredMatch || ordered.find(isExplicitDetailSourceImage) || null;
+      return ordered.find(isExplicitDetailSourceImage) || null;
     }
 
     function detailVideoForComposer(post, selectedOverride = undefined) {

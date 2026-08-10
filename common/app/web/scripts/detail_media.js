@@ -12,318 +12,29 @@ const localCardPreviewObserver = typeof IntersectionObserver === "function"
   : null;
 const missingImagineCardPreviewChecks = new Map();
 const persistentCardPreviewLookupCache = new Map();
-const imagineRecoveredStartFrameTasks = new Map();
-const imagineRecoveredStartFrameItems = new Map();
-const imagineRecoveredStartFrameRefreshes = new Set();
 const cardPreviewDisposers = new WeakMap();
 const CARD_PREVIEW_NATIVE_MAX_ACTIVE = 4;
 const CARD_PREVIEW_LIST_MAX_ACTIVE = 2;
+// Queue order alone could not get the opened detail served first. Sorting only reorders
+// what is still waiting, and a started task keeps its slot until the native call returns —
+// cancelling it does nothing (see the cancel() in queueCardPreviewWork). So a thumbnail the
+// user just opened sat behind up to four card previews that were already generating.
+// Detail work gets its own slots instead of competing for those four.
+const CARD_PREVIEW_DETAIL_MAX_ACTIVE = 2;
+const DETAIL_THUMB_SELECTOR = ".i_detail_thumb, .b_detail_thumb";
 const nativeCardPreviewQueue = [];
 let activeNativeCardPreviewTasks = 0;
+let activeDetailCardPreviewTasks = 0;
 const activeListCardPreviewTasks = new Map();
 let nativeCardPreviewPumpScheduled = false;
-const imagineRecoveredStartFrameIconDataUrl = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`
-  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-    <rect x="3.5" y="4.5" width="17" height="15" rx="2.5" stroke="#fff" stroke-width="2"/>
-    <path d="M8 4.5V19.5M16 4.5V19.5M3.5 9H8M3.5 15H8M16 9H20.5M16 15H20.5" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
-  </svg>
-`)}`;
 let detailLastMediaAspect = "";
 let detailImageFullscreenListenerBound = false;
 
-function imagineRecoveredStartFrameIconUrl() {
-  return imagineRecoveredStartFrameIconDataUrl;
-}
-
-function imagineRecoveredStartFrameMetadata(item) {
-  const metadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
-  const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
-  return {
-    metadata,
-    imagine,
-    recovered: Boolean(
-      item?.recovered_start_frame
-      || metadata.recovered_start_frame
-      || imagine.recovered_start_frame
-    ),
-  };
-}
-
-function isImagineRecoveredStartFrame(item) {
-  return imagineRecoveredStartFrameMetadata(item).recovered;
-}
-
-function imagineRecoveredStartFrameDisabled(item) {
-  const metadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
-  const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
-  return Boolean(
-    item?.recovered_start_frame_disabled
-    || metadata.recovered_start_frame_disabled
-    || imagine.recovered_start_frame_disabled
-  );
-}
-
-function imagineRecoveredStartFramePostEligible(post) {
-  const source = String(post?.source || "").trim().toLowerCase();
-  if (source === "imagine") return true;
-  const accountId = String(post?.account_id || "").trim().toLowerCase();
-  const folderName = String(post?.folder_path || "").split("/").filter(Boolean).pop() || "";
-  return source === "build"
-    && accountId.startsWith("imagine_")
-    && /^merged-item(?:-\d+)?$/i.test(folderName);
-}
-
-function imagineRecoveredStartFrameSourceKey(item) {
-  const { metadata, imagine } = imagineRecoveredStartFrameMetadata(item);
-  return String(
-    item?.recovered_from_item_id
-    || metadata.recovered_from_item_id
-    || imagine.recovered_from_item_id
-    || ""
-  ).trim();
-}
-
-function imagineRecoveredStartFrameForVideo(post, videoItem) {
-  if (imagineRecoveredStartFrameDisabled(videoItem)) return null;
-  const sourceKey = String(typeof mediaItemKey === "function" ? mediaItemKey(videoItem) : "").trim();
-  if (!sourceKey) return null;
-  const attached = (post?.items || []).find((item) => (
-    isImagineRecoveredStartFrame(item)
-    && imagineRecoveredStartFrameSourceKey(item) === sourceKey
-  ));
-  if (attached) return attached;
-  return imagineRecoveredStartFrameItems.get(imagineRecoveredStartFrameTaskKey(post, videoItem)) || null;
-}
-
-function imaginePostHasRealImage(post) {
-  return (post?.items || []).some((item) => (
-    detailItemType(item) === "image"
-    && !isImagineRecoveredStartFrame(item)
-    && Boolean(detailMediaUrlForItem("i", item, post))
-  ));
-}
-
-function imagineRecoveredStartFrameTaskKey(post, videoItem) {
-  const postKey = String(post?.folder_path || post?.post_id || "").trim();
-  const itemKey = String(typeof mediaItemKey === "function" ? mediaItemKey(videoItem) : "").trim();
-  return `${postKey}\0${itemKey}`;
-}
-
-function attachCachedImagineRecoveredStartFrames(post) {
-  if (!imagineRecoveredStartFramePostEligible(post) || imaginePostHasRealImage(post)) return;
-  const originalItems = Array.isArray(post?.items) ? post.items : [];
-  const recoveredItems = originalItems
-    .filter((item) => detailItemType(item) === "video" && !imagineRecoveredStartFrameDisabled(item))
-    .map((videoItem) => imagineRecoveredStartFrameItems.get(imagineRecoveredStartFrameTaskKey(post, videoItem)))
-    .filter(Boolean)
-    .filter((item) => !originalItems.some((existing) => mediaItemKey(existing) === mediaItemKey(item)));
-  if (recoveredItems.length) post.items = [...originalItems, ...recoveredItems];
-}
-
-function captureImagineVideoStartFrame(videoUrl) {
-  return new Promise((resolve, reject) => {
-    const video = document.createElement("video");
-    const timeoutId = window.setTimeout(() => finish(null, new Error("Start frame timed out.")), 15000);
-    let finished = false;
-
-    const cleanup = () => {
-      window.clearTimeout(timeoutId);
-      video.removeEventListener("loadeddata", onLoadedData);
-      video.removeEventListener("error", onError);
-      video.removeAttribute("src");
-      try {
-        video.load();
-      } catch (_) {}
-    };
-    const finish = (result, error = null) => {
-      if (finished) return;
-      finished = true;
-      cleanup();
-      if (error) reject(error);
-      else resolve(result);
-    };
-    const capture = () => {
-      const width = Number(video.videoWidth || 0);
-      const height = Number(video.videoHeight || 0);
-      if (!width || !height) {
-        finish(null, new Error("Start frame dimensions are unavailable."));
-        return;
-      }
-      const canvas = document.createElement("canvas");
-      canvas.width = width;
-      canvas.height = height;
-      const context = canvas.getContext("2d", { alpha: false });
-      if (!context) {
-        finish(null, new Error("Start frame canvas is unavailable."));
-        return;
-      }
-      try {
-        context.drawImage(video, 0, 0, width, height);
-      } catch (error) {
-        finish(null, error);
-        return;
-      }
-      canvas.toBlob((blob) => {
-        if (!blob) {
-          finish(null, new Error("Start frame encoding failed."));
-          return;
-        }
-        const reader = new FileReader();
-        reader.onload = () => {
-          if (finished) return;
-          const dataUrl = String(reader.result || "");
-          if (!dataUrl.startsWith("data:image/")) {
-            finish(null, new Error("Start frame data could not be encoded."));
-            return;
-          }
-          finish({
-            url: URL.createObjectURL(blob),
-            data_url: dataUrl,
-            mime_type: blob.type || "image/png",
-            size: blob.size || 0,
-            width,
-            height,
-          });
-        };
-        reader.onerror = () => finish(null, reader.error || new Error("Start frame data could not be read."));
-        reader.readAsDataURL(blob);
-      }, "image/png");
-    };
-    const onLoadedData = () => {
-      window.requestAnimationFrame(capture);
-    };
-    const onError = () => finish(null, new Error("Start frame could not be decoded."));
-
-    video.muted = true;
-    video.playsInline = true;
-    video.preload = "auto";
-    video.addEventListener("loadeddata", onLoadedData, { once: true });
-    video.addEventListener("error", onError, { once: true });
-    video.src = videoUrl;
-    video.load();
-  });
-}
-
-function ensureImagineRecoveredStartFrame(post, videoItem) {
-  if (!imagineRecoveredStartFramePostEligible(post) || detailItemType(videoItem) !== "video") return Promise.resolve(null);
-  if (imagineRecoveredStartFrameDisabled(videoItem)) return Promise.resolve(null);
-  if (imaginePostHasRealImage(post)) return Promise.resolve(null);
-  const existing = imagineRecoveredStartFrameForVideo(post, videoItem);
-  if (existing) return Promise.resolve(existing);
-  const detailPrefix = String(post?.source || "").toLowerCase() === "build" ? "b" : "i";
-  const videoUrl = detailMediaUrlForItem(detailPrefix, videoItem, post);
-  const sourceKey = String(typeof mediaItemKey === "function" ? mediaItemKey(videoItem) : "").trim();
-  if (!videoUrl || !sourceKey) return Promise.resolve(null);
-  const taskKey = imagineRecoveredStartFrameTaskKey(post, videoItem);
-  if (imagineRecoveredStartFrameTasks.has(taskKey)) return imagineRecoveredStartFrameTasks.get(taskKey);
-  const accountId = String(
-    videoItem?.account_id
-    || videoItem?.metadata?.account_id
-    || videoItem?.metadata?.imagine?.account_id
-    || post?.account_id
-    || ""
-  ).trim();
-  const safeSourceKey = sourceKey.replace(/[^a-zA-Z0-9]/g, "").slice(-48) || "video";
-  const task = captureImagineVideoStartFrame(videoUrl).then((frame) => {
-    const duplicate = imagineRecoveredStartFrameForVideo(post, videoItem);
-    if (duplicate) {
-      URL.revokeObjectURL(frame.url);
-      return duplicate;
-    }
-    const item = {
-      item_id: `recovered-start-frame-${safeSourceKey}`,
-      type: "image",
-      file: "",
-      url: frame.url,
-      object_url: frame.url,
-      thumbnail_url: frame.url,
-      data_url: frame.data_url,
-      mime_type: frame.mime_type,
-      size: frame.size,
-      width: frame.width,
-      height: frame.height,
-      aspect_ratio: `${frame.width}:${frame.height}`,
-      role: "source",
-      relation: "recovered_start_frame",
-      title: "Recovered start frame",
-      prompt: "",
-      recovered_start_frame: true,
-      recovered_from_item_id: sourceKey,
-      account_id: accountId,
-      metadata: {
-        recovered_start_frame: true,
-        recovered_from_item_id: sourceKey,
-        account_id: accountId,
-        imagine: {
-          recovered_start_frame: true,
-          recovered_from_item_id: sourceKey,
-          account_id: accountId,
-        },
-      },
-    };
-    imagineRecoveredStartFrameItems.set(taskKey, item);
-    post.items = Array.isArray(post.items) ? [...post.items, item] : [item];
-    return item;
-  }).catch((error) => {
-    console.warn("Imagine start frame recovery failed.", error);
-    return null;
-  }).finally(() => {
-    imagineRecoveredStartFrameTasks.delete(taskKey);
-  });
-  imagineRecoveredStartFrameTasks.set(taskKey, task);
-  return task;
-}
-
-function scheduleImagineRecoveredStartFrame(post, videoItem) {
-  if (!imagineRecoveredStartFramePostEligible(post) || detailItemType(videoItem) !== "video") return;
-  if (imagineRecoveredStartFrameDisabled(videoItem)) return;
-  if (imaginePostHasRealImage(post) || imagineRecoveredStartFrameForVideo(post, videoItem)) return;
-  const taskKey = imagineRecoveredStartFrameTaskKey(post, videoItem);
-  if (!taskKey || imagineRecoveredStartFrameRefreshes.has(taskKey)) return;
-  const detailScreen = screen_state.current_screen;
-  if (detailScreen !== "i_detail" && detailScreen !== "b_detail") return;
-  imagineRecoveredStartFrameRefreshes.add(taskKey);
-  ensureImagineRecoveredStartFrame(post, videoItem).then((item) => {
-    if (!item || screen_state.current_screen !== detailScreen) return;
-    const selectedPost = typeof selectedLibraryPost === "function" ? selectedLibraryPost() : null;
-    if (
-      selectedPost !== post
-      && String(selectedPost?.folder_path || "") !== String(post?.folder_path || "")
-    ) return;
-    renderDetailViews();
-    if (typeof syncDetailAttachmentForComposerTray === "function") {
-      syncDetailAttachmentForComposerTray().catch((error) => console.warn(error));
-    }
-  }).finally(() => {
-    imagineRecoveredStartFrameRefreshes.delete(taskKey);
-  });
-}
-
-function discardImagineRecoveredStartFrame(post, item) {
-  if (!isImagineRecoveredStartFrame(item)) return false;
-  const sourceKey = imagineRecoveredStartFrameSourceKey(item);
-  const postKey = String(post?.folder_path || post?.post_id || "").trim();
-  const taskKey = `${postKey}\0${sourceKey}`;
-  const cached = imagineRecoveredStartFrameItems.get(taskKey);
-  const urls = new Set([
-    item?.url,
-    item?.object_url,
-    item?.thumbnail_url,
-    cached?.url,
-    cached?.object_url,
-    cached?.thumbnail_url,
-  ].map((value) => String(value || "").trim()).filter((value) => value.startsWith("blob:")));
-  imagineRecoveredStartFrameItems.delete(taskKey);
-  imagineRecoveredStartFrameRefreshes.delete(taskKey);
-  const itemKey = String(typeof mediaItemKey === "function" ? mediaItemKey(item) : item?.item_id || "");
-  if (Array.isArray(post?.items)) {
-    post.items = post.items.filter((candidate) => (
-      String(typeof mediaItemKey === "function" ? mediaItemKey(candidate) : candidate?.item_id || "") !== itemKey
-    ));
-  }
-  for (const url of urls) URL.revokeObjectURL(url);
-  return true;
-}
+// Recovering a still from an Imagine video's first frame was removed on 2026-08-10.
+// The frame only ever existed as a blob: URL with a base64 copy carried on the item, so
+// it was rebuilt on every visit and could not outlive the page. One that the old
+// local-heart save happened to capture froze a dead blob: address, and half a megabyte
+// of base64, into the stored post where nothing could reach or repair it.
 
 function detailItemType(item) {
   return item?.type || mediaTypeForName(item?.file || item?.url || item?.object_url || "") || "image";
@@ -802,8 +513,10 @@ function registerCardPreviewDisposer(host, disposer) {
 function nativeCardPreviewQueuePriority(entry) {
   const target = entry?.target;
   if (!target?.isConnected) return Number.POSITIVE_INFINITY;
-  const detailThumb = target.closest?.(".i_detail_thumb, .b_detail_thumb");
-  if (detailThumb?.classList.contains("active")) return -1;
+  // The whole strip outranks the grid, not just the selected frame: the neighbours are one
+  // click away and there are a handful of them, against hundreds of cards scoring 0.
+  const detailThumb = target.closest?.(DETAIL_THUMB_SELECTOR);
+  if (detailThumb) return detailThumb.classList.contains("active") ? -2 : -1;
   const rect = target.getBoundingClientRect?.();
   if (!rect) return 0;
   if (rect.width <= 0 && rect.height <= 0) return Number.MAX_SAFE_INTEGER;
@@ -842,15 +555,24 @@ function activeListCardPreviewTaskCount(listKey) {
   return listKey ? Number(activeListCardPreviewTasks.get(listKey) || 0) : 0;
 }
 
+function cardPreviewEntryIsDetail(entry) {
+  return Boolean(entry?.target?.closest?.(DETAIL_THUMB_SELECTOR));
+}
+
 function pumpNativeCardPreviewQueue() {
-  while (activeNativeCardPreviewTasks < CARD_PREVIEW_NATIVE_MAX_ACTIVE && nativeCardPreviewQueue.length) {
+  while (nativeCardPreviewQueue.length) {
+    const detailSlotFree = activeDetailCardPreviewTasks < CARD_PREVIEW_DETAIL_MAX_ACTIVE;
+    const generalSlotFree = activeNativeCardPreviewTasks < CARD_PREVIEW_NATIVE_MAX_ACTIVE;
+    if (!detailSlotFree && !generalSlotFree) break;
     nativeCardPreviewQueue.sort((left, right) => nativeCardPreviewQueuePriority(left) - nativeCardPreviewQueuePriority(right));
-    const entryIndex = nativeCardPreviewQueue.findIndex((candidate) => (
-      candidate.cancelled
-      || !candidate.target?.isConnected
-      || !candidate.listThrottled
-      || activeListCardPreviewTaskCount(candidate.listThrottleKey) < CARD_PREVIEW_LIST_MAX_ACTIVE
-    ));
+    const entryIndex = nativeCardPreviewQueue.findIndex((candidate) => {
+      // Dead entries are picked up regardless so they drain instead of blocking the scan.
+      if (candidate.cancelled || !candidate.target?.isConnected) return true;
+      if (cardPreviewEntryIsDetail(candidate)) return detailSlotFree;
+      if (!generalSlotFree) return false;
+      return !candidate.listThrottled
+        || activeListCardPreviewTaskCount(candidate.listThrottleKey) < CARD_PREVIEW_LIST_MAX_ACTIVE;
+    });
     if (entryIndex < 0) break;
     const [entry] = nativeCardPreviewQueue.splice(entryIndex, 1);
     if (!entry || entry.cancelled || !entry.target?.isConnected) {
@@ -858,8 +580,10 @@ function pumpNativeCardPreviewQueue() {
       continue;
     }
     entry.started = true;
-    activeNativeCardPreviewTasks += 1;
-    if (entry.listThrottled) {
+    entry.detailLane = cardPreviewEntryIsDetail(entry);
+    if (entry.detailLane) activeDetailCardPreviewTasks += 1;
+    else activeNativeCardPreviewTasks += 1;
+    if (entry.listThrottled && !entry.detailLane) {
       activeListCardPreviewTasks.set(
         entry.listThrottleKey,
         activeListCardPreviewTaskCount(entry.listThrottleKey) + 1,
@@ -869,8 +593,9 @@ function pumpNativeCardPreviewQueue() {
       .then(() => entry.task())
       .then((result) => entry.resolve(entry.cancelled ? null : result), entry.reject)
       .finally(() => {
-        activeNativeCardPreviewTasks -= 1;
-        if (entry.listThrottled) {
+        if (entry.detailLane) activeDetailCardPreviewTasks -= 1;
+        else activeNativeCardPreviewTasks -= 1;
+        if (entry.listThrottled && !entry.detailLane) {
           const remaining = activeListCardPreviewTaskCount(entry.listThrottleKey) - 1;
           if (remaining > 0) activeListCardPreviewTasks.set(entry.listThrottleKey, remaining);
           else activeListCardPreviewTasks.delete(entry.listThrottleKey);
