@@ -71,10 +71,23 @@ jobs:
     timeout-minutes: 35
     outputs:
       input_sha256: ${{ steps.windows_input.outputs.sha256 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: plain
+            common_dir: common
+            output_zip: Win_Grok_Chameleon_v2.0.zip
+            artifact: windows-common-source-build
+          - variant: clone-batch
+            common_dir: common-c
+            output_zip: Win_Grok_Chameleon_C_v2.0.zip
+            artifact: windows-common-source-build-c
     env:
       RELEASE_TAG: v2.0.0
       INPUT_ZIP: Win_Grok_Chameleon_v2.0.zip
-      OUTPUT_ZIP: Win_Grok_Chameleon_v2.0.zip
+      OUTPUT_ZIP: ${{ matrix.output_zip }}
+      VARIANT_COMMON_DIR: ${{ matrix.common_dir }}
 
     steps:
       - name: Check out the shared source commit
@@ -163,8 +176,12 @@ jobs:
             @{ Name = "ui_feedback"; Relative = "web\scripts\ui_feedback.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_UI_FEEDBACK) },
             @{ Name = "account_style"; Relative = "web\styles\account.css"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_ACCOUNT_STYLE) }
           )
+          # The COMMON_* variables name the plain tree. The clone-batch variant keeps its own
+          # full copy of the same relative paths, so only the root directory differs.
+          $variantRoot = Join-Path $env:GITHUB_WORKSPACE $env:VARIANT_COMMON_DIR
           foreach ($shared in $sharedSources) {
             $shared.Target = Join-Path $appRoot $shared.Relative
+            $shared.Source = Join-Path $variantRoot (Join-Path "app" $shared.Relative)
           }
           $targetMain = ($sharedSources | Where-Object Name -eq "main").Target
           $targetPreload = ($sharedSources | Where-Object Name -eq "preload").Target
@@ -549,8 +566,8 @@ jobs:
       - name: Retain the verified Windows build
         uses: actions/upload-artifact@v4
         with:
-          name: windows-common-source-build
-          path: output/Win_Grok_Chameleon_v2.0.zip
+          name: ${{ matrix.artifact }}
+          path: output/${{ matrix.output_zip }}
           if-no-files-found: error
           retention-days: 3
 
@@ -559,10 +576,23 @@ jobs:
     timeout-minutes: 35
     outputs:
       input_sha256: ${{ steps.macos_input.outputs.sha256 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: plain
+            common_dir: common
+            output_zip: Mac_Grok_Chameleon_v2.0.zip
+            artifact: mac-common-source-build
+          - variant: clone-batch
+            common_dir: common-c
+            output_zip: Mac_Grok_Chameleon_C_v2.0.zip
+            artifact: mac-common-source-build-c
     env:
       RELEASE_TAG: v2.0.0
       INPUT_ZIP: Mac_Grok_Chameleon_v2.0.zip
-      OUTPUT_ZIP: Mac_Grok_Chameleon_v2.0.zip
+      OUTPUT_ZIP: ${{ matrix.output_zip }}
+      VARIANT_COMMON_DIR: ${{ matrix.common_dir }}
 
     steps:
       - name: Check out the shared source commit
@@ -596,7 +626,7 @@ jobs:
           main_app="$root/Grok Chameleon.app"
           migration_app="$root/Migration.app"
           app_root="$main_app/Contents/Resources/app"
-          common_root="$GITHUB_WORKSPACE/common/app"
+          common_root="$GITHUB_WORKSPACE/$VARIANT_COMMON_DIR/app"
           shared_relatives=(
             electron/main.js
             electron/preload-bridge.js
@@ -922,7 +952,7 @@ jobs:
           test -d "$main_app"
           app_root="$main_app/Contents/Resources/app"
           info_plist="$main_app/Contents/Info.plist"
-          common_root="$GITHUB_WORKSPACE/common/app"
+          common_root="$GITHUB_WORKSPACE/$VARIANT_COMMON_DIR/app"
           shared_relatives=(
             electron/main.js
             electron/preload-bridge.js
@@ -1159,8 +1189,8 @@ jobs:
       - name: Retain the verified Mac build
         uses: actions/upload-artifact@v4
         with:
-          name: mac-common-source-build
-          path: output/Mac_Grok_Chameleon_v2.0.zip
+          name: ${{ matrix.artifact }}
+          path: output/${{ matrix.output_zip }}
           if-no-files-found: error
           retention-days: 3
 
@@ -1178,40 +1208,75 @@ jobs:
           name: windows-common-source-build
           path: release/windows
 
+      - name: Download the verified Windows clone-batch build
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-common-source-build-c
+          path: release/windows-c
+
       - name: Download the verified Mac build
         uses: actions/download-artifact@v4
         with:
           name: mac-common-source-build
           path: release/macos
 
-      - name: Publish the two verified v2 release assets
+      - name: Download the verified Mac clone-batch build
+        uses: actions/download-artifact@v4
+        with:
+          name: mac-common-source-build-c
+          path: release/macos-c
+
+      - name: Publish the four verified v2 release assets
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: v2.0.0
           WIN_ZIP: Win_Grok_Chameleon_v2.0.zip
           MAC_ZIP: Mac_Grok_Chameleon_v2.0.zip
+          WIN_C_ZIP: Win_Grok_Chameleon_C_v2.0.zip
+          MAC_C_ZIP: Mac_Grok_Chameleon_C_v2.0.zip
           WIN_INPUT_SHA256: ${{ needs.build-windows.outputs.input_sha256 }}
           MAC_INPUT_SHA256: ${{ needs.build-macos.outputs.input_sha256 }}
         run: |
           set -euo pipefail
-          mkdir -p current/win current/mac
+          mkdir -p current/win current/mac current/win-c current/mac-c
           release_existed=false
+          win_c_existed=false
+          mac_c_existed=false
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             release_existed=true
             gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$WIN_ZIP" --dir current/win
             gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$MAC_ZIP" --dir current/mac
             test "$(sha256sum "current/win/$WIN_ZIP" | awk '{print $1}')" = "$WIN_INPUT_SHA256"
             test "$(sha256sum "current/mac/$MAC_ZIP" | awk '{print $1}')" = "$MAC_INPUT_SHA256"
+            existing_assets="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+            if printf '%s\n' "$existing_assets" | grep -Fxq "$WIN_C_ZIP"; then
+              win_c_existed=true
+              gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$WIN_C_ZIP" --dir current/win-c
+            fi
+            if printf '%s\n' "$existing_assets" | grep -Fxq "$MAC_C_ZIP"; then
+              mac_c_existed=true
+              gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$MAC_C_ZIP" --dir current/mac-c
+            fi
           else
             gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Grok Chameleon v2.0.0" --latest
           fi
 
+          restore_or_drop() {
+            local existed="$1" dir="$2" name="$3"
+            if [[ "$existed" == true ]]; then
+              gh release upload "$RELEASE_TAG" "$dir/$name" --repo "$GITHUB_REPOSITORY" --clobber || true
+            else
+              gh release delete-asset "$RELEASE_TAG" "$name" --repo "$GITHUB_REPOSITORY" --yes || true
+            fi
+          }
           rollback() {
             echo 'Rolling back the v2 release assets.' >&2
             if [[ "$release_existed" == true ]]; then
               gh release upload "$RELEASE_TAG" "current/win/$WIN_ZIP" --repo "$GITHUB_REPOSITORY" --clobber || true
               gh release upload "$RELEASE_TAG" "current/mac/$MAC_ZIP" --repo "$GITHUB_REPOSITORY" --clobber || true
+              restore_or_drop "$win_c_existed" current/win-c "$WIN_C_ZIP"
+              restore_or_drop "$mac_c_existed" current/mac-c "$MAC_C_ZIP"
             else
               gh release delete "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
             fi
@@ -1219,16 +1284,29 @@ jobs:
           trap rollback ERR
           gh release upload "$RELEASE_TAG" "release/windows/$WIN_ZIP" --repo "$GITHUB_REPOSITORY" --clobber
           gh release upload "$RELEASE_TAG" "release/macos/$MAC_ZIP" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$RELEASE_TAG" "release/windows-c/$WIN_C_ZIP" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$RELEASE_TAG" "release/macos-c/$MAC_C_ZIP" --repo "$GITHUB_REPOSITORY" --clobber
+          remote_digest() {
+            gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | select(.name == "'"$1"'") | .digest'
+          }
           win_local="sha256:$(sha256sum "release/windows/$WIN_ZIP" | awk '{print $1}')"
           mac_local="sha256:$(sha256sum "release/macos/$MAC_ZIP" | awk '{print $1}')"
-          win_remote="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | select(.name == "'"$WIN_ZIP"'") | .digest')"
-          mac_remote="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | select(.name == "'"$MAC_ZIP"'") | .digest')"
+          win_c_local="sha256:$(sha256sum "release/windows-c/$WIN_C_ZIP" | awk '{print $1}')"
+          mac_c_local="sha256:$(sha256sum "release/macos-c/$MAC_C_ZIP" | awk '{print $1}')"
+          win_remote="$(remote_digest "$WIN_ZIP")"
+          mac_remote="$(remote_digest "$MAC_ZIP")"
+          win_c_remote="$(remote_digest "$WIN_C_ZIP")"
+          mac_c_remote="$(remote_digest "$MAC_C_ZIP")"
           test "$win_local" = "$win_remote"
           test "$mac_local" = "$mac_remote"
+          test "$win_c_local" = "$win_c_remote"
+          test "$mac_c_local" = "$mac_c_remote"
           asset_names="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
           test "$(printf '%s\n' "$asset_names" | grep -Fxc "$WIN_ZIP")" -eq 1
           test "$(printf '%s\n' "$asset_names" | grep -Fxc "$MAC_ZIP")" -eq 1
-          test "$(printf '%s\n' "$asset_names" | sed '/^$/d' | wc -l | tr -d ' ')" -eq 2
+          test "$(printf '%s\n' "$asset_names" | grep -Fxc "$WIN_C_ZIP")" -eq 1
+          test "$(printf '%s\n' "$asset_names" | grep -Fxc "$MAC_C_ZIP")" -eq 1
+          test "$(printf '%s\n' "$asset_names" | sed '/^$/d' | wc -l | tr -d ' ')" -eq 4
           if printf '%s\n' "$asset_names" | grep -Eq '(^|_)u\.zip$'; then
             echo 'Unexpected U release asset found in v2.' >&2
             exit 1
@@ -1236,6 +1314,8 @@ jobs:
           trap - ERR
           echo "windows-production-digest=$win_remote"
           echo "mac-production-digest=$mac_remote"
+          echo "windows-clone-batch-digest=$win_c_remote"
+          echo "mac-clone-batch-digest=$mac_c_remote"
 
   verify-published-macos:
     runs-on: macos-15
@@ -1244,9 +1324,20 @@ jobs:
       - publish
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: plain
+            common_dir: common
+            mac_zip: Mac_Grok_Chameleon_v2.0.zip
+          - variant: clone-batch
+            common_dir: common-c
+            mac_zip: Mac_Grok_Chameleon_C_v2.0.zip
     env:
       RELEASE_TAG: v2.0.0
-      MAC_ZIP: Mac_Grok_Chameleon_v2.0.zip
+      MAC_ZIP: ${{ matrix.mac_zip }}
+      VARIANT_COMMON_DIR: ${{ matrix.common_dir }}
 
     steps:
       - name: Check out the exact shared source commit
@@ -1288,7 +1379,7 @@ jobs:
           app_root="$main_app/Contents/Resources/app"
           main_exec="$main_app/Contents/MacOS/Grok Chameleon"
           python_exec="$main_app/Contents/Resources/Python/bin/python3"
-          common_root="$GITHUB_WORKSPACE/common/app"
+          common_root="$GITHUB_WORKSPACE/$VARIANT_COMMON_DIR/app"
           shared_relatives=(
             electron/main.js
             electron/preload-bridge.js
