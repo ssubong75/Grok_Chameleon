@@ -102,6 +102,7 @@ def normalize_imagine_account(account) -> dict:
         status = "ok" if valid_imagine_cookies({"cookies": cookies}) else "expired"
     return {
         "id": str((account or {}).get("id") or account_id("imagine", key)),
+        "store_id": str((account or {}).get("store_id") or ""),
         "provider": "imagine",
         "label": str((account or {}).get("label") or email or "Imagine"),
         "email": email,

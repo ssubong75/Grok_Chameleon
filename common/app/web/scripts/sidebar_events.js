@@ -71,7 +71,7 @@ async function refreshCurrentMainView() {
   await waitForRefreshPaint();
   if (screenId === "account") {
     renderAccounts();
-    if (typeof refreshAccounts === "function") await refreshAccounts({ refreshStatuses: true });
+    if (typeof refreshAccounts === "function") await refreshAccounts();
     return;
   }
   if (screenId === "i_main") {

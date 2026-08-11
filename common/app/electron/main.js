@@ -368,6 +368,47 @@ const RUNTIME_DIR = path.join(RUNTIME_ROOT, PLATFORM_RUNTIME_KEY);
 const LOG_DIR = path.join(RUNTIME_DIR, "logs");
 const TEMP_DIR = path.join(RUNTIME_DIR, "temp");
 const CRASH_DUMPS_DIR = path.join(RUNTIME_DIR, "crash_dumps");
+const TOTAL_ACCOUNT_TEMPLATE_SCHEMA = 1;
+const TOTAL_ACCOUNT_TEMPLATE_BUILD_ARG = "--build-total-account-cache-template=";
+const TOTAL_ACCOUNT_TEMPLATE_BUILD_TOKEN = String(
+  process.argv.find((arg) => String(arg).startsWith(TOTAL_ACCOUNT_TEMPLATE_BUILD_ARG)) || "",
+).slice(TOTAL_ACCOUNT_TEMPLATE_BUILD_ARG.length);
+const TOTAL_ACCOUNT_TEMPLATE_BUILD_MODE = /^[a-f0-9-]{36}$/.test(TOTAL_ACCOUNT_TEMPLATE_BUILD_TOKEN);
+const TOTAL_ACCOUNT_TEMPLATE_VERSION = [
+  `v${TOTAL_ACCOUNT_TEMPLATE_SCHEMA}`,
+  `electron-${String(process.versions.electron || "unknown")}`,
+  `chrome-${String(process.versions.chrome || "unknown")}`,
+  process.platform,
+  process.arch,
+].join("-").replace(/[^a-zA-Z0-9_.-]/g, "_");
+const TOTAL_ACCOUNT_TEMPLATE_BASE = path.join(
+  RUNTIME_DIR,
+  "cache_templates",
+  "total-account",
+);
+const TOTAL_ACCOUNT_TEMPLATE_ROOT = path.join(TOTAL_ACCOUNT_TEMPLATE_BASE, TOTAL_ACCOUNT_TEMPLATE_VERSION);
+const TOTAL_ACCOUNT_TEMPLATE_READY_PATH = path.join(TOTAL_ACCOUNT_TEMPLATE_ROOT, "READY.json");
+const TOTAL_ACCOUNT_TEMPLATE_BUILD_ROOT = TOTAL_ACCOUNT_TEMPLATE_BUILD_MODE
+  ? path.join(TOTAL_ACCOUNT_TEMPLATE_BASE, `.build-${TOTAL_ACCOUNT_TEMPLATE_BUILD_TOKEN}`)
+  : "";
+const TOTAL_ACCOUNT_TEMPLATE_BUILD_COMPLETE_PATH = TOTAL_ACCOUNT_TEMPLATE_BUILD_MODE
+  ? path.join(TOTAL_ACCOUNT_TEMPLATE_BUILD_ROOT, "BUILD_COMPLETE.json")
+  : "";
+const TOTAL_ACCOUNT_READY_SEED_ROOT = path.join(
+  RUNTIME_DIR,
+  "Partitions",
+  `.total-account-ready-${TOTAL_ACCOUNT_TEMPLATE_VERSION}`,
+);
+const TOTAL_ACCOUNT_READY_SEED_PATH = path.join(TOTAL_ACCOUNT_READY_SEED_ROOT, "SEED_READY.json");
+const ELECTRON_SESSION_ROOT = TOTAL_ACCOUNT_TEMPLATE_BUILD_MODE
+  ? TOTAL_ACCOUNT_TEMPLATE_BUILD_ROOT
+  : RUNTIME_DIR;
+if (TOTAL_ACCOUNT_TEMPLATE_BUILD_MODE) {
+  // A helper always writes a unique staging profile. The normal parent only publishes
+  // it after the helper has exited cleanly, so an open Chromium cache is never reused.
+  fs.rmSync(TOTAL_ACCOUNT_TEMPLATE_BUILD_ROOT, { recursive: true, force: true });
+  fs.mkdirSync(TOTAL_ACCOUNT_TEMPLATE_BUILD_ROOT, { recursive: true });
+}
 for (const directory of [RUNTIME_DIR, LOG_DIR, TEMP_DIR, CRASH_DUMPS_DIR]) {
   fs.mkdirSync(directory, { recursive: true });
 }
@@ -385,8 +426,8 @@ if (SELECTED_LIBRARY_ROOT) {
   );
   removeObsoletePortableRuntime(PORTABLE_ROOT, RUNTIME_ROOT);
 }
-app.setPath("userData", RUNTIME_DIR);
-app.setPath("sessionData", RUNTIME_DIR);
+app.setPath("userData", ELECTRON_SESSION_ROOT);
+app.setPath("sessionData", ELECTRON_SESSION_ROOT);
 app.setPath("temp", TEMP_DIR);
 app.setPath("crashDumps", CRASH_DUMPS_DIR);
 app.setAppLogsPath(LOG_DIR);
@@ -411,6 +452,8 @@ let appTerminating = false;
 const bridgeWindows = new Map();
 const bridgeCommandQueues = new Map();
 const usageWindows = new Map();
+const totalAccountWindows = new Map();
+let selectedImagineAccountKey = "";
 const CARD_PREVIEW_MAX_EDGE = 960;
 const THUMBNAIL_PREVIEW_MAX_EDGE = 320;
 const CARD_PREVIEW_MAX_ACTIVE = 4;
@@ -948,6 +991,17 @@ function killServerPortPids(signal = "TERM") {
 }
 
 function closeAccountWindowsNow() {
+  for (const entry of totalAccountWindows.values()) {
+    for (const win of [entry?.oauthWindow, entry?.loginWindow]) {
+      if (!win || win.isDestroyed()) continue;
+      try {
+        win.removeAllListeners("close");
+        win.destroy();
+      } catch (_) {}
+    }
+  }
+  totalAccountWindows.clear();
+  selectedImagineAccountKey = "";
   for (const win of bridgeWindows.values()) {
     if (!win || win.isDestroyed()) continue;
     try {
@@ -989,6 +1043,7 @@ async function exitAppNow(reason = "app-exit") {
   appTerminating = true;
   app.isQuitting = true;
   appendLog(`app exit reason=${reason}`);
+  await stopTotalAccountBackgroundPreparation();
   closeBridgeWindowsNow();
   if (mainWindow && !mainWindow.isDestroyed()) {
     try {
@@ -1356,7 +1411,7 @@ function bridgeCommandCanRunInParallel(command) {
 }
 
 function bridgeCommandUsesEphemeralWindow(command) {
-  return String(command?.type || "") === "t2i_ws";
+  return ["t2i_ws", "crop_image"].includes(String(command?.type || ""));
 }
 
 function bridgeAccountKey(command) {
@@ -1364,6 +1419,10 @@ function bridgeAccountKey(command) {
 }
 
 function bridgeKey(command) {
+  if (String(command?.type || "").startsWith("total_account_")) {
+    const registrationId = String(command?.registration_id || command?.session_id || "").trim();
+    return `total-account::${registrationId || command?.store_id || "registration"}`;
+  }
   const baseKey = bridgeAccountKey(command);
   if (String(command?.type || "") === "open_page") return `${baseKey}::open_page`;
   if (!bridgeCommandCanRunInParallel(command)) return baseKey;
@@ -1392,7 +1451,13 @@ function supersedeOtherAccountPreparations(command) {
     if (!win || win.isDestroyed()) continue;
     if (win.__grokAccountKey === activeKey) continue;
     if (!win.__grokPreparePromise) continue;
-    win.__grokPrepareGeneration = Number(win.__grokPrepareGeneration || 0) + 1;
+    // Only an obsolete speculative prepare may be abandoned. A cold fetch_stream uses
+    // the same promise slot and is real user work, so a compatibility prepare request
+    // for another account must never stop it.
+    if (win.__grokPrepareCommandType !== "prepare") continue;
+    const promiseGeneration = Number(win.__grokPreparePromiseGeneration || win.__grokPrepareGeneration || 0);
+    win.__grokLastSupersededPrepareGeneration = promiseGeneration;
+    win.__grokPrepareGeneration = Math.max(Number(win.__grokPrepareGeneration || 0), promiseGeneration) + 1;
     win.__grokPreparedAt = 0;
     try {
       win.webContents.stop();
@@ -1506,7 +1571,8 @@ function closeInactiveAccountWindows(command) {
   for (const win of bridgeWindows.values()) {
     if (!win || win.isDestroyed()) continue;
     if (win.__grokAccountKey === activeKey) wakeBridgeWindow(win);
-    else sleepBridgeWindow(win);
+    else if (win.__grokAccountKey === selectedImagineAccountKey) continue;
+    else if (!bridgeWindowIsBusy(win)) sleepBridgeWindow(win);
   }
   const liveEntries = () => [...bridgeWindows.entries()].filter(([, win]) => win && !win.isDestroyed());
   const metrics = bridgeProcessMemoryBytes();
@@ -1522,11 +1588,18 @@ function closeInactiveAccountWindows(command) {
   // total past the ceiling, and booting grok.com on a machine already at the ceiling is
   // what produced the two 30s prepare timeouts measured across 13 accounts. Clear room
   // for the newcomer first when this account has nothing open yet.
-  const headroom = entries.some(([, win]) => win.__grokAccountKey === activeKey) ? 0 : perWindow;
+  const createsBridgeWindow = ["prepare", "fetch_stream", "crop_image", "t2i_ws"].includes(String(command?.type || ""));
+  const targetKey = bridgeWindowKey(command);
+  const willCreate = createsBridgeWindow && !entries.some(([key]) => key === targetKey);
+  const headroom = willCreate ? perWindow : 0;
   // Least recently used first. The active account is never taken, and neither is one
   // that is mid-generation — a video run can hold its window for three minutes.
   const candidates = entries
-    .filter(([, win]) => win.__grokAccountKey !== activeKey && !bridgeWindowIsBusy(win))
+    .filter(([, win]) => (
+      win.__grokAccountKey !== activeKey
+      && win.__grokAccountKey !== selectedImagineAccountKey
+      && !bridgeWindowIsBusy(win)
+    ))
     .sort((left, right) => Number(left[1].__grokLastUsedAt || 0) - Number(right[1].__grokLastUsedAt || 0));
   // A single release per pressure signal, the way a browser unloads one tab at a time,
   // so an unrelated memory spike elsewhere on the machine cannot clear the whole set.
@@ -1534,7 +1607,7 @@ function closeInactiveAccountWindows(command) {
   let evicted = 0;
   for (const [key, win] of candidates) {
     const overBudget = used + headroom > budget;
-    const overCount = live > IMAGINE_BRIDGE_MAX_ACCOUNT_WINDOWS;
+    const overCount = live + (willCreate ? 1 : 0) > IMAGINE_BRIDGE_MAX_ACCOUNT_WINDOWS;
     if (!overBudget && !overCount) {
       if (pressureReleases <= 0) break;
       pressureReleases -= 1;
@@ -1555,9 +1628,38 @@ function closeInactiveAccountWindows(command) {
   // Usage windows are cheap to recreate and are not part of the prepared store, so
   // they keep the previous single-account behaviour.
   for (const [key, win] of usageWindows.entries()) {
-    if (win?.__grokAccountKey === activeKey) continue;
+    if (win?.__grokAccountKey === activeKey || win?.__grokAccountKey === selectedImagineAccountKey) continue;
     destroy(usageWindows, key, win);
   }
+}
+
+function activateImagineAccountTab(command = {}) {
+  const accountId = String(command.account_id || "").trim();
+  const storeId = String(command.store_id || "").trim();
+  if (!accountId || !storeId) {
+    selectedImagineAccountKey = "";
+    for (const win of bridgeWindows.values()) {
+      if (!win || win.isDestroyed() || bridgeWindowIsBusy(win)) continue;
+      sleepBridgeWindow(win);
+    }
+    appendLog("imagine account tab selection cleared");
+    return { ok: true, status: "cleared", found: false };
+  }
+  const key = bridgeAccountKey(command);
+  selectedImagineAccountKey = key;
+  let found = false;
+  for (const win of bridgeWindows.values()) {
+    if (!win || win.isDestroyed()) continue;
+    if (win.__grokAccountKey === key) {
+      found = true;
+      win.__grokLastUsedAt = Date.now();
+      wakeBridgeWindow(win);
+    } else if (!bridgeWindowIsBusy(win)) {
+      sleepBridgeWindow(win);
+    }
+  }
+  appendLog(`imagine account tab activated account=${accountId} found=${found ? "yes" : "no"}`);
+  return { ok: true, status: found ? "activated" : "deferred", found };
 }
 
 function uuidV5Url(name) {
@@ -1815,6 +1917,10 @@ function bridgeWindow(command) {
   win.__grokCookieSignature = "";
   win.__grokPreparedAt = 0;
   win.__grokPreparePromise = null;
+  win.__grokPrepareCommandType = "";
+  win.__grokPrepareOriginType = "";
+  win.__grokPreparePromiseGeneration = 0;
+  win.__grokLastSupersededPrepareGeneration = 0;
   win.__grokPrepareGeneration = 0;
   win.__grokDomReadyUrl = "";
   win.__grokLastUsedAt = Date.now();
@@ -1840,6 +1946,803 @@ function existingBridgeWindow(command) {
   const key = bridgeWindowKey(command);
   const existing = bridgeWindows.get(key);
   return existing && !existing.isDestroyed() ? existing : null;
+}
+
+function totalAccountRegistrationId(command = {}) {
+  return String(command.registration_id || command.session_id || "").trim();
+}
+
+function totalAccountCookieRecord(cookie = {}) {
+  return {
+    name: String(cookie.name || ""),
+    value: String(cookie.value || ""),
+    domain: String(cookie.domain || ""),
+    path: String(cookie.path || "/"),
+    expires: Number(cookie.expirationDate || 0),
+    secure: Boolean(cookie.secure),
+    httpOnly: Boolean(cookie.httpOnly),
+    sameSite: String(cookie.sameSite || ""),
+  };
+}
+
+async function totalAccountGrokCookies(win) {
+  const cookies = await win.webContents.session.cookies.get({});
+  return cookies
+    .filter((cookie) => String(cookie.domain || "").replace(/^\./, "").endsWith("grok.com"))
+    .map(totalAccountCookieRecord)
+    .filter((cookie) => cookie.name && cookie.value);
+}
+
+function waitForAccountDomReady(win, expectedHost, timeoutMs = 5000) {
+  if (!win || win.isDestroyed()) return Promise.resolve("closed");
+  return new Promise((resolve) => {
+    let settled = false;
+    let targetCommitted = false;
+    const hostMatches = (url) => {
+      try {
+        const hostname = new URL(String(url || "")).hostname;
+        return hostname === expectedHost || hostname.endsWith(`.${expectedHost}`);
+      } catch (_) {
+        return false;
+      }
+    };
+    const finish = (status) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      win.webContents.removeListener("dom-ready", onReady);
+      win.webContents.removeListener("did-navigate", onNavigate);
+      win.webContents.removeListener("did-fail-load", onFailed);
+      win.removeListener("closed", onClosed);
+      resolve(status);
+    };
+    const onNavigate = (_event, url) => {
+      if (hostMatches(url)) targetCommitted = true;
+    };
+    const onReady = () => {
+      if (targetCommitted) finish("dom-ready");
+    };
+    const onFailed = (_event, errorCode, _description, _url, isMainFrame) => {
+      if (isMainFrame && Number(errorCode) !== -3) finish("load-failed");
+    };
+    const onClosed = () => finish("closed");
+    const timer = setTimeout(() => finish("timeout"), Math.max(1000, Number(timeoutMs || 0)));
+    timer.unref?.();
+    win.webContents.on("dom-ready", onReady);
+    win.webContents.on("did-navigate", onNavigate);
+    win.webContents.on("did-fail-load", onFailed);
+    win.once("closed", onClosed);
+  });
+}
+
+function waitForAccountWindowDelay(win, timeoutMs = 250) {
+  if (!win || win.isDestroyed()) return Promise.resolve("closed");
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (status) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      win.removeListener("closed", onClosed);
+      resolve(status);
+    };
+    const onClosed = () => finish("closed");
+    const timer = setTimeout(() => finish("timeout"), Math.max(0, Number(timeoutMs || 0)));
+    timer.unref?.();
+    win.once("closed", onClosed);
+  });
+}
+
+async function settleAccountWindowForInteraction(win) {
+  if (!win || win.isDestroyed()) return;
+  await bridgePromiseWithTimeout(
+    win.webContents.executeJavaScript(`
+      new Promise((resolve) => {
+        const painted = () => requestAnimationFrame(() => requestAnimationFrame(resolve));
+        if (typeof requestIdleCallback === "function") {
+          requestIdleCallback(painted, { timeout: 800 });
+        } else {
+          setTimeout(painted, 0);
+        }
+      })
+    `),
+    1400,
+    "Account page did not settle.",
+  ).catch(() => {});
+}
+
+async function totalAccountLoginIdentity(win) {
+  const script = `
+    (async () => {
+      const findEmail = (value, depth = 0) => {
+        if (depth > 6 || value == null) return "";
+        if (typeof value === "string") {
+          const match = value.match(/[\\w.+-]+@[\\w.-]+\\.[A-Za-z]{2,}/);
+          return match ? match[0] : "";
+        }
+        if (Array.isArray(value)) {
+          for (const item of value) {
+            const found = findEmail(item, depth + 1);
+            if (found) return found;
+          }
+          return "";
+        }
+        if (typeof value === "object") {
+          for (const [key, item] of Object.entries(value)) {
+            if (/email/i.test(key) && typeof item === "string" && item.includes("@")) return item;
+          }
+          for (const item of Object.values(value)) {
+            const found = findEmail(item, depth + 1);
+            if (found) return found;
+          }
+        }
+        return "";
+      };
+      try {
+        const response = await fetch("/api/auth/session", {
+          method: "GET",
+          credentials: "include",
+          cache: "no-store",
+          headers: { accept: "application/json, text/plain, */*" }
+        });
+        const text = await response.text();
+        let data = null;
+        try { data = text ? JSON.parse(text) : null; } catch (_) { data = text; }
+        return { ok: response.ok, status: response.status, email: findEmail(data) };
+      } catch (error) {
+        return { ok: false, status: 0, email: "", error: String(error?.message || error || "") };
+      }
+    })()
+  `;
+  return bridgePromiseWithTimeout(
+    win.webContents.executeJavaScript(script, false),
+    3500,
+    "Total Account login check did not return.",
+  );
+}
+
+const TOTAL_ACCOUNT_TEMPLATE_CACHE_DIRS = ["Cache", "Code Cache"];
+const TOTAL_ACCOUNT_TEMPLATE_MAX_BYTES = 64 * 1024 * 1024;
+const TOTAL_ACCOUNT_TEMPLATE_MAX_ALLOCATED_BYTES = 192 * 1024 * 1024;
+const TOTAL_ACCOUNT_TEMPLATE_MAX_FILES = 1500;
+const TOTAL_ACCOUNT_TEMPLATE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+let totalAccountTemplateBuildPromise = null;
+let totalAccountReadySeedPromise = null;
+let totalAccountTemplateChild = null;
+let totalAccountTemplateMaintenanceTimer = null;
+let totalAccountSeedAbortController = null;
+let totalAccountBackgroundEpoch = 0;
+
+function totalAccountPartitionDiskPath(command) {
+  const partition = bridgePartition(command);
+  const partitionName = String(partition).replace(/^persist:/, "");
+  if (!/^grok-chameleon-imagine-[a-zA-Z0-9_.-]+$/.test(partitionName)) {
+    throw new Error("Total Account partition name is invalid.");
+  }
+  const partitionsRoot = path.join(RUNTIME_DIR, "Partitions");
+  const targetPath = path.join(partitionsRoot, partitionName);
+  if (path.dirname(targetPath) !== partitionsRoot) {
+    throw new Error("Total Account partition path is invalid.");
+  }
+  return { partitionName, partitionsRoot, targetPath };
+}
+
+async function totalAccountTemplateManifest() {
+  try {
+    const raw = await fs.promises.readFile(TOTAL_ACCOUNT_TEMPLATE_READY_PATH, "utf8");
+    const manifest = JSON.parse(raw);
+    if (
+      manifest?.ready !== true
+      || Number(manifest?.schema || 0) !== TOTAL_ACCOUNT_TEMPLATE_SCHEMA
+      || String(manifest?.version || "") !== TOTAL_ACCOUNT_TEMPLATE_VERSION
+      || !Number.isFinite(Date.parse(String(manifest?.created_at || "")))
+      || Date.now() - Date.parse(String(manifest.created_at)) > TOTAL_ACCOUNT_TEMPLATE_MAX_AGE_MS
+      || Number(manifest?.bytes || 0) <= 0
+      || Number(manifest?.bytes || 0) > TOTAL_ACCOUNT_TEMPLATE_MAX_BYTES
+      || Number(manifest?.allocated_bytes || 0) <= 0
+      || Number(manifest?.allocated_bytes || 0) > TOTAL_ACCOUNT_TEMPLATE_MAX_ALLOCATED_BYTES
+      || Number(manifest?.files || 0) <= 0
+      || Number(manifest?.files || 0) > TOTAL_ACCOUNT_TEMPLATE_MAX_FILES
+    ) {
+      return null;
+    }
+    for (const directoryName of TOTAL_ACCOUNT_TEMPLATE_CACHE_DIRS) {
+      const source = path.join(TOTAL_ACCOUNT_TEMPLATE_ROOT, directoryName);
+      const info = await fs.promises.stat(source).catch(() => null);
+      if (!info?.isDirectory()) return null;
+    }
+    return manifest;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function totalAccountCacheTreeStats(rootPath, { signal = null, expectedEpoch = null } = {}) {
+  const pending = TOTAL_ACCOUNT_TEMPLATE_CACHE_DIRS.map((name) => path.join(rootPath, name));
+  const fileSystem = await fs.promises.statfs(rootPath).catch(() => null);
+  const allocationUnit = Math.max(4096, Number(fileSystem?.bsize || 4096));
+  let bytes = 0;
+  let allocatedBytes = 0;
+  let files = 0;
+  while (pending.length) {
+    if (signal?.aborted || (expectedEpoch != null && expectedEpoch !== totalAccountBackgroundEpoch)) {
+      throw totalAccountAbortError();
+    }
+    const current = pending.pop();
+    const entries = await fs.promises.readdir(current, { withFileTypes: true });
+    for (const entry of entries) {
+      if (signal?.aborted || (expectedEpoch != null && expectedEpoch !== totalAccountBackgroundEpoch)) {
+        throw totalAccountAbortError();
+      }
+      const entryPath = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        pending.push(entryPath);
+      } else if (entry.isFile()) {
+        const info = await fs.promises.stat(entryPath);
+        bytes += Number(info.size || 0);
+        const roundedSize = Math.ceil(Math.max(1, Number(info.size || 0)) / allocationUnit) * allocationUnit;
+        allocatedBytes += Math.max(roundedSize, Number(info.blocks || 0) * 512);
+        files += 1;
+        if (
+          bytes > TOTAL_ACCOUNT_TEMPLATE_MAX_BYTES
+          || allocatedBytes > TOTAL_ACCOUNT_TEMPLATE_MAX_ALLOCATED_BYTES
+          || files > TOTAL_ACCOUNT_TEMPLATE_MAX_FILES
+        ) {
+          throw new Error("Total Account cache template is too large.");
+        }
+      } else {
+        throw new Error("Total Account cache template contains an unsupported entry.");
+      }
+    }
+  }
+  if (!bytes || !files) throw new Error("Total Account cache template is empty.");
+  return { bytes, allocated_bytes: allocatedBytes, files };
+}
+
+async function totalAccountReadySeedManifest(templateManifest = null) {
+  try {
+    const raw = await fs.promises.readFile(TOTAL_ACCOUNT_READY_SEED_PATH, "utf8");
+    const manifest = JSON.parse(raw);
+    if (
+      manifest?.ready !== true
+      || Number(manifest?.schema || 0) !== TOTAL_ACCOUNT_TEMPLATE_SCHEMA
+      || String(manifest?.version || "") !== TOTAL_ACCOUNT_TEMPLATE_VERSION
+      || (
+        templateManifest
+        && String(manifest?.template_created_at || "") !== String(templateManifest?.created_at || "")
+      )
+    ) return null;
+    for (const directoryName of TOTAL_ACCOUNT_TEMPLATE_CACHE_DIRS) {
+      const info = await fs.promises.stat(path.join(TOTAL_ACCOUNT_READY_SEED_ROOT, directoryName)).catch(() => null);
+      if (!info?.isDirectory()) return null;
+    }
+    return manifest;
+  } catch (_) {
+    return null;
+  }
+}
+
+function totalAccountAbortError() {
+  const error = new Error("Total Account background cache copy was cancelled.");
+  error.name = "AbortError";
+  return error;
+}
+
+async function copyTotalAccountCacheTree(sourceRoot, destinationRoot, signal) {
+  const pending = TOTAL_ACCOUNT_TEMPLATE_CACHE_DIRS.map((name) => ({
+    source: path.join(sourceRoot, name),
+    destination: path.join(destinationRoot, name),
+  }));
+  while (pending.length) {
+    if (signal?.aborted) throw totalAccountAbortError();
+    const current = pending.pop();
+    await fs.promises.mkdir(current.destination, { recursive: true });
+    const entries = await fs.promises.readdir(current.source, { withFileTypes: true });
+    for (const entry of entries) {
+      if (signal?.aborted) throw totalAccountAbortError();
+      const source = path.join(current.source, entry.name);
+      const destination = path.join(current.destination, entry.name);
+      if (entry.isDirectory()) {
+        pending.push({ source, destination });
+      } else if (entry.isFile()) {
+        await fs.promises.copyFile(source, destination, fs.constants.COPYFILE_EXCL);
+      } else {
+        throw new Error("Total Account cache template contains an unsupported entry.");
+      }
+    }
+  }
+}
+
+async function ensureTotalAccountReadySeed(expectedEpoch = totalAccountBackgroundEpoch) {
+  if (TOTAL_ACCOUNT_TEMPLATE_BUILD_MODE) return false;
+  const operationEpoch = expectedEpoch;
+  if (operationEpoch !== totalAccountBackgroundEpoch) return false;
+  const manifest = await totalAccountTemplateManifest();
+  if (operationEpoch !== totalAccountBackgroundEpoch) return false;
+  if (!manifest) return false;
+  if (await totalAccountReadySeedManifest(manifest)) return true;
+  if (totalAccountReadySeedPromise) return totalAccountReadySeedPromise;
+  if (operationEpoch !== totalAccountBackgroundEpoch) return false;
+  const controller = new AbortController();
+  totalAccountSeedAbortController = controller;
+  totalAccountReadySeedPromise = (async () => {
+    const actualStats = await totalAccountCacheTreeStats(TOTAL_ACCOUNT_TEMPLATE_ROOT, {
+      signal: controller.signal,
+      expectedEpoch: operationEpoch,
+    });
+    if (operationEpoch !== totalAccountBackgroundEpoch) throw totalAccountAbortError();
+    if (
+      actualStats.bytes !== Number(manifest.bytes)
+      || actualStats.allocated_bytes !== Number(manifest.allocated_bytes)
+      || actualStats.files !== Number(manifest.files)
+    ) throw new Error("Total Account cache template verification failed.");
+    const partitionsRoot = path.dirname(TOTAL_ACCOUNT_READY_SEED_ROOT);
+    const stagingPath = path.join(
+      partitionsRoot,
+      `.total-account-ready.tmp-${process.pid}-${crypto.randomUUID()}`,
+    );
+    try {
+      await fs.promises.mkdir(partitionsRoot, { recursive: true });
+      await fs.promises.mkdir(stagingPath, { recursive: false });
+      await copyTotalAccountCacheTree(TOTAL_ACCOUNT_TEMPLATE_ROOT, stagingPath, controller.signal);
+      if (controller.signal.aborted) throw totalAccountAbortError();
+      const marker = {
+        ready: true,
+        schema: TOTAL_ACCOUNT_TEMPLATE_SCHEMA,
+        version: TOTAL_ACCOUNT_TEMPLATE_VERSION,
+        template_created_at: manifest.created_at,
+      };
+      await fs.promises.writeFile(
+        path.join(stagingPath, "SEED_READY.json"),
+        `${JSON.stringify(marker, null, 2)}\n`,
+        "utf8",
+      );
+      if (fs.existsSync(TOTAL_ACCOUNT_READY_SEED_ROOT)) {
+        await fs.promises.rm(TOTAL_ACCOUNT_READY_SEED_ROOT, { recursive: true, force: true });
+      }
+      await fs.promises.rename(stagingPath, TOTAL_ACCOUNT_READY_SEED_ROOT);
+      appendLog(`total account ready cache seed created version=${TOTAL_ACCOUNT_TEMPLATE_VERSION}`);
+      return true;
+    } catch (error) {
+      await fs.promises.rm(stagingPath, { recursive: true, force: true }).catch(() => {});
+      appendLog(`total account ready cache seed failed: ${error.message || String(error)}`);
+      return false;
+    }
+  })().finally(() => {
+    totalAccountReadySeedPromise = null;
+    if (totalAccountSeedAbortController === controller) totalAccountSeedAbortController = null;
+  });
+  return totalAccountReadySeedPromise;
+}
+
+function cancelTotalAccountBackgroundPreparation() {
+  totalAccountBackgroundEpoch += 1;
+  if (totalAccountTemplateMaintenanceTimer) {
+    clearTimeout(totalAccountTemplateMaintenanceTimer);
+    totalAccountTemplateMaintenanceTimer = null;
+  }
+  totalAccountSeedAbortController?.abort();
+  if (totalAccountTemplateChild && !totalAccountTemplateChild.killed) {
+    try { totalAccountTemplateChild.kill("SIGTERM"); } catch (_) {}
+  }
+}
+
+async function stopTotalAccountBackgroundPreparation() {
+  const child = totalAccountTemplateChild;
+  const seedPromise = totalAccountReadySeedPromise;
+  cancelTotalAccountBackgroundPreparation();
+  if (seedPromise) {
+    await Promise.race([seedPromise.catch(() => false), sleep(2000)]).catch(() => {});
+  }
+  if (!child) return;
+  await Promise.race([
+    new Promise((resolve) => child.once("close", resolve)),
+    sleep(1500),
+  ]).catch(() => {});
+  if (totalAccountTemplateChild === child && child.exitCode == null) {
+    try { child.kill("SIGKILL"); } catch (_) {}
+  }
+}
+
+function scheduleTotalAccountTemplateMaintenance(delayMs = 10000) {
+  if (TOTAL_ACCOUNT_TEMPLATE_BUILD_MODE) return;
+  if (totalAccountTemplateMaintenanceTimer) clearTimeout(totalAccountTemplateMaintenanceTimer);
+  totalAccountTemplateMaintenanceTimer = setTimeout(() => {
+    totalAccountTemplateMaintenanceTimer = null;
+    void ensureTotalAccountCacheTemplate();
+  }, Math.max(0, Number(delayMs || 0)));
+  totalAccountTemplateMaintenanceTimer.unref?.();
+}
+
+async function seedTotalAccountPartitionFromTemplate(command) {
+  const startedAt = Date.now();
+  cancelTotalAccountBackgroundPreparation();
+  const { partitionName, partitionsRoot, targetPath } = totalAccountPartitionDiskPath(command);
+  if (fs.existsSync(targetPath)) {
+    return { status: "cold", elapsed_ms: Date.now() - startedAt, reason: "target_exists" };
+  }
+  const template = await totalAccountTemplateManifest();
+  const seed = template ? await totalAccountReadySeedManifest(template) : null;
+  if (!seed) {
+    return { status: "cold", elapsed_ms: Date.now() - startedAt, reason: "ready_seed_missing" };
+  }
+  try {
+    await fs.promises.mkdir(partitionsRoot, { recursive: true });
+    // The ready seed is a complete cache-only profile on the same volume. Claiming it
+    // is a metadata rename, so Total Account never waits for hundreds of USB file copies.
+    await fs.promises.rename(TOTAL_ACCOUNT_READY_SEED_ROOT, targetPath);
+    await fs.promises.rm(path.join(targetPath, "SEED_READY.json"), { force: true }).catch(() => {});
+    const elapsedMs = Date.now() - startedAt;
+    appendLog(`total account ready cache seed claimed store=${command.store_id || ""} elapsed_ms=${elapsedMs}`);
+    return { status: "claimed", elapsed_ms: elapsedMs, reason: "" };
+  } catch (error) {
+    appendLog(`total account ready cache seed fallback store=${command.store_id || ""} error=${error.message || String(error)}`);
+    return { status: "cold", elapsed_ms: Date.now() - startedAt, reason: "seed_claim_failed" };
+  }
+}
+
+function createTotalAccountLoginWindow(command) {
+  const bounds = centeredWindowBounds();
+  const partition = bridgePartition(command);
+  installMediaPermissionGuard(session.fromPartition(partition));
+  const win = new BrowserWindow({
+    ...bounds,
+    show: false,
+    paintWhenInitiallyHidden: true,
+    title: `${APP_NAME} Total Account`,
+    backgroundColor: "#090b0c",
+    webPreferences: {
+      partition,
+      // Registration only needs the rendered Grok login, /api/auth/session, and
+      // cookies collected by the main process. No preload or input interception is
+      // installed, so the official page owns its interaction behavior unchanged.
+      contextIsolation: true,
+      nodeIntegration: false,
+      webSecurity: true,
+      autoplayPolicy: "no-user-gesture-required",
+      backgroundThrottling: false,
+    },
+  });
+  win.__grokAccountKey = bridgeAccountKey(command);
+  win.__grokCookieSignature = "";
+  win.__grokPreparedAt = 0;
+  win.__grokPreparePromise = null;
+  win.__grokPrepareCommandType = "";
+  win.__grokPrepareOriginType = "";
+  win.__grokPreparePromiseGeneration = 0;
+  win.__grokLastSupersededPrepareGeneration = 0;
+  win.__grokPrepareGeneration = 0;
+  win.__grokDomReadyUrl = "";
+  win.__grokLastUsedAt = Date.now();
+  win.__grokAsleep = false;
+  win.__grokBusyCount = 0;
+  win.__grokNetworkCaptureEnabled = false;
+  win.webContents.on("did-start-navigation", (_event, _url, isInPlace, isMainFrame) => {
+    if (!isMainFrame || isInPlace) return;
+    win.__grokDomReadyUrl = "";
+    win.__grokPreparedAt = 0;
+  });
+  win.webContents.on("dom-ready", () => {
+    win.__grokDomReadyUrl = normalizeGrokUrl(win.webContents.getURL() || "");
+  });
+  return win;
+}
+
+async function createTotalAccountEntry(command) {
+  const registrationId = totalAccountRegistrationId(command);
+  if (!registrationId) throw new Error("Total Account registration id is missing.");
+  const existing = totalAccountWindows.get(registrationId);
+  if (existing?.loginWindow && !existing.loginWindow.isDestroyed()) return existing;
+
+  // Registration is intentionally outside bridgeWindows. It must not be charged
+  // against the ordinary account-window budget or have generation capture enabled
+  // while the user is only signing in.
+  const cacheSeed = await seedTotalAccountPartitionFromTemplate(command);
+  const loginWindow = createTotalAccountLoginWindow(command);
+  const entry = {
+    registrationId,
+    storeId: String(command.store_id || ""),
+    loginWindow,
+    oauthWindow: null,
+    oauthLoadError: "",
+    bridgeKey: bridgeWindowKey(command),
+    promoted: false,
+    registrationBusy: true,
+    cacheSeed,
+  };
+  // Keep the registration renderer resident until it is either promoted or
+  // discarded. Normal account switching may evict idle bridge windows under
+  // memory pressure, but this one is still carrying an in-flight OAuth flow.
+  markBridgeWindowBusy(loginWindow, 1);
+  totalAccountWindows.set(registrationId, entry);
+  loginWindow.on("closed", () => {
+    bridgeWindows.delete(entry.bridgeKey);
+    if (!entry.promoted && totalAccountWindows.get(registrationId) === entry) {
+      totalAccountWindows.delete(registrationId);
+    }
+  });
+  return entry;
+}
+
+async function waitForTotalAccountLogin(command) {
+  const entry = await createTotalAccountEntry(command);
+  const win = entry.loginWindow;
+  const targetUrl = String(command.url || "https://grok.com/");
+  const timeoutMs = Math.max(1000, Number(command.timeout_ms || 240000));
+  const deadline = Date.now() + timeoutMs;
+  const pageLoadStartedAt = Date.now();
+  let lastStatus = 0;
+  markBridgeWindowBusy(win, 1);
+  try {
+    win.setTitle(`${APP_NAME} Total Account`);
+    app.focus({ steal: true });
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.moveTop();
+    win.focus();
+    appendLog(
+      `total account login window opened registration=${entry.registrationId}`
+      + ` cache_seed=${entry.cacheSeed?.status || "cold"}`
+      + ` seed_ms=${Number(entry.cacheSeed?.elapsed_ms || 0)}`
+      + ` elapsed_ms=${Date.now() - pageLoadStartedAt}`,
+    );
+
+    let readyStatus = "already-loaded";
+    if (!String(win.webContents.getURL() || "").includes("grok.com")) {
+      const readyPromise = waitForAccountDomReady(win, "grok.com", 5000);
+      win.loadURL(targetUrl).catch((error) => {
+        appendLog(`total account login load warning registration=${entry.registrationId} error=${error.message || String(error)}`);
+      });
+      readyStatus = await readyPromise;
+    }
+    if (readyStatus === "closed" || win.isDestroyed()) {
+      throw new Error("Total Account login window was closed.");
+    }
+    // Grok can paint its SSR controls before the client handlers are hydrated. Give
+    // the completed document one idle turn and two paint frames so the first click is
+    // not consumed by a still-starting renderer. This is bounded and non-fatal.
+    await settleAccountWindowForInteraction(win);
+    appendLog(
+      `total account login window interactive registration=${entry.registrationId}`
+      + ` ready=${readyStatus}`
+      + ` elapsed_ms=${Date.now() - pageLoadStartedAt}`,
+    );
+
+    while (Date.now() < deadline) {
+      if (win.isDestroyed()) throw new Error("Total Account login window was closed.");
+      let hostname = "";
+      try { hostname = new URL(win.webContents.getURL() || "").hostname; } catch (_) {}
+      if (hostname === "grok.com" || hostname.endsWith(".grok.com")) {
+        try {
+          const identity = await totalAccountLoginIdentity(win);
+          lastStatus = Number(identity?.status || 0);
+          const email = String(identity?.email || "").trim();
+          if (identity?.ok && email) {
+            const cookies = await totalAccountGrokCookies(win);
+            if (cookies.length) {
+              return {
+                ok: true,
+                status: "ready",
+                source_url: win.webContents.getURL() || targetUrl,
+                cookies,
+                identity: {
+                  email,
+                  label: email,
+                  identity_values: [email.toLowerCase()],
+                },
+              };
+            }
+          }
+        } catch (_) {}
+      }
+      if (await waitForAccountWindowDelay(win, 250) === "closed") {
+        throw new Error("Total Account login window was closed.");
+      }
+    }
+    throw new Error(`Total Account Imagine login timed out. Last session status=${lastStatus || 0}.`);
+  } finally {
+    markBridgeWindowBusy(win, -1);
+  }
+}
+
+async function openTotalAccountOauth(command) {
+  const registrationId = totalAccountRegistrationId(command);
+  const entry = totalAccountWindows.get(registrationId);
+  if (!entry?.loginWindow || entry.loginWindow.isDestroyed()) {
+    throw new Error("Total Account login window is unavailable.");
+  }
+  const targetUrl = String(command.url || "");
+  let parsedUrl = null;
+  try { parsedUrl = new URL(targetUrl); } catch (_) {}
+  if (!parsedUrl || parsedUrl.protocol !== "https:" || parsedUrl.hostname !== "auth.x.ai") {
+    throw new Error("Total Account OAuth URL is invalid.");
+  }
+  if (entry.oauthWindow && !entry.oauthWindow.isDestroyed()) entry.oauthWindow.destroy();
+  entry.oauthLoadError = "";
+
+  const bounds = centeredWindowBounds(560, 680);
+  const partition = bridgePartition(command);
+  const oauthWindow = new BrowserWindow({
+    ...bounds,
+    parent: entry.loginWindow,
+    modal: true,
+    show: false,
+    resizable: true,
+    minimizable: false,
+    maximizable: false,
+    autoHideMenuBar: true,
+    title: `${APP_NAME} Build Login`,
+    backgroundColor: "#090b0c",
+    webPreferences: {
+      partition,
+      contextIsolation: true,
+      nodeIntegration: false,
+      webSecurity: true,
+      backgroundThrottling: false,
+    },
+  });
+  entry.oauthWindow = oauthWindow;
+  let oauthShown = false;
+  let oauthPresenting = false;
+  let oauthTargetCommitted = false;
+  let oauthFallbackTimer = null;
+  const showOauthOnce = () => {
+    if (oauthShown || oauthWindow.isDestroyed()) return;
+    let hostname = "";
+    try { hostname = new URL(oauthWindow.webContents.getURL() || "").hostname; } catch (_) {}
+    if (!hostname || hostname === "127.0.0.1" || hostname === "localhost") return;
+    oauthShown = true;
+    if (oauthFallbackTimer) clearTimeout(oauthFallbackTimer);
+    app.focus({ steal: true });
+    oauthWindow.show();
+    oauthWindow.moveTop();
+    oauthWindow.focus();
+    appendLog(`total account oauth window shown registration=${registrationId} host=${hostname}`);
+  };
+  const showOauthWhenInteractive = async () => {
+    if (oauthShown || oauthPresenting || oauthWindow.isDestroyed()) return;
+    oauthPresenting = true;
+    await settleAccountWindowForInteraction(oauthWindow);
+    oauthPresenting = false;
+    showOauthOnce();
+  };
+  oauthWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, _url, isMainFrame) => {
+    if (!isMainFrame || Number(errorCode) === -3) return;
+    entry.oauthLoadError = String(errorDescription || `OAuth page load failed (${errorCode}).`);
+  });
+  oauthWindow.on("closed", () => {
+    if (oauthFallbackTimer) clearTimeout(oauthFallbackTimer);
+    if (entry.oauthWindow === oauthWindow) entry.oauthWindow = null;
+  });
+  oauthWindow.webContents.on("did-navigate", (_event, url) => {
+    let hostname = "";
+    try { hostname = new URL(String(url || "")).hostname; } catch (_) {}
+    if (hostname === "127.0.0.1" || hostname === "localhost") {
+      oauthWindow.hide();
+      return;
+    }
+    if (hostname) oauthTargetCommitted = true;
+  });
+  oauthWindow.webContents.on("dom-ready", () => {
+    if (!oauthTargetCommitted) return;
+    showOauthWhenInteractive().catch(() => {});
+  });
+  oauthWindow.webContents.on("did-finish-load", () => {
+    let hostname = "";
+    try { hostname = new URL(oauthWindow.webContents.getURL() || "").hostname; } catch (_) {}
+    if (hostname === "127.0.0.1" || hostname === "localhost") {
+      oauthWindow.hide();
+      return;
+    }
+    if (!oauthTargetCommitted) return;
+    showOauthWhenInteractive().catch(() => {});
+  });
+  oauthWindow.loadURL(targetUrl).catch((error) => {
+    const detail = error.message || String(error);
+    if (!detail.includes("ERR_ABORTED")) entry.oauthLoadError = detail;
+    appendLog(`total account oauth load warning registration=${registrationId} error=${error.message || String(error)}`);
+  });
+  oauthFallbackTimer = setTimeout(showOauthOnce, 5000);
+  oauthFallbackTimer.unref?.();
+
+  return { ok: true, status: "opening", url: targetUrl };
+}
+
+async function totalAccountOauthStatus(command) {
+  const registrationId = totalAccountRegistrationId(command);
+  const entry = totalAccountWindows.get(registrationId);
+  const win = entry?.oauthWindow;
+  if (!win || win.isDestroyed()) {
+    return { ok: true, status: "closed", open: false, error: "Authorization window was closed." };
+  }
+  if (entry.oauthLoadError) {
+    return { ok: true, status: "error", open: true, error: entry.oauthLoadError };
+  }
+
+  let pageText = "";
+  try {
+    pageText = await bridgePromiseWithTimeout(
+      win.webContents.executeJavaScript(
+        "document.body ? String(document.body.innerText || '').slice(0, 4000) : ''",
+        false,
+      ),
+      1200,
+      "Total Account OAuth status check did not return.",
+    );
+  } catch (_) {}
+  const lowered = String(pageText || "").toLowerCase();
+  let error = "";
+  if (lowered.includes("failed to generate authentication code")) {
+    error = "Failed to generate authentication code";
+  } else if (lowered.includes("access denied")) {
+    error = "Access denied";
+  }
+  return {
+    ok: true,
+    status: error ? "error" : "open",
+    open: true,
+    error,
+  };
+}
+
+async function promoteTotalAccountWindow(command) {
+  const registrationId = totalAccountRegistrationId(command);
+  const entry = totalAccountWindows.get(registrationId);
+  if (!entry?.loginWindow || entry.loginWindow.isDestroyed()) {
+    throw new Error("Total Account login window cannot be promoted.");
+  }
+  const nextKey = bridgeWindowKey(command);
+  const loginWindow = entry.loginWindow;
+  const partitionSession = loginWindow.webContents.session;
+  try { partitionSession.flushStorageData(); } catch (_) {}
+
+  if (entry.oauthWindow && !entry.oauthWindow.isDestroyed()) entry.oauthWindow.destroy();
+  entry.oauthWindow = null;
+  entry.promoted = true;
+  if (entry.registrationBusy) {
+    entry.registrationBusy = false;
+    markBridgeWindowBusy(loginWindow, -1);
+  }
+  totalAccountWindows.delete(registrationId);
+  // The registration renderer deliberately has no generation preload. Close it while
+  // retaining its persistent session; bridgeWindow() creates the normal account tab
+  // with the full preload only when that account performs real Imagine work.
+  if (!loginWindow.isDestroyed()) loginWindow.destroy();
+  selectedImagineAccountKey = nextKey;
+  scheduleTotalAccountTemplateMaintenance(10000);
+  appendLog(`total account window promoted registration=${registrationId} account=${command.account_id || ""} resident=no media_ready=deferred`);
+  return { ok: true, status: "promoted", reused: false, media_ready: false };
+}
+
+async function discardTotalAccountWindow(command) {
+  const registrationId = totalAccountRegistrationId(command);
+  const entry = totalAccountWindows.get(registrationId);
+  if (entry) {
+    totalAccountWindows.delete(registrationId);
+    if (bridgeWindows.get(entry.bridgeKey) === entry.loginWindow) bridgeWindows.delete(entry.bridgeKey);
+    if (entry.registrationBusy) {
+      entry.registrationBusy = false;
+      markBridgeWindowBusy(entry.loginWindow, -1);
+    }
+    for (const win of [entry.oauthWindow, entry.loginWindow]) {
+      if (!win || win.isDestroyed()) continue;
+      try { win.destroy(); } catch (_) {}
+    }
+  }
+  const storeId = String(command.store_id || "").trim();
+  if (storeId && Boolean(command.clear_storage)) {
+    const ses = session.fromPartition(bridgePartition(command));
+    // The UUID partition cannot be reused after cancellation. Clear it without
+    // holding the registration response and Total Account button open.
+    void (async () => {
+      await ses.clearStorageData().catch(() => {});
+      await ses.clearCache().catch(() => {});
+      appendLog(`total account discarded partition cleared store=${storeId}`);
+    })();
+  }
+  scheduleTotalAccountTemplateMaintenance(10000);
+  appendLog(`total account window discarded registration=${registrationId}`);
+  return { ok: true, status: "discarded" };
 }
 
 function usageWindowKey(command) {
@@ -2330,13 +3233,35 @@ async function prepareBridgeWindow(win, command, prepareGeneration = 0) {
   return win;
 }
 
-async function ensureBridgeReady(command) {
-  const win = bridgeWindow(command);
+async function ensureBridgeReady(command, existingWindow = null) {
+  const win = existingWindow || bridgeWindow(command);
   const storePageCommand = ["prepare", "fetch_stream"].includes(command.type);
   if (!storePageCommand) return prepareBridgeWindow(win, command);
   if (win.__grokPreparePromise) {
-    await win.__grokPreparePromise;
-    return win;
+    const sharedPromise = win.__grokPreparePromise;
+    const sharedOriginType = String(win.__grokPrepareOriginType || "");
+    const sharedGeneration = Number(win.__grokPreparePromiseGeneration || 0);
+    if (command.type !== "prepare") win.__grokPrepareCommandType = String(command.type || "");
+    try {
+      await sharedPromise;
+      return win;
+    } catch (error) {
+      const supersededSpeculativePrepare = (
+        sharedOriginType === "prepare"
+        && sharedGeneration > 0
+        && Number(win.__grokLastSupersededPrepareGeneration || 0) === sharedGeneration
+      );
+      if (command.type === "prepare" || !supersededSpeculativePrepare) throw error;
+      // A real request may arrive just after an obsolete speculative prepare was
+      // superseded. Re-enter so every concurrent joiner shares one replacement promise.
+      if (win.__grokPreparePromise === sharedPromise) {
+        win.__grokPreparePromise = null;
+        win.__grokPrepareCommandType = "";
+        win.__grokPrepareOriginType = "";
+        win.__grokPreparePromiseGeneration = 0;
+      }
+      return ensureBridgeReady(command, win);
+    }
   }
   const generation = Number(win.__grokPrepareGeneration || 0) + 1;
   win.__grokPrepareGeneration = generation;
@@ -2352,6 +3277,9 @@ async function ensureBridgeReady(command) {
     "Imagine bridge preparation did not finish in time.",
   );
   win.__grokPreparePromise = promise;
+  win.__grokPrepareCommandType = String(command.type || "");
+  win.__grokPrepareOriginType = String(command.type || "");
+  win.__grokPreparePromiseGeneration = generation;
   try {
     return await promise;
   } catch (error) {
@@ -2361,7 +3289,12 @@ async function ensureBridgeReady(command) {
     }
     throw error;
   } finally {
-    if (win.__grokPreparePromise === promise) win.__grokPreparePromise = null;
+    if (win.__grokPreparePromise === promise) {
+      win.__grokPreparePromise = null;
+      win.__grokPrepareCommandType = "";
+      win.__grokPrepareOriginType = "";
+      win.__grokPreparePromiseGeneration = 0;
+    }
   }
 }
 
@@ -2384,6 +3317,9 @@ function usageCommandFromPayload(payload = {}) {
 }
 
 ipcMain.handle("grok-chameleon:warm-imagine-usage", async (_event, payload = {}) => warmUsagePage(usageCommandFromPayload(payload)));
+ipcMain.handle("grok-chameleon:activate-imagine-account", async (_event, payload = {}) => (
+  activateImagineAccountTab(usageCommandFromPayload(payload))
+));
 
 ipcMain.handle("grok-chameleon:open-imagine-usage", async (_event, payload = {}) => {
   return showUsagePage(usageCommandFromPayload(payload));
@@ -2416,7 +3352,10 @@ async function runCropImage(win, command) {
   const fileName = String(command.file_name || "cropped.png");
   const mimeType = String(command.mime_type || "image/png");
   const originalPostId = String(command.source_post_id || command.original_post_id || "");
+  const sourceItemId = String(command.source_item_id || "");
   const sourceContainerId = String(command.source_container_id || originalPostId);
+  const width = Math.max(1, Number(command.crop_width || 0));
+  const height = Math.max(1, Number(command.crop_height || 0));
   const script = `
     (async () => {
       const bridge = window.__grokChameleonImagineBridge;
@@ -2429,7 +3368,10 @@ async function runCropImage(win, command) {
         fileName: ${JSON.stringify(fileName)},
         mimeType: ${JSON.stringify(mimeType)},
         originalPostId: ${JSON.stringify(originalPostId)},
-        sourceContainerId: ${JSON.stringify(sourceContainerId)}
+        sourceItemId: ${JSON.stringify(sourceItemId)},
+        sourceContainerId: ${JSON.stringify(sourceContainerId)},
+        width: ${JSON.stringify(width)},
+        height: ${JSON.stringify(height)}
       });
     })()
   `;
@@ -2482,6 +3424,31 @@ async function handleBridgeCommand(command) {
   if (!id) return;
   let win = null;
   try {
+    if (command.type === "total_account_login") {
+      const value = await waitForTotalAccountLogin(command);
+      await sendBridgeResult(id, true, value);
+      return;
+    }
+    if (command.type === "total_account_oauth_open") {
+      const value = await openTotalAccountOauth(command);
+      await sendBridgeResult(id, true, value);
+      return;
+    }
+    if (command.type === "total_account_oauth_status") {
+      const value = await totalAccountOauthStatus(command);
+      await sendBridgeResult(id, true, value);
+      return;
+    }
+    if (command.type === "total_account_promote") {
+      const value = await promoteTotalAccountWindow(command);
+      await sendBridgeResult(id, true, value);
+      return;
+    }
+    if (command.type === "total_account_discard") {
+      const value = await discardTotalAccountWindow(command);
+      await sendBridgeResult(id, true, value);
+      return;
+    }
     if (command.type === "release_all") {
       closeAccountWindowsNow();
       await sendBridgeResult(id, true, { ok: true, status: "released" });
@@ -2499,12 +3466,18 @@ async function handleBridgeCommand(command) {
     }
     if (command.type === "prepare") {
       supersedeOtherAccountPreparations(command);
+    }
+    // With speculative preparation removed, real work is the only point where a
+    // missing account tab may be created. Sweep idle tabs here so the browser-style
+    // cache stays bounded; selected and busy tabs are protected by the sweep itself.
+    if (["prepare", "fetch_stream", "crop_image", "t2i_ws"].includes(command.type)) {
       closeInactiveAccountWindows(command);
     }
-    win = await ensureBridgeReady(command);
-    // Held for the whole command so the budget sweep cannot evict a window that is
-    // still streaming a generation.
+    win = bridgeWindow(command);
+    // Pin the renderer before any page load/store wait. A tab that is opening is just
+    // as active as one already streaming and must not be slept or evicted mid-load.
     markBridgeWindowBusy(win, 1);
+    win = await ensureBridgeReady(command, win);
     if (command.type === "prepare") {
       await sendBridgeResult(id, true, { ok: true, status: "ready" });
     } else if (command.type === "fetch_stream") {
@@ -2563,6 +3536,198 @@ async function pollBridge() {
   }
 }
 
+async function finalizeTotalAccountCacheTemplate(buildToken, expectedEpoch) {
+  if (expectedEpoch !== totalAccountBackgroundEpoch) throw totalAccountAbortError();
+  const buildRoot = path.join(TOTAL_ACCOUNT_TEMPLATE_BASE, `.build-${buildToken}`);
+  const completePath = path.join(buildRoot, "BUILD_COMPLETE.json");
+  const raw = await fs.promises.readFile(completePath, "utf8");
+  const complete = JSON.parse(raw);
+  if (
+    complete?.complete !== true
+    || String(complete?.token || "") !== buildToken
+    || String(complete?.version || "") !== TOTAL_ACCOUNT_TEMPLATE_VERSION
+  ) {
+    throw new Error("Total Account cache builder did not finish cleanly.");
+  }
+  for (const directoryName of TOTAL_ACCOUNT_TEMPLATE_CACHE_DIRS) {
+    const info = await fs.promises.stat(path.join(buildRoot, directoryName)).catch(() => null);
+    if (!info?.isDirectory()) throw new Error(`Total Account builder cache is missing: ${directoryName}`);
+  }
+  const stats = await totalAccountCacheTreeStats(buildRoot, { expectedEpoch });
+  if (expectedEpoch !== totalAccountBackgroundEpoch) throw totalAccountAbortError();
+  const manifest = {
+    ready: true,
+    schema: TOTAL_ACCOUNT_TEMPLATE_SCHEMA,
+    version: TOTAL_ACCOUNT_TEMPLATE_VERSION,
+    created_at: new Date().toISOString(),
+    source_url: String(complete.source_url || "https://grok.com/"),
+    cache_directories: TOTAL_ACCOUNT_TEMPLATE_CACHE_DIRS,
+    bytes: stats.bytes,
+    allocated_bytes: stats.allocated_bytes,
+    files: stats.files,
+  };
+  const pendingReadyPath = path.join(buildRoot, "READY.json.pending");
+  await fs.promises.writeFile(pendingReadyPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  await fs.promises.rename(pendingReadyPath, path.join(buildRoot, "READY.json"));
+
+  const backupRoot = `${TOTAL_ACCOUNT_TEMPLATE_ROOT}.old-${process.pid}-${crypto.randomUUID()}`;
+  let backedUp = false;
+  try {
+    if (expectedEpoch !== totalAccountBackgroundEpoch) throw totalAccountAbortError();
+    if (fs.existsSync(TOTAL_ACCOUNT_TEMPLATE_ROOT)) {
+      await fs.promises.rename(TOTAL_ACCOUNT_TEMPLATE_ROOT, backupRoot);
+      backedUp = true;
+    }
+    await fs.promises.rename(buildRoot, TOTAL_ACCOUNT_TEMPLATE_ROOT);
+  } catch (error) {
+    if (backedUp && !fs.existsSync(TOTAL_ACCOUNT_TEMPLATE_ROOT)) {
+      await fs.promises.rename(backupRoot, TOTAL_ACCOUNT_TEMPLATE_ROOT).catch(() => {});
+    }
+    throw error;
+  }
+  if (backedUp) await fs.promises.rm(backupRoot, { recursive: true, force: true }).catch(() => {});
+  appendLog(`total account cache template sealed version=${TOTAL_ACCOUNT_TEMPLATE_VERSION} bytes=${stats.bytes} files=${stats.files}`);
+  return manifest;
+}
+
+async function ensureTotalAccountCacheTemplate() {
+  if (TOTAL_ACCOUNT_TEMPLATE_BUILD_MODE) return false;
+  const operationEpoch = totalAccountBackgroundEpoch;
+  if (await totalAccountTemplateManifest()) {
+    if (operationEpoch !== totalAccountBackgroundEpoch) return false;
+    return ensureTotalAccountReadySeed(operationEpoch);
+  }
+  if (operationEpoch !== totalAccountBackgroundEpoch) return false;
+  if (totalAccountTemplateBuildPromise) return totalAccountTemplateBuildPromise;
+  totalAccountTemplateBuildPromise = (async () => {
+    const token = crypto.randomUUID();
+    const buildRoot = path.join(TOTAL_ACCOUNT_TEMPLATE_BASE, `.build-${token}`);
+    await fs.promises.mkdir(TOTAL_ACCOUNT_TEMPLATE_BASE, { recursive: true });
+    const childEnv = { ...process.env };
+    delete childEnv.ELECTRON_RUN_AS_NODE;
+    let builderTimedOut = false;
+    const exitCode = await new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [`${TOTAL_ACCOUNT_TEMPLATE_BUILD_ARG}${token}`], {
+        env: childEnv,
+        stdio: "ignore",
+      });
+      totalAccountTemplateChild = child;
+      let forceTimeout = null;
+      const timeout = setTimeout(() => {
+        builderTimedOut = true;
+        try { child.kill("SIGTERM"); } catch (_) {}
+        forceTimeout = setTimeout(() => {
+          if (child.exitCode == null) {
+            try { child.kill("SIGKILL"); } catch (_) {}
+          }
+        }, 1500);
+        forceTimeout.unref?.();
+      }, 35000);
+      timeout.unref?.();
+      child.once("error", (error) => {
+        clearTimeout(timeout);
+        if (forceTimeout) clearTimeout(forceTimeout);
+        if (totalAccountTemplateChild === child) totalAccountTemplateChild = null;
+        reject(error);
+      });
+      child.once("close", (code) => {
+        clearTimeout(timeout);
+        if (forceTimeout) clearTimeout(forceTimeout);
+        if (totalAccountTemplateChild === child) totalAccountTemplateChild = null;
+        resolve(Number(code ?? 1));
+      });
+    });
+    if (builderTimedOut || exitCode !== 0) {
+      await fs.promises.rm(buildRoot, { recursive: true, force: true }).catch(() => {});
+      throw new Error(builderTimedOut
+        ? "Total Account cache builder timed out."
+        : `Total Account cache builder exited with code ${exitCode}.`);
+    }
+    if (operationEpoch !== totalAccountBackgroundEpoch) {
+      await fs.promises.rm(buildRoot, { recursive: true, force: true }).catch(() => {});
+      return false;
+    }
+    try {
+      await finalizeTotalAccountCacheTemplate(token, operationEpoch);
+      if (operationEpoch !== totalAccountBackgroundEpoch) return false;
+      return ensureTotalAccountReadySeed(operationEpoch);
+    } catch (error) {
+      await fs.promises.rm(buildRoot, { recursive: true, force: true }).catch(() => {});
+      throw error;
+    }
+  })()
+    .catch((error) => {
+      appendLog(`total account cache template unavailable: ${error.message || String(error)}`);
+      return false;
+    })
+    .finally(() => {
+      totalAccountTemplateBuildPromise = null;
+    });
+  return totalAccountTemplateBuildPromise;
+}
+
+async function buildTotalAccountCacheTemplate() {
+  let win = null;
+  try {
+    win = new BrowserWindow({
+      width: BRIDGE_WINDOW_WIDTH,
+      height: BRIDGE_WINDOW_HEIGHT,
+      show: false,
+      paintWhenInitiallyHidden: true,
+      backgroundColor: "#090b0c",
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+        webSecurity: true,
+        backgroundThrottling: false,
+      },
+    });
+    const readyPromise = waitForAccountDomReady(win, "grok.com", 15000);
+    await win.loadURL("https://grok.com/");
+    const readyStatus = await readyPromise;
+    if (!String(readyStatus).includes("ready")) {
+      throw new Error(`Anonymous template page was not ready (${readyStatus}).`);
+    }
+    await settleAccountWindowForInteraction(win);
+    const identity = await totalAccountLoginIdentity(win).catch(() => null);
+    if (!identity?.ok || Number(identity?.status || 0) !== 200) {
+      throw new Error("Anonymous template login state could not be verified.");
+    }
+    if (String(identity?.email || "").trim()) {
+      throw new Error("Anonymous template unexpectedly contains a signed-in account.");
+    }
+    for (const directoryName of TOTAL_ACCOUNT_TEMPLATE_CACHE_DIRS) {
+      const directoryPath = path.join(TOTAL_ACCOUNT_TEMPLATE_BUILD_ROOT, directoryName);
+      const info = await fs.promises.stat(directoryPath).catch(() => null);
+      if (!info?.isDirectory()) {
+        throw new Error(`Anonymous template cache is missing: ${directoryName}`);
+      }
+    }
+    const complete = {
+      complete: true,
+      token: TOTAL_ACCOUNT_TEMPLATE_BUILD_TOKEN,
+      version: TOTAL_ACCOUNT_TEMPLATE_VERSION,
+      source_url: String(win.webContents.getURL() || "https://grok.com/"),
+    };
+    await fs.promises.writeFile(
+      TOTAL_ACCOUNT_TEMPLATE_BUILD_COMPLETE_PATH,
+      `${JSON.stringify(complete, null, 2)}\n`,
+      "utf8",
+    );
+    appendLog(`total account cache template helper complete token=${TOTAL_ACCOUNT_TEMPLATE_BUILD_TOKEN}`);
+    if (!win.isDestroyed()) win.destroy();
+    // This branch has no normal before-quit interception. app.quit() lets Chromium
+    // close its cache index; only the parent process publishes READY after child close.
+    setTimeout(() => app.quit(), 250);
+  } catch (error) {
+    appendLog(`total account cache template build failed: ${error.stack || error.message || String(error)}`);
+    try { fs.rmSync(TOTAL_ACCOUNT_TEMPLATE_BUILD_COMPLETE_PATH, { force: true }); } catch (_) {}
+    if (win && !win.isDestroyed()) win.destroy();
+    process.exitCode = 1;
+    setTimeout(() => app.quit(), 50);
+  }
+}
+
 async function boot() {
   try {
     installMediaPermissionGuards();
@@ -2570,6 +3735,9 @@ async function boot() {
     await startServer();
     createMainWindow();
     void pruneCardPreviewCacheAtStartup();
+    // Template maintenance waits for an idle window and is cancelled immediately when
+    // Total Account starts, so it never competes with the visible login cold path.
+    scheduleTotalAccountTemplateMaintenance(10000);
     pollBridge();
   } catch (error) {
     appendLog(`boot failed: ${error.stack || error.message}`);
@@ -2580,31 +3748,35 @@ async function boot() {
 
 app.name = APP_NAME;
 if (process.platform === "win32") nativeTheme.themeSource = "dark";
-app.whenReady().then(boot);
+if (TOTAL_ACCOUNT_TEMPLATE_BUILD_MODE) {
+  app.whenReady().then(buildTotalAccountCacheTemplate);
+} else {
+  app.whenReady().then(boot);
 
-app.on("activate", () => {
-  if (!mainWindow) createMainWindow();
-});
+  app.on("activate", () => {
+    if (!mainWindow) createMainWindow();
+  });
 
-app.on("before-quit", (event) => {
-  if (!appTerminating) {
-    event.preventDefault();
-    void exitAppNow("before-quit");
-  }
-});
+  app.on("before-quit", (event) => {
+    if (!appTerminating) {
+      event.preventDefault();
+      void exitAppNow("before-quit");
+    }
+  });
 
-app.on("window-all-closed", () => {
-  void exitAppNow("window-all-closed");
-});
+  app.on("window-all-closed", () => {
+    void exitAppNow("window-all-closed");
+  });
 
-app.on("will-quit", () => {
-  if (!appTerminating) shutdownServerNow();
-});
+  app.on("will-quit", () => {
+    if (!appTerminating) shutdownServerNow();
+  });
 
-if (process.platform === "darwin") {
-  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
-    process.once(signal, () => {
-      void exitAppNow(signal.toLowerCase());
-    });
+  if (process.platform === "darwin") {
+    for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+      process.once(signal, () => {
+        void exitAppNow(signal.toLowerCase());
+      });
+    }
   }
 }

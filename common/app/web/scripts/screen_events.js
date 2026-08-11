@@ -90,9 +90,6 @@ scheduleSidebarTogglePosition();
 restoreLibraryRoot().then(() => {
   consumeImageEditorReturn().catch((error) => showErrorPanel("Edit failed", error?.message || "Edit failed."));
   if (typeof refreshBuildJobs === "function") refreshBuildJobs();
-  if (typeof startImagineBridgePreparation === "function") {
-    startImagineBridgePreparation();
-  }
   if (
     library_state.apiReady
     && library_state.rootPath

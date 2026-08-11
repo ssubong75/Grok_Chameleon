@@ -2307,79 +2307,6 @@
     return `https://assets.grok.com/${text.replace(/^\/+/, "")}`;
   }
 
-  function cropContainerIds(state, sourceContainerId, originalPostId) {
-    const ids = [];
-    const add = (value) => {
-      const text = String(value || "").trim();
-      if (text && !ids.includes(text)) ids.push(text);
-    };
-    add(containerPostIdFor(state, originalPostId));
-    add(sourceContainerId);
-    add(originalPostId);
-    return ids;
-  }
-
-  function upsertImageIntoStore(record, state, post, containerIds, requestId) {
-    const id = String(post?.id || "");
-    if (!id || !record?.store || typeof record.store.setState !== "function") {
-      return { updated: false, id, containerIds: [] };
-    }
-    const upsertListItem = (list, item) => {
-      const next = Array.isArray(list) ? list.slice() : [];
-      const index = next.findIndex((candidate) => String(candidate?.id || candidate?.itemId || "") === id);
-      if (index >= 0) next[index] = { ...next[index], ...item };
-      else next.push(item);
-      return next;
-    };
-    const imageItem = {
-      ...post,
-      id,
-      itemId: post.itemId || id,
-      mediaType: post.mediaType || "MEDIA_POST_TYPE_IMAGE",
-      mediaUrl: post.mediaUrl || post.imageUrl || post.url || "",
-      thumbnailImageUrl: post.thumbnailImageUrl || post.mediaUrl || post.imageUrl || post.url || "",
-      mimeType: post.mimeType || "image/png",
-      originalRefType: post.originalRefType || "ORIGINAL_REF_TYPE_IMAGE_EDIT",
-      images: Array.isArray(post.images) ? post.images : [],
-      videos: Array.isArray(post.videos) ? post.videos : [],
-      childPosts: Array.isArray(post.childPosts) ? post.childPosts : [],
-    };
-    const currentState = mediaStoreStateForRecord(record) || state || {};
-    const byId = { ...(currentState.byId || {}) };
-    byId[id] = { ...(byId[id] || {}), ...imageItem };
-    const imageByMediaId = { ...(currentState.imageByMediaId || {}) };
-    const directLoadRootContainerByChildId = { ...(currentState.directLoadRootContainerByChildId || {}) };
-    const touched = [];
-    for (const containerId of containerIds || []) {
-      const key = String(containerId || "").trim();
-      if (!key) continue;
-      const linkedItem = {
-        ...imageItem,
-        originalPostId: imageItem.originalPostId || key,
-        parentPostId: imageItem.parentPostId || key,
-      };
-      imageByMediaId[key] = upsertListItem(imageByMediaId[key], linkedItem);
-      if (key !== id && byId[key] && typeof byId[key] === "object") {
-        const container = { ...byId[key] };
-        container.images = upsertListItem(container.images, linkedItem);
-        container.childPosts = upsertListItem(container.childPosts, linkedItem);
-        byId[key] = container;
-      }
-      if (!directLoadRootContainerByChildId[id]) directLoadRootContainerByChildId[id] = key;
-      touched.push(key);
-    }
-    record.store.setState({ byId, imageByMediaId, directLoadRootContainerByChildId }, false);
-    pushStoreTrace("store_crop_post_upsert", {
-      requestId,
-      id,
-      containerIds: touched,
-      mediaUrl: imageItem.mediaUrl || "",
-      originalPostId: imageItem.originalPostId || "",
-      updatedContainerFields: touched.length > 0,
-    });
-    return { updated: touched.length > 0, id, containerIds: touched };
-  }
-
   function firstExistingPostId(state, ids) {
     for (const id of ids) {
       if (id && state.byId && state.byId[id]) return id;
@@ -3280,12 +3207,8 @@
     throw new Error(`Unsupported official store generation payload model=${payload.modelName || ""} variant=${variant.kind || ""}`);
   }
 
-  async function runCropImage({ requestId, imageData, fileName, mimeType, originalPostId, sourceContainerId }) {
+  async function runCropImage({ requestId, imageData, fileName, mimeType, originalPostId, sourceItemId, sourceContainerId, width, height }) {
     const startedAt = Date.now();
-    await waitForMediaStore(12000);
-    const ids = [sourceContainerId, originalPostId].filter(Boolean).map(String);
-    const storeContext = preferredMediaStoreContext(ids);
-    let state = ensureStoreLoginState(storeContext.state, storeContext.record, requestId, "createMediaPostFromUrl", ids);
     const blob = await fetch(String(imageData || "")).then((response) => {
       if (!response.ok) throw new Error(`Crop data URL could not be read: ${response.status}`);
       return response.blob();
@@ -3318,87 +3241,214 @@
     const fileUri = String(metadata.fileUri || "");
     const mediaUrl = assetUrlFromFileUri(fileUri);
     if (!fileId || !mediaUrl) throw new Error("Crop upload response did not include file metadata.");
-    state = mediaStoreStateForRecord(storeContext.record) || state;
-    const createCroppedImagePost = typeof state?.createCroppedImagePost === "function"
-      ? state.createCroppedImagePost.bind(state)
-      : null;
-    let createJson = {};
-    let post = {};
-    let storeUpdate = { updated: false, officialMethod: false, id: fileId, containerIds: [] };
-    if (createCroppedImagePost) {
-      const callState = startStoreMethodCall("createCroppedImagePost", createCroppedImagePost, [{
-        parentPostId: String(originalPostId || ""),
-        mediaUrl,
-      }]);
-      const officialPost = await callState.promise;
-      post = officialPost && typeof officialPost === "object" ? officialPost : {};
-      createJson = { post };
-      storeUpdate = {
-        updated: Boolean(post?.id),
-        officialMethod: true,
-        id: post?.id || fileId,
-        containerIds: cropContainerIds(mediaStoreStateForRecord(storeContext.record) || state, sourceContainerId, originalPostId),
-        callState: callState.state(),
-      };
-      if (typeof state?.fetchMediaPost === "function") {
-        startStoreMethodCall("fetchMediaPost", state.fetchMediaPost.bind(state), [String(originalPostId || "")]);
-      }
-      if (typeof state?.setLastViewedMediaId === "function" && post?.id) {
-        startStoreMethodCall("setLastViewedMediaId", state.setLastViewedMediaId.bind(state), [
-          String(sourceContainerId || originalPostId || ""),
-          String(post.id),
-        ]);
-      }
-    } else {
-      const createPayload = {
-        mediaType: "MEDIA_POST_TYPE_IMAGE",
-        mediaUrl,
-        originalPostId: String(originalPostId || ""),
-        originalRefType: "ORIGINAL_REF_TYPE_IMAGE_EDIT",
-      };
-      pushStoreTrace("store_crop_post_create_start", {
-        requestId,
-        payload: createPayload,
-      });
-      const createResponse = await fetch("/rest/media/post/create", {
-        method: "POST",
-        credentials: "include",
-        headers: {
-          "accept": "application/json, text/plain, */*",
-          "content-type": "application/json",
-        },
-        body: JSON.stringify(createPayload),
-      });
-      const createText = await createResponse.text();
-      try {
-        createJson = createText.trim() ? JSON.parse(createText) : {};
-      } catch (_) {}
-      if (!createResponse.ok) {
-        throw new Error(`Crop post create HTTP ${createResponse.status}: ${createText.slice(0, 500)}`);
-      }
-      post = createJson.post || {};
+    await waitForMediaStore(12000);
+    const ids = [sourceContainerId, originalPostId].filter(Boolean).map(String);
+    const storeContext = preferredMediaStoreContext(ids);
+    const state = ensureStoreLoginState(
+      storeContext.state,
+      storeContext.record,
+      requestId,
+      "createCroppedImagePost",
+      ids,
+    );
+    const officialMethod = resolveStoreMethod(state, storeContext.record, "createCroppedImagePost");
+    if (!officialMethod.fn) throw new Error("Official Grok Crop method is unavailable.");
+    const officialArgs = {
+      containerPostId: String(sourceContainerId || originalPostId || ""),
+      parentPostId: String(originalPostId || ""),
+      mediaUrl,
+      width: Math.max(1, Number(width) || 1),
+      height: Math.max(1, Number(height) || 1),
+    };
+    const officialCall = startStoreMethodCall(
+      "createCroppedImagePost",
+      officialMethod.fn,
+      [officialArgs],
+    );
+    const officialResult = await officialCall.promise;
+    const officialState = officialCall.state();
+    if (["rejected", "threw"].includes(officialState.state)) {
+      throw new Error(officialState.error || "Official Grok Crop failed.");
     }
-    if (!post.id) post.id = fileId;
-    if (!post.mediaUrl) post.mediaUrl = mediaUrl;
-    if (!post.mimeType) post.mimeType = metadata.fileMimeType || mimeType || "image/png";
-    if (!post.originalPostId) post.originalPostId = String(originalPostId || "");
-    if (!post.originalRefType) post.originalRefType = "ORIGINAL_REF_TYPE_IMAGE_EDIT";
-    if (!storeUpdate.officialMethod) {
-      state = mediaStoreStateForRecord(storeContext.record) || state;
-      const containers = cropContainerIds(state, sourceContainerId, originalPostId);
-      storeUpdate = upsertImageIntoStore(storeContext.record, state, post, containers, requestId);
+    let post = {};
+
+    const normalizeId = (value) => String(value || "").trim().toLowerCase();
+    const canonicalUrl = (value) => {
+      const text = String(value || "").trim();
+      if (!text) return "";
+      try {
+        const parsed = new URL(text, location.origin);
+        parsed.search = "";
+        parsed.hash = "";
+        return parsed.href;
+      } catch (_) {
+        return text.split(/[?#]/, 1)[0];
+      }
+    };
+    const relationIds = (root) => {
+      const found = new Set();
+      const relationKey = (key) => {
+        const compact = String(key || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+        return [
+          "inputasset", "originalpost", "originalasset", "parentpost", "parentasset",
+          "sourcepost", "sourceasset", "rootpost", "rootasset", "mediareference",
+          "referenceasset", "referenceimage",
+        ].some((token) => compact.includes(token)) || ["reference", "references"].includes(compact);
+      };
+      const visit = (value, relation = false) => {
+        if (Array.isArray(value)) {
+          value.forEach((item) => visit(item, relation));
+          return;
+        }
+        if (value && typeof value === "object") {
+          Object.entries(value).forEach(([key, item]) => visit(item, relation || relationKey(key)));
+          return;
+        }
+        if (!relation || typeof value !== "string") return;
+        for (const match of value.matchAll(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi)) {
+          found.add(match[0].toLowerCase());
+        }
+      };
+      visit(root);
+      return found;
+    };
+    const assetMediaUrl = (asset) => assetUrlFromFileUri(
+      asset?.mediaUrl
+      || asset?.imageUrl
+      || asset?.url
+      || asset?.assetUrl
+      || asset?.fileUri
+      || asset?.key
+      || "",
+    );
+    let expectedPostId = "";
+    const expectedSourceId = normalizeId(originalPostId);
+    const expectedSourceIds = new Set([originalPostId, sourceItemId]
+      .flatMap((value) => String(value || "").match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi) || [])
+      .map((value) => value.toLowerCase()));
+    const expectedFileId = normalizeId(fileId);
+    const expectedMediaUrl = canonicalUrl(mediaUrl);
+    const postIsLinked = (candidate) => Boolean(
+      candidate
+      && expectedPostId
+      && normalizeId(candidate.id || candidate.postId || candidate.mediaPostId) === expectedPostId
+      && [candidate.originalPostId, candidate.original_post_id, candidate.parentPostId, candidate.parent_post_id]
+        .some((value) => normalizeId(value) === expectedSourceId)
+    );
+    const assetIsLinked = (asset) => {
+      if (!asset || typeof asset !== "object") return false;
+      const identityMatches = [asset.assetId, asset.id, asset.postId, asset.mediaPostId]
+        .some((value) => {
+          const normalized = normalizeId(value);
+          return Boolean(normalized) && normalized === expectedFileId;
+        })
+        || (expectedMediaUrl && canonicalUrl(assetMediaUrl(asset)) === expectedMediaUrl);
+      const assetPostId = normalizeId(asset.postId || asset.mediaPostId);
+      const linkedSources = relationIds(asset);
+      return identityMatches && Boolean(assetPostId) && Array.from(expectedSourceIds).some((value) => linkedSources.has(value));
+    };
+    const requestJson = async (path, options = {}) => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 4000);
+      try {
+        const response = await fetch(path, {
+          credentials: "include",
+          ...options,
+          signal: controller.signal,
+        });
+        const text = await response.text();
+        let json = {};
+        try {
+          json = text.trim() ? JSON.parse(text) : {};
+        } catch (_) {}
+        if (!response.ok) throw new Error(`${path} HTTP ${response.status}: ${text.slice(0, 300)}`);
+        return json;
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+    let verifiedPost = null;
+    let savedAsset = null;
+    let lastVerificationError = "";
+    const verificationDeadline = Date.now() + 12000;
+    while (Date.now() < verificationDeadline && (!verifiedPost || !savedAsset)) {
+      const [postAttempt, assetAttempt] = await Promise.all([
+        verifiedPost ? Promise.resolve(verifiedPost) : (async () => {
+          try {
+            const data = await requestJson("/rest/media/post/get", {
+              method: "POST",
+              headers: { "accept": "application/json, text/plain, */*", "content-type": "application/json" },
+              body: JSON.stringify({ id: post.id }),
+            });
+            const candidate = data?.post && typeof data.post === "object" ? data.post : null;
+            if (postIsLinked(candidate)) return candidate;
+          } catch (error) {
+            lastVerificationError = error?.message || String(error);
+          }
+          try {
+            const data = await requestJson("/rest/media/post/bulk-get", {
+              method: "POST",
+              headers: { "accept": "application/json, text/plain, */*", "content-type": "application/json" },
+              body: JSON.stringify({ ids: [post.id] }),
+            });
+            return (Array.isArray(data?.posts) ? data.posts : []).find(postIsLinked) || null;
+          } catch (error) {
+            lastVerificationError = error?.message || String(error);
+            return null;
+          }
+        })(),
+        savedAsset ? Promise.resolve(savedAsset) : (async () => {
+          try {
+            const data = await requestJson(`/rest/assets/${encodeURIComponent(fileId)}`);
+            const candidate = data?.asset && typeof data.asset === "object" ? data.asset : data;
+            if (assetIsLinked(candidate)) return candidate;
+          } catch (error) {
+            lastVerificationError = error?.message || String(error);
+          }
+          try {
+            const query = new URLSearchParams({
+              pageSize: "40",
+              orderBy: "ORDER_BY_CREATE_TIME",
+              workspaceKind: "WORKSPACE_KIND_IMAGINE_ALL",
+            });
+            const data = await requestJson(`/rest/assets?${query}`);
+            return (Array.isArray(data?.assets) ? data.assets : []).find(assetIsLinked) || null;
+          } catch (error) {
+            lastVerificationError = error?.message || String(error);
+            return null;
+          }
+        })(),
+      ]);
+      if (postAttempt) verifiedPost = postAttempt;
+      if (assetAttempt) {
+        savedAsset = assetAttempt;
+        expectedPostId = normalizeId(savedAsset.postId || savedAsset.mediaPostId);
+        post = { id: expectedPostId };
+      }
+      if (!verifiedPost || !savedAsset) await new Promise((resolve) => setTimeout(resolve, 400));
+    }
+    if (!verifiedPost || !savedAsset) {
+      throw new Error(
+        "Grok did not confirm the cropped image in its Saved data."
+        + (lastVerificationError ? ` ${lastVerificationError}` : ""),
+      );
     }
     return {
       ok: true,
       status: 200,
       upload: uploadJson,
-      result: createJson,
-      post,
+      result: officialResult && typeof officialResult === "object" ? officialResult : { value: officialResult ?? null },
+      post: verifiedPost,
+      verifiedPost,
+      savedAsset,
+      savedVerified: true,
       fileId,
       mediaUrl,
       originalPostId: String(originalPostId || ""),
       sourceContainerId: String(sourceContainerId || ""),
-      storeUpdate,
+      // This renderer is temporary. Do not pretend its in-memory store is persistence;
+      // the host accepts this result only after re-reading the post and Saved asset.
+      storeUpdate: { updated: false, mode: "remote_verification_required" },
       elapsedMs: Date.now() - startedAt,
       bridgeStatus: this.status(),
       storeTrace: storeTrace.slice(-90),

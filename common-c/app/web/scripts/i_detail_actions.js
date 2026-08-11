@@ -1470,9 +1470,6 @@ async function upscaleImagineSelectedDetailVideo(button = null) {
   };
   if (button) button.disabled = true;
   try {
-    if (typeof prepareActiveImagineBridgeSession === "function") {
-      await prepareActiveImagineBridgeSession({ force: false, silent: true, accountId: payload.account_id });
-    }
     const data = await qApi("/api/imagine/start", payload);
     if (!data?.job) throw new Error("Upscale job was not created.");
     upsertImagineJob(data.job);
@@ -1585,9 +1582,6 @@ async function startImagineDetailAspectRatio(label, button = null) {
   };
   if (button) button.disabled = true;
   try {
-    if (typeof prepareActiveImagineBridgeSession === "function") {
-      await prepareActiveImagineBridgeSession({ force: false, silent: true, accountId: payload.account_id });
-    }
     const data = await qApi("/api/imagine/start", payload);
     if (!data?.job) throw new Error("Aspect Ratio job was not created.");
     upsertImagineJob(data.job);
@@ -1694,16 +1688,11 @@ function layoutImagineCropOverlay() {
   if (!frame || !image) return;
   const naturalWidth = imagineCropOverlayState.naturalWidth || image.naturalWidth || 1;
   const naturalHeight = imagineCropOverlayState.naturalHeight || image.naturalHeight || 1;
-  const maxWidth = Math.min(window.innerWidth * 0.72, 980);
-  const maxHeight = Math.max(260, window.innerHeight - 190);
-  let width = maxWidth;
-  let height = width * (naturalHeight / naturalWidth);
-  if (height > maxHeight) {
-    height = maxHeight;
-    width = height * (naturalWidth / naturalHeight);
-  }
-  width = Math.max(220, Math.round(width));
-  height = Math.max(220, Math.round(height));
+  const maxWidth = Math.max(120, Math.min(window.innerWidth * 0.72, 980));
+  const maxHeight = Math.max(120, window.innerHeight - 190);
+  const scale = Math.min(maxWidth / naturalWidth, maxHeight / naturalHeight);
+  const width = Math.max(1, Math.round(naturalWidth * scale));
+  const height = Math.max(1, Math.round(naturalHeight * scale));
   frame.style.width = `${width}px`;
   frame.style.height = `${height}px`;
   imagineCropOverlayState.frame = { width, height };
@@ -1839,25 +1828,41 @@ function imagineCropDataUrl() {
   }
   const scaleX = state.naturalWidth / state.frame.width;
   const scaleY = state.naturalHeight / state.frame.height;
-  const sourceX = Math.round(state.rect.x * scaleX);
-  const sourceY = Math.round(state.rect.y * scaleY);
-  const sourceWidth = Math.round(state.rect.width * scaleX);
-  const sourceHeight = Math.round(state.rect.height * scaleY);
+  const sourceX = Math.max(0, Math.floor(state.rect.x * scaleX));
+  const sourceY = Math.max(0, Math.floor(state.rect.y * scaleY));
+  const sourceRight = Math.min(state.naturalWidth, Math.ceil((state.rect.x + state.rect.width) * scaleX));
+  const sourceBottom = Math.min(state.naturalHeight, Math.ceil((state.rect.y + state.rect.height) * scaleY));
+  const sourceWidth = Math.max(1, sourceRight - sourceX);
+  const sourceHeight = Math.max(1, sourceBottom - sourceY);
   const canvas = document.createElement("canvas");
   canvas.width = Math.max(1, sourceWidth);
   canvas.height = Math.max(1, sourceHeight);
   const context = canvas.getContext("2d");
   if (!context) throw new Error("Crop canvas is unavailable.");
   context.drawImage(image, sourceX, sourceY, sourceWidth, sourceHeight, 0, 0, canvas.width, canvas.height);
-  return canvas.toDataURL("image/png");
+  const gcd = (left, right) => {
+    let a = Math.round(Math.abs(left));
+    let b = Math.round(Math.abs(right));
+    while (b) [a, b] = [b, a % b];
+    return a || 1;
+  };
+  const divisor = gcd(canvas.width, canvas.height);
+  return {
+    dataUrl: canvas.toDataURL("image/png"),
+    width: canvas.width,
+    height: canvas.height,
+    aspectRatio: `${Math.round(canvas.width / divisor)}:${Math.round(canvas.height / divisor)}`,
+  };
 }
 
 function applyImagineCropResult(post, data) {
   const item = data?.item || data?.items?.[0];
   if (!post || !item) return false;
   const targetPath = String(data.source_post_path || post.folder_path || "");
+  let matched = false;
   const updatePost = (candidate) => {
     if (!candidate || candidate.folder_path !== targetPath) return candidate;
+    matched = true;
     if (typeof mergeImagineGeneratedItems === "function") return mergeImagineGeneratedItems(candidate, [item]);
     const items = [...(candidate.items || [])];
     const itemKey = mediaItemKey(item);
@@ -1870,10 +1875,18 @@ function applyImagineCropResult(post, data) {
       representative_item: representative,
     });
   };
-  for (const listName of ["imagineRemotePosts", "imagineDiscoverPosts", "imagineUnsavedPosts"]) {
+  for (const listName of [
+    "imagineRemotePosts",
+    "imagineDiscoverPosts",
+    "imagineUnsavedPosts",
+    "imagineSearchPosts",
+    "imagineUploadPosts",
+    "imagineLikedPosts",
+  ]) {
     const list = Array.isArray(library_state[listName]) ? library_state[listName] : [];
     library_state[listName] = list.map(updatePost);
   }
+  if (!matched) return false;
   syncImagineRemotePostsIntoLibrary();
   library_state.selectedPostPath = targetPath || library_state.selectedPostPath;
   library_state.selectedDetailItemId = mediaItemKey(item);
@@ -1887,10 +1900,9 @@ async function submitImagineCropOverlay() {
   const confirmButton = document.querySelector(".i_crop_confirm");
   if (confirmButton) confirmButton.disabled = true;
   try {
-    const imageData = imagineCropDataUrl();
-    const aspectRatio = "1:1";
+    const crop = imagineCropDataUrl();
     const data = await qApi("/api/imagine/image/crop", {
-      image_data: imageData,
+      image_data: crop.dataUrl,
       account_id: iDetailAccountId(state.item, state.post),
       id: state.sourcePostId,
       post_id: state.sourcePostId,
@@ -1898,9 +1910,14 @@ async function submitImagineCropOverlay() {
       source_item_id: mediaItemKey(state.item),
       source_post_path: state.post.folder_path || "",
       prompt: detailPromptFor(state.post, state.item) || state.post.prompt || "",
-      aspect_ratio: aspectRatio,
+      aspect_ratio: crop.aspectRatio,
+      crop_width: crop.width,
+      crop_height: crop.height,
       metadata: state.item.metadata || {},
     });
+    if (!data?.saved_verified) {
+      throw new Error("Grok did not confirm the cropped image in Saved.");
+    }
     closeImagineCropOverlay();
     if (!applyImagineCropResult(state.post, data)) {
       throw new Error("Crop response did not include an image.");

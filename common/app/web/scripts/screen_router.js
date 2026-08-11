@@ -14,7 +14,6 @@ function showAccountScreen(show, options = {}) {
   if (visible) {
     closePromptSave();
     renderAccounts();
-    refreshAccounts({ refreshStatuses: true }).catch((error) => setLibraryMessage(error.message || "Account refresh failed."));
     accountScreen?.focus({ preventScroll: true });
     if (options.pushHistory) writeBrowserHistory(screen_state.current_screen, activeNavButtonId());
   } else if (!options.skipHistory && history.state?.grokStudioQ && history.state.accountVisible) {
@@ -71,9 +70,6 @@ function openScreen(screenId, activeButtonId = "", options = {}) {
   if (screenId === "i_detail" || screenId === "b_detail") updateDetailPostNavigationButtons();
   if (screenId === "collection_main") scheduleCollectionRows();
   if (typeof scheduleScreenVirtualCardList === "function") scheduleScreenVirtualCardList(screenId);
-  if ((screenId === "i_main" || screenId === "i_discover_main") && typeof prepareActiveImagineBridgeSession === "function") {
-    prepareActiveImagineBridgeSession().catch((error) => console.warn(error));
-  }
   if (typeof syncCardSelectionControls === "function") syncCardSelectionControls();
   const historyOptions = (
     previousScreenId === screenId
@@ -89,9 +85,6 @@ function usagePopupFeatures(width = 560, height = 760) {
   return `popup=yes,width=${width},height=${height},left=${left},top=${top},resizable=yes,scrollbars=yes`;
 }
 
-let lastWarmedImagineUsageAccount = "";
-let warmImagineUsageTimer = null;
-
 function activeImagineUsagePayload() {
   const accountId = account_state.imagine?.active_id || "";
   const accounts = account_state.imagine?.accounts || [];
@@ -100,20 +93,9 @@ function activeImagineUsagePayload() {
   return {
     account_id: account.id,
     account_email: account.email || "",
+    store_id: account.store_id || "",
     cookies: validImagineCookies(account),
   };
-}
-
-function warmActiveImagineUsage() {
-  const payload = activeImagineUsagePayload();
-  if (!payload || !window.grokChameleonNative?.warmImagineUsage) return;
-  const key = `${payload.account_id}:${payload.cookies.length}`;
-  if (key === lastWarmedImagineUsageAccount) return;
-  lastWarmedImagineUsageAccount = key;
-  clearTimeout(warmImagineUsageTimer);
-  warmImagineUsageTimer = setTimeout(() => {
-    window.grokChameleonNative.warmImagineUsage(payload).catch(() => {});
-  }, 250);
 }
 
 async function openUsagePage() {

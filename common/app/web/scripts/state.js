@@ -495,7 +495,6 @@ function normalizeNfcText(value = "") {
     if (account_state.imagine.active_id && !account_state.imagine.accounts.some((account) => account.id === account_state.imagine.active_id)) {
       account_state.imagine.active_id = "";
     }
-    if (typeof warmActiveImagineUsage === "function") warmActiveImagineUsage();
   }
 
   function applyLibrarySnapshot(data, options = {}) {
