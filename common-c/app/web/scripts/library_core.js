@@ -4,7 +4,6 @@
     const titleInput = promptSave.querySelector(".prompt_save_title");
     const promptInput = promptSave.querySelector(".prompt_save_original");
     const translationInput = promptSave.querySelector(".prompt_save_translation");
-    const translateButton = promptSave.querySelector(".prompt_save_translate");
     const currentPrompt = normalizeNfcText(
       prompt ? prompt.text || "" : document.getElementById("composer_input")?.value || "",
     );
@@ -15,7 +14,7 @@
     if (titleInput) titleInput.value = normalizeNfcText(prompt?.title || "");
     if (promptInput) promptInput.value = currentPrompt;
     if (translationInput) translationInput.value = normalizeNfcText(prompt?.translation || "");
-    setPromptTranslationDirection(translateButton, promptTranslationDirection(prompt?.translation || currentPrompt), prompt?.translation ? "translation" : "original");
+    resetPromptTranslationDialog({ translate: Boolean(currentPrompt) && !prompt?.translation });
     promptSave.hidden = false;
     requestAnimationFrame(() => {
       for (const input of [promptInput, translationInput]) {
@@ -30,6 +29,8 @@
 
   function closePromptSave() {
     if (!promptSave) return;
+    cancelPromptTranslationWork();
+    closePromptTranslationLanguageMenu();
     promptSave.hidden = true;
     promptSave.dataset.editFileName = "";
     promptSave.dataset.editPromptId = "";

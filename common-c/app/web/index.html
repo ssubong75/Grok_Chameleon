@@ -4,14 +4,14 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Grok Chameleon</title>
-    <link rel="stylesheet" href="./styles/app.css?v=20260809-1" />
+    <link rel="stylesheet" href="./styles/app.css?v=20260812-2" />
     <link rel="stylesheet" href="./styles/composer.css" />
     <script src="./scripts/state.js?v=20260809-4" defer></script>
     <script src="./scripts/library_utils.js" defer></script>
     <script src="./scripts/ui_feedback.js" defer></script>
     <script src="./scripts/dialog.js" defer></script>
     <script src="./scripts/library_core.js" defer></script>
-    <script src="./scripts/prompt_translate.js" defer></script>
+    <script src="./scripts/prompt_translate.js?v=20260812-2" defer></script>
     <script src="./scripts/account_core.js" defer></script>
     <script src="./scripts/composer_options.js" defer></script>
     <script src="./scripts/composer_provider.js" defer></script>
@@ -27,7 +27,7 @@
     <script src="./scripts/detail_render.js?v=20260809-3" defer></script>
     <script src="./scripts/library_scan.js?v=20260806-14" defer></script>
     <script src="./scripts/render.js" defer></script>
-    <script src="./scripts/build_main.js?v=20260806-12" defer></script>
+    <script src="./scripts/build_main.js?v=20260812-2" defer></script>
     <script src="./scripts/b_composer_submit.js" defer></script>
     <script src="./scripts/i_composer_submit.js" defer></script>
     <script src="./scripts/composer_submit.js" defer></script>
@@ -450,11 +450,31 @@
               <textarea class="prompt_save_text prompt_save_translation" aria-label="Translated prompt" placeholder="Translation appears here." readonly></textarea>
             </div>
             <div class="prompt_save_actions">
-              <button class="ghost_btn prompt_save_translate" type="button" aria-label="ENG to KOR">
-                <span>ENG</span>
-                <svg class="translation_arrow_icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M14 7l5 5-5 5" /></svg>
-                <span>KOR</span>
-              </button>
+              <div class="prompt_translate_controls" aria-label="Translation languages">
+                <button class="prompt_language_detect" type="button" aria-label="언어 감지">Detect</button>
+                <div class="prompt_language_pair">
+                  <span class="prompt_language_badge" data-prompt-language-label="source" title="영어">ENG</span>
+                  <button class="prompt_language_toggle" type="button" data-prompt-language-side="source" aria-label="원문 언어 선택" aria-controls="prompt_language_menu" aria-expanded="false">
+                    <svg class="prompt_language_chevron" viewBox="0 0 12 8" aria-hidden="true"><path d="m1 1 5 5 5-5" /></svg>
+                  </button>
+                </div>
+                <button class="prompt_language_swap" type="button" aria-label="원문과 번역문 전환" title="원문과 번역문 전환">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h14m-4-4 4 4-4 4M20 16H6m4 4-4-4 4-4" /></svg>
+                </button>
+                <div class="prompt_language_pair">
+                  <span class="prompt_language_badge" data-prompt-language-label="target" title="한국어">KOR</span>
+                  <button class="prompt_language_toggle" type="button" data-prompt-language-side="target" aria-label="번역문 언어 선택" aria-controls="prompt_language_menu" aria-expanded="false">
+                    <svg class="prompt_language_chevron" viewBox="0 0 12 8" aria-hidden="true"><path d="m1 1 5 5 5-5" /></svg>
+                  </button>
+                </div>
+                <section id="prompt_language_menu" class="prompt_language_menu" data-language-side="" aria-label="언어 선택" hidden>
+                  <label class="prompt_language_search_box">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5" /><path d="m16 16 4 4" /></svg>
+                    <input class="prompt_language_search" type="search" placeholder="언어 검색" autocomplete="off" spellcheck="false" aria-label="언어 검색" />
+                  </label>
+                  <div class="prompt_language_options" role="listbox" aria-label="번역 언어"></div>
+                </section>
+              </div>
               <div class="prompt_save_actions_right">
                 <button id="prompt_save_cancel" class="ghost_btn prompt_save_cancel" type="button">Cancel</button>
                 <button id="prompt_save_confirm" class="primary_btn prompt_save_confirm" type="button">Save</button>
