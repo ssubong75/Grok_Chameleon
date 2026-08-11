@@ -7250,8 +7250,11 @@ def imagine_asset_media_kind(asset: dict, raw_url: str) -> str:
 def imagine_asset_upload_only(asset: dict) -> bool:
     if not isinstance(asset, dict):
         return False
-    source_text = " ".join(str(asset.get(key) or "") for key in ("source", "fileSource", "file_source", "mediaSource"))
-    if "UPLOADED" not in source_text.upper():
+    # Grok labels a picked file SELF_UPLOAD_FILE_SOURCE — or IMAGINE_SELF_UPLOAD_FILE_SOURCE
+    # from the Imagine screen. Neither contains "UPLOADED", which this test used to look
+    # for, so every upload slipped through and drew its own card in Imagine main.
+    # imagine_asset_upload_source next door already had the right test; share it.
+    if not imagine_asset_upload_source(asset):
         return False
     post_keys = ("postId", "mediaPostId", "rootPostId", "originalPostId", "parentPostId")
     return not any(str(asset.get(key) or "").strip() for key in post_keys)
@@ -21821,6 +21824,7 @@ def save_image_editor_upload_result(payload: dict, mime_type: str, image_data: s
     if existing:
         folder_path, item_id = existing
         unhide_saved_upload_refs(root, [(folder_path, item_id)])
+        refresh_library_index_paths(root, [folder_path])
         return {
             "ok": True,
             "item": {
@@ -21874,6 +21878,10 @@ def save_image_editor_upload_result(payload: dict, mime_type: str, image_data: s
     }
     write_json(folder / "post.json", post_json_from_post(post))
     unhide_saved_upload_refs(root, [(folder_path, item_id)])
+    # Without this the editor's return trip asks the index for a folder it has never been
+    # told about, and the save ends on "Library post was not found." even though every
+    # file is on disk.
+    refresh_library_index_paths(root, [folder_path])
     return {
         "ok": True,
         "item": {
@@ -21940,6 +21948,24 @@ def save_image_editor_result(payload: dict) -> dict:
     )
     write_json(post_dir / "post.json", post_json)
     refresh_library_index_paths(root, [post.get("folder_path") or ""])
+    # The edit belongs on the card it was made from, and it is also the most likely thing
+    # to attach to the next prompt. The composer's list is built from the upload area
+    # alone, so a card item never reaches it — file a copy there as well. The index has to
+    # be told about that folder in the same breath: without it the editor's return trip
+    # asks for a post the index has never heard of and fails with "not found".
+    upload_folder_path = ""
+    try:
+        upload_result = save_image_editor_upload_result(payload, mime_type, image_data)
+        upload_folder_path = str((upload_result.get("item") or {}).get("folder_path") or "")
+        if upload_folder_path:
+            refresh_library_index_paths(root, [upload_folder_path])
+    except Exception as exc:  # noqa: BLE001
+        # The card copy is already written and is what the caller is waiting for. Losing
+        # the composer copy should not take the save down with it.
+        log_event(
+            "image_editor_upload_copy_failed "
+            f"post={post.get('folder_path') or ''} error={str(exc)[:300]}"
+        )
     data = current_library_snapshot(root)
     data["selected_path"] = post.get("folder_path") or ""
     data["selected_item_id"] = new_item["item_id"]
@@ -21947,7 +21973,10 @@ def save_image_editor_result(payload: dict) -> dict:
         "id": f"{post.get('folder_path') or ''}::{new_item['item_id']}",
         "folder_path": post.get("folder_path") or "",
         "item_id": new_item["item_id"],
-        "metadata": {"editor_save_target": "detail"},
+        "metadata": {
+            "editor_save_target": "detail",
+            "upload_copy_folder_path": upload_folder_path,
+        },
     }
     return data
 
