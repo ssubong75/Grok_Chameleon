@@ -240,6 +240,11 @@
         library_state.imagineUploadLoaded = true;
       } catch (error) {
         library_state.imagineUploadError = error?.message || "Imagine uploads failed.";
+        // Settle the flag on failure too. It is cleared on every account switch, and the
+        // redraw below re-enters whatever asked for this list — leaving it unset turned a
+        // single failed request into an unbroken retry loop, right at the moment a switch
+        // is least likely to succeed. A forced reload still gets through.
+        library_state.imagineUploadLoaded = true;
       } finally {
         library_state.imagineUploadLoading = false;
         renderComposerAttachments();
@@ -765,6 +770,48 @@
       };
     }
 
+    // Grok keeps no small copy of an uploaded image — traced 2026-08-11, its own composer
+    // pulls the 4.5MB original and scales it in CSS, and previewImageKey comes back empty.
+    // Twenty-four of those decoded on every open is what made the app stutter. The card
+    // preview pipeline already downsizes a remote image once and serves it from disk with
+    // a year-long cache; route these through it and fall back to the original if it fails.
+    function composerThumbImageSource(img, source, previewUrl) {
+      const url = String(previewUrl || "");
+      const identity = String(source?.asset_id || source?.item_id || "").trim();
+      if (url.startsWith("/api/imagine/remote/media")) {
+        if (typeof queueNativeCardPreview !== "function") {
+          img.src = url;
+          return;
+        }
+        queueNativeCardPreview(img, {
+          url,
+          kind: "thumbnail",
+          cache_identity: identity ? `imagine-upload:${identity}` : "",
+        }).then((result) => {
+          const cached = String(result?.url || "");
+          if (img.isConnected) img.src = cached || url;
+        }).catch(() => {
+          if (img.isConnected) img.src = url;
+        });
+        return;
+      }
+      // A local upload costs no network, but decoding a multi-megabyte original down to a
+      // thumbnail costs the same either way — which is why the card lists already go
+      // through here. resolveLocalCardPreview reuses an existing preview before asking for
+      // a new one, and shares the queue so twenty-four do not start at once.
+      if (url.startsWith("/api/media") && typeof resolveLocalCardPreview === "function") {
+        resolveLocalCardPreview(url, "thumbnail", identity ? `upload:${identity}` : "", img)
+          .then((resolvedUrl) => {
+            if (img.isConnected) img.src = resolvedUrl || url;
+          })
+          .catch(() => {
+            if (img.isConnected) img.src = url;
+          });
+        return;
+      }
+      img.src = url;
+    }
+
     function composerThumbButton({ attachment = null, post = null, item = null, index = 0, active = false, disabled = false, attached = false }) {
       const source = attachment || item || {};
       const type = composerMediaKind(source);
@@ -783,8 +830,8 @@
       }
       if (type === "image") {
         const img = document.createElement("img");
-        img.src = source.preview_url || mediaPreviewUrl(source);
         img.alt = "";
+        composerThumbImageSource(img, source, source.preview_url || mediaPreviewUrl(source));
         button.append(img);
       } else if (type === "video") {
         const video = document.createElement("video");

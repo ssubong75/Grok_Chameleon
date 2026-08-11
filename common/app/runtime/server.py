@@ -5010,6 +5010,48 @@ def list_imagine_saved_cache(payload: dict) -> dict:
     }
 
 
+# grok.com stamps a copy with the id it was made from, so a copy identifies itself from the
+# asset alone — no local bookkeeping, and it still holds for a copy made on another machine
+# or before this build. Measured 2026-08-11 on this account: /rest/assets and a
+# conversation's /responses both carry auxKeys.duplicated_from_asset_id, and only the two
+# copies had it. Nothing generated here did, so filtering on it cannot take a result down.
+def imagine_asset_duplicated_from_id(node: object) -> str:
+    if not isinstance(node, dict):
+        return ""
+    aux_keys = node.get("auxKeys") if isinstance(node.get("auxKeys"), dict) else {}
+    for source in (aux_keys, node):
+        for key in ("duplicated_from_asset_id", "duplicatedFromAssetId"):
+            value = str(source.get(key) or "").strip()
+            if value:
+                return value
+    return ""
+
+
+# The mark sits on the asset node itself, so there is no reason to sweep a whole response
+# looking for it. A conversation keeps its assets in one place; read that and nothing else.
+# Walking every node cost 8.8ms per 3.8MB of detail on every list request for the same
+# answer a direct lookup gives for free.
+def imagine_detail_cloned_copy_ids(detail: object) -> set[str]:
+    found: set[str] = set()
+    responses = detail.get("responses") if isinstance(detail, dict) else None
+    if not isinstance(responses, list):
+        return found
+    for response in responses:
+        if not isinstance(response, dict):
+            continue
+        for key in ("fileAttachmentAssetMetadata", "assetMetadata", "assets"):
+            entries = response.get(key)
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                asset_id = str(entry.get("assetId") or "").strip()
+                if asset_id and imagine_asset_duplicated_from_id(entry):
+                    found.add(asset_id)
+    return found
+
+
 def list_imagine_saved(payload: dict) -> dict:
     root = library_root()
     if not root:
@@ -5088,6 +5130,12 @@ def list_imagine_saved(payload: dict) -> dict:
     pending_delete_ids = imagine_pending_delete_ids(root, account)
     local_exclusion_ids = imagine_local_exclusion_ids(root, account)
     hidden_remote_ids = pending_delete_ids | local_exclusion_ids
+    # A copy belongs on its Liked card and nowhere else. The conversation detail carries the
+    # mark, so the cards built from it can be filtered before the asset pass runs.
+    cloned_copy_ids: set[str] = set()
+    for detail in details.values():
+        cloned_copy_ids |= imagine_detail_cloned_copy_ids(detail)
+    hidden_remote_ids |= cloned_copy_ids
     external_reference_ids = imagine_account_setting_ids(
         root,
         "imagine_external_reference_asset_ids",
@@ -5196,6 +5244,10 @@ def list_imagine_saved(payload: dict) -> dict:
         if not isinstance(asset, dict) or imagine_asset_upload_only(asset):
             continue
         asset_id = str(asset.get("assetId") or asset.get("id") or "").strip()
+        # A copy carries the id it was made from; it belongs on its Liked card, not here.
+        if asset_id and imagine_asset_duplicated_from_id(asset):
+            cloned_copy_ids.add(asset_id)
+            continue
         if (
             not asset_id
             or asset_id in hidden_remote_ids
@@ -5235,6 +5287,23 @@ def list_imagine_saved(payload: dict) -> dict:
         imagine_debug_event("saved_cache_update_failed", {
             "account_id": str(account.get("id") or ""),
             "error": str(exc)[:400],
+        })
+    if cloned_copy_ids:
+        # A card the copy shared with generated results is rewritten by the upsert above,
+        # so only a card that was nothing but the copy is left behind. Those rows have to
+        # go by hand or the cached view keeps drawing them.
+        live_post_keys = {
+            imagine_remote_cache_post_key(post)
+            for post in posts
+            if imagine_remote_cache_post_key(post)
+        }
+        stale_copy_keys = cloned_copy_ids - live_post_keys
+        if stale_copy_keys:
+            remove_imagine_remote_cache_post_keys(root, account, stale_copy_keys)
+        imagine_debug_event("cloned_copies_hidden_from_main", {
+            "account_id": str(account.get("id") or ""),
+            "cloned_copy_ids": sorted(cloned_copy_ids),
+            "cache_rows_removed": sorted(stale_copy_keys),
         })
 
     next_conversation_cursor = str(data.get("nextPageToken") or "").strip()
@@ -5698,7 +5767,7 @@ def list_imagine_liked(payload: dict) -> dict:
             return {"asset_id": asset_id, "error": str(exc)[:300]}
         if not post:
             return {"asset_id": asset_id, "error": "Liked asset returned no post."}
-        return {"entry": entry, "asset_id": asset_id, "post": post}
+        return {"entry": entry, "asset_id": asset_id, "post": post, "raw_post": raw_post}
 
     fetched: list[dict] = []
     if wanted_entries:
@@ -5711,6 +5780,37 @@ def list_imagine_liked(payload: dict) -> dict:
         # Keep the collection's own order; as_completed hands them back by whoever finished.
         fetched = [results[entry["asset_id"]] for entry in wanted_entries if entry["asset_id"] in results]
 
+    # Hearting a link on an older build filed the copy of the source image alongside the
+    # copy of the video, so the collection holds two ids for what was one press. The copy
+    # says what it was made from, and the card for the other id already shows that origin as
+    # its source — so this entry is the same card twice. Fold it away instead of drawing it
+    # as a second card holding nothing but the original image.
+    item_ids_by_asset_id = {
+        record["asset_id"]: {
+            imagine_item_asset_id(item)
+            for item in record["post"].get("items") or []
+            if isinstance(item, dict) and imagine_item_asset_id(item)
+        }
+        for record in fetched
+        if not record.get("error")
+    }
+    folded_asset_ids: set[str] = set()
+    for record in fetched:
+        if record.get("error"):
+            continue
+        asset_id = record["asset_id"]
+        origin_id = (
+            imagine_asset_duplicated_from_id(record.get("raw_post"))
+            or imagine_asset_duplicated_from_id(record.get("post"))
+        )
+        if not origin_id:
+            continue
+        if any(
+            other_asset_id != asset_id and origin_id in other_item_ids
+            for other_asset_id, other_item_ids in item_ids_by_asset_id.items()
+        ):
+            folded_asset_ids.add(asset_id)
+
     for record in fetched:
         if record.get("error"):
             errors.append({"asset_id": record.get("asset_id"), "error": record["error"]})
@@ -5718,6 +5818,8 @@ def list_imagine_liked(payload: dict) -> dict:
         entry = record["entry"]
         asset_id = record["asset_id"]
         post = record["post"]
+        if asset_id in folded_asset_ids:
+            continue
         # Liked shows what the heart was pressed on and the source it came from, nothing
         # else. Anything generated from it afterwards lands in its own card on grok.com's
         # saved view, and it was turning up glued onto the Liked card here.
@@ -5778,6 +5880,7 @@ def list_imagine_liked(payload: dict) -> dict:
         "requested": len(entries),
         "posts": len(posts),
         "errors": len(errors),
+        "folded_copies": sorted(folded_asset_ids),
     })
     return {
         "ok": True,
@@ -7087,8 +7190,11 @@ def imagine_asset_media_kind(asset: dict, raw_url: str) -> str:
 def imagine_asset_upload_only(asset: dict) -> bool:
     if not isinstance(asset, dict):
         return False
-    source_text = " ".join(str(asset.get(key) or "") for key in ("source", "fileSource", "file_source", "mediaSource"))
-    if "UPLOADED" not in source_text.upper():
+    # Grok labels a picked file SELF_UPLOAD_FILE_SOURCE — or IMAGINE_SELF_UPLOAD_FILE_SOURCE
+    # from the Imagine screen. Neither contains "UPLOADED", which this test used to look
+    # for, so every upload slipped through and drew its own card in Imagine main.
+    # imagine_asset_upload_source next door already had the right test; share it.
+    if not imagine_asset_upload_source(asset):
         return False
     post_keys = ("postId", "mediaPostId", "rootPostId", "originalPostId", "parentPostId")
     return not any(str(asset.get(key) or "").strip() for key in post_keys)
@@ -7532,6 +7638,7 @@ def list_imagine_uploads(payload: dict) -> dict:
         ("mimeTypes", "image/webp"),
         ("orderBy", "ORDER_BY_LAST_USE_TIME"),
         ("source", "SOURCE_UPLOADED"),
+        ("isLatest", "true"),
         ("includeImagineFiles", "true"),
     ]
     if cursor:
@@ -21464,10 +21571,12 @@ def save_image_editor_upload_result(payload: dict, mime_type: str, image_data: s
     if not raw:
         raise RuntimeError("Edited image is empty.")
     upload_hash = hashlib.sha256(raw).hexdigest()
+    source_name = str(payload.get("name") or "").strip()
     existing = find_uploaded_media_by_hash(root, upload_hash)
     if existing:
         folder_path, item_id = existing
         unhide_saved_upload_refs(root, [(folder_path, item_id)])
+        refresh_library_index_paths(root, [folder_path])
         return {
             "ok": True,
             "item": {
@@ -21477,7 +21586,6 @@ def save_image_editor_upload_result(payload: dict, mime_type: str, image_data: s
                 "metadata": {"editor_save_target": "upload"},
             },
         }
-    source_name = str(payload.get("name") or "").strip()
     ext = extension_from_mime_type(mime_type, "png")
     now = now_iso()
     date_name = datetime.now().strftime("%Y-%m-%d")
@@ -21521,6 +21629,10 @@ def save_image_editor_upload_result(payload: dict, mime_type: str, image_data: s
     }
     write_json(folder / "post.json", post_json_from_post(post))
     unhide_saved_upload_refs(root, [(folder_path, item_id)])
+    # Without this the editor's return trip asks the index for a folder it has never been
+    # told about, and the save ends on "Library post was not found." even though every
+    # file is on disk.
+    refresh_library_index_paths(root, [folder_path])
     return {
         "ok": True,
         "item": {
@@ -21587,6 +21699,24 @@ def save_image_editor_result(payload: dict) -> dict:
     )
     write_json(post_dir / "post.json", post_json)
     refresh_library_index_paths(root, [post.get("folder_path") or ""])
+    # The edit belongs on the card it was made from, and it is also the most likely thing
+    # to attach to the next prompt. The composer's list is built from the upload area
+    # alone, so a card item never reaches it — file a copy there as well. The index has to
+    # be told about that folder in the same breath: without it the editor's return trip
+    # asks for a post the index has never heard of and fails with "not found".
+    upload_folder_path = ""
+    try:
+        upload_result = save_image_editor_upload_result(payload, mime_type, image_data)
+        upload_folder_path = str((upload_result.get("item") or {}).get("folder_path") or "")
+        if upload_folder_path:
+            refresh_library_index_paths(root, [upload_folder_path])
+    except Exception as exc:  # noqa: BLE001
+        # The card copy is already written and is what the caller is waiting for. Losing
+        # the composer copy should not take the save down with it.
+        log_event(
+            "image_editor_upload_copy_failed "
+            f"post={post.get('folder_path') or ''} error={str(exc)[:300]}"
+        )
     data = current_library_snapshot(root)
     data["selected_path"] = post.get("folder_path") or ""
     data["selected_item_id"] = new_item["item_id"]
@@ -21594,7 +21724,10 @@ def save_image_editor_result(payload: dict) -> dict:
         "id": f"{post.get('folder_path') or ''}::{new_item['item_id']}",
         "folder_path": post.get("folder_path") or "",
         "item_id": new_item["item_id"],
-        "metadata": {"editor_save_target": "detail"},
+        "metadata": {
+            "editor_save_target": "detail",
+            "upload_copy_folder_path": upload_folder_path,
+        },
     }
     return data
 
