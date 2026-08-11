@@ -851,6 +851,13 @@
   left: 18px;
 }
 
+.i_detail_media .video-player:fullscreen.controls-hidden,
+.i_detail_media .video-player.is-fullscreen.controls-hidden,
+.b_detail_media .video-player:fullscreen.controls-hidden,
+.b_detail_media .video-player.is-fullscreen.controls-hidden {
+  cursor: none;
+}
+
 .i_detail_media .video-player:fullscreen .custom-video,
 .i_detail_media .video-player.is-fullscreen .custom-video,
 .b_detail_media .video-player:fullscreen .custom-video,

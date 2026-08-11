@@ -20788,12 +20788,19 @@ def translate_prompt(payload: dict) -> dict:
     text = str(payload.get("text") or "").strip()
     if not text:
         raise RuntimeError("Prompt content is empty.")
-    target_language = str(payload.get("target_language") or "Korean").strip()
-    if target_language not in {"Korean", "English"}:
-        raise RuntimeError("Unsupported translation language.")
-    target_code = "ko" if target_language == "Korean" else "en"
+    legacy_target = str(payload.get("target_language") or "Korean").strip()
+    legacy_target_codes = {"Korean": "ko", "English": "en"}
+    explicit_target = str(payload.get("target_language_code") or "").strip()
+    source_code = str(payload.get("source_language_code") or ("en" if explicit_target else "auto")).strip()
+    target_code = explicit_target or legacy_target_codes.get(legacy_target, "")
+    language_code_pattern = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z]{2,8})?$")
+    if source_code != "auto" and not language_code_pattern.fullmatch(source_code):
+        raise RuntimeError("Unsupported source translation language.")
+    if not language_code_pattern.fullmatch(target_code):
+        raise RuntimeError("Unsupported target translation language.")
+    query = urlencode({"client": "gtx", "sl": source_code, "tl": target_code, "dt": "t"})
     request = urllib.request.Request(
-        f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl={target_code}&dt=t",
+        f"https://translate.googleapis.com/translate_a/single?{query}",
         data=urlencode({"q": text}).encode("utf-8"),
         headers={
             "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
@@ -20819,9 +20826,17 @@ def translate_prompt(payload: dict) -> dict:
     ).strip()
     if not translation:
         raise RuntimeError("Google translation response did not contain text.")
+    detected_source_code = (
+        str(result[2]).strip()
+        if isinstance(result, list) and len(result) > 2 and isinstance(result[2], str)
+        else source_code
+    )
     return {
         "translation": translation,
-        "target_language": target_language,
+        "source_language_code": source_code,
+        "detected_source_language_code": detected_source_code,
+        "target_language_code": target_code,
+        "target_language": {"ko": "Korean", "en": "English"}.get(target_code, target_code),
         "provider": "Google Translate",
     }
 

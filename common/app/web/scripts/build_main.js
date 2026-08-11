@@ -654,12 +654,13 @@
       const candidateProgress = Math.max(1, buildJobSlotProgress(candidate, slotIndex));
       const itemId = `${generationJobProvider(candidate) === "imagine" ? "imagine-job" : "job"}-${candidate.id}-${slotIndex}`;
       const thumb = document.createElement("button");
-      thumb.className = `${prefix}_detail_thumb detail_job_thumb ${candidateModerated ? "moderated" : (candidateFailed ? "failed" : "running")}${!selectedBaseItem && String(candidate.id || "") === String(job.id || "") && (!library_state.selectedDetailItemId || library_state.selectedDetailItemId === itemId) ? " active" : ""}`;
+      thumb.className = `${prefix}_detail_thumb detail_job_thumb ${candidateFailed ? "failed" : "running"}${candidateModerated ? " moderated" : ""}${!selectedBaseItem && String(candidate.id || "") === String(job.id || "") && (!library_state.selectedDetailItemId || library_state.selectedDetailItemId === itemId) ? " active" : ""}`;
       thumb.type = "button";
       thumb.dataset[generationJobDatasetKey(candidate)] = candidate.id;
       thumb.dataset.jobSlotIndex = String(slotIndex);
       thumb.dataset.libraryItemId = itemId;
-      const thumbMedia = candidateModerated
+      const candidatePreview = generationJobPreviewInfo(candidate, basePost);
+      const thumbMedia = candidateModerated && !candidatePreview.url
         ? `<div class="detail_job_thumb_media moderated_detail_thumb_media"></div>`
         : buildJobPreviewHtml(candidate, "detail_job_thumb_media", basePost);
       thumb.innerHTML = `${thumbMedia}
@@ -969,10 +970,7 @@
     const media = document.createElement("div");
     media.className = `card_media card_${type}`;
     const preview = previewInfo.url || "";
-    if (moderated) {
-      media.classList.add("has_moderated_preview");
-      media.append(hiddenMediaPreviewElement("Moderated"));
-    } else if (preview) {
+    if (preview) {
       media.classList.add("has_preview");
       if (previewInfo.type === "video") {
         const video = document.createElement("video");
@@ -993,6 +991,9 @@
         if (typeof bindCardPreviewLoadState === "function") bindCardPreviewLoadState(media, img, preview);
         media.append(img);
       }
+    } else if (moderated) {
+      media.classList.add("has_moderated_preview");
+      media.append(hiddenMediaPreviewElement("Moderated"));
     } else if (failed) {
       media.classList.add("has_moderated_preview");
       const hiddenPreview = hiddenMediaPreviewElement(buildJobLabel(job));
@@ -1008,9 +1009,9 @@
       icon.alt = "";
       media.append(icon);
     }
-    // Moderated jobs use the same placeholder as stored moderated media items.
-    // Do not shade that placeholder with the failed-job overlay.
-    if (!moderated) {
+    // A source-backed failure keeps the same blurred media preview used while
+    // generating. Only T2I/no-source moderation falls back to the dark placeholder.
+    if (!moderated || preview) {
       media.append(buildJobOverlayElement(job, slotIndex, Boolean(preview)));
     }
     article.append(media);
