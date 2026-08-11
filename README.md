@@ -12,7 +12,7 @@ Grok Chameleon is a desktop app designed to make Grok Imagine and Build more con
 2. Set the library path by choosing either a new folder or an existing Grok Chameleon library folder.
 3. Add your account from the lower-left corner of the app. The Build account will be registered automatically as part of the process.
 4. Select **Total Account** and complete the Imagine sign-in.
-   - The app will automatically continue to the Build page. Select **Allow**, then approve the x.ai permission request.
+   - The app will automatically continue to the Build page. Select **Allow**.
    - Wait briefly. The page will close automatically when account registration is complete.
 
 ## Media Viewer Controls
