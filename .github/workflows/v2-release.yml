@@ -53,6 +53,7 @@ env:
   COMMON_COLLECTION_ACTIONS: common/app/web/scripts/collection_actions.js
   COMMON_IMAGE_EDITOR_FLOW: common/app/web/scripts/image_editor_flow.js
   COMMON_SEARCH_RENDER: common/app/web/scripts/search_render.js
+  COMMON_PROMPT_TRANSLATE: common/app/web/scripts/prompt_translate.js
   COMMON_PROMPT_EVENTS: common/app/web/scripts/prompt_events.js
   COMMON_UI_FEEDBACK: common/app/web/scripts/ui_feedback.js
   COMMON_ACCOUNT_STYLE: common/app/web/styles/account.css
@@ -158,6 +159,7 @@ jobs:
             @{ Name = "attachments"; Relative = "web\scripts\composer_attachments.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_ATTACHMENTS) },
             @{ Name = "i_submit"; Relative = "web\scripts\i_composer_submit.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_I_SUBMIT) },
             @{ Name = "library_core"; Relative = "web\scripts\library_core.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_LIBRARY_CORE) },
+            @{ Name = "prompt_translate"; Relative = "web\scripts\prompt_translate.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_PROMPT_TRANSLATE) },
             @{ Name = "library_scan"; Relative = "web\scripts\library_scan.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_LIBRARY_SCAN) },
             @{ Name = "detail_state"; Relative = "web\scripts\detail_state.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_STATE) },
             @{ Name = "detail_media"; Relative = "web\scripts\detail_media.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_MEDIA) },
@@ -664,6 +666,7 @@ jobs:
             web/scripts/composer_attachments.js
             web/scripts/i_composer_submit.js
             web/scripts/library_core.js
+            web/scripts/prompt_translate.js
             web/scripts/library_scan.js
             web/scripts/detail_state.js
             web/scripts/detail_media.js
@@ -992,6 +995,7 @@ jobs:
             web/scripts/composer_attachments.js
             web/scripts/i_composer_submit.js
             web/scripts/library_core.js
+            web/scripts/prompt_translate.js
             web/scripts/library_scan.js
             web/scripts/detail_state.js
             web/scripts/detail_media.js
@@ -1420,6 +1424,7 @@ jobs:
             web/scripts/composer_attachments.js
             web/scripts/i_composer_submit.js
             web/scripts/library_core.js
+            web/scripts/prompt_translate.js
             web/scripts/library_scan.js
             web/scripts/detail_state.js
             web/scripts/detail_media.js

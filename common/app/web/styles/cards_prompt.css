@@ -891,22 +891,278 @@ html.landscape_six_card_grid .workspace .card_list {
   line-height: 1;
 }
 
-.prompt_save_translate {
-  display: inline-flex;
+.prompt_translate_controls {
+  position: relative;
+  display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 6px;
-  width: auto !important;
-  min-width: 90px;
-  border-color: #246f94;
-  background: #145b7e;
+  gap: 7px;
+}
+
+.prompt_language_detect {
+  box-sizing: border-box;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid #3d484d;
+  border-radius: 8px;
+  background: #202527;
+  color: #d9e3e6;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 750;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.prompt_language_detect:not(:disabled):hover {
+  border-color: #2e86b2;
+  background: #172b34;
   color: #fff;
 }
 
-.prompt_save_translate:not(:disabled):hover {
+.prompt_language_pair {
+  display: inline-flex;
+  align-items: stretch;
+}
+
+.prompt_language_badge,
+.prompt_language_toggle,
+.prompt_language_swap {
+  box-sizing: border-box;
+  height: 30px;
+  border: 1px solid #246f94;
+  background: #145b7e;
+  color: #fff;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 780;
+  line-height: 1;
+}
+
+.prompt_language_badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 56px;
+  padding: 0 10px;
+  border-radius: 8px 0 0 8px;
+  user-select: none;
+}
+
+.prompt_save_actions .prompt_language_toggle {
+  display: inline-grid;
+  place-items: center;
+  width: 29px;
+  min-width: 29px;
+  padding: 0;
+  border-left: 0;
+  border-radius: 0 8px 8px 0;
+}
+
+.prompt_save_actions .prompt_language_swap {
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  min-width: 34px;
+  padding: 0;
+  border-color: #3d484d;
+  border-radius: 8px;
+  background: #202527;
+  color: #d9e3e6;
+}
+
+.prompt_language_toggle:not(:disabled):hover,
+.prompt_language_toggle[aria-expanded="true"] {
   border-color: #2e86b2;
   background: #17698f;
+}
+
+.prompt_language_swap:not(:disabled):hover {
+  border-color: #587079;
+  background: #2a3235;
   color: #fff;
+}
+
+.prompt_language_chevron {
+  width: 11px;
+  height: 8px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform 150ms ease;
+}
+
+.prompt_language_toggle[aria-expanded="true"] .prompt_language_chevron {
+  transform: rotate(180deg);
+}
+
+.prompt_language_swap svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.prompt_language_menu {
+  position: fixed;
+  z-index: 30;
+  left: 50%;
+  box-sizing: border-box;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  width: 70vw;
+  height: 60vh;
+  padding: 12px;
+  overflow: hidden;
+  border: 1px solid #394348;
+  border-radius: 14px;
+  background: rgb(14 17 18 / 0.99);
+  box-shadow: 0 22px 70px rgb(0 0 0 / 0.62);
+  transform: translateX(-50%);
+}
+
+.prompt_language_menu[hidden] {
+  display: none;
+}
+
+.prompt_language_search_box {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  margin-bottom: 10px;
+  padding: 0 11px;
+  border: 1px solid #343e42;
+  border-radius: 10px;
+  background: #090b0c;
+  color: #849398;
+}
+
+.prompt_language_search_box:focus-within {
+  border-color: #2e86b2;
+  color: #c7e8f5;
+}
+
+.prompt_language_search_box svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+}
+
+.prompt_language_search {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #f4f7f8;
+  font: inherit;
+  font-size: 13px;
+}
+
+.prompt_language_search::placeholder {
+  color: #718086;
+}
+
+.prompt_language_search::-webkit-search-cancel-button {
+  filter: invert(0.8);
+}
+
+.prompt_language_options {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  align-content: start;
+  gap: 4px;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.prompt_language_options::-webkit-scrollbar {
+  display: none;
+}
+
+.prompt_language_option {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 0 9px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: #c8d0d3;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+}
+
+.prompt_language_option:hover,
+.prompt_language_option:focus-visible {
+  border-color: #33464e;
+  outline: 0;
+  background: #172126;
+  color: #fff;
+}
+
+.prompt_language_option[aria-selected="true"] {
+  border-color: #246f94;
+  background: #12394b;
+  color: #dff5ff;
+}
+
+.prompt_language_option_check {
+  color: #63d5ff;
+  font-size: 13px;
+  font-weight: 900;
+  opacity: 0;
+}
+
+.prompt_language_option[aria-selected="true"] .prompt_language_option_check {
+  opacity: 1;
+}
+
+.prompt_language_option_name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.prompt_language_option_code {
+  color: #718086;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.prompt_language_empty {
+  grid-column: 1 / -1;
+  padding: 28px 12px;
+  color: #7f8a8e;
+  font-size: 12px;
+  text-align: center;
+}
+
+@media (max-width: 720px) {
+  .prompt_language_menu {
+    width: 90vw;
+    height: 70vh;
+  }
+
+  .prompt_language_options {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }
 
 .prompt_save_cancel {
@@ -927,16 +1183,6 @@ html.landscape_six_card_grid .workspace .card_list {
   border-color: var(--prompt-teal);
   background: rgb(45 212 191 / 0.16);
   color: var(--prompt-teal);
-}
-
-.translation_arrow_icon {
-  width: 12px;
-  height: 12px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 2;
-  stroke-linecap: round;
-  stroke-linejoin: round;
 }
 
 .card.is_generating .card_media .card_preview,

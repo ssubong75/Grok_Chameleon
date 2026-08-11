@@ -16,15 +16,44 @@ document.getElementById("prompt_save_confirm")?.addEventListener("click", () => 
   savePromptFromDialog();
 });
 
-promptSave?.querySelector(".prompt_save_translate")?.addEventListener("click", () => {
-  translatePromptSave();
+for (const toggle of promptSave?.querySelectorAll(".prompt_language_toggle") || []) {
+  toggle.addEventListener("click", () => {
+    togglePromptTranslationLanguageMenu(toggle.dataset.promptLanguageSide || "");
+  });
+}
+
+promptSave?.querySelector(".prompt_language_detect")?.addEventListener("click", () => {
+  detectPromptTranslationLanguage();
 });
 
-promptSave?.querySelector(".prompt_save_original")?.addEventListener("input", (event) => {
-  const translationInput = promptSave.querySelector(".prompt_save_translation");
-  const translateButton = promptSave.querySelector(".prompt_save_translate");
-  if (translationInput) translationInput.value = "";
-  setPromptTranslationDirection(translateButton, promptTranslationDirection(event.target.value), "original");
+promptSave?.querySelector(".prompt_language_swap")?.addEventListener("click", () => {
+  swapPromptTranslationLanguages();
+});
+
+promptSave?.querySelector(".prompt_language_search")?.addEventListener("input", () => {
+  renderPromptTranslationLanguages();
+});
+
+promptSave?.querySelector(".prompt_language_options")?.addEventListener("click", (event) => {
+  const option = event.target instanceof Element
+    ? event.target.closest(".prompt_language_option")
+    : null;
+  if (!option) return;
+  selectPromptTranslationLanguage(option.dataset.languageCode || "");
+});
+
+promptSave?.querySelector(".prompt_save_original")?.addEventListener("input", () => {
+  schedulePromptTranslation({ immediate: false, clear: true });
+});
+
+window.addEventListener("resize", () => {
+  if (promptTranslationState.openSide) positionPromptTranslationLanguageMenu();
+});
+
+document.addEventListener("pointerdown", (event) => {
+  if (!promptTranslationState.openSide) return;
+  if (event.target instanceof Element && event.target.closest(".prompt_translate_controls")) return;
+  closePromptTranslationLanguageMenu();
 });
 
 let promptBackdropPointer = null;
@@ -48,5 +77,10 @@ promptSave?.addEventListener("pointercancel", () => {
 });
 
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && promptSave && !promptSave.hidden) closePromptSave();
+  if (event.key !== "Escape" || !promptSave || promptSave.hidden) return;
+  if (closePromptTranslationLanguageMenu()) {
+    event.preventDefault();
+    return;
+  }
+  closePromptSave();
 });
