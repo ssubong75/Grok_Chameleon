@@ -1099,6 +1099,53 @@ def wait_oauth_callback(
     raise RuntimeError("Timed out waiting for xAI account authorization.")
 
 
+def wait_native_total_account_oauth_callback(
+    server: ThreadingHTTPServer,
+    registration_id: str,
+    account_id_value: str,
+    store_id: str,
+    timeout_seconds: int = 300,
+) -> dict:
+    server.timeout = 0.2
+    deadline = time.monotonic() + max(1, timeout_seconds)
+    next_status_check = 0.0
+    while time.monotonic() < deadline:
+        server.handle_request()
+        result = getattr(server, "oauth_result", None)
+        if isinstance(result, dict):
+            return result
+        if time.monotonic() < next_status_check:
+            continue
+        next_status_check = time.monotonic() + 0.25
+        try:
+            status = native_bridge_send({
+                "type": "total_account_oauth_status",
+                "registration_id": registration_id,
+                "account_id": account_id_value,
+                "store_id": store_id,
+            }, timeout_seconds=4)
+        except Exception:
+            # A transient renderer navigation must not cancel a valid OAuth flow.
+            continue
+        status_name = str(status.get("status") or "")
+        error = str(status.get("error") or "").strip()
+        if status_name == "closed":
+            return {
+                "code": "",
+                "state": "",
+                "error": "authorization_window_closed",
+                "error_description": error or "Authorization window was closed.",
+            }
+        if status_name == "error" and error:
+            return {
+                "code": "",
+                "state": "",
+                "error": "browser_authorization_error",
+                "error_description": f"Browser authorization page error: {error}",
+            }
+    raise RuntimeError("Timed out waiting for xAI account authorization.")
+
+
 def build_oauth_authorize_url(redirect_uri: str, challenge: str, state: str, nonce: str) -> str:
     return XAI_OAUTH_AUTHORIZE_URL + "?" + urlencode({
         "response_type": "code",
@@ -1415,11 +1462,14 @@ def active_imagine_account(root: Path | None = None, account_id_value: str = "")
         return {}
     imagine = account_files(root)["imagine"]
     accounts = [account for account in imagine.get("accounts") or [] if isinstance(account, dict)]
-    wanted = str(account_id_value or imagine.get("active_id") or "")
+    explicit_id = str(account_id_value or "")
+    wanted = explicit_id or str(imagine.get("active_id") or "")
     if wanted:
         match = next((account for account in accounts if str(account.get("id") or "") == wanted), None)
         if match:
             return match
+        if explicit_id:
+            return {}
     return accounts[0] if accounts else {}
 
 
@@ -1545,18 +1595,17 @@ def finish_total_account_session(
             TOTAL_ACCOUNT_SESSIONS.pop(session_id, None)
 
 
+class TotalAccountRegistrationCancelled(RuntimeError):
+    pass
+
+
 def register_total_account(payload: dict) -> dict:
     root = library_root()
     if not root:
         raise RuntimeError("Library path is not set.")
     ensure_library_root(root)
     session_id = uuid.uuid4().hex
-    profile_dir = total_account_profile_dir(root, session_id)
-    cache_dir = total_account_cache_dir(session_id)
-    debug_port = available_loopback_port()
-    target: dict | None = None
     callback_server: ThreadingHTTPServer | None = None
-    browser_process: subprocess.Popen | None = None
     imagine_account: dict = {}
     imagine_email = ""
     build_account: dict = {}
@@ -1564,59 +1613,88 @@ def register_total_account(payload: dict) -> dict:
     build_error = ""
     build_error_code = ""
     email = ""
+    saved_access_executor: ThreadPoolExecutor | None = None
+    saved_access_future = None
     request_started_at = time.monotonic()
-    log_event(f"total_account_start session={session_id} debug_port={debug_port}")
+    native_registration = native_bridge_wait_available(
+        timeout_seconds=3,
+        max_age_seconds=10,
+    )
+    if not native_registration:
+        log_event(
+            f"total_account_native_unavailable session={session_id} "
+            f"elapsed_ms={int((time.monotonic() - request_started_at) * 1000)}"
+        )
+        raise RuntimeError(
+            "The in-app account window is not ready. Retry Total Account or restart the app."
+        )
+    native_store_id = str(uuid.uuid4())
+    native_account_ref = f"register_{session_id}"
+    native_promoted = False
+    imagine_saved = False
+    log_event(f"total_account_start session={session_id} mode=native")
     with TOTAL_ACCOUNT_SESSION_LOCK:
         TOTAL_ACCOUNT_SESSIONS[session_id] = {
             "root": str(root.resolve()),
-            "profile_dir": str(profile_dir),
-            "cache_dir": str(cache_dir),
-            "debug_port": debug_port,
-            "target": None,
-            "process": None,
             "stage": "imagine",
+            "native": True,
+            "store_id": native_store_id,
         }
 
     try:
-        browser_process = launch_total_account_browser(
-            IMAGINE_BASE + "/imagine",
-            profile_dir,
-            cache_dir,
-            debug_port,
-        )
-        with TOTAL_ACCOUNT_SESSION_LOCK:
-            if session_id in TOTAL_ACCOUNT_SESSIONS:
-                TOTAL_ACCOUNT_SESSIONS[session_id]["process"] = browser_process
+        source_url = IMAGINE_BASE + "/"
         log_event(
-            f"total_account_browser_launched session={session_id} "
+            f"total_account_native_login_queued session={session_id} "
             f"elapsed_ms={int((time.monotonic() - request_started_at) * 1000)}"
         )
-        target = wait_total_account_imagine_login(debug_port)
+        login_result = native_bridge_send({
+            "type": "total_account_login",
+            "registration_id": session_id,
+            "account_id": native_account_ref,
+            "store_id": native_store_id,
+            "url": IMAGINE_BASE + "/",
+            "timeout_ms": 240_000,
+        }, timeout_seconds=250)
+        cookies = normalize_imagine_cookies(
+            login_result.get("cookies")
+            if isinstance(login_result.get("cookies"), list)
+            else []
+        )
+        if not cookies:
+            raise RuntimeError("No grok.com cookies were captured from the Total Account window.")
+        identity = login_result.get("identity") if isinstance(login_result.get("identity"), dict) else {}
+        if not find_email_in_value(identity):
+            identity = fetch_imagine_identity(cookies)
+        source_url = str(login_result.get("source_url") or IMAGINE_BASE + "/")
         log_event(
-            f"total_account_imagine_ready session={session_id} "
+            f"total_account_imagine_ready session={session_id} mode=native "
             f"elapsed_ms={int((time.monotonic() - request_started_at) * 1000)}"
         )
-        with TOTAL_ACCOUNT_SESSION_LOCK:
-            if session_id in TOTAL_ACCOUNT_SESSIONS:
-                TOTAL_ACCOUNT_SESSIONS[session_id]["target"] = target
-        cookies = capture_total_account_cookies(target)
-        identity = fetch_imagine_identity(cookies)
         imagine_email = str(identity.get("email") or "").strip()
 
         imagine_account = normalize_imagine_account({
+            "store_id": native_store_id,
             "provider": "imagine",
             "captured_at": now_iso(),
-            "source_url": str(target.get("url") or IMAGINE_BASE + "/imagine"),
+            "source_url": source_url,
             "cookies": cookies,
             **identity,
             "email": imagine_email,
             "label": imagine_email or identity.get("label") or "Imagine",
         })
-        verify_imagine_saved_access(imagine_account)
+        # Saved access remains a required registration check, but it does not need to
+        # hold the UI between Imagine login and the Build authorization window.
+        saved_access_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="total-account-saved-check",
+        )
+        saved_access_future = saved_access_executor.submit(
+            verify_imagine_saved_access,
+            imagine_account,
+        )
         with TOTAL_ACCOUNT_SESSION_LOCK:
             if session_id in TOTAL_ACCOUNT_SESSIONS:
                 TOTAL_ACCOUNT_SESSIONS[session_id].update({
-                    "target": target,
                     "stage": "build",
                     "imagine_id": imagine_account["id"],
                     "imagine_email": imagine_email,
@@ -1630,12 +1708,25 @@ def register_total_account(payload: dict) -> dict:
             callback_server, callback_port = start_oauth_callback_server()
             redirect_uri = f"http://127.0.0.1:{callback_port}{XAI_OAUTH_REDIRECT_PATH}"
             oauth_url = build_oauth_authorize_url(redirect_uri, challenge, state, nonce)
-            navigate_cdp_target(target, oauth_url)
+            native_bridge_send({
+                "type": "total_account_oauth_open",
+                "registration_id": session_id,
+                "account_id": native_account_ref,
+                "store_id": native_store_id,
+                "url": oauth_url,
+            }, timeout_seconds=15)
             log_event(
                 f"total_account_oauth_opened session={session_id} "
+                f"mode=native "
                 f"elapsed_ms={int((time.monotonic() - request_started_at) * 1000)}"
             )
-            callback_result = wait_oauth_callback(callback_server, timeout_seconds=300, target=target)
+            callback_result = wait_native_total_account_oauth_callback(
+                callback_server,
+                session_id,
+                native_account_ref,
+                native_store_id,
+                timeout_seconds=300,
+            )
             log_event(
                 f"total_account_oauth_returned session={session_id} "
                 f"elapsed_ms={int((time.monotonic() - request_started_at) * 1000)} "
@@ -1648,6 +1739,11 @@ def register_total_account(payload: dict) -> dict:
                     or callback_result.get("error")
                     or "xAI authorization failed."
                 ).strip()
+                if oauth_error == "authorization_window_closed":
+                    log_event(
+                        f"total_account_cancelled session={session_id} stage=build_window_closed"
+                    )
+                    raise TotalAccountRegistrationCancelled(error_description)
                 build_denied = (
                     oauth_error == "access_denied"
                     and "failed to generate authentication code" not in error_description.lower()
@@ -1668,6 +1764,8 @@ def register_total_account(payload: dict) -> dict:
 
             build_auth = build_auth_from_oauth(tokens, userinfo, email)
             build_account = build_account_from_auth(build_auth, "xai_oauth", email)
+        except TotalAccountRegistrationCancelled:
+            raise
         except Exception as exc:
             build_failed = True
             build_error = str(exc).strip() or "Unknown Build registration error."
@@ -1682,19 +1780,14 @@ def register_total_account(payload: dict) -> dict:
                 pass
             callback_server = None
 
-        browser_closed = close_total_account_browser(
-            target,
-            debug_port,
-            browser_process,
-        )
+        # Keep this outside the Build exception handler. An Imagine verification
+        # failure must abort registration, not be mislabeled as a partial Build login.
+        if saved_access_future is not None:
+            saved_access_future.result()
+
         with TOTAL_ACCOUNT_SESSION_LOCK:
             if session_id in TOTAL_ACCOUNT_SESSIONS:
                 TOTAL_ACCOUNT_SESSIONS[session_id]["stage"] = "saving"
-        if not browser_closed:
-            log_event(
-                f"total_account_save_after_close_failure session={session_id} "
-                f"debug_port={debug_port}"
-            )
 
         files = account_files(root)
         previous_imagine_tier = matching_account_tier(
@@ -1710,10 +1803,34 @@ def register_total_account(payload: dict) -> dict:
         )
         files["imagine"]["active_id"] = imagine_account["id"]
         write_imagine_auth(root, files["imagine"])
+        imagine_saved = True
         log_event(
             f"total_account_imagine_saved session={session_id} "
             f"elapsed_ms={int((time.monotonic() - request_started_at) * 1000)}"
         )
+
+        native_ready = False
+        try:
+            promotion = native_bridge_send({
+                "type": "total_account_promote",
+                "registration_id": session_id,
+                "account_id": imagine_account["id"],
+                "account_email": imagine_email,
+                "store_id": native_store_id,
+                "url": IMAGINE_BASE + "/imagine/saved",
+                "cookies": cookies,
+            }, timeout_seconds=15)
+            native_ready = str(promotion.get("status") or "") == "promoted"
+            native_promoted = native_ready
+            log_event(
+                f"total_account_native_promoted session={session_id} "
+                f"ready={'yes' if native_ready else 'no'}"
+            )
+        except Exception as exc:
+            log_event(
+                f"total_account_native_promote_failed session={session_id} "
+                f"error={str(exc)[:300]}"
+            )
 
         if build_failed:
             failed_build_id = account_id(
@@ -1754,6 +1871,8 @@ def register_total_account(payload: dict) -> dict:
                 "imagine_id": imagine_account["id"],
                 "build_id": failed_build_id,
                 "build_error": build_error[:500],
+                "native_ready": native_ready,
+                "registration_mode": "native",
                 "message": f"Imagine registered. Build registration failed: {build_error[:300]}",
             }
             log_event(
@@ -1783,24 +1902,35 @@ def register_total_account(payload: dict) -> dict:
             "email": email,
             "imagine_id": imagine_account["id"],
             "build_id": build_account["id"],
+            "native_ready": native_ready,
+            "registration_mode": "native",
         }
         log_event(f"total_account_done session={session_id} email={email or ''}")
         return data
     finally:
+        if saved_access_executor is not None:
+            saved_access_executor.shutdown(wait=False, cancel_futures=True)
         if callback_server:
             try:
                 callback_server.server_close()
             except Exception:
                 pass
-        finish_total_account_session(
-            root,
-            session_id,
-            target,
-            debug_port,
-            browser_process,
-            profile_dir,
-            "registration-finished",
-        )
+        if not native_promoted:
+            try:
+                native_bridge_send({
+                    "type": "total_account_discard",
+                    "registration_id": session_id,
+                    "account_id": native_account_ref,
+                    "store_id": native_store_id,
+                    "clear_storage": not imagine_saved,
+                }, timeout_seconds=8)
+            except Exception as exc:
+                log_event(
+                    f"total_account_native_discard_failed session={session_id} "
+                    f"error={str(exc)[:300]}"
+                )
+        with TOTAL_ACCOUNT_SESSION_LOCK:
+            TOTAL_ACCOUNT_SESSIONS.pop(session_id, None)
 
 
 def select_build_account(payload: dict) -> dict:
@@ -7249,7 +7379,10 @@ def imagine_unsaved_post_from_asset(asset: dict, account: dict) -> dict | None:
     media_gen = imagine_conversation_media_gen(asset)
     prompt = imagine_text_value(media_gen.get("prompt") or asset.get("prompt") or asset.get("metadata") or "")
     input_assets = [str(value) for value in media_gen.get("input_assets") or [] if str(value or "").strip()]
-    source_item_id = next((value for value in input_assets if value != asset_id), "")
+    source_item_id = (
+        next((value for value in input_assets if value != asset_id), "")
+        or str(asset.get("parentPostId") or asset.get("originalPostId") or "").strip()
+    )
     owner_user_id = str(asset.get("ownerUserId") or asset.get("owner_user_id") or "").strip()
     item = {
         "item_id": asset_id,
@@ -8982,6 +9115,149 @@ def upscale_imagine_video_post(payload: dict, progress_callback=None, cancel_che
     }
 
 
+def imagine_wait_for_saved_crop_asset(
+    account: dict,
+    file_id: str,
+    post_id: str,
+    media_url: str,
+    source_post_id: str,
+    timeout_seconds: float = 12,
+) -> dict:
+    expected_ids = {str(file_id or "").strip(), str(post_id or "").strip()} - {""}
+    expected_url = canonical_remote_media_key(media_url)
+    deadline = time.monotonic() + max(1.0, float(timeout_seconds or 0))
+    last_error = ""
+    saw_upload = False
+    saw_unlinked = False
+    while time.monotonic() < deadline:
+        candidates: list[dict] = []
+        request_timeout = max(2, min(5, int(deadline - time.monotonic()) + 1))
+        if str(file_id or "").strip():
+            try:
+                detail = imagine_get_json(
+                    "/rest/assets/" + quote(str(file_id).strip(), safe=""),
+                    account,
+                    timeout=request_timeout,
+                )
+                asset = detail.get("asset") if isinstance(detail.get("asset"), dict) else detail
+                if isinstance(asset, dict):
+                    candidates.append(asset)
+            except Exception as exc:  # noqa: BLE001
+                last_error = str(exc)[:500]
+        query = urlencode([
+            ("pageSize", "40"),
+            ("orderBy", "ORDER_BY_CREATE_TIME"),
+            ("workspaceKind", "WORKSPACE_KIND_IMAGINE_ALL"),
+        ])
+        try:
+            data = imagine_get_json(
+                "/rest/assets?" + query,
+                account,
+                timeout=request_timeout,
+            )
+            assets = data.get("assets") if isinstance(data.get("assets"), list) else []
+            candidates.extend(asset for asset in assets if isinstance(asset, dict))
+        except Exception as exc:  # noqa: BLE001
+            last_error = str(exc)[:500]
+        seen_candidates: set[str] = set()
+        for asset in candidates:
+            asset_identity = str(asset.get("assetId") or asset.get("id") or imagine_asset_primary_media_url(asset) or "").strip()
+            if asset_identity and asset_identity in seen_candidates:
+                continue
+            if asset_identity:
+                seen_candidates.add(asset_identity)
+            try:
+                if not isinstance(asset, dict):
+                    continue
+                asset_ids = {
+                    str(asset.get(key) or "").strip()
+                    for key in ("assetId", "id", "postId", "mediaPostId")
+                    if str(asset.get(key) or "").strip()
+                }
+                asset_url = canonical_remote_media_key(imagine_asset_primary_media_url(asset))
+                if not (expected_ids & asset_ids) and not (expected_url and asset_url == expected_url):
+                    continue
+                saw_upload = True
+                if imagine_asset_upload_only(asset):
+                    continue
+                asset_post_ids = {
+                    str(asset.get(key) or "").strip().lower()
+                    for key in ("postId", "mediaPostId")
+                    if str(asset.get(key) or "").strip()
+                }
+                relation_ids = set(imagine_public_asset_reference_ids(asset))
+                if str(post_id or "").strip().lower() not in asset_post_ids or str(source_post_id or "").strip().lower() not in relation_ids:
+                    saw_unlinked = True
+                    continue
+                invalidate_imagine_saved_media_keys_cache(account)
+                return asset
+            except Exception as exc:  # noqa: BLE001
+                last_error = str(exc)[:500]
+        time.sleep(0.4)
+    imagine_debug_event("image_crop_saved_verify_failed", {
+        "file_id": file_id,
+        "post_id": post_id,
+        "media_url": imagine_debug_compact_url(media_url),
+        "saw_upload": saw_upload,
+        "saw_unlinked": saw_unlinked,
+        "error": last_error,
+    })
+    if saw_unlinked:
+        message = "Grok saved the crop asset without linking it to the source image."
+    elif saw_upload:
+        message = "Grok uploaded the crop but did not save it to the normal Saved feed."
+    else:
+        message = "Grok did not return the cropped image in the Saved feed."
+    raise RuntimeError(message)
+
+
+def imagine_wait_for_saved_crop_post(
+    account: dict,
+    post_id: str,
+    media_url: str,
+    source_post_id: str,
+    timeout_seconds: float = 7,
+) -> dict:
+    expected_id = str(post_id or "").strip()
+    expected_url = canonical_remote_media_key(media_url)
+    deadline = time.time() + max(1.0, float(timeout_seconds or 0))
+    last_error = ""
+    while time.time() < deadline:
+        try:
+            post = imagine_post_detail(
+                expected_id,
+                account,
+                timeout=3,
+                deadline=deadline,
+            )
+            returned_id = imagine_post_id(post)
+            returned_url = canonical_remote_media_key(imagine_node_primary_media_url(post))
+            relation_ids = set(imagine_public_asset_reference_ids(post))
+            if returned_id.lower() == expected_id.lower() and (
+                not expected_url
+                or not returned_url
+                or returned_url == expected_url
+            ) and str(source_post_id or "").strip().lower() in relation_ids:
+                return post
+            if returned_id.lower() != expected_id.lower():
+                last_error = f"unexpected post id {returned_id}"
+            elif str(source_post_id or "").strip().lower() not in relation_ids:
+                last_error = "saved post is not linked to the source image"
+            elif expected_url and returned_url and returned_url != expected_url:
+                last_error = "saved post media does not match the crop upload"
+            elif post:
+                last_error = "post response did not include its canonical id"
+        except Exception as exc:  # noqa: BLE001
+            last_error = str(exc)[:500]
+        time.sleep(0.35)
+    imagine_debug_event("image_crop_post_verify_failed", {
+        "post_id": expected_id,
+        "media_url": imagine_debug_compact_url(media_url),
+        "error": last_error,
+    })
+    raise RuntimeError("Grok created the crop but did not return its saved post.")
+
+
 def crop_imagine_image_post(payload: dict) -> dict:
     root = library_root()
     if not root:
@@ -9023,64 +9299,157 @@ def crop_imagine_image_post(payload: dict) -> dict:
         "original_ref_type": "ORIGINAL_REF_TYPE_IMAGE_EDIT",
     }
 
-    def build_crop_response(post_node: dict, file_id: str, media_url: str, create_result: dict, upload_metadata: dict, bridge_value: dict | None = None) -> dict:
-        post_id = imagine_post_id(post_node, file_id)
+    try:
+        crop_width = max(0, int(payload.get("crop_width") or 0))
+        crop_height = max(0, int(payload.get("crop_height") or 0))
+    except (TypeError, ValueError):
+        crop_width = 0
+        crop_height = 0
+    if (
+        len(image_bytes) >= 24
+        and image_bytes[:8] == b"\x89PNG\r\n\x1a\n"
+        and image_bytes[12:16] == b"IHDR"
+    ):
+        crop_width = int.from_bytes(image_bytes[16:20], "big")
+        crop_height = int.from_bytes(image_bytes[20:24], "big")
+    aspect_ratio = str(payload.get("aspect_ratio") or "").strip()
+    if crop_width > 0 and crop_height > 0:
+        left = crop_width
+        right = crop_height
+        while right:
+            left, right = right, left % right
+        divisor = max(1, left)
+        aspect_ratio = f"{crop_width // divisor}:{crop_height // divisor}"
+
+    def build_crop_response(
+        post_node: dict,
+        file_id: str,
+        media_url: str,
+        create_result: dict,
+        upload_metadata: dict,
+        verified_post: dict,
+        saved_asset: dict,
+        bridge_value: dict | None = None,
+    ) -> dict:
+        post_id = imagine_post_id(post_node)
+        if not post_id:
+            raise RuntimeError("Grok crop creation did not return a canonical post id.")
         created_url = imagine_node_primary_media_url(post_node) or media_url
-        item = imagine_direct_item_from_candidate(
-            {
-                "url": created_url,
-                "post_id": post_id or file_id,
+        if imagine_post_id(verified_post).lower() != post_id.lower():
+            raise RuntimeError("Grok did not return the canonical cropped-image post.")
+        verified_sources = {
+            str(verified_post.get(key) or "").strip().lower()
+            for key in ("originalPostId", "original_post_id", "parentPostId", "parent_post_id")
+            if str(verified_post.get(key) or "").strip()
+        }
+        if original_post_id.lower() not in verified_sources:
+            raise RuntimeError("Grok did not link the cropped-image post to its source image.")
+        verified_url = canonical_remote_media_key(imagine_node_primary_media_url(verified_post))
+        expected_url = canonical_remote_media_key(created_url)
+        if verified_url and expected_url and verified_url != expected_url:
+            raise RuntimeError("Grok returned a different image for the cropped-image post.")
+        asset_ids = {
+            str(saved_asset.get(key) or "").strip().lower()
+            for key in ("assetId", "id", "postId", "mediaPostId")
+            if str(saved_asset.get(key) or "").strip()
+        }
+        asset_post_ids = {
+            str(saved_asset.get(key) or "").strip().lower()
+            for key in ("postId", "mediaPostId")
+            if str(saved_asset.get(key) or "").strip()
+        }
+        asset_url = canonical_remote_media_key(imagine_asset_primary_media_url(saved_asset))
+        identity_matches = bool(file_id.lower() in asset_ids or (expected_url and asset_url == expected_url))
+        expected_source_ids = {original_post_id.lower()}
+        source_item_post_id = extract_imagine_post_id_from_text(source_info["source_item_id"])
+        if source_item_post_id:
+            expected_source_ids.add(source_item_post_id.lower())
+        if (
+            not identity_matches
+            or post_id.lower() not in asset_post_ids
+            or not (expected_source_ids & set(imagine_public_asset_reference_ids(saved_asset)))
+            or imagine_asset_upload_only(saved_asset)
+        ):
+            raise RuntimeError("Grok did not return the crop in its normal Saved relationship.")
+        saved_post = imagine_flat_saved_post_from_asset(saved_asset, account)
+        saved_items = saved_post.get("items") if isinstance(saved_post, dict) else []
+        item = next((dict(value) for value in (saved_items or []) if isinstance(value, dict)), None)
+        if not item:
+            raise RuntimeError("Grok Saved returned the crop without readable image data.")
+        created_url = imagine_asset_primary_media_url(saved_asset) or item.get("remote_url") or item.get("url") or created_url
+        item.update({
+            "post_id": post_id,
+            "role": "result",
+            "relation": "crop",
+            "source_item_id": source_info["source_item_id"],
+            "parent_post_id": original_post_id,
+            "original_post_id": original_post_id,
+            "root_post_id": source_info["root_post_id"],
+            "original_ref_type": "ORIGINAL_REF_TYPE_IMAGE_EDIT",
+            "model": "imagine-image-edit",
+            "title": "cropped",
+            "prompt": str(payload.get("prompt") or item.get("prompt") or ""),
+            "aspect_ratio": aspect_ratio,
+            "aspectRatio": aspect_ratio,
+        })
+        if crop_width > 0 and crop_height > 0:
+            item["width"] = crop_width
+            item["height"] = crop_height
+        item["mime_type"] = str(upload_metadata.get("fileMimeType") or mime_type)
+        item.setdefault("metadata", {})
+        if isinstance(item["metadata"], dict):
+            imagine_metadata = item["metadata"].get("imagine") if isinstance(item["metadata"].get("imagine"), dict) else {}
+            imagine_metadata.update({
+                "post_id": post_id,
+                "source_item_id": source_info["source_item_id"],
                 "parent_post_id": original_post_id,
                 "original_post_id": original_post_id,
                 "root_post_id": source_info["root_post_id"],
                 "original_ref_type": "ORIGINAL_REF_TYPE_IMAGE_EDIT",
-                "created_at": imagine_post_time(post_node) or now_iso(),
-                "prompt": str(payload.get("prompt") or ""),
-                "model": "imagine-image-edit",
-            },
-            "image",
-            account,
-            str(payload.get("prompt") or ""),
-            "crop",
-            request_id,
-            source_info,
-        )
-        item["mime_type"] = str(upload_metadata.get("fileMimeType") or mime_type)
-        item["title"] = "cropped"
-        item["aspect_ratio"] = str(payload.get("aspect_ratio") or "")
-        item["aspectRatio"] = str(payload.get("aspect_ratio") or "")
-        item.setdefault("metadata", {})
-        if isinstance(item["metadata"], dict):
+                "media_url": created_url,
+                "action": "crop",
+                "request_id": request_id,
+                "saved_verified": True,
+            })
+            item["metadata"]["imagine"] = imagine_metadata
             item["metadata"]["crop"] = {
                 "source_post_id": original_post_id,
                 "request_id": request_id,
                 "bridge": bool(bridge_value),
+                "saved_verified": True,
+                "width": crop_width,
+                "height": crop_height,
             }
         imagine_debug_event("image_crop_result", {
             "request_id": request_id,
             "source_post_id": original_post_id,
-            "post_id": post_id or file_id,
+            "post_id": post_id,
+            "file_id": file_id,
             "media_url": imagine_debug_compact_url(created_url),
             "bridge": bool(bridge_value),
+            "saved_verified": True,
             "store_update": (bridge_value or {}).get("storeUpdate") if isinstance((bridge_value or {}).get("storeUpdate"), dict) else {},
         })
         return {
             "ok": True,
             "action": "crop",
-            "id": post_id or file_id,
+            "id": post_id,
             "source_post_path": str(payload.get("source_post_path") or ""),
-            "source_item_id": str(payload.get("source_item_id") or payload.get("item_id") or ""),
+            "source_item_id": source_info["source_item_id"],
             "selected_item_id": item.get("item_id") or "",
             "item": item,
             "items": [item],
-            "post": post_node,
+            "post": verified_post,
+            "asset": saved_asset,
             "result": create_result,
             "bridge": bool(bridge_value),
+            "saved_verified": True,
         }
 
-    if native_bridge_wait_available(timeout_seconds=2, max_age_seconds=60):
-        try:
-            bridge_value = native_bridge_account_command(
+    if not native_bridge_wait_available(timeout_seconds=2, max_age_seconds=60):
+        raise RuntimeError("The Grok browser session is unavailable. Restart the app and try Crop again.")
+    try:
+        bridge_value = native_bridge_account_command(
                 root,
                 account,
                 "crop_image",
@@ -9089,57 +9458,47 @@ def crop_imagine_image_post(payload: dict) -> dict:
                     "url": IMAGINE_BASE + "/imagine/post/" + quote(original_post_id),
                     "referer": IMAGINE_BASE + "/imagine/post/" + quote(original_post_id),
                     "source_post_id": original_post_id,
+                    "source_item_id": source_info["source_item_id"],
                     "source_container_id": source_info["root_post_id"] or original_post_id,
                     "image_data": image_data,
                     "file_name": "cropped.png",
                     "mime_type": mime_type,
+                    "crop_width": crop_width,
+                    "crop_height": crop_height,
                 },
                 timeout_seconds=80,
             )
-            create_result = bridge_value.get("result") if isinstance(bridge_value.get("result"), dict) else {}
-            post_node = bridge_value.get("post") if isinstance(bridge_value.get("post"), dict) else {}
-            if not post_node:
-                post_node = create_result.get("post") if isinstance(create_result.get("post"), dict) else {}
-            upload_result = bridge_value.get("upload") if isinstance(bridge_value.get("upload"), dict) else {}
-            upload_metadata = upload_result.get("fileMetadata") if isinstance(upload_result.get("fileMetadata"), dict) else {}
-            file_id = str(bridge_value.get("fileId") or upload_metadata.get("fileMetadataId") or "").strip()
-            media_url = str(bridge_value.get("mediaUrl") or "").strip()
-            if not media_url:
-                media_url = imagine_node_primary_media_url(post_node) or imagine_asset_url(str(upload_metadata.get("fileUri") or ""))
-            if not file_id:
-                file_id = imagine_post_id(post_node, extract_imagine_post_id_from_text(media_url))
-            if not file_id or not media_url:
-                raise RuntimeError("Imagine crop bridge response did not include media.")
-            return build_crop_response(post_node, file_id, media_url, create_result, upload_metadata, bridge_value)
-        except Exception as exc:
-            imagine_debug_event("image_crop_bridge_failed", {
-                "request_id": request_id,
-                "source_post_id": original_post_id,
-                "error": str(exc)[:800],
-            })
-
-    upload_result = imagine_upload_file_direct(account, "cropped.png", mime_type, image_bytes, request_id, "crop")
-    upload_metadata = upload_result.get("fileMetadata") if isinstance(upload_result.get("fileMetadata"), dict) else {}
-    file_id = str(upload_metadata.get("fileMetadataId") or "").strip()
-    file_uri = str(upload_metadata.get("fileUri") or "").strip()
-    media_url = imagine_asset_url(file_uri)
-    if not file_id or not media_url:
-        raise RuntimeError("Imagine crop upload response did not include media.")
-
-    create_result = imagine_post_json(
-        "/rest/media/post/create",
-        {
-            "mediaType": "MEDIA_POST_TYPE_IMAGE",
-            "mediaUrl": media_url,
-            "originalPostId": original_post_id,
-            "originalRefType": "ORIGINAL_REF_TYPE_IMAGE_EDIT",
-        },
-        account,
-        timeout=30,
-        referer=IMAGINE_BASE + "/imagine/post/" + quote(original_post_id),
-    )
-    post_node = create_result.get("post") if isinstance(create_result.get("post"), dict) else {}
-    return build_crop_response(post_node, file_id, media_url, create_result, upload_metadata)
+        create_result = bridge_value.get("result") if isinstance(bridge_value.get("result"), dict) else {}
+        post_node = bridge_value.get("post") if isinstance(bridge_value.get("post"), dict) else {}
+        if not post_node:
+            post_node = create_result.get("post") if isinstance(create_result.get("post"), dict) else {}
+        upload_result = bridge_value.get("upload") if isinstance(bridge_value.get("upload"), dict) else {}
+        upload_metadata = upload_result.get("fileMetadata") if isinstance(upload_result.get("fileMetadata"), dict) else {}
+        file_id = str(bridge_value.get("fileId") or upload_metadata.get("fileMetadataId") or "").strip()
+        media_url = str(bridge_value.get("mediaUrl") or "").strip()
+        if not media_url:
+            media_url = imagine_node_primary_media_url(post_node) or imagine_asset_url(str(upload_metadata.get("fileUri") or ""))
+        verified_post = bridge_value.get("verifiedPost") if isinstance(bridge_value.get("verifiedPost"), dict) else {}
+        saved_asset = bridge_value.get("savedAsset") if isinstance(bridge_value.get("savedAsset"), dict) else {}
+        if not file_id or not media_url or not bridge_value.get("savedVerified"):
+            raise RuntimeError("Imagine crop bridge response did not include verified Saved media.")
+        return build_crop_response(
+            post_node,
+            file_id,
+            media_url,
+            create_result,
+            upload_metadata,
+            verified_post,
+            saved_asset,
+            bridge_value,
+        )
+    except Exception as exc:
+        imagine_debug_event("image_crop_bridge_failed", {
+            "request_id": request_id,
+            "source_post_id": original_post_id,
+            "error": str(exc)[:800],
+        })
+        raise
 
 
 def imagine_unwrap_remote_proxy(value: str) -> str:
@@ -16268,6 +16627,9 @@ def close_imagine_bridge_browser(root: Path, account: dict) -> None:
 
 
 def native_bridge_store_id(account: dict) -> str:
+    explicit_store_id = str(account.get("store_id") or "").strip()
+    if explicit_store_id:
+        return explicit_store_id
     key = str(account.get("id") or account.get("email") or "imagine")
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"grok-chameleon-imagine:{key}"))
 

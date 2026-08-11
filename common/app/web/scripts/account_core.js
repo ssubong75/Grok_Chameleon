@@ -152,6 +152,7 @@ function imagineAccountFromSession(raw, sourceUrl = "") {
   const email = raw?.email || raw?.label || findEmailInValue(raw) || "";
   return {
     id: String(raw?.id || accountId("imagine")),
+    store_id: String(raw?.store_id || ""),
     provider: "imagine",
     label: String(raw?.label || email || "Imagine"),
     email: String(email || ""),
@@ -238,7 +239,6 @@ async function loadAccountFiles() {
   if (account_state.imagine.active_id && !account_state.imagine.accounts.some((account) => account.id === account_state.imagine.active_id)) {
     account_state.imagine.active_id = "";
   }
-  if (typeof warmActiveImagineUsage === "function") warmActiveImagineUsage();
   await persistAccountFiles();
   renderAccounts();
 }

@@ -84,13 +84,6 @@
     await scanLibrary();
   }
 
-  let accountTierMenu = null;
-
-  function closeAccountTierMenu() {
-    accountTierMenu?.remove();
-    accountTierMenu = null;
-  }
-
   function confirmAction({ title = "Confirm", message = "", confirmLabel = "OK", cancelLabel = "Cancel" } = {}) {
     if (typeof openGalleryActionDialog === "function") {
       return openGalleryActionDialog({ title, message, confirmLabel, cancelLabel }).then(Boolean);
@@ -149,7 +142,21 @@
     });
   }
 
-  async function refreshAccounts({ refreshStatuses = true } = {}) {
+  function activateImagineAccountTab(accountId) {
+    const id = String(accountId || "");
+    const account = account_state.imagine.accounts.find((item) => String(item.id || "") === id);
+    const activate = window.grokChameleonNative?.activateImagineAccount;
+    if (!activate) return;
+    const payload = account ? {
+      account_id: account.id,
+      account_email: account.email || "",
+      store_id: account.store_id || "",
+      cookies: validImagineCookies(account),
+    } : {};
+    activate(payload).catch(() => {});
+  }
+
+  async function refreshAccounts() {
     if (location.protocol !== "file:") {
       const data = await tryQApi("/api/accounts");
       if (data) {
@@ -171,71 +178,8 @@
     }
     sortAccountCardsByPriority("build");
     sortAccountCardsByPriority("imagine");
+    account_state.imagineStatuses = {};
     renderAccounts();
-    if (refreshStatuses) {
-      await refreshImagineAccountStatuses();
-    }
-  }
-
-  async function refreshImagineAccountStatuses() {
-    const ids = account_state.imagine.accounts.map((account) => account.id).filter(Boolean);
-    if (!ids.length) {
-      account_state.imagineStatuses = {};
-      renderAccounts();
-      return;
-    }
-    const token = account_state.statusToken + 1;
-    account_state.statusToken = token;
-    account_state.imagineStatuses = Object.fromEntries(ids.map((id) => [id, { status: "checking" }]));
-    renderAccounts();
-    let statuses = [];
-    if (library_state.apiReady) {
-      const data = await qApi("/api/imagine/accounts/status", { ids });
-      statuses = Array.isArray(data.statuses) ? data.statuses : [];
-    } else {
-      statuses = account_state.imagine.accounts.map((account) => ({
-        id: account.id,
-        status: validImagineCookies(account).length ? "ok" : "expired",
-      }));
-    }
-    if (account_state.statusToken !== token) return;
-    account_state.imagineStatuses = Object.fromEntries(statuses.map((item) => [
-      String(item.id || ""),
-      { status: String(item.status || "unknown") },
-    ]));
-    for (const item of statuses) {
-      const id = String(item?.id || "");
-      if (!item || !("tier" in item)) continue;
-      const tier = normalizeAccountTier(item.tier);
-      const account = account_state.imagine.accounts.find((entry) => entry.id === id);
-      if (account) account.tier = tier;
-    }
-    sortAccountCardsByPriority("imagine");
-    renderAccounts();
-  }
-
-  const imagineTierRefreshTasks = new Map();
-
-  function refreshSelectedImagineAccountTier(accountId) {
-    const id = String(accountId || "");
-    if (!id || !library_state.apiReady) return Promise.resolve();
-    if (imagineTierRefreshTasks.has(id)) return imagineTierRefreshTasks.get(id);
-    const task = qApi("/api/imagine/account/tier", { account_id: id }).then((data) => {
-      if (
-        String(account_state.imagine.active_id || "") !== id
-        || String(data?.imagine?.id || "") !== id
-        || !data?.refreshed
-      ) return;
-      const account = account_state.imagine.accounts.find((item) => String(item.id || "") === id);
-      if (!account) return;
-      account.tier = normalizeAccountTier(data.imagine.tier);
-      sortAccountCardsByPriority("imagine");
-      renderAccounts();
-    }).finally(() => {
-      if (imagineTierRefreshTasks.get(id) === task) imagineTierRefreshTasks.delete(id);
-    });
-    imagineTierRefreshTasks.set(id, task);
-    return task;
   }
 
   function activeAccount(provider) {
@@ -252,13 +196,7 @@
       return "denied";
     }
     if (provider === "imagine") {
-      // Warming an account's bridge takes several seconds. Say so on the row instead of
-      // leaving it looking idle while the switch is still in flight.
-      if (typeof imagineAccountIsPreparing === "function" && imagineAccountIsPreparing(account.id)) {
-        return "preparing";
-      }
-      return account_state.imagineStatuses?.[account.id]?.status
-        || account.status
+      return account.status
         || (validImagineCookies(account).length ? "ok" : "expired");
     }
     return account_state.buildStatuses?.[account.id]?.status
@@ -270,7 +208,6 @@
     if (status === "ok") return "OK";
     if (status === "expired") return "Expired";
     if (status === "checking") return "Checking";
-    if (status === "preparing") return "Preparing…";
     if (status === "denied") return "Denied";
     if (status === "login_required") return "Expired";
     if (status === "oauth_error") return "Expired";
@@ -280,7 +217,6 @@
   function accountStatusClass(status) {
     if (status === "denied") return "expired";
     if (status === "login_required" || status === "oauth_error") return "expired";
-    if (status === "preparing") return "checking";
     return status || "unknown";
   }
 
@@ -297,34 +233,6 @@
     if (buildSmall) buildSmall.textContent = accountStatusText(buildStatus);
     if (imagineEmail) imagineEmail.textContent = imagine?.email || imagine?.label || "Imagine";
     if (imagineSmall) imagineSmall.textContent = accountStatusText(imagineStatus);
-  }
-
-  function openAccountTierMenu(provider, id, anchor) {
-    closeAccountTierMenu();
-    const current = normalizeAccountTier(account_state[provider].accounts.find((account) => account.id === id)?.tier);
-    const menu = document.createElement("div");
-    menu.className = "account_tier_menu";
-    menu.dataset.provider = provider;
-    menu.dataset.accountId = id;
-    for (const tier of accountTiers) {
-      const option = document.createElement("button");
-      option.className = `account_tier_option tier_${tier}${tier === current ? " active" : ""}`;
-      option.type = "button";
-      option.textContent = accountTierLabels[tier];
-      option.addEventListener("click", (event) => {
-        event.stopPropagation();
-        updateAccountTier(provider, id, tier).catch((error) => setLibraryMessage(error.message || "Account tier failed."));
-      });
-      menu.append(option);
-    }
-    document.body.append(menu);
-    const rect = anchor.getBoundingClientRect();
-    const menuRect = menu.getBoundingClientRect();
-    const left = Math.min(Math.max(8, rect.left), Math.max(8, window.innerWidth - menuRect.width - 8));
-    const top = Math.min(rect.bottom + 6, Math.max(8, window.innerHeight - menuRect.height - 8));
-    menu.style.left = `${left}px`;
-    menu.style.top = `${top}px`;
-    accountTierMenu = menu;
   }
 
   function canDragAccountRow(provider, id) {
@@ -344,14 +252,9 @@
 
     const tierControl = document.createElement("div");
     tierControl.className = `account_tier_control tier_${normalizeAccountTier(account.tier)}`;
-    const tierBtn = document.createElement("button");
+    const tierBtn = document.createElement("span");
     tierBtn.className = "account_tier_btn";
-    tierBtn.type = "button";
     tierBtn.textContent = accountTierLabels[normalizeAccountTier(account.tier)];
-    tierBtn.addEventListener("click", (event) => {
-      event.stopPropagation();
-      openAccountTierMenu(provider, account.id, tierBtn);
-    });
     tierControl.append(tierBtn);
 
     const copy = document.createElement("div");
@@ -579,27 +482,38 @@
     if (typeof renderLibrary === "function") renderLibrary();
   }
 
-  async function selectAccount(provider, id) {
+  let imagineSelectionQueue = Promise.resolve();
+
+  function selectAccount(provider, id) {
+    if (provider !== "imagine") return performSelectAccount(provider, id);
+    const task = imagineSelectionQueue.then(
+      () => performSelectAccount(provider, id),
+      () => performSelectAccount(provider, id),
+    );
+    imagineSelectionQueue = task.catch(() => {});
+    return task;
+  }
+
+  async function performSelectAccount(provider, id) {
     const previousId = provider === "imagine" ? String(account_state.imagine.active_id || "") : "";
     const nextId = String(id || "");
     const imagineAccountChanged = provider === "imagine" && previousId !== nextId;
+    if (provider === "imagine" && !imagineAccountChanged) {
+      setComposerProvider(provider);
+      renderAccounts();
+      activateImagineAccountTab(nextId);
+      return;
+    }
     if (library_state.apiReady) {
       const data = await qApi(provider === "imagine" ? "/api/imagine/select" : "/api/accounts/select", { id });
       applyAccountSnapshot(data);
       sortAccountCardsByPriority(provider);
       if (imagineAccountChanged) {
         clearImagineAccountScopedCache(nextId);
-        if (typeof invalidateImagineBridgePreparation === "function") invalidateImagineBridgePreparation();
       }
       setComposerProvider(provider);
       renderAccounts();
-      if (provider === "imagine") {
-        refreshSelectedImagineAccountTier(nextId).catch((error) => console.warn(error));
-      }
-      if (provider === "imagine" && typeof prepareActiveImagineBridgeSession === "function") {
-        prepareActiveImagineBridgeSession({ force: imagineAccountChanged, accountId: nextId }).catch((error) => console.warn(error));
-      }
-      if (provider === "imagine" && typeof warmActiveImagineUsage === "function") warmActiveImagineUsage();
+      if (provider === "imagine") activateImagineAccountTab(nextId);
       return;
     }
     const store = account_state[provider];
@@ -610,14 +524,10 @@
     await persistAccountFiles();
     if (imagineAccountChanged) {
       clearImagineAccountScopedCache(nextId);
-      if (typeof invalidateImagineBridgePreparation === "function") invalidateImagineBridgePreparation();
     }
     setComposerProvider(provider);
     renderAccounts();
-    if (provider === "imagine" && typeof prepareActiveImagineBridgeSession === "function") {
-      prepareActiveImagineBridgeSession({ force: imagineAccountChanged, accountId: nextId }).catch((error) => console.warn(error));
-    }
-    if (provider === "imagine" && typeof warmActiveImagineUsage === "function") warmActiveImagineUsage();
+    if (provider === "imagine") activateImagineAccountTab(nextId);
   }
 
   async function deleteAccount(provider, id) {
@@ -637,19 +547,18 @@
       if (provider === "imagine" && previousImagineId === String(id || "")) {
         const accountId = String(account_state.imagine.active_id || "");
         clearImagineAccountScopedCache(accountId);
-        if (typeof invalidateImagineBridgePreparation === "function") invalidateImagineBridgePreparation(accountId);
-        if (accountId && typeof prepareActiveImagineBridgeSession === "function") {
-          prepareActiveImagineBridgeSession({ force: true, accountId }).catch((error) => console.warn(error));
-        }
+        activateImagineAccountTab(accountId);
       }
       renderAccounts();
       return;
     }
     store.accounts = store.accounts.filter((account) => account.id !== id);
-    if (store.active_id === id) store.active_id = provider === "build" ? store.accounts[0]?.id || "" : "";
+    if (store.active_id === id) store.active_id = store.accounts[0]?.id || "";
     await persistAccountFiles();
     if (provider === "imagine" && previousImagineId === String(id || "")) {
-      clearImagineAccountScopedCache(String(account_state.imagine.active_id || ""));
+      const accountId = String(account_state.imagine.active_id || "");
+      clearImagineAccountScopedCache(accountId);
+      activateImagineAccountTab(accountId);
     }
     renderAccounts();
   }
@@ -689,6 +598,7 @@
     try {
       await persistAccountFiles();
       clearImagineAccountScopedCache("");
+      activateImagineAccountTab("");
       renderAccounts();
     } catch (error) {
       account_state.build = previous.build;
@@ -705,25 +615,6 @@
       }
       syncAccountAllDeleteButton();
     }
-  }
-
-  async function updateAccountTier(provider, id, tier) {
-    closeAccountTierMenu();
-    const store = account_state[provider];
-    const account = store.accounts.find((item) => item.id === id);
-    if (!account) return;
-    const next = normalizeAccountTier(tier);
-    if (library_state.apiReady) {
-      const data = await qApi("/api/accounts/tier", { provider, id, tier: next });
-      applyAccountSnapshot(data);
-      sortAccountCardsByPriority(provider);
-      renderAccounts();
-      return;
-    }
-    account.tier = next;
-    sortAccountCardsByPriority(provider);
-    await persistAccountFiles();
-    renderAccounts();
   }
 
   async function reorderAccount(provider, draggedId, targetId = "") {
@@ -750,12 +641,6 @@
     await persistAccountFiles();
     renderAccounts();
   }
-
-  document.addEventListener("pointerdown", (event) => {
-    if (!accountTierMenu) return;
-    if (event.target instanceof Element && accountTierMenu.contains(event.target)) return;
-    closeAccountTierMenu();
-  }, { capture: true });
 
   async function chooseJsonFile() {
     if (!window.showOpenFilePicker) return null;
@@ -830,11 +715,6 @@
       sortAccountCardsByPriority("imagine");
       clearImagineAccountScopedCache(String(account_state.imagine.active_id || ""));
       renderAccounts();
-      const accountId = String(account_state.imagine.active_id || "");
-      if (typeof invalidateImagineBridgePreparation === "function") invalidateImagineBridgePreparation(accountId);
-      if (typeof prepareActiveImagineBridgeSession === "function") {
-        prepareActiveImagineBridgeSession({ force: true, accountId }).catch((error) => console.warn(error));
-      }
     } finally {
       if (button) {
         button.disabled = false;
@@ -868,8 +748,7 @@
       sortAccountCardsByPriority("imagine");
       const accountId = String(account_state.imagine.active_id || "");
       clearImagineAccountScopedCache(accountId);
-      if (typeof invalidateImagineBridgePreparation === "function") invalidateImagineBridgePreparation(accountId);
-      if (typeof prepareActiveImagineBridgeSession === "function") prepareActiveImagineBridgeSession({ force: true, accountId }).catch((error) => console.warn(error));
+      activateImagineAccountTab(accountId);
       renderAccounts();
       return;
     }
@@ -891,9 +770,7 @@
     sortAccountCardsByPriority("imagine");
     await persistAccountFiles();
     clearImagineAccountScopedCache(account.id);
-    if (typeof invalidateImagineBridgePreparation === "function") invalidateImagineBridgePreparation(account.id);
-    if (typeof prepareActiveImagineBridgeSession === "function") prepareActiveImagineBridgeSession({ force: true, accountId: account.id }).catch((error) => console.warn(error));
-    if (typeof warmActiveImagineUsage === "function") warmActiveImagineUsage();
+    activateImagineAccountTab(account.id);
     renderAccounts();
   }
 
@@ -903,7 +780,7 @@
       applyAccountSnapshot(data);
       sortAccountCardsByPriority("imagine");
       clearImagineAccountScopedCache("");
-      if (typeof invalidateImagineBridgePreparation === "function") invalidateImagineBridgePreparation();
+      activateImagineAccountTab("");
       renderAccounts();
       return;
     }
@@ -913,7 +790,7 @@
     sortAccountCardsByPriority("imagine");
     await persistAccountFiles();
     clearImagineAccountScopedCache("");
-    if (typeof invalidateImagineBridgePreparation === "function") invalidateImagineBridgePreparation();
+    activateImagineAccountTab("");
     renderAccounts();
   }
 
