@@ -206,8 +206,6 @@ function imagineSavedMetadataValue(source, key) {
 function imagineSavedPostProvenance(post) {
   const explicit = String(imagineSavedMetadataValue(post, "saved_provenance") || "").trim().toLowerCase();
   if (["normal-saved", "plain-liked", "cloned-liked"].includes(explicit)) return explicit;
-  // `liked` is a legacy Saved-display flag, not grok.com's Liked membership.
-  // Only explicit server provenance or structural clone/reference evidence may scope a card.
   const remoteView = String(imagineSavedMetadataValue(post, "remote_view") || "").toLowerCase();
   const structurallyReferenced = Boolean(
     imagineSavedMetadataValue(post, "link_source")
@@ -249,22 +247,9 @@ function imagineSavedDisplayGroup(post) {
 }
 
 function imagineSavedOfficialOrder(post) {
-  const metadata = post?.metadata && typeof post.metadata === "object" ? post.metadata : {};
-  const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
-  for (const value of [post?.official_order, metadata.official_order, imagine.official_order]) {
-    if (value === null || value === undefined || String(value).trim() === "") continue;
-    const order = Number(value);
-    if (Number.isInteger(order) && order >= 0) return order;
-  }
-  return null;
-}
-
-function imagineSavedEarliestOfficialOrder(...posts) {
-  const orders = posts
-    .flat()
-    .map(imagineSavedOfficialOrder)
-    .filter((value) => value !== null);
-  return orders.length ? Math.min(...orders) : null;
+  const value = imagineSavedMetadataValue(post, "official_order");
+  const order = Number(value);
+  return Number.isInteger(order) && order >= 0 ? order : null;
 }
 
 function compareImagineSavedOfficialOrder(left, right) {
@@ -392,10 +377,6 @@ function mergeImagineRemotePosts(existingPosts, nextPosts) {
       for (const key of keys) known.add(key);
     }
     const representative = representativeItem(items, { ...primary, items }) || items[0];
-    const refreshedOfficialOrder = imagineSavedOfficialOrder(post);
-    const officialOrder = refreshedOfficialOrder !== null
-      ? refreshedOfficialOrder
-      : imagineSavedOfficialOrder(existing);
     merged.set(key, normalizeServerPost({
       ...primary,
       items,
@@ -404,7 +385,6 @@ function mergeImagineRemotePosts(existingPosts, nextPosts) {
       metadata: {
         ...(primary.metadata || {}),
         flat_only: existingFlat && nextFlat,
-        ...(officialOrder !== null ? { official_order: officialOrder } : {}),
       },
     }));
   }
@@ -736,10 +716,6 @@ function mergeImagineIncrementalSavedPost(existingPost, refreshedPost) {
   const highPriorityImagine = highPriorityMetadata.imagine && typeof highPriorityMetadata.imagine === "object"
     ? highPriorityMetadata.imagine
     : {};
-  const refreshedOfficialOrder = imagineSavedOfficialOrder(stabilized);
-  const officialOrder = refreshedOfficialOrder !== null
-    ? refreshedOfficialOrder
-    : imagineSavedOfficialOrder(existingPost);
   return normalizeServerPost({
     ...basePost,
     folder_path: existingPost.folder_path || basePost.folder_path || "",
@@ -770,7 +746,6 @@ function mergeImagineIncrementalSavedPost(existingPost, refreshedPost) {
         }
         : {}),
       flat_only: existingFlat && refreshedFlat,
-      ...(officialOrder !== null ? { official_order: officialOrder } : {}),
     },
   });
 }
@@ -808,92 +783,6 @@ function imagineLikedExclusionCardKeys(post) {
   ].map((value) => String(value || "").trim()).filter(Boolean));
 }
 
-function imagineLikedExclusionGroups(payload) {
-  return (Array.isArray(payload?.groups) ? payload.groups : []).map((group) => ({
-    anchorId: String(group?.anchor_id || "").trim(),
-    provenance: ["plain-liked", "cloned-liked"].includes(String(group?.provenance || "").trim().toLowerCase())
-      ? String(group.provenance).trim().toLowerCase()
-      : "plain-liked",
-    reason: String(group?.reason || "").trim(),
-    ids: new Set((Array.isArray(group?.ids) ? group.ids : [])
-      .map((value) => String(value || "").trim())
-      .filter(Boolean)),
-  })).filter((group) => group.anchorId && group.ids.size);
-}
-
-function imaginePostLikedExclusionGroup(post, groups) {
-  if (!post || !groups?.length) return null;
-  const keys = new Set(imagineLikedExclusionCardKeys(post));
-  for (const item of post.items || []) {
-    const assetId = imagineSavedItemAssetId(item);
-    if (assetId) keys.add(assetId);
-    for (const sourceId of imagineSavedItemSourceIds(item)) keys.add(sourceId);
-  }
-  return groups.find((group) => Array.from(keys).some((key) => group.ids.has(key))) || null;
-}
-
-function imagineLikedPostIndexForExclusionGroup(posts, group) {
-  return (posts || []).findIndex((post) => {
-    if (imagineSavedPostProvenance(post) !== group.provenance) return false;
-    const keys = imagineLikedExclusionCardKeys(post);
-    if (keys.has(group.anchorId)) return true;
-    return Array.from(keys).some((key) => group.ids.has(key));
-  });
-}
-
-function imagineLikedExclusionGroupKey(group) {
-  return `${group.provenance}\u001f${group.anchorId}`;
-}
-
-function mergeImagineMemoryRelationsIntoLikedGroups(posts, groups) {
-  if (!(library_state.imagineLikedPendingRelations instanceof Map)) {
-    library_state.imagineLikedPendingRelations = new Map();
-  }
-  for (const post of posts || []) {
-    const group = imaginePostLikedExclusionGroup(post, groups);
-    if (!group) continue;
-    const relationItems = (post.items || []).filter((item) => {
-      const itemId = imagineSavedItemAssetId(item);
-      return Boolean(itemId && group.ids.has(itemId));
-    });
-    if (!relationItems.length) continue;
-    const groupKey = imagineLikedExclusionGroupKey(group);
-    const pending = library_state.imagineLikedPendingRelations.get(groupKey) || {
-      group,
-      itemsById: new Map(),
-    };
-    pending.group = group;
-    for (const item of relationItems) {
-      pending.itemsById.set(imagineSavedItemAssetId(item), item);
-    }
-    library_state.imagineLikedPendingRelations.set(groupKey, pending);
-  }
-  let likedPosts = Array.isArray(library_state.imagineLikedPosts)
-    ? [...library_state.imagineLikedPosts]
-    : [];
-  let changed = false;
-  for (const [groupKey, pending] of library_state.imagineLikedPendingRelations) {
-    const { group } = pending;
-    const likedIndex = imagineLikedPostIndexForExclusionGroup(likedPosts, group);
-    if (likedIndex < 0) continue;
-    const likedPost = likedPosts[likedIndex];
-    const relationItems = Array.from(pending.itemsById.values());
-    const merged = typeof mergeImagineGeneratedItems === "function"
-      ? mergeImagineGeneratedItems(likedPost, relationItems, {
-        markGeneratedRelation: true,
-        preserveRepresentative: true,
-      })
-      : likedPost;
-    if (merged !== likedPost) {
-      likedPosts[likedIndex] = merged;
-      changed = true;
-    }
-    library_state.imagineLikedPendingRelations.delete(groupKey);
-  }
-  if (changed) library_state.imagineLikedPosts = likedPosts;
-  return changed;
-}
-
 function filterImagineMainLikedScopePosts(posts) {
   const excluded = library_state.imagineLikedExclusionIds instanceof Set
     ? library_state.imagineLikedExclusionIds
@@ -927,27 +816,6 @@ function applyImagineLikedExclusionSnapshot(data, accountId) {
     ? new Set(library_state.imagineLikedExclusionIds)
     : new Set();
   const incoming = new Set(payload.ids.map((value) => String(value || "").trim()).filter(Boolean));
-  const incomingGroups = imagineLikedExclusionGroups(payload);
-  const previousGroups = previousAccountId === normalizedAccountId
-    && Array.isArray(library_state.imagineLikedExclusionGroups)
-    ? library_state.imagineLikedExclusionGroups
-    : [];
-  const groupsByAnchor = new Map();
-  for (const group of payload.complete === true ? incomingGroups : [...previousGroups, ...incomingGroups]) {
-    const key = imagineLikedExclusionGroupKey(group);
-    const existing = groupsByAnchor.get(key);
-    if (!existing) groupsByAnchor.set(key, { ...group, ids: new Set(group.ids) });
-    else for (const id of group.ids) existing.ids.add(id);
-  }
-  const groups = Array.from(groupsByAnchor.values());
-  if (library_state.imagineLikedPendingRelations instanceof Map) {
-    const groupsByKey = new Map(groups.map((group) => [imagineLikedExclusionGroupKey(group), group]));
-    for (const [groupKey, pending] of library_state.imagineLikedPendingRelations) {
-      const currentGroup = groupsByKey.get(groupKey);
-      if (currentGroup) pending.group = currentGroup;
-      else if (payload.complete === true) library_state.imagineLikedPendingRelations.delete(groupKey);
-    }
-  }
   if (payload.complete === true) nextIds = incoming;
   else for (const value of incoming) nextIds.add(value);
   const previousSignature = Array.from(
@@ -957,7 +825,6 @@ function applyImagineLikedExclusionSnapshot(data, accountId) {
   ).sort().join("\u0000");
   const nextSignature = Array.from(nextIds).sort().join("\u0000");
   library_state.imagineLikedExclusionIds = nextIds;
-  library_state.imagineLikedExclusionGroups = groups;
   library_state.imagineLikedExclusionComplete = payload.complete === true
     || (previousAccountId === normalizedAccountId && library_state.imagineLikedExclusionComplete === true);
   library_state.imagineLikedExclusionRevision = String(
@@ -965,10 +832,8 @@ function applyImagineLikedExclusionSnapshot(data, accountId) {
   );
   library_state.imagineLikedExclusionAccountId = normalizedAccountId;
   const before = library_state.imagineRemotePosts || [];
-  const likedRelationsChanged = mergeImagineMemoryRelationsIntoLikedGroups(before, groups);
   const after = filterImagineMainLikedScopePosts(before);
   const changed = previousSignature !== nextSignature
-    || likedRelationsChanged
     || after.length !== before.length
     || after.some((post, index) => post !== before[index]);
   if (changed) library_state.imagineRemotePosts = after;
@@ -1196,104 +1061,136 @@ function mergeImagineSavedLineageCards(cards) {
   }));
   if (active.length < 2) return active;
 
-  const metadataFor = (card) => (card?.metadata && typeof card.metadata === "object" ? card.metadata : {});
-  const accountScopeFor = (card) => {
-    const metadata = metadataFor(card);
-    const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
-    return String(
-      card?.account_id || metadata.account_id || imagine.account_id
-      || card?.account_email || metadata.account_email || imagine.account_email
-      || (typeof imaginePendingSavedAccountId === "function" ? imaginePendingSavedAccountId() : "")
-      || "active-account",
-    ).trim();
-  };
-  const rootIds = active.map((card) => String(
-    metadataFor(card).lineage_root_asset_id || card?.post_id || "",
-  ).trim());
-  const scopes = active.map((card) => `${accountScopeFor(card)}\u001f${imagineSavedPostProvenance(card)}`);
-  const parentIndexes = active.map((_, index) => index);
-  const findRoot = (index) => {
-    let current = index;
-    while (parentIndexes[current] !== current) {
-      parentIndexes[current] = parentIndexes[parentIndexes[current]];
-      current = parentIndexes[current];
-    }
-    return current;
-  };
-  const connect = (left, right) => {
-    const leftRoot = findRoot(left);
-    const rightRoot = findRoot(right);
-    if (leftRoot === rightRoot) return;
-    parentIndexes[Math.max(leftRoot, rightRoot)] = Math.min(leftRoot, rightRoot);
-  };
+  const rootIds = [];
+  const provenances = [];
+  const lineageScopes = [];
   const rootOwnerById = new Map();
-  const itemOwnerById = new Map();
-  const canonicalGroupOwner = new Map();
-  const generationOwner = new Map();
   active.forEach((card, index) => {
-    const scope = scopes[index];
-    const rootId = rootIds[index];
-    if (rootId) {
-      const key = `${scope}\u001f${rootId}`;
-      if (rootOwnerById.has(key)) connect(index, rootOwnerById.get(key));
-      else rootOwnerById.set(key, index);
-      if (!itemOwnerById.has(key)) itemOwnerById.set(key, index);
-    }
-    const displayGroup = imagineSavedDisplayGroup(card);
-    if (displayGroup) {
-      const key = `${scope}\u001f${displayGroup}`;
-      if (canonicalGroupOwner.has(key)) connect(index, canonicalGroupOwner.get(key));
-      else canonicalGroupOwner.set(key, index);
-    }
-    const conversationId = String(imagineSavedMetadataValue(card, "conversation_id") || "").trim();
-    const generationRootId = String(imagineSavedMetadataValue(card, "root_generation_asset_id") || "").trim();
-    if (conversationId && generationRootId) {
-      const key = `${scope}\u001f${conversationId}\u001f${generationRootId}`;
-      if (generationOwner.has(key)) connect(index, generationOwner.get(key));
-      else generationOwner.set(key, index);
-    }
+    const provenance = imagineSavedPostProvenance(card);
+    const savedAnchor = imagineSavedCardAnchor(card);
+    const lineageScope = `${provenance}\u001f${savedAnchor ? `anchor:${savedAnchor}` : "legacy"}`;
+    const rootId = String(
+      card?.metadata?.lineage_root_asset_id
+      || card?.post_id
+      || "",
+    ).trim();
+    provenances.push(provenance);
+    lineageScopes.push(lineageScope);
+    rootIds.push(rootId);
+    const scopedRootId = rootId ? `${lineageScope}\u001f${rootId}` : "";
+    if (scopedRootId && !rootOwnerById.has(scopedRootId)) rootOwnerById.set(scopedRootId, index);
+  });
+
+  const ownerByItemId = new Map(rootOwnerById);
+  const sourceOwnerById = new Map();
+  const uploadBundleOwnerByItemId = new Map();
+  active.forEach((card, index) => {
+    const lineageScope = lineageScopes[index];
     for (const item of card.items || []) {
-      if (imagineSavedItemIsSource(item)) continue;
       const itemId = imagineSavedItemAssetId(item);
-      if (!itemId) continue;
-      const key = `${scope}\u001f${itemId}`;
-      if (!itemOwnerById.has(key)) itemOwnerById.set(key, index);
+      const scopedItemId = itemId ? `${lineageScope}\u001f${itemId}` : "";
+      if (card?.metadata?.upload_origin_bundle === true && scopedItemId && !uploadBundleOwnerByItemId.has(scopedItemId)) {
+        uploadBundleOwnerByItemId.set(scopedItemId, index);
+      }
+      if (imagineSavedItemIsSource(item)) {
+        if (scopedItemId && !sourceOwnerById.has(scopedItemId)) sourceOwnerById.set(scopedItemId, index);
+        continue;
+      }
+      if (scopedItemId && !ownerByItemId.has(scopedItemId)) ownerByItemId.set(scopedItemId, index);
     }
   });
-  const incomingParentCounts = new Map();
-  active.forEach((card, index) => {
-    const scope = scopes[index];
-    for (const item of card.items || []) {
-      for (const sourceId of imagineSavedItemSourceIds(item)) {
-        const owner = rootOwnerById.get(`${scope}\u001f${sourceId}`)
-          ?? itemOwnerById.get(`${scope}\u001f${sourceId}`);
-        if (owner === undefined || owner === index) continue;
-        connect(index, owner);
-        incomingParentCounts.set(owner, (incomingParentCounts.get(owner) || 0) + 1);
+
+  const parentIndexes = active.map((_, index) => index);
+  active.forEach((candidate, index) => {
+    const lineageScope = lineageScopes[index];
+    const rootId = rootIds[index];
+    const duplicateOwner = rootId ? rootOwnerById.get(`${lineageScope}\u001f${rootId}`) : undefined;
+    if (duplicateOwner !== undefined && duplicateOwner !== index) {
+      parentIndexes[index] = duplicateOwner;
+      return;
+    }
+    if (candidate?.metadata?.upload_origin_bundle !== true) {
+      const uploadBundleOwner = (candidate.items || [])
+        .map((item) => {
+          const itemId = imagineSavedItemAssetId(item);
+          return itemId ? uploadBundleOwnerByItemId.get(`${lineageScope}\u001f${itemId}`) : undefined;
+        })
+        .find((owner) => owner !== undefined);
+      if (uploadBundleOwner !== undefined && uploadBundleOwner !== index) {
+        parentIndexes[index] = uploadBundleOwner;
+        return;
+      }
+    }
+    const rootItem = (candidate.items || [])
+      .find((item) => imagineSavedItemAssetId(item) === rootId);
+    const parentId = imagineSavedItemSourceId(rootItem);
+    const scopedParentId = parentId ? `${lineageScope}\u001f${parentId}` : "";
+    const parentOwner = ownerByItemId.get(scopedParentId) ?? sourceOwnerById.get(scopedParentId);
+    if (parentId && parentOwner !== undefined && parentOwner !== index) {
+      parentIndexes[index] = parentOwner;
+      return;
+    }
+    // clone-batch copies an asset but leaves the original owner's id as its parent, so a
+    // cloned pair arrives with the chain cut: the video points at a foreign image this
+    // account does not own and no owner matches. Grok still filed both under one generation
+    // root, so fall back to that only when the parent is unreachable. This mirrors
+    // merge_imagine_saved_lineage_cards on the server, which reruns the same grouping.
+    if (parentId && parentOwner === undefined) {
+      const generationRootId = String(candidate?.metadata?.root_generation_asset_id || "").trim();
+      const scopedGenerationRootId = generationRootId ? `${lineageScope}\u001f${generationRootId}` : "";
+      const generationOwner = ownerByItemId.get(scopedGenerationRootId)
+        ?? sourceOwnerById.get(scopedGenerationRootId);
+      if (generationRootId && generationOwner !== undefined && generationOwner !== index) {
+        parentIndexes[index] = generationOwner;
       }
     }
   });
+
+  const resolvedRoots = new Map();
+  for (let startIndex = 0; startIndex < active.length; startIndex += 1) {
+    if (resolvedRoots.has(startIndex)) continue;
+    const path = [];
+    const positions = new Map();
+    let currentIndex = startIndex;
+    while (
+      !resolvedRoots.has(currentIndex)
+      && parentIndexes[currentIndex] !== currentIndex
+      && !positions.has(currentIndex)
+    ) {
+      positions.set(currentIndex, path.length);
+      path.push(currentIndex);
+      currentIndex = parentIndexes[currentIndex];
+    }
+    let rootIndex;
+    if (resolvedRoots.has(currentIndex)) {
+      rootIndex = resolvedRoots.get(currentIndex);
+    } else if (positions.has(currentIndex)) {
+      rootIndex = Math.min(...path.slice(positions.get(currentIndex)));
+    } else {
+      rootIndex = currentIndex;
+    }
+    resolvedRoots.set(currentIndex, rootIndex);
+    for (let pathIndex = path.length - 1; pathIndex >= 0; pathIndex -= 1) {
+      resolvedRoots.set(path[pathIndex], rootIndex);
+    }
+  }
+
   const membersByRoot = new Map();
   active.forEach((_, index) => {
-    const rootIndex = findRoot(index);
+    const rootIndex = resolvedRoots.get(index) ?? index;
     if (!membersByRoot.has(rootIndex)) membersByRoot.set(rootIndex, []);
     membersByRoot.get(rootIndex).push(index);
   });
 
-  return Array.from(membersByRoot.values()).sort((left, right) => Math.min(...left) - Math.min(...right)).map((memberIndexes) => {
-    const anchorIndex = [...memberIndexes].sort((left, right) => (
-      (incomingParentCounts.get(right) || 0) - (incomingParentCounts.get(left) || 0)
-      || (imagineSavedOfficialOrder(active[left]) ?? Number.MAX_SAFE_INTEGER)
-        - (imagineSavedOfficialOrder(active[right]) ?? Number.MAX_SAFE_INTEGER)
-      || left - right
-    ))[0];
-    const anchor = active[anchorIndex];
+  return Array.from(membersByRoot.keys()).sort((left, right) => left - right).map((rootIndex) => {
+    const memberIndexes = membersByRoot.get(rootIndex);
+    const anchor = active[rootIndex];
     if (memberIndexes.length === 1) return anchor;
     const knownItemIds = new Set();
     const items = [];
     const orderedIndexes = [
-      anchorIndex,
-      ...memberIndexes.filter((index) => index !== anchorIndex),
+      rootIndex,
+      ...memberIndexes.filter((index) => index !== rootIndex),
     ];
     for (const memberIndex of orderedIndexes) {
       for (const item of active[memberIndex].items || []) {
@@ -1304,18 +1201,11 @@ function mergeImagineSavedLineageCards(cards) {
       }
     }
     const representative = representativeItem(items, { ...anchor, items }) || items[0];
-    const officialOrder = imagineSavedEarliestOfficialOrder(
-      memberIndexes.map((memberIndex) => active[memberIndex]),
-    );
     return normalizeServerPost({
       ...anchor,
       items,
       representative: representative?.file || representative?.url || representative?.item_id || "",
       representative_item: representative,
-      metadata: {
-        ...(anchor.metadata || {}),
-        ...(officialOrder !== null ? { official_order: officialOrder } : {}),
-      },
     });
   });
 }
@@ -2071,10 +1961,6 @@ async function loadImagineLikedCards({ force = false } = {}) {
             cachedPosts,
             { replacesList: false, preserveMatchedAnchors: true },
           );
-          mergeImagineMemoryRelationsIntoLikedGroups(
-            [],
-            library_state.imagineLikedExclusionGroups || [],
-          );
           syncImagineRemotePostsIntoLibrary();
           renderImagineSourceCards();
         }
@@ -2095,10 +1981,6 @@ async function loadImagineLikedCards({ force = false } = {}) {
         replacesList: data.complete === true,
         preserveMatchedAnchors: true,
       },
-    );
-    mergeImagineMemoryRelationsIntoLikedGroups(
-      [],
-      library_state.imagineLikedExclusionGroups || [],
     );
     library_state.imagineLikedLoaded = true;
     syncImagineRemotePostsIntoLibrary();

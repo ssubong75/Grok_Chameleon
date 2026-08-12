@@ -214,8 +214,6 @@ function normalizeNfcText(value = "") {
       imagineLikedLoading: false,
       imagineLikedError: "",
       imagineLikedExclusionIds: new Set(),
-      imagineLikedExclusionGroups: [],
-      imagineLikedPendingRelations: new Map(),
       imagineLikedExclusionComplete: false,
       imagineLikedExclusionRevision: "",
       imagineLikedExclusionAccountId: "",
@@ -508,12 +506,7 @@ function normalizeNfcText(value = "") {
           || imagine.conversation_id
         ));
     const anchor = String(savedDisplayGroup || savedAnchor || provenanceAnchor || path).trim();
-    const accountScope = String(
-      post.account_id || metadata.account_id || imagine.account_id
-      || post.account_email || metadata.account_email || imagine.account_email
-      || account_state.imagine?.active_id || "active-account",
-    ).trim();
-    return `imagine\u001f${accountScope}\u001f${provenance}\u001f${anchor}`;
+    return `imagine\u001f${provenance}\u001f${anchor}`;
   }
 
   function libraryPostMatchesIdentity(post, identity) {
