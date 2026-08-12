@@ -1,5 +1,9 @@
 // Collection category, item grid, and second-level main rendering
   const COLLECTION_SECOND_MAIN_VIRTUAL_LIST_KEY = "collection-second-main";
+  let collectionSecondMainStableScope = "";
+  let collectionSecondMainStablePosts = [];
+  let collectionFolderGridStableScope = "";
+  let collectionFolderGridStablePosts = [];
 
   function selectedCollectionPost() {
     if (!library_state.selectedCollectionPostPath) return null;
@@ -40,36 +44,82 @@
   }
 
 
-  function renderSecondMain(post = selectedCollectionPost()) {
+  function stableScopedCollectionPosts(existingPosts, incomingPosts, compare = comparePostsByRecentActivity) {
+    const byPath = new Map();
+    for (const post of existingPosts || []) {
+      const path = String(post?.folder_path || "");
+      if (path) byPath.set(path, post);
+    }
+    for (const post of incomingPosts || []) {
+      const path = String(post?.folder_path || "");
+      if (path) byPath.set(path, post);
+    }
+    const posts = Array.from(byPath.values());
+    return typeof compare === "function" ? posts.sort(compare) : posts;
+  }
+
+
+  function replaceSecondMainWithMessage(list, message) {
+    // The virtual list owns its mounted nodes and cache. Always retire it before putting a
+    // non-virtual empty state in the same element, otherwise an unchanged render token can
+    // leave the replacement message mounted after data has arrived.
+    disableVirtualCardList(COLLECTION_SECOND_MAIN_VIRTUAL_LIST_KEY, list);
+    list.replaceChildren(emptyLibraryNode(message));
+  }
+
+
+  function renderSecondMain(requestedPost = selectedCollectionPost()) {
     const title = document.querySelector(".second_main_header h2");
     const list = document.querySelector(".second_main_card_list");
     if (!list) return;
-    if (
+
+    const selectedPath = String(library_state.selectedCollectionPostPath || "");
+    const requestedPath = String(requestedPost?.folder_path || "");
+    const post = selectedPath
+      ? (selectedCollectionPost() || (requestedPath === selectedPath ? requestedPost : null))
+      : null;
+    const scope = String(post?.folder_path || "");
+    const sameScope = scope === collectionSecondMainStableScope;
+    if (!sameScope) {
+      collectionSecondMainStableScope = scope;
+      collectionSecondMainStablePosts = [];
+    }
+    list.dataset.collectionSecondMainScope = scope;
+
+    const needsInitialLoad = Boolean(
       post
       && library_state.libraryIndexEnabled
       && !post._indexed_children_loaded
-    ) {
+    );
+    if (needsInitialLoad) {
       if (!post._indexed_children_loading && typeof loadIndexedCollectionPostContents === "function") {
         loadIndexedCollectionPostContents(post.folder_path).catch((error) => console.warn(error));
       }
-      if (title) title.textContent = post.title || readableName(post.folderName);
-      disableVirtualCardList(COLLECTION_SECOND_MAIN_VIRTUAL_LIST_KEY, list);
-      list.replaceChildren(emptyLibraryNode("Loading . . ."));
+    }
+
+    const loading = Boolean(needsInitialLoad || post?._indexed_children_loading);
+    const currentPosts = secondMainPostsFor(post);
+    const posts = loading && sameScope
+      ? stableScopedCollectionPosts(collectionSecondMainStablePosts, currentPosts)
+      : currentPosts;
+    collectionSecondMainStablePosts = posts;
+    list.setAttribute("aria-busy", String(loading));
+    if (title) title.textContent = post ? post.title || readableName(post.folderName) : "Item";
+
+    if (!posts.length && loading) {
+      replaceSecondMainWithMessage(list, "Loading . . .");
       return;
     }
-    const posts = secondMainPostsFor(post);
     if (!posts.length) {
-      if (title) title.textContent = "Item";
-      disableVirtualCardList(COLLECTION_SECOND_MAIN_VIRTUAL_LIST_KEY, list);
-      list.replaceChildren(emptyLibraryNode("No items."));
+      collectionSecondMainStablePosts = [];
+      replaceSecondMainWithMessage(list, "No items.");
       return;
     }
-    if (title) title.textContent = post.title || readableName(post.folderName);
     renderVirtualCardList(COLLECTION_SECOND_MAIN_VIRTUAL_LIST_KEY, list, posts.map((item) => virtualCardRenderSpecForPost(item, "collection_media_card", {
         screenId: "2nd_main",
         activeButtonId: "b_collection_nav_btn",
     })), {
-      loading: Boolean(post?._indexed_children_loading),
+      loading,
     });
   }
 
@@ -388,6 +438,39 @@
   }
 
 
+  function applyCollectionGridRenderData(node, key, hash) {
+    if (typeof applyStableCardRenderData === "function") {
+      return applyStableCardRenderData(node, key, hash);
+    }
+    node.dataset.cardRenderKey = key;
+    node.dataset.cardRenderHash = hash;
+    return node;
+  }
+
+
+  function collectionGridMessageEntry(scope, message, loading = false) {
+    const key = `collection-folder-message|${scope}`;
+    const hash = `${message}\u001f${loading ? "loading" : "ready"}`;
+    return {
+      cardRenderKey: key,
+      cardRenderHash: hash,
+      createCard() {
+        return applyCollectionGridRenderData(emptyLibraryNode(message), key, hash);
+      },
+    };
+  }
+
+
+  function renderCollectionGridMessage(grid, scope, message, loading = false) {
+    grid.setAttribute("aria-busy", String(loading));
+    grid.classList.toggle("collection_grid_loading", loading);
+    replaceCardListChildren(grid, [collectionGridMessageEntry(scope, message, loading)]);
+    grid.ondragover = null;
+    grid.ondragleave = null;
+    grid.ondrop = null;
+  }
+
+
   function renderCollectionPosts(collection) {
     const grid = document.querySelector(".collection_2nd_card_grid");
     const heading = document.querySelector(".collection_2nd_heading strong");
@@ -398,91 +481,142 @@
     });
     document.querySelector(".collection_title_btn")?.classList.toggle("active", library_state.collectionActionLevel !== "second");
     document.querySelector(".collection_item_title_btn")?.classList.toggle("active", library_state.collectionActionLevel === "second");
+    const scope = String(collection?.path || "");
+    const sameScope = scope === collectionFolderGridStableScope;
+    if (!sameScope) {
+      collectionFolderGridStableScope = scope;
+      collectionFolderGridStablePosts = [];
+      library_state.draggingCollectionPostPath = "";
+    }
+    grid.dataset.collectionFolderScope = scope;
     if (!collection) {
-      grid.replaceChildren(emptyLibraryNode(""));
+      collectionFolderGridStablePosts = [];
+      renderCollectionGridMessage(grid, scope, "");
       return;
     }
-    if (library_state.libraryIndexEnabled && !collection.indexed_loaded) {
+
+    const needsInitialLoad = Boolean(library_state.libraryIndexEnabled && !collection.indexed_loaded);
+    if (needsInitialLoad) {
       if (!collection.indexed_loading && typeof loadIndexedCollectionPosts === "function") {
         loadIndexedCollectionPosts(collection.path).catch((error) => console.warn(error));
       }
-      grid.replaceChildren(emptyLibraryNode("Loading . . ."));
+    }
+
+    const loading = Boolean(needsInitialLoad || collection.indexed_loading);
+    const currentPosts = collectionPostsWithSlots(collection);
+    const posts = loading && sameScope
+      ? normalizeCollectionSlotPosts(stableScopedCollectionPosts(
+        collectionFolderGridStablePosts,
+        currentPosts,
+        null,
+      ))
+      : currentPosts;
+    collectionFolderGridStablePosts = posts;
+    grid.setAttribute("aria-busy", String(loading));
+    grid.classList.toggle("collection_grid_loading", loading);
+
+    if (!posts.length && loading) {
+      renderCollectionGridMessage(grid, scope, "Loading . . .", true);
       return;
     }
-    const directPosts = collectionDirectPosts(collection);
-    if (!directPosts.length) {
+    if (!posts.length) {
+      collectionFolderGridStablePosts = [];
       library_state.selectedCollectionPostPath = "";
-      grid.replaceChildren(emptyLibraryNode("No items yet."));
+      renderCollectionGridMessage(grid, scope, "No items yet.");
       return;
     }
-    if (!directPosts.some((post) => post.folder_path === library_state.selectedCollectionPostPath)) {
+    if (
+      !loading
+      && !collection.indexed_has_more
+      && !posts.some((post) => post.folder_path === library_state.selectedCollectionPostPath)
+    ) {
       library_state.selectedCollectionPostPath = "";
     }
     library_state.collectionView = "2nd_folders";
-    const posts = collectionPostsWithSlots(collection);
     const maxSlot = Math.max(11, ...posts.map((post) => Number(post.grid_slot) || 0)) + 8;
     const postBySlot = new Map(posts.map((post) => [Number(post.grid_slot) || 0, post]));
     const slots = Array.from({ length: maxSlot + 1 }, (_, slot) => {
       const post = postBySlot.get(slot);
       if (!post) {
-        const emptySlot = document.createElement("button");
-        emptySlot.className = "collection_2nd_slot";
-        emptySlot.type = "button";
-        emptySlot.tabIndex = -1;
-        emptySlot.dataset.gridSlot = String(slot);
-        emptySlot.setAttribute("aria-label", "Empty folder position");
-        return emptySlot;
+        const key = `collection-folder-slot|${scope}|${slot}`;
+        const hash = String(slot);
+        return {
+          cardRenderKey: key,
+          cardRenderHash: hash,
+          createCard() {
+            const emptySlot = document.createElement("button");
+            emptySlot.className = "collection_2nd_slot";
+            emptySlot.type = "button";
+            emptySlot.tabIndex = -1;
+            emptySlot.dataset.gridSlot = String(slot);
+            emptySlot.setAttribute("aria-label", "Empty folder position");
+            return applyCollectionGridRenderData(emptySlot, key, hash);
+          },
+        };
       }
-      const card = document.createElement("article");
-      card.className = `collection_2nd_card${post.folder_path === library_state.selectedCollectionPostPath ? " active" : ""}`;
-      if (library_state.selectedItems.has(post.folder_path || "")) card.classList.add("selected");
-      card.tabIndex = 0;
-      card.setAttribute("role", "button");
-      card.draggable = true;
-      card.dataset.libraryPostPath = post.folder_path;
-      card.dataset.gridSlot = String(slot);
-      const title = document.createElement("strong");
-      title.textContent = readableName(post.folderName) || post.title || "Folder";
-      card.append(title);
-      card.addEventListener("click", () => {
-        library_state.selectedCollectionPostPath = library_state.selectedCollectionPostPath === post.folder_path ? "" : post.folder_path;
-        library_state.collectionActionLevel = "second";
-        document.querySelector(".collection_title_btn")?.classList.remove("active");
-        document.querySelector(".collection_item_title_btn")?.classList.add("active");
-        for (const item of grid.querySelectorAll(".collection_2nd_card")) {
-          item.classList.toggle("active", item.dataset.libraryPostPath === library_state.selectedCollectionPostPath);
-        }
-      });
-      card.addEventListener("dblclick", () => {
-        library_state.selectedCollectionPostPath = post.folder_path;
-        library_state.collectionActionLevel = "second";
-        selectLibraryPost(post.folder_path, { loadFull: false });
-        renderSecondMain(post);
-        openScreen("2nd_main", "b_collection_nav_btn");
-      });
-      card.addEventListener("keydown", (event) => {
-        if (event.key !== "Enter" && event.key !== " ") return;
-        if (event.target.closest("button")) return;
-        event.preventDefault();
-        library_state.selectedCollectionPostPath = post.folder_path;
-        library_state.collectionActionLevel = "second";
-        selectLibraryPost(post.folder_path, { loadFull: false });
-        renderSecondMain(post);
-        openScreen("2nd_main", "b_collection_nav_btn");
-      });
-      card.addEventListener("dragstart", (event) => {
-        event.dataTransfer.effectAllowed = "move";
-        event.dataTransfer.setData("application/x-grok-q-collection-post", post.folder_path);
-        library_state.draggingCollectionPostPath = post.folder_path;
-        card.classList.add("dragging");
-      });
-      card.addEventListener("dragend", () => {
-        library_state.draggingCollectionPostPath = "";
-        card.classList.remove("dragging");
-      });
-      return card;
+      const titleText = readableName(post.folderName) || post.title || "Folder";
+      const active = post.folder_path === library_state.selectedCollectionPostPath;
+      const selected = library_state.selectedItems.has(post.folder_path || "");
+      const key = `collection-folder-card|${scope}|${post.folder_path}`;
+      const hash = [slot, titleText, active ? "active" : "", selected ? "selected" : ""]
+        .map((value) => String(value || ""))
+        .join("\u001f");
+      return {
+        cardRenderKey: key,
+        cardRenderHash: hash,
+        createCard() {
+          const card = document.createElement("article");
+          card.className = `collection_2nd_card${active ? " active" : ""}`;
+          if (selected) card.classList.add("selected");
+          card.tabIndex = 0;
+          card.setAttribute("role", "button");
+          card.draggable = true;
+          card.dataset.libraryPostPath = post.folder_path;
+          card.dataset.gridSlot = String(slot);
+          const title = document.createElement("strong");
+          title.textContent = titleText;
+          card.append(title);
+          card.addEventListener("click", () => {
+            library_state.selectedCollectionPostPath = library_state.selectedCollectionPostPath === post.folder_path ? "" : post.folder_path;
+            library_state.collectionActionLevel = "second";
+            document.querySelector(".collection_title_btn")?.classList.remove("active");
+            document.querySelector(".collection_item_title_btn")?.classList.add("active");
+            for (const item of grid.querySelectorAll(".collection_2nd_card")) {
+              item.classList.toggle("active", item.dataset.libraryPostPath === library_state.selectedCollectionPostPath);
+            }
+          });
+          card.addEventListener("dblclick", () => {
+            library_state.selectedCollectionPostPath = post.folder_path;
+            library_state.collectionActionLevel = "second";
+            selectLibraryPost(post, { loadFull: false });
+            renderSecondMain(post);
+            openScreen("2nd_main", "b_collection_nav_btn");
+          });
+          card.addEventListener("keydown", (event) => {
+            if (event.key !== "Enter" && event.key !== " ") return;
+            if (event.target.closest("button")) return;
+            event.preventDefault();
+            library_state.selectedCollectionPostPath = post.folder_path;
+            library_state.collectionActionLevel = "second";
+            selectLibraryPost(post, { loadFull: false });
+            renderSecondMain(post);
+            openScreen("2nd_main", "b_collection_nav_btn");
+          });
+          card.addEventListener("dragstart", (event) => {
+            event.dataTransfer.effectAllowed = "move";
+            event.dataTransfer.setData("application/x-grok-q-collection-post", post.folder_path);
+            library_state.draggingCollectionPostPath = post.folder_path;
+            card.classList.add("dragging");
+          });
+          card.addEventListener("dragend", () => {
+            library_state.draggingCollectionPostPath = "";
+            card.classList.remove("dragging");
+          });
+          return applyCollectionGridRenderData(card, key, hash);
+        },
+      };
     });
-    grid.replaceChildren(...slots);
+    replaceCardListChildren(grid, slots);
     grid.ondragover = (event) => {
       if (!library_state.draggingCollectionPostPath && !dataTransferHasType(event, "application/x-grok-q-collection-post")) return;
       event.preventDefault();

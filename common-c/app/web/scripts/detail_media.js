@@ -849,6 +849,7 @@ function removeUnavailableImagineItem(postPath, url, host = null) {
     library_state.selectedItems?.delete?.(path);
     if (String(library_state.selectedPostPath || "") === path) {
       library_state.selectedPostPath = "";
+      library_state.selectedPostIdentity = "";
       library_state.selectedDetailItemId = "";
     }
   } else if (

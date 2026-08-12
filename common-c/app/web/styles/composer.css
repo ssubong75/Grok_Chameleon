@@ -892,6 +892,12 @@
   min-width: 56px;
 }
 
+.composer.mode_image .custom_select[data-composer-control="build-image-model"],
+.composer.mode_image .custom_select[data-composer-control="build-image-model"] .custom_select_btn,
+.composer.mode_image .custom_select[data-composer-control="build-image-model"] .custom_select_menu {
+  min-width: 58px;
+}
+
 .composer.mode_image .custom_select[data-composer-control="image-model"],
 .composer.mode_image .custom_select[data-composer-control="image-model"] .custom_select_btn,
 .composer.mode_image .custom_select[data-composer-control="image-model"] .custom_select_menu {
@@ -924,6 +930,8 @@
 
 .composer.mode_image .custom_select[data-composer-control="aspect"] .custom_select_btn,
 .composer.mode_image .custom_select[data-composer-control="aspect"] .custom_select_option,
+.composer.mode_image .custom_select[data-composer-control="build-image-model"] .custom_select_btn,
+.composer.mode_image .custom_select[data-composer-control="build-image-model"] .custom_select_option,
 .composer.mode_image .custom_select[data-composer-control="image-model"] .custom_select_btn,
 .composer.mode_image .custom_select[data-composer-control="image-model"] .custom_select_option,
 .composer.mode_image .custom_select[data-composer-control="resolution"] .custom_select_btn,

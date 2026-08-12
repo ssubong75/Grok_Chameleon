@@ -330,7 +330,13 @@ for (const select of document.querySelectorAll(".custom_select")) {
     button.textContent = option.textContent;
     if (typeof rememberComposerOption === "function") rememberComposerOption(select, option.textContent);
     select.querySelectorAll(".custom_select_option").forEach((item) => item.classList.toggle("active", item === option));
-    if (composerState.mode === "video" && typeof syncComposerVideoOptionControls === "function") {
+    if (
+      composerState.mode === "image"
+      && select === composerControls.buildImageModel
+      && typeof renderComposerOptions === "function"
+    ) {
+      renderComposerOptions();
+    } else if (composerState.mode === "video" && typeof syncComposerVideoOptionControls === "function") {
       syncComposerVideoOptionControls();
     }
     closeComposerSelects();

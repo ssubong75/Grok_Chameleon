@@ -213,7 +213,10 @@ function selectImagineJob(jobId, options = {}) {
   if (!job) return;
   library_state.selectedImagineJobId = String(job.id);
   library_state.selectedJobId = "";
-  if (!options.keepDetailPost) library_state.selectedPostPath = "";
+  if (!options.keepDetailPost) {
+    library_state.selectedPostPath = "";
+    library_state.selectedPostIdentity = "";
+  }
   const focusedSlot = options.slotIndex
     || (options.focusJobThumb && typeof visibleGenerationJobSlots === "function"
       ? (visibleGenerationJobSlots(job)[0] || 1)
@@ -530,36 +533,18 @@ function mergeImagineGeneratedItems(post, generatedItems, options = {}) {
   });
 }
 
-function mergeImagineGeneratedItemsIntoSource(sourcePath, generatedItems) {
-  const path = String(sourcePath || "");
-  if (!path) return null;
-  let mergedPost = null;
-  for (const stateKey of [
-    "imagineRemotePosts",
-    "imagineDiscoverPosts",
-    "imagineUnsavedPosts",
-    "imagineSearchPosts",
-  ]) {
-    const posts = Array.isArray(library_state[stateKey]) ? library_state[stateKey] : [];
-    library_state[stateKey] = posts.map((post) => {
-      if (String(post?.folder_path || "") !== path) return post;
-      const merged = mergeImagineGeneratedItems(post, generatedItems, {
-        markGeneratedRelation: true,
-        preserveRepresentative: true,
-      });
-      mergedPost = merged;
-      return merged;
-    });
-  }
-  if (mergedPost) syncImagineRemotePostsIntoLibrary();
-  return mergedPost;
-}
-
 function upsertImagineRemotePost(post) {
   if (!post?.folder_path) return "";
   const normalized = normalizeServerPost(post);
   const currentPosts = Array.isArray(library_state.imagineRemotePosts) ? library_state.imagineRemotePosts : [];
-  const index = currentPosts.findIndex((candidate) => candidate?.folder_path === normalized.folder_path);
+  const identity = typeof libraryPostStableIdentity === "function"
+    ? libraryPostStableIdentity(normalized)
+    : String(normalized.folder_path || "");
+  const index = currentPosts.findIndex((candidate) => (
+    typeof libraryPostMatchesIdentity === "function"
+      ? libraryPostMatchesIdentity(candidate, identity)
+      : candidate?.folder_path === normalized.folder_path
+  ));
   library_state.imagineRemotePosts = index >= 0
     ? currentPosts.map((candidate, candidateIndex) => (candidateIndex === index ? normalized : candidate))
     : [normalized, ...currentPosts];
@@ -570,6 +555,7 @@ function upsertImagineRemotePost(post) {
 function applyImagineDirectResult(result, options = {}) {
   if (!result) return;
   let selectedPath = "";
+  let selectedIdentity = "";
   const upsertedPaths = [];
   const skipPaths = options.skipPaths instanceof Set ? options.skipPaths : new Set();
   const sourcePath = String(result.source_post_path || "");
@@ -590,29 +576,54 @@ function applyImagineDirectResult(result, options = {}) {
       if (candidatePath && skipPaths.has(candidatePath)) continue;
       const path = upsertImagineRemotePost(post);
       if (path) upsertedPaths.push(path);
-      if (path) selectedPath = path;
-      if (targetPath && path === targetPath) selectedPath = path;
+      if (path && (!selectedPath || (targetPath && path === targetPath))) {
+        selectedPath = path;
+        selectedIdentity = typeof libraryPostStableIdentity === "function"
+          ? libraryPostStableIdentity(post)
+          : "";
+      }
     }
   } else {
     if (targetPath && items.length) {
-      const existing = (library_state.imagineRemotePosts || []).find((post) => post.folder_path === targetPath)
-        || (library_state.posts || []).find((post) => post.folder_path === targetPath);
+      const resultPostIdentity = result.post && typeof libraryPostStableIdentity === "function"
+        ? libraryPostStableIdentity({ ...result.post, folder_path: targetPath })
+        : "";
+      const selectedSourceIdentity = (
+        library_state.selectedPostPath === sourcePath
+        && (targetPath === sourcePath || !resultPostIdentity)
+      ) ? String(library_state.selectedPostIdentity || "") : "";
+      const targetIdentity = resultPostIdentity || selectedSourceIdentity;
+      const candidates = [
+        ...(library_state.imagineRemotePosts || []),
+        ...(library_state.posts || []),
+      ].filter((candidate) => candidate?.folder_path === targetPath);
+      const existing = targetIdentity && typeof libraryPostMatchesIdentity === "function"
+        ? candidates.find((candidate) => libraryPostMatchesIdentity(candidate, targetIdentity))
+        : (candidates.length === 1 ? candidates[0] : null);
       if (existing) {
-        selectedPath = upsertImagineRemotePost(mergeImagineGeneratedItems(existing, items, {
+        const mergedPost = mergeImagineGeneratedItems(existing, items, {
           markGeneratedRelation: true,
-        }));
+        });
+        selectedPath = upsertImagineRemotePost(mergedPost);
+        selectedIdentity = typeof libraryPostStableIdentity === "function"
+          ? libraryPostStableIdentity(mergedPost)
+          : "";
         if (selectedPath) upsertedPaths.push(selectedPath);
       }
     }
     if (!selectedPath && result.post) {
-      selectedPath = upsertImagineRemotePost(mergeImagineGeneratedItems(result.post, items, {
+      const mergedPost = mergeImagineGeneratedItems(result.post, items, {
         markGeneratedRelation: true,
-      }));
+      });
+      selectedPath = upsertImagineRemotePost(mergedPost);
+      selectedIdentity = typeof libraryPostStableIdentity === "function"
+        ? libraryPostStableIdentity(mergedPost)
+        : "";
       if (selectedPath) upsertedPaths.push(selectedPath);
     }
     if (!selectedPath && items.length) {
       const representative = representativeItem(items, { items }) || item;
-      selectedPath = upsertImagineRemotePost(mergeImagineGeneratedItems({
+      const generatedPost = mergeImagineGeneratedItems({
         post_id: representative?.root_post_id || representative?.item_id,
         source: "imagine",
         mode: result.action || "direct",
@@ -625,16 +636,17 @@ function applyImagineDirectResult(result, options = {}) {
         representative: representative?.url || representative?.item_id,
         representative_item: representative,
         items,
-      }, items, { markGeneratedRelation: true }));
+      }, items, { markGeneratedRelation: true });
+      selectedPath = upsertImagineRemotePost(generatedPost);
+      selectedIdentity = typeof libraryPostStableIdentity === "function"
+        ? libraryPostStableIdentity(generatedPost)
+        : "";
       if (selectedPath) upsertedPaths.push(selectedPath);
     }
   }
   upsertedPaths.forEach((path) => {
     if (path) noteMainGenerationActivity("imagine", "post", path);
   });
-  if (keepSourceDetail && mergeImagineGeneratedItemsIntoSource(sourcePath, items)) {
-    selectedPath = sourcePath;
-  }
   if (options.stayOnImagineMain) {
     const resultPaths = resultPosts.map((post) => post?.folder_path).filter(Boolean);
     markSessionImagineT2iPaths(resultPaths.length ? resultPaths : upsertedPaths);
@@ -644,27 +656,43 @@ function applyImagineDirectResult(result, options = {}) {
     showImagineMainNow();
     return;
   }
+  if (keepSourceDetail) {
+    renderDetailViews();
+    return;
+  }
   if (selectedPath) {
-    if (result.selected_item_id) {
+    const selectedPost = (library_state.imagineRemotePosts || [])
+      .find((post) => (
+        String(post?.folder_path || "") === selectedPath
+        && (!selectedIdentity || libraryPostMatchesIdentity(post, selectedIdentity))
+      ))
+      || (library_state.posts || []).find((post) => (
+        String(post?.folder_path || "") === selectedPath
+        && (!selectedIdentity || libraryPostMatchesIdentity(post, selectedIdentity))
+      ));
+    const selectedItemExists = Boolean(result.selected_item_id && (selectedPost?.items || []).some((candidate) => (
+      mediaItemKey(candidate) === String(result.selected_item_id)
+      || String(candidate?.item_id || "") === String(result.selected_item_id)
+    )));
+    if (selectedItemExists) {
       library_state.selectedDetailItemId = result.selected_item_id;
       if (typeof resetDetailMediaAspect === "function") resetDetailMediaAspect("i");
     }
-    selectLibraryPost(selectedPath);
-    if (result.selected_item_id && library_state.selectedDetailItemId !== result.selected_item_id) {
+    selectLibraryPost(selectedPost || selectedPath);
+    if (selectedItemExists && library_state.selectedDetailItemId !== result.selected_item_id) {
       library_state.selectedDetailItemId = result.selected_item_id;
       renderDetailViews();
     }
-    if (!keepSourceDetail) {
-      const backTarget = { screenId: "i_main", activeButtonId: screen_state.current_i_nav_btn || "i_imagine_nav_btn" };
-      if (typeof captureLibraryCardListScroll === "function") {
-        const scrollState = captureLibraryCardListScroll("i_main");
-        if (scrollState) backTarget.scrollState = scrollState;
-      }
-      screen_state.detail_back.imagine = backTarget;
+    const backTarget = { screenId: "i_main", activeButtonId: screen_state.current_i_nav_btn || "i_imagine_nav_btn" };
+    if (typeof captureLibraryCardListScroll === "function") {
+      const scrollState = captureLibraryCardListScroll("i_main");
+      if (scrollState) backTarget.scrollState = scrollState;
     }
+    screen_state.detail_back.imagine = backTarget;
     openScreen("i_detail", screen_state.current_i_nav_btn || "i_imagine_nav_btn");
     if (
-      new Set(["i2i", "i2v"]).has(String(result.action || "").toLowerCase())
+      selectedItemExists
+      && new Set(["i2i", "i2v"]).has(String(result.action || "").toLowerCase())
       && typeof resetComposerAttachmentsToSelectedDetail === "function"
     ) {
       resetComposerAttachmentsToSelectedDetail();

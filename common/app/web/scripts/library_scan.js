@@ -508,11 +508,93 @@
   const INDEXED_COLLECTION_CONTENT_PAGE_SIZE = INDEXED_CACHED_CARD_LIST_SIZE;
   const indexedPostRequests = new Map();
   const indexedCollectionContentRequests = new Map();
+  let indexedBuildRequestToken = 0;
+  let indexedBuildLoadingKey = "";
+  let indexedBuildRefreshScope = null;
+  let indexedCollectionRequestToken = 0;
+  const indexedCollectionRequestTokens = new Map();
+  const indexedCollectionRefreshScopes = new Map();
+  let indexedCollectionContentRequestToken = 0;
+  const indexedCollectionContentRequestTokens = new Map();
+  const indexedCollectionContentRefreshScopes = new Map();
+
+  function indexedLibraryRequestEpoch() {
+    return Number(library_state.libraryIndexEpoch || 0);
+  }
+
+  function indexedLibraryPath(value) {
+    return String(value || "").trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  }
+
+  function indexedLibraryParentPath(value) {
+    const parts = indexedLibraryPath(value).split("/").filter(Boolean);
+    parts.pop();
+    return parts.join("/");
+  }
+
+  function indexedPostIsDirectChild(post, parentPath) {
+    const path = indexedLibraryPath(post?.folder_path);
+    return Boolean(path && indexedLibraryParentPath(path) === indexedLibraryPath(parentPath));
+  }
+
+  function indexedCollectionForPath(path) {
+    const normalizedPath = indexedLibraryPath(path);
+    return (library_state.collections || [])
+      .filter((collection) => {
+        const collectionPath = indexedLibraryPath(collection?.path);
+        return collectionPath && (
+          normalizedPath === collectionPath
+          || normalizedPath.startsWith(`${collectionPath}/`)
+        );
+      })
+      .sort((left, right) => indexedLibraryPath(right?.path).length - indexedLibraryPath(left?.path).length)[0]
+      || null;
+  }
+
+  function indexedPostInstances(path) {
+    const normalizedPath = indexedLibraryPath(path);
+    if (!normalizedPath) return [];
+    const matches = new Set();
+    for (const post of library_state.posts || []) {
+      if (indexedLibraryPath(post?.folder_path) === normalizedPath) matches.add(post);
+    }
+    for (const collection of library_state.collections || []) {
+      for (const post of collection.posts || []) {
+        if (indexedLibraryPath(post?.folder_path) === normalizedPath) matches.add(post);
+      }
+    }
+    return Array.from(matches);
+  }
+
+  function indexedPostForPath(path) {
+    return indexedPostInstances(path)[0] || null;
+  }
+
+  function setIndexedChildPagingState(path, values) {
+    for (const post of indexedPostInstances(path)) Object.assign(post, values);
+  }
 
   function mergeIndexedPostRecord(current, incoming) {
     if (!incoming) return current || null;
-    if (current && !current._indexed_summary && incoming._indexed_summary) return current;
     if (!current) return incoming;
+    if (incoming._indexed_summary) {
+      // Keep already-loaded detail items available while applying fresh list fields such as
+      // title, slot and representative media. Mark the record stale so the next detail open
+      // still reloads the complete post instead of treating this merged summary as current.
+      const currentItems = Array.isArray(current.items) ? current.items : [];
+      const incomingItems = Array.isArray(incoming.items) ? incoming.items : [];
+      const currentMetadata = current.metadata && typeof current.metadata === "object"
+        ? current.metadata
+        : {};
+      const incomingMetadata = incoming.metadata && typeof incoming.metadata === "object"
+        ? incoming.metadata
+        : {};
+      Object.assign(current, incoming);
+      if (currentItems.length > incomingItems.length) current.items = currentItems;
+      current.metadata = { ...currentMetadata, ...incomingMetadata };
+      current._indexed_summary = true;
+      return current;
+    }
     Object.assign(current, incoming);
     if (!incoming._indexed_summary) delete current._indexed_summary;
     return current;
@@ -531,6 +613,21 @@
     return { posts: Array.from(byPath.values()), merged };
   }
 
+  function restrictIndexedPostListToPaths(posts, paths) {
+    const keep = paths instanceof Set ? paths : new Set(paths || []);
+    return (posts || []).filter((post) => keep.has(indexedLibraryPath(post?.folder_path)));
+  }
+
+  function mergeIndexedPostPage(current, posts, { authoritativePaths = null } = {}) {
+    const result = mergeIndexedPostList(current, posts);
+    return {
+      posts: authoritativePaths
+        ? restrictIndexedPostListToPaths(result.posts, authoritativePaths)
+        : result.posts,
+      merged: result.merged,
+    };
+  }
+
   function mergeIndexedPostsIntoWorkingSet(posts) {
     const normalized = (Array.isArray(posts) ? posts : []).map(normalizeServerPost);
     const result = mergeIndexedPostList(library_state.posts, normalized);
@@ -538,12 +635,52 @@
     return result.merged;
   }
 
-  function mergeIndexedPostsIntoCollection(collection, posts, { reset = false } = {}) {
+  function mergeIndexedPostsIntoCollection(collection, posts, options = {}) {
     if (!collection) return [];
-    const normalized = (Array.isArray(posts) ? posts : []).map(normalizeServerPost);
-    const result = mergeIndexedPostList(reset ? [] : collection.posts, normalized);
-    collection.posts = result.posts;
+    const parentPath = indexedLibraryPath(options.parentPath || "");
+    const normalized = (Array.isArray(posts) ? posts : [])
+      .map(normalizeServerPost)
+      .filter((post) => !parentPath || indexedPostIsDirectChild(post, parentPath));
+    const result = mergeIndexedPostList(collection.posts, normalized);
+    const authoritativePaths = options.authoritativePaths instanceof Set
+      ? options.authoritativePaths
+      : null;
+    if (parentPath && authoritativePaths) {
+      collection.posts = result.posts.filter((post) => (
+        !indexedPostIsDirectChild(post, parentPath)
+        || authoritativePaths.has(indexedLibraryPath(post?.folder_path))
+      ));
+    } else {
+      collection.posts = result.posts;
+    }
     return result.merged;
+  }
+
+  function pruneIndexedWorkingSetDirectChildren(parentPath, authoritativePaths) {
+    if (!(authoritativePaths instanceof Set)) return;
+    library_state.posts = (library_state.posts || []).filter((post) => (
+      !indexedPostIsDirectChild(post, parentPath)
+      || authoritativePaths.has(indexedLibraryPath(post?.folder_path))
+    ));
+  }
+
+  function advanceIndexedRefreshScope(current, { epoch, scope, reset, posts, hasMore }) {
+    const sameRefresh = Boolean(
+      current
+      && current.epoch === epoch
+      && current.scope === scope
+    );
+    const refresh = reset || !sameRefresh
+      ? { epoch, scope, paths: new Set(), coversHead: Boolean(reset) }
+      : current;
+    for (const post of posts || []) {
+      const path = indexedLibraryPath(post?.folder_path);
+      if (path) refresh.paths.add(path);
+    }
+    return {
+      refresh,
+      authoritativePaths: !hasMore && refresh.coversHead ? refresh.paths : null,
+    };
   }
 
   function indexedBuildQueryKey() {
@@ -551,115 +688,231 @@
   }
 
   async function loadIndexedBuildPosts({ append = false, force = false } = {}) {
-    if (!library_state.libraryIndexEnabled || !library_state.apiReady || library_state.indexedBuildLoading) return;
     const key = indexedBuildQueryKey();
-    const reset = force || !append || library_state.indexedBuildKey !== key;
+    if (!library_state.libraryIndexEnabled || !library_state.apiReady) return;
+    if (library_state.indexedBuildLoading && indexedBuildLoadingKey === key) return;
+    const epoch = indexedLibraryRequestEpoch();
+    const sameScope = library_state.indexedBuildKey === key;
+    const reset = force || !append || !sameScope;
     if (!reset && !library_state.indexedBuildHasMore) return;
+    const requestToken = ++indexedBuildRequestToken;
+    const requestOffset = reset ? 0 : Number(library_state.indexedBuildOffset || 0);
     library_state.indexedBuildLoading = true;
+    indexedBuildLoadingKey = key;
     if (reset) {
       library_state.indexedBuildKey = key;
       library_state.indexedBuildOffset = 0;
       library_state.indexedBuildHasMore = true;
-      library_state.indexedBuildPosts = [];
+      if (!sameScope && key === "without-collections") {
+        // The old `with` scope contains the entire new `without` scope plus collection
+        // cards. Filtering those cards is safe and keeps the remaining view mounted while
+        // the exact new snapshot is fetched. Switching the other way is already a safe
+        // subset, so it can remain visible unchanged.
+        library_state.indexedBuildPosts = (library_state.indexedBuildPosts || [])
+          .filter((post) => String(post?.area || "") !== "collection");
+      }
     }
     try {
       const data = await qApi("/api/library/posts", {
         scope: "build_main",
-        include_collections: Boolean(library_state.buildIncludeCollections),
-        offset: reset ? 0 : library_state.indexedBuildOffset,
+        include_collections: key === "with-collections",
+        offset: requestOffset,
         limit: INDEXED_CACHED_CARD_LIST_SIZE,
       });
-      const posts = (Array.isArray(data.posts) ? data.posts : []).map(normalizeServerPost);
-      const byPath = new Map((reset ? [] : library_state.indexedBuildPosts).map((post) => [post.folder_path, post]));
-      for (const post of posts) {
-        if (post?.folder_path) byPath.set(post.folder_path, post);
+      if (
+        requestToken !== indexedBuildRequestToken
+        || epoch !== indexedLibraryRequestEpoch()
+        || key !== indexedBuildQueryKey()
+        || library_state.indexedBuildKey !== key
+      ) {
+        return;
       }
-      library_state.indexedBuildPosts = Array.from(byPath.values());
+      const posts = (Array.isArray(data.posts) ? data.posts : []).map(normalizeServerPost);
+      const refreshResult = advanceIndexedRefreshScope(indexedBuildRefreshScope, {
+        epoch,
+        scope: key,
+        reset,
+        posts,
+        hasMore: Boolean(data.has_more),
+      });
+      indexedBuildRefreshScope = refreshResult.refresh;
+      const result = mergeIndexedPostPage(library_state.indexedBuildPosts, posts, {
+        authoritativePaths: refreshResult.authoritativePaths,
+      });
+      library_state.indexedBuildPosts = result.posts;
       library_state.indexedBuildTotal = Number(data.total || 0);
-      library_state.indexedBuildOffset = Number(data.next_offset || library_state.indexedBuildPosts.length);
+      library_state.indexedBuildOffset = Number(data.next_offset ?? (requestOffset + posts.length));
       library_state.indexedBuildHasMore = Boolean(data.has_more);
       library_state.indexedBuildLoaded = true;
-      mergeIndexedPostsIntoWorkingSet(posts);
+      mergeIndexedPostsIntoWorkingSet(result.merged);
+      if (refreshResult.authoritativePaths) indexedBuildRefreshScope = null;
     } finally {
-      library_state.indexedBuildLoading = false;
-      if (typeof renderBuildSourceCards === "function") renderBuildSourceCards();
-      if (typeof updateDetailPostNavigationButtons === "function") updateDetailPostNavigationButtons();
+      if (requestToken === indexedBuildRequestToken) {
+        library_state.indexedBuildLoading = false;
+        indexedBuildLoadingKey = "";
+        if (typeof renderBuildSourceCards === "function") renderBuildSourceCards();
+        if (typeof updateDetailPostNavigationButtons === "function") updateDetailPostNavigationButtons();
+      }
     }
   }
 
   async function loadIndexedCollectionPosts(collectionPath, { append = false, force = false } = {}) {
-    if (!library_state.libraryIndexEnabled || !library_state.apiReady || !collectionPath) return;
-    const collection = library_state.collections.find((item) => item.path === collectionPath);
+    const normalizedCollectionPath = indexedLibraryPath(collectionPath);
+    if (!library_state.libraryIndexEnabled || !library_state.apiReady || !normalizedCollectionPath) return;
+    const collection = library_state.collections.find((item) => indexedLibraryPath(item.path) === normalizedCollectionPath);
     if (!collection || collection.indexed_loading) return;
+    const epoch = indexedLibraryRequestEpoch();
     const reset = force || !append;
     if (!force && !append && collection.indexed_loaded) return;
     if (append && !collection.indexed_has_more) return;
+    const requestToken = ++indexedCollectionRequestToken;
+    indexedCollectionRequestTokens.set(normalizedCollectionPath, requestToken);
+    const requestOffset = reset ? 0 : Number(collection.indexed_offset || 0);
     collection.indexed_loading = true;
     try {
       const data = await qApi("/api/library/posts", {
         scope: "collection",
-        parent_path: collectionPath,
+        parent_path: normalizedCollectionPath,
         recursive: false,
-        offset: reset ? 0 : Number(collection.indexed_offset || 0),
+        offset: requestOffset,
         limit: INDEXED_COLLECTION_PAGE_SIZE,
       });
+      if (
+        indexedCollectionRequestTokens.get(normalizedCollectionPath) !== requestToken
+        || epoch !== indexedLibraryRequestEpoch()
+      ) {
+        return;
+      }
+      const liveCollection = library_state.collections.find((item) => (
+        indexedLibraryPath(item.path) === normalizedCollectionPath
+      ));
+      if (!liveCollection) return;
+      const responsePosts = (Array.isArray(data.posts) ? data.posts : [])
+        .map(normalizeServerPost)
+        .filter((post) => indexedPostIsDirectChild(post, normalizedCollectionPath));
+      const previousRefresh = indexedCollectionRefreshScopes.get(normalizedCollectionPath) || null;
+      const refreshResult = advanceIndexedRefreshScope(previousRefresh, {
+        epoch,
+        scope: normalizedCollectionPath,
+        reset,
+        posts: responsePosts,
+        hasMore: Boolean(data.has_more),
+      });
+      indexedCollectionRefreshScopes.set(normalizedCollectionPath, refreshResult.refresh);
       const posts = mergeIndexedPostsIntoCollection(
-        collection,
-        Array.isArray(data.posts) ? data.posts : [],
-        { reset },
+        liveCollection,
+        responsePosts,
+        {
+          parentPath: normalizedCollectionPath,
+          authoritativePaths: refreshResult.authoritativePaths,
+        },
       );
-      collection.indexed_loaded = true;
-      collection.indexed_total = Number(data.total || 0);
-      collection.indexed_offset = Number(data.next_offset || collection.posts.length);
-      collection.indexed_has_more = Boolean(data.has_more);
+      liveCollection.indexed_loaded = true;
+      liveCollection.indexed_total = Number(data.total || 0);
+      liveCollection.indexed_offset = Number(data.next_offset ?? (requestOffset + responsePosts.length));
+      liveCollection.indexed_has_more = Boolean(data.has_more);
       mergeIndexedPostsIntoWorkingSet(posts);
+      if (refreshResult.authoritativePaths) {
+        pruneIndexedWorkingSetDirectChildren(normalizedCollectionPath, refreshResult.authoritativePaths);
+      }
+      if (refreshResult.authoritativePaths) indexedCollectionRefreshScopes.delete(normalizedCollectionPath);
     } finally {
       collection.indexed_loading = false;
-      if (typeof renderCollectionFolders === "function") renderCollectionFolders();
-      if (typeof renderSecondMain === "function") renderSecondMain();
-      if (typeof updateDetailPostNavigationButtons === "function") updateDetailPostNavigationButtons();
+      if (indexedCollectionRequestTokens.get(normalizedCollectionPath) === requestToken) {
+        indexedCollectionRequestTokens.delete(normalizedCollectionPath);
+        const liveCollection = library_state.collections.find((item) => (
+          indexedLibraryPath(item.path) === normalizedCollectionPath
+        ));
+        if (liveCollection) liveCollection.indexed_loading = false;
+        if (typeof renderCollectionFolders === "function") renderCollectionFolders();
+        if (typeof renderSecondMain === "function") renderSecondMain();
+        if (typeof updateDetailPostNavigationButtons === "function") updateDetailPostNavigationButtons();
+      }
     }
   }
 
   async function loadIndexedCollectionPostContents(postPath, { append = false, force = false } = {}) {
-    const normalizedPath = String(postPath || "").trim();
+    const normalizedPath = indexedLibraryPath(postPath);
     if (!library_state.libraryIndexEnabled || !library_state.apiReady || !normalizedPath) return null;
-    const requestKey = `${normalizedPath}\u001f${append ? "append" : "initial"}`;
+    const epoch = indexedLibraryRequestEpoch();
+    const requestKey = `${epoch}\u001f${normalizedPath}\u001f${append ? "append" : "initial"}`;
     if (indexedCollectionContentRequests.has(requestKey)) {
       return indexedCollectionContentRequests.get(requestKey);
     }
     const request = (async () => {
-      const parent = (library_state.posts || []).find((post) => post.folder_path === normalizedPath)
-        || await loadIndexedPost(normalizedPath);
+      const loadedParent = indexedPostForPath(normalizedPath) || await loadIndexedPost(normalizedPath);
+      if (epoch !== indexedLibraryRequestEpoch()) return null;
+      const parent = indexedPostForPath(normalizedPath) || loadedParent;
       if (!parent) return null;
       if (!force && !append && parent._indexed_children_loaded) return parent;
       if (append && (!parent._indexed_children_has_more || parent._indexed_children_loading)) return parent;
-      parent._indexed_children_loading = true;
+      const reset = force || !append;
+      const requestOffset = reset ? 0 : Number(parent._indexed_children_offset || 0);
+      const requestToken = ++indexedCollectionContentRequestToken;
+      indexedCollectionContentRequestTokens.set(normalizedPath, requestToken);
+      setIndexedChildPagingState(normalizedPath, { _indexed_children_loading: true });
       try {
-        const reset = force || !append;
         const data = await qApi("/api/library/posts", {
           scope: "collection",
           parent_path: normalizedPath,
           recursive: false,
           recent_first: true,
           full: false,
-          offset: reset ? 0 : Number(parent._indexed_children_offset || 0),
+          offset: requestOffset,
           limit: INDEXED_COLLECTION_CONTENT_PAGE_SIZE,
         });
-        const childPosts = mergeIndexedPostsIntoWorkingSet(data.posts || []);
-        const collection = library_state.collections.find((item) => (
-          normalizedPath === item.path || normalizedPath.startsWith(`${item.path}/`)
-        ));
-        if (collection) mergeIndexedPostsIntoCollection(collection, childPosts);
-        parent._indexed_children_loaded = true;
-        parent._indexed_children_total = Number(data.total || 0);
-        parent._indexed_children_offset = Number(data.next_offset || childPosts.length);
-        parent._indexed_children_has_more = Boolean(data.has_more);
-        return parent;
+        if (
+          indexedCollectionContentRequestTokens.get(normalizedPath) !== requestToken
+          || epoch !== indexedLibraryRequestEpoch()
+        ) {
+          return null;
+        }
+        const liveParent = indexedPostForPath(normalizedPath);
+        if (!liveParent) return null;
+        const responsePosts = (Array.isArray(data.posts) ? data.posts : [])
+          .map(normalizeServerPost)
+          .filter((post) => indexedPostIsDirectChild(post, normalizedPath));
+        const previousRefresh = indexedCollectionContentRefreshScopes.get(normalizedPath) || null;
+        const refreshResult = advanceIndexedRefreshScope(previousRefresh, {
+          epoch,
+          scope: normalizedPath,
+          reset,
+          posts: responsePosts,
+          hasMore: Boolean(data.has_more),
+        });
+        indexedCollectionContentRefreshScopes.set(normalizedPath, refreshResult.refresh);
+        const childPosts = mergeIndexedPostsIntoWorkingSet(responsePosts);
+        if (refreshResult.authoritativePaths) {
+          pruneIndexedWorkingSetDirectChildren(normalizedPath, refreshResult.authoritativePaths);
+        }
+        const collection = indexedCollectionForPath(normalizedPath);
+        if (collection) {
+          mergeIndexedPostsIntoCollection(collection, childPosts, {
+            parentPath: normalizedPath,
+            authoritativePaths: refreshResult.authoritativePaths,
+          });
+        }
+        setIndexedChildPagingState(normalizedPath, {
+          _indexed_children_loaded: true,
+          _indexed_children_total: Number(data.total || 0),
+          _indexed_children_offset: Number(data.next_offset ?? (requestOffset + responsePosts.length)),
+          _indexed_children_has_more: Boolean(data.has_more),
+        });
+        if (refreshResult.authoritativePaths) {
+          indexedCollectionContentRefreshScopes.delete(normalizedPath);
+        }
+        return indexedPostForPath(normalizedPath) || liveParent;
       } finally {
         parent._indexed_children_loading = false;
-        if (typeof renderSecondMain === "function" && library_state.selectedCollectionPostPath === normalizedPath) {
-          renderSecondMain(parent);
+        if (indexedCollectionContentRequestTokens.get(normalizedPath) === requestToken) {
+          indexedCollectionContentRequestTokens.delete(normalizedPath);
+          setIndexedChildPagingState(normalizedPath, { _indexed_children_loading: false });
+          if (
+            typeof renderSecondMain === "function"
+            && indexedLibraryPath(library_state.selectedCollectionPostPath) === normalizedPath
+          ) {
+            renderSecondMain();
+          }
         }
       }
     })();
@@ -731,27 +984,28 @@
   }
 
   async function loadIndexedPost(path) {
-    const normalizedPath = String(path || "").trim();
+    const normalizedPath = indexedLibraryPath(path);
     if (!library_state.libraryIndexEnabled || !library_state.apiReady || !normalizedPath) return null;
-    const existing = (library_state.posts || []).find((post) => post.folder_path === normalizedPath);
+    const existing = indexedPostForPath(normalizedPath);
     if (existing && !existing._indexed_summary) return existing;
-    if (indexedPostRequests.has(normalizedPath)) return indexedPostRequests.get(normalizedPath);
+    const epoch = indexedLibraryRequestEpoch();
+    const requestKey = `${epoch}\u001f${normalizedPath}`;
+    if (indexedPostRequests.has(requestKey)) return indexedPostRequests.get(requestKey);
     const request = (async () => {
       const data = await qApi("/api/library/post", { path: normalizedPath });
+      if (epoch !== indexedLibraryRequestEpoch()) return null;
       const post = data?.post ? normalizeServerPost(data.post) : null;
       if (!post) return null;
       const merged = mergeIndexedPostsIntoWorkingSet([post])[0] || post;
-      const collection = library_state.collections.find((item) => (
-        normalizedPath === item.path || normalizedPath.startsWith(`${item.path}/`)
-      ));
+      const collection = indexedCollectionForPath(normalizedPath);
       if (collection) mergeIndexedPostsIntoCollection(collection, [merged]);
       return merged;
     })();
-    indexedPostRequests.set(normalizedPath, request);
+    indexedPostRequests.set(requestKey, request);
     try {
       return await request;
     } finally {
-      indexedPostRequests.delete(normalizedPath);
+      indexedPostRequests.delete(requestKey);
     }
   }
 

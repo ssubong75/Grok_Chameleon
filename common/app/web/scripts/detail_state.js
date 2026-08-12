@@ -1,10 +1,23 @@
 // Detail selection state and prompt sync
-function selectLibraryPost(path, { loadFull = true } = {}) {
+function selectLibraryPost(pathOrPost, { loadFull = true, identity = "" } = {}) {
   library_state.selectedJobId = "";
   library_state.selectedImagineJobId = "";
+  const explicitPost = pathOrPost && typeof pathOrPost === "object" ? pathOrPost : null;
+  const path = typeof libraryPostServerPath === "function"
+    ? libraryPostServerPath(pathOrPost)
+    : String(explicitPost?.folder_path || pathOrPost || "");
+  const nextIdentity = String(
+    identity
+    || (explicitPost && typeof libraryPostStableIdentity === "function"
+      ? libraryPostStableIdentity(explicitPost)
+      : ""),
+  );
   const previousPath = library_state.selectedPostPath;
+  const previousIdentity = String(library_state.selectedPostIdentity || "");
   library_state.selectedPostPath = path || "";
-  const postChanged = previousPath !== library_state.selectedPostPath;
+  library_state.selectedPostIdentity = nextIdentity;
+  const postChanged = previousPath !== library_state.selectedPostPath
+    || previousIdentity !== library_state.selectedPostIdentity;
   if (postChanged && typeof clearComposerAttachmentsForPostChange === "function") {
     clearComposerAttachmentsForPostChange();
   }
@@ -17,11 +30,19 @@ function selectLibraryPost(path, { loadFull = true } = {}) {
     && typeof loadIndexedPost === "function"
   ) {
     loadIndexedPost(path).then((loadedPost) => {
-      if (loadedPost && library_state.selectedPostPath === path) selectLibraryPost(path);
+      if (
+        loadedPost
+        && library_state.selectedPostPath === path
+        && (!nextIdentity || library_state.selectedPostIdentity === nextIdentity)
+      ) selectLibraryPost(loadedPost);
     }).catch((error) => console.warn(error));
   }
   if (post) {
-    const samePost = previousPath === library_state.selectedPostPath;
+    if (!library_state.selectedPostIdentity && typeof libraryPostStableIdentity === "function") {
+      library_state.selectedPostIdentity = libraryPostStableIdentity(post);
+    }
+    const samePost = previousPath === library_state.selectedPostPath
+      && previousIdentity === library_state.selectedPostIdentity;
     const visibleItems = detailVisibleItems(post);
     const selectedStillValid = visibleItems.some((item) => mediaItemKey(item) === library_state.selectedDetailItemId);
     if (!samePost || !selectedStillValid) {
@@ -29,7 +50,10 @@ function selectLibraryPost(path, { loadFull = true } = {}) {
     }
   }
   for (const card of document.querySelectorAll("[data-library-post-path]")) {
-    const selected = card.dataset.libraryPostPath === library_state.selectedPostPath;
+    const cardIdentity = String(card.dataset.libraryPostIdentity || "");
+    const selected = cardIdentity
+      ? cardIdentity === library_state.selectedPostIdentity
+      : card.dataset.libraryPostPath === library_state.selectedPostPath;
     card.classList.toggle("library_selected", selected);
     if (card.classList.contains("collection_2nd_card")) card.classList.toggle("active", selected);
   }
@@ -41,9 +65,28 @@ function selectLibraryPost(path, { loadFull = true } = {}) {
 }
 
 function selectedLibraryPost() {
-  return library_state.posts.find((item) => item.folder_path === library_state.selectedPostPath)
-    || (library_state.imagineRemotePosts || []).find((item) => item.folder_path === library_state.selectedPostPath)
-    || null;
+  const selectedPath = String(library_state.selectedPostPath || "");
+  if (!selectedPath) {
+    library_state.selectedPostIdentity = "";
+    return null;
+  }
+  const posts = [
+    ...(library_state.posts || []),
+    ...(library_state.imagineRemotePosts || []),
+  ];
+  if (library_state.selectedPostIdentity && typeof libraryPostMatchesIdentity === "function") {
+    const matched = posts.find((post) => (
+      post?.folder_path === selectedPath
+      && libraryPostMatchesIdentity(post, library_state.selectedPostIdentity)
+    ));
+    if (matched) return matched;
+    return null;
+  }
+  const fallback = posts.find((item) => item.folder_path === selectedPath) || null;
+  if (fallback && typeof libraryPostStableIdentity === "function") {
+    library_state.selectedPostIdentity = libraryPostStableIdentity(fallback);
+  }
+  return fallback;
 }
 
 function selectedDetailItem(post = selectedLibraryPost()) {
