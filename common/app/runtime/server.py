@@ -14026,12 +14026,7 @@ def imagine_saved_candidate_ids(account: dict, expected_type: str, parent_ids: s
     return {value for value in ids if value}
 
 
-def imagine_generated_relation_baseline_ids(
-    root: Path,
-    source_post_path: str,
-    expected_type: str,
-    account: dict,
-) -> set[str]:
+def imagine_generated_relation_baseline_ids(root: Path, source_post_path: str, expected_type: str, account: dict) -> set[str]:
     source_id = imagine_relation_source_id(source_post_path)
     if not source_id:
         return set()
