@@ -263,7 +263,7 @@ def _create_schema(connection: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS imagine_remote_posts_activity_idx
             ON imagine_remote_posts(account_key, activity_at DESC, post_key);
         CREATE INDEX IF NOT EXISTS imagine_remote_posts_official_order_idx
-            ON imagine_remote_posts(account_key, official_order, created_at DESC, post_key);
+            ON imagine_remote_posts(account_key, official_order, activity_at DESC, post_key);
         """
     )
     connection.execute(
@@ -989,13 +989,13 @@ def query_imagine_remote_posts(
                 ).fetchone()
                 rows = connection.execute(
                     """
-                    SELECT post_json
+                    SELECT post_json, official_order
                     FROM imagine_remote_posts
                     WHERE account_key = ?
                     ORDER BY
-                        official_order IS NULL,
-                        official_order ASC,
-                        created_at DESC,
+                        CASE WHEN official_order IS NULL THEN 1 ELSE 0 END,
+                        official_order,
+                        activity_at DESC,
                         post_key
                     LIMIT ? OFFSET ?
                     """,
@@ -1003,7 +1003,16 @@ def query_imagine_remote_posts(
                 ).fetchall()
     except sqlite3.Error:
         return empty_result
-    posts = [post for row in rows if (post := _json_dict(row["post_json"]))]
+    posts = []
+    for row in rows:
+        post = _json_dict(row["post_json"])
+        if not post:
+            continue
+        if row["official_order"] is not None:
+            metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+            metadata["official_order"] = int(row["official_order"])
+            post["metadata"] = metadata
+        posts.append(post)
     total = int(count_row["count"] if count_row else 0)
     next_offset = safe_offset + len(rows)
     return {
@@ -1200,8 +1209,9 @@ def upsert_imagine_remote_posts(
             asset_ids,
             legacy_post_keys,
             (
-                max(0, int(record.get("official_order")))
-                if record.get("official_order") is not None
+                int((post.get("metadata") or {}).get("official_order"))
+                if isinstance(post.get("metadata"), dict)
+                and str((post.get("metadata") or {}).get("official_order", "")).strip()
                 else None
             ),
         ))
@@ -1212,6 +1222,20 @@ def upsert_imagine_remote_posts(
         with _connection(root, write=True) as connection:
             _create_schema(connection)
             for post_key, created_at, activity_at, post, asset_ids, legacy_post_keys, official_order in normalized_records:
+                inherited_order = None
+                order_keys = [post_key, *legacy_post_keys]
+                if order_keys:
+                    placeholders = ",".join("?" for _ in order_keys)
+                    order_row = connection.execute(
+                        f"""
+                        SELECT MIN(official_order) AS official_order
+                        FROM imagine_remote_posts
+                        WHERE account_key = ? AND post_key IN ({placeholders})
+                        """,
+                        (normalized_account, *order_keys),
+                    ).fetchone()
+                    inherited_order = order_row["official_order"] if order_row else None
+                resolved_order = official_order if official_order is not None else inherited_order
                 if legacy_post_keys:
                     placeholders = ",".join("?" for _ in legacy_post_keys)
                     connection.execute(
@@ -1232,14 +1256,10 @@ def upsert_imagine_remote_posts(
                         activity_at = excluded.activity_at,
                         post_json = excluded.post_json,
                         refreshed_at = excluded.refreshed_at,
+                        official_order = COALESCE(excluded.official_order, imagine_remote_posts.official_order),
                         sync_token = CASE
                             WHEN excluded.sync_token != '' THEN excluded.sync_token
                             ELSE imagine_remote_posts.sync_token
-                        END,
-                        official_order = CASE
-                            WHEN excluded.sync_token != '' THEN excluded.official_order
-                            WHEN excluded.official_order IS NOT NULL THEN excluded.official_order
-                            ELSE imagine_remote_posts.official_order
                         END
                     """,
                     (
@@ -1250,7 +1270,7 @@ def upsert_imagine_remote_posts(
                         _json_text(post),
                         refreshed_at,
                         normalized_sync_token,
-                        official_order,
+                        resolved_order,
                     ),
                 )
                 connection.execute(

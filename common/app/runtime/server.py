@@ -3203,6 +3203,8 @@ def imagine_missing_generated_relation_posts(
     }
     recovered: list[dict] = []
     for record_id, record in relations.items() if isinstance(relations, dict) else []:
+        if isinstance(record, dict) and record.get("liked_source_relation") is True:
+            continue
         post = imagine_generated_relation_anchor_post(record_id, record, root, account)
         if not post:
             continue
@@ -3313,6 +3315,275 @@ def imagine_persist_generated_relation(
     })
 
 
+# Everything on a Liked card — the copies and whatever has been made from them — belongs
+# there and nowhere else. The local exclusion list cannot say this, because Liked reads it
+# too and hiding a result there emptied the card it was supposed to appear on. Work it out
+# from the copies and their relations instead, and apply it only where main is built.
+def imagine_liked_membership_snapshot_key(account: dict) -> str:
+    account_key = imagine_account_settings_key(account)
+    digest = hashlib.sha256(account_key.encode("utf-8")).hexdigest()[:24]
+    return f"imagine_liked_membership_snapshot_v1:{digest}"
+
+
+def imagine_liked_membership_snapshot(root: Path, account: dict) -> dict:
+    ensure_imagine_state_migrated(root)
+    try:
+        value = json.loads(imagine_state.metadata_value(
+            root, imagine_liked_membership_snapshot_key(account),
+        ) or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        value = {}
+    ids = sorted({
+        str(item).strip()
+        for item in (value.get("ids") if isinstance(value.get("ids"), list) else [])
+        if str(item or "").strip()
+    })
+    return {
+        "ids": ids,
+        "complete": bool(value.get("complete")),
+        "revision": str(value.get("revision") or ""),
+        "updated_at": str(value.get("updated_at") or ""),
+    }
+
+
+def imagine_store_liked_membership_snapshot(root: Path, account: dict, ids: set[str]) -> dict:
+    normalized = sorted({str(value).strip() for value in ids if str(value or "").strip()})
+    revision = hashlib.sha256("\0".join(normalized).encode("utf-8")).hexdigest()[:24]
+    snapshot = {
+        "ids": normalized,
+        "complete": True,
+        "revision": revision,
+        "updated_at": now_iso(),
+    }
+    current = imagine_liked_membership_snapshot(root, account)
+    if current.get("ids") != normalized or not current.get("complete"):
+        imagine_state.set_metadata_value(
+            root,
+            imagine_liked_membership_snapshot_key(account),
+            json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")),
+        )
+    elif current.get("revision"):
+        snapshot["revision"] = current["revision"]
+        snapshot["updated_at"] = current.get("updated_at") or snapshot["updated_at"]
+    return snapshot
+
+
+def imagine_update_complete_liked_membership_snapshot(
+    account: dict,
+    *,
+    add: set[str] | None = None,
+    remove: set[str] | None = None,
+) -> None:
+    root = library_root()
+    if not root:
+        return
+    snapshot = imagine_liked_membership_snapshot(root, account)
+    if not snapshot.get("complete"):
+        return
+    ids = set(snapshot.get("ids") or [])
+    ids.update(str(value).strip() for value in (add or set()) if str(value or "").strip())
+    ids.difference_update(str(value).strip() for value in (remove or set()) if str(value or "").strip())
+    imagine_store_liked_membership_snapshot(root, account, ids)
+
+
+def imagine_liked_card_asset_ids(root: Path, account: dict, relations: dict[str, dict]) -> set[str]:
+    snapshot = imagine_liked_membership_snapshot(root, account)
+    liked_ids = set(snapshot.get("ids") or [])
+    try:
+        cached = library_index.query_imagine_remote_posts(
+            root,
+            imagine_liked_cache_account_key(account),
+            offset=0,
+            limit=5000,
+        )
+    except Exception:
+        cached = {"posts": []}
+    for post in cached.get("posts") or []:
+        if not isinstance(post, dict):
+            continue
+        provenance, anchor = imagine_post_saved_identity(post)
+        metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+        membership_ids = {
+            str(value).strip()
+            for value in (
+                metadata.get("link_post_id"),
+                *(metadata.get("liked_membership_asset_ids") or []),
+            )
+            if str(value or "").strip()
+        }
+        post_aliases = {
+            str(value).strip()
+            for value in (
+                anchor,
+                post.get("post_id"),
+                Path(str(post.get("folder_path") or "")).name,
+                metadata.get("link_post_id"),
+                metadata.get("clone_batch_id"),
+            )
+            if str(value or "").strip()
+        }
+        if snapshot.get("complete"):
+            if not membership_ids & liked_ids:
+                continue
+        elif provenance not in {"plain-liked", "cloned-liked"} and not membership_ids:
+            continue
+        liked_ids.update(post_aliases)
+        liked_ids.update(membership_ids)
+    if not liked_ids:
+        return set()
+    hidden = set(liked_ids)
+    changed = True
+    while changed:
+        changed = False
+        for source_id, record in (relations or {}).items():
+            if not isinstance(record, dict):
+                continue
+            record_account_key = str(record.get("account_key") or "").strip().lower()
+            if record_account_key and record_account_key != imagine_account_settings_key(account):
+                continue
+            related = {
+                str(value).strip()
+                for value in (
+                    source_id,
+                    record.get("source_post_id"),
+                    record.get("source_item_id"),
+                    record.get("display_source_post_id"),
+                    record.get("upload_source_asset_id"),
+                )
+                if str(value or "").strip()
+            }
+            if not related & hidden:
+                continue
+            expanded = set(related)
+            expanded.update(
+                str(value).strip()
+                for value in (*(record.get("item_ids") or []), *(record.get("hidden_asset_ids") or []))
+                if str(value or "").strip()
+            )
+            expanded.update(
+                imagine_relation_item_key(item)
+                for item in record.get("items") or []
+                if isinstance(item, dict) and imagine_relation_item_key(item)
+            )
+            before = len(hidden)
+            hidden.update(expanded)
+            changed = changed or len(hidden) != before
+    return hidden
+
+
+def imagine_liked_exclusion_payload(root: Path, account: dict, relations: dict[str, dict]) -> dict:
+    snapshot = imagine_liked_membership_snapshot(root, account)
+    ids = imagine_liked_card_asset_ids(root, account, relations)
+    return {
+        "ids": sorted(ids),
+        "complete": bool(snapshot.get("complete")),
+        "revision": str(snapshot.get("revision") or ""),
+    }
+
+
+def imagine_post_liked_anchor_keys(post: dict) -> set[str]:
+    if not isinstance(post, dict):
+        return set()
+    metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+    imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
+    _, anchor = imagine_post_saved_identity(post)
+    return {
+        str(value).strip()
+        for value in (
+            anchor,
+            post.get("post_id"),
+            Path(str(post.get("folder_path") or "")).name,
+            metadata.get("link_post_id"),
+            imagine.get("link_post_id"),
+            metadata.get("clone_batch_id"),
+            imagine.get("clone_batch_id"),
+            *(metadata.get("liked_membership_asset_ids") or []),
+        )
+        if str(value or "").strip()
+    }
+
+
+def imagine_filter_liked_scope_posts(posts: list[dict], hidden_ids: set[str]) -> list[dict]:
+    if not hidden_ids:
+        return posts
+    filtered: list[dict] = []
+    for post in posts:
+        if not isinstance(post, dict) or imagine_post_liked_anchor_keys(post) & hidden_ids:
+            continue
+        items = [
+            item
+            for item in post.get("items") or []
+            if isinstance(item, dict) and imagine_item_asset_id(item) not in hidden_ids
+        ]
+        if not items:
+            continue
+        post["items"] = items
+        representative = imagine_representative_item(items) or items[-1]
+        post["representative_item"] = representative
+        post["representative"] = (
+            representative.get("url")
+            or representative.get("remote_url")
+            or representative.get("item_id")
+            or ""
+        )
+        filtered.append(post)
+    return filtered
+
+
+def imagine_hide_generated_results_for_cloned_source(
+    root: Path,
+    account: dict,
+    source_info: dict,
+    payload: dict,
+    generated_items: list[dict],
+    source_post_path: str = "",
+) -> None:
+    if not root or not account or not generated_items:
+        return
+    cloned_ids = imagine_account_setting_ids(root, "imagine_cloned_asset_ids", account)
+    if not cloned_ids:
+        return
+    # A Liked copy counts as a link source, so generating from one re-uploads the image and
+    # starts a fresh conversation: every parent field arrives empty and the attachment ids
+    # name the re-upload, not the copy. What still points back is the card the result is
+    # being filed under, whose path carries the copy's own id.
+    source_ids = {
+        str(value).strip()
+        for value in (
+            (source_info or {}).get("source_item_id"),
+            (source_info or {}).get("parent_post_id"),
+            (source_info or {}).get("original_post_id"),
+            (source_info or {}).get("root_post_id"),
+            (payload or {}).get("source_item_id"),
+            (payload or {}).get("post_id"),
+            str(source_post_path or "").strip("/").rsplit("/", 1)[-1],
+        )
+        if str(value or "").strip()
+    }
+    if not source_ids & cloned_ids:
+        return
+    result_ids = {
+        imagine_item_asset_id(item)
+        for item in generated_items
+        if isinstance(item, dict) and imagine_item_asset_id(item)
+    }
+    result_ids -= imagine_local_exclusion_ids(root, account)
+    if not result_ids:
+        return
+    ensure_imagine_state_migrated(root)
+    imagine_state.add_local_exclusions(
+        root,
+        imagine_account_settings_key(account),
+        result_ids,
+        reason="external_clone",
+    )
+    imagine_debug_event("cloned_source_result_hidden", {
+        "account_id": str(account.get("id") or ""),
+        "source_ids": sorted(source_ids & cloned_ids),
+        "hidden": sorted(result_ids),
+    })
+
+
 def imagine_persist_rematerialized_generated_relation(
     root: Path,
     source_post_path: str,
@@ -3341,11 +3612,18 @@ def imagine_persist_rematerialized_generated_relation(
     ), "")
     if not source_id or not bundle_id or bundle_id == source_id:
         return
-    # Hiding the new bundle only makes sense when its display source is a card this account
-    # owns. A link or Liked source belongs to someone else and is not in the saved list, so
-    # the card had nowhere to show and vanished. grok.com files such a generation as its own
-    # card, so leave it visible.
-    if link_source:
+    liked_source = False
+    if link_source and account:
+        ensure_imagine_state_migrated(root)
+        relation_snapshot = imagine_state.load_generated_relations(root)
+        liked_scope_ids = imagine_liked_card_asset_ids(root, account, relation_snapshot)
+        liked_source = bool(
+            {source_id, str(source_item_id or "").strip()} & liked_scope_ids
+        )
+    # A non-Liked external link still owns its separate Saved conversation. A Liked source
+    # is different: its result belongs inside that Liked card, so hide the rematerialized
+    # Saved bundle and retain the source relation below.
+    if link_source and not liked_source:
         imagine_debug_event("rematerialized_bundle_kept_link_source", {
             "request_id": request_id,
             "action": action,
@@ -3369,6 +3647,7 @@ def imagine_persist_rematerialized_generated_relation(
             "account_key": imagine_account_settings_key(account or {}) if account else str(source_record.get("account_key") or ""),
             "rematerialized_source_relation": True,
             "rematerialized_bundle_id": bundle_id,
+            "liked_source_relation": bool(liked_source),
             "updated_at": now_iso(),
         })
         imagine_state.upsert_generated_relation(root, source_id, source_record)
@@ -3380,6 +3659,7 @@ def imagine_persist_rematerialized_generated_relation(
             "source_item_id": upload_source_asset_id,
             "hidden_bundle_card": True,
             "display_source_post_id": source_id,
+            "liked_source_relation": bool(liked_source),
             "upload_source_asset_id": upload_source_asset_id,
             "hidden_asset_ids": sorted(hidden_asset_ids),
             "updated_at": now_iso(),
@@ -3743,11 +4023,7 @@ def imagine_post_clone_source_id(post: dict) -> str:
 
 
 def imagine_post_saved_identity(post: dict) -> tuple[str, str]:
-    """Return a provenance-scoped stable card identity.
-
-    A source asset can legally appear in a normal Saved conversation, a plain Liked
-    reference, and an owned clone. It is therefore lineage context, not card identity.
-    """
+    """Return a provenance-scoped stable card identity."""
     if not isinstance(post, dict):
         return "normal-saved", ""
     metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
@@ -3769,8 +4045,6 @@ def imagine_post_saved_identity(post: dict) -> tuple[str, str]:
     provenance = explicit if explicit in {"normal-saved", "plain-liked", "cloned-liked"} else (
         "cloned-liked" if cloned else "plain-liked" if linked else "normal-saved"
     )
-    # The clone's own membership id is the anchor. The id it was copied from is never an
-    # anchor, otherwise two independent clone batches of the same public image collapse.
     shared_candidates = (
         metadata.get("saved_anchor_id"),
         metadata.get("card_anchor_id"),
@@ -3800,6 +4074,69 @@ def imagine_post_saved_identity(post: dict) -> tuple[str, str]:
     return provenance, anchor
 
 
+def imagine_saved_display_group_id(post: dict) -> str:
+    """Return an explicit, provenance-safe grouping key for one Saved card."""
+    if not isinstance(post, dict):
+        return ""
+    provenance, _ = imagine_post_saved_identity(post)
+    if provenance != "normal-saved":
+        return ""
+    metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+    upload_source_id = str(metadata.get("upload_source_asset_id") or "").strip()
+    if metadata.get("upload_origin_bundle") and upload_source_id:
+        return f"upload:{upload_source_id}"
+    if metadata.get("flat_only") is True:
+        items = [item for item in post.get("items") or [] if isinstance(item, dict)]
+        item_ids = [imagine_item_asset_id(item) for item in items if imagine_item_asset_id(item)]
+        referenced_ids = [imagine_item_source_id(item) for item in items if imagine_item_source_id(item)]
+        root_id = next((item_id for item_id in item_ids if item_id in referenced_ids), "")
+        if not root_id and len(items) == 1:
+            root_id = imagine_item_source_id(items[0])
+        if not root_id:
+            root_id = next((
+                imagine_item_asset_id(item)
+                for item in items
+                if imagine_item_asset_id(item) and not imagine_item_source_id(item)
+            ), "")
+        if not root_id and item_ids:
+            root_id = item_ids[0]
+        if root_id:
+            return f"asset:{root_id}"
+    return str(metadata.get("saved_display_group_id") or "").strip()
+
+
+def imagine_saved_official_order(post: dict) -> int | None:
+    if not isinstance(post, dict):
+        return None
+    metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+    value = metadata.get("official_order")
+    try:
+        return max(0, int(value)) if value is not None and str(value).strip() else None
+    except (TypeError, ValueError):
+        return None
+
+
+def imagine_preserve_earliest_official_order(destination: dict, *posts: dict) -> None:
+    orders = [
+        order
+        for post in (destination, *posts)
+        if (order := imagine_saved_official_order(post)) is not None
+    ]
+    if not orders:
+        return
+    metadata = destination.get("metadata") if isinstance(destination.get("metadata"), dict) else {}
+    metadata["official_order"] = min(orders)
+    destination["metadata"] = metadata
+
+
+def imagine_sort_saved_by_official_order(posts: list[dict]) -> None:
+    posts.sort(key=library_index.post_activity_at, reverse=True)
+    posts.sort(key=lambda post: (
+        imagine_saved_official_order(post) is None,
+        imagine_saved_official_order(post) or 0,
+    ))
+
+
 def imagine_stamp_saved_identity(post: dict) -> dict:
     if not isinstance(post, dict):
         return post
@@ -3808,6 +4145,11 @@ def imagine_stamp_saved_identity(post: dict) -> dict:
     metadata["saved_provenance"] = provenance
     if anchor:
         metadata["saved_anchor_id"] = anchor
+    display_group_id = imagine_saved_display_group_id(post)
+    if display_group_id:
+        metadata["saved_display_group_id"] = display_group_id
+    else:
+        metadata.pop("saved_display_group_id", None)
     post["metadata"] = metadata
     return post
 
@@ -3815,6 +4157,10 @@ def imagine_stamp_saved_identity(post: dict) -> dict:
 def imagine_posts_share_saved_identity(left: dict, right: dict) -> bool:
     left_provenance, left_anchor = imagine_post_saved_identity(left)
     right_provenance, right_anchor = imagine_post_saved_identity(right)
+    left_group = imagine_saved_display_group_id(left)
+    right_group = imagine_saved_display_group_id(right)
+    if left_group and right_group:
+        return left_provenance == right_provenance and left_group == right_group
     return bool(
         left_anchor
         and right_anchor
@@ -3825,6 +4171,9 @@ def imagine_posts_share_saved_identity(left: dict, right: dict) -> bool:
 
 def imagine_saved_group_key(post: dict) -> str:
     provenance, anchor = imagine_post_saved_identity(post)
+    display_group_id = imagine_saved_display_group_id(post)
+    if display_group_id:
+        return f"{provenance}:group:{display_group_id}"
     folder_path = str(post.get("folder_path") or "").strip()
     return f"{provenance}:{anchor}" if anchor else folder_path
 
@@ -4485,7 +4834,7 @@ def imagine_conversation_detail(conversation_id: str, account: dict, timeout: in
     )
 
 
-IMAGINE_SAVED_CURSOR_PREFIX = "gc-saved-v3."
+IMAGINE_SAVED_CURSOR_PREFIX = "gc-saved-v2."
 
 
 def encode_imagine_saved_cursor(
@@ -4497,7 +4846,7 @@ def encode_imagine_saved_cursor(
     conversation_offset: int = 0,
 ) -> str:
     payload = {
-        "v": 3,
+        "v": 2,
         "conversations": str(conversation_cursor or ""),
         "assets": str(asset_cursor or ""),
         "conversations_done": bool(conversations_done),
@@ -4513,18 +4862,13 @@ def decode_imagine_saved_cursor(value: str) -> tuple[str, str, bool, bool, int]:
     text = str(value or "").strip()
     if not text:
         return "", "", False, False, 0
-    cursor_prefix = next((
-        prefix
-        for prefix in (IMAGINE_SAVED_CURSOR_PREFIX, "gc-saved-v2.")
-        if text.startswith(prefix)
-    ), "")
-    if not cursor_prefix:
+    if not text.startswith(IMAGINE_SAVED_CURSOR_PREFIX):
         return text, "", False, False, 0
-    token = text[len(cursor_prefix):]
+    token = text[len(IMAGINE_SAVED_CURSOR_PREFIX):]
     try:
         raw = base64.urlsafe_b64decode(token + ("=" * (-len(token) % 4)))
         payload = json.loads(raw.decode("utf-8"))
-        if not isinstance(payload, dict) or int(payload.get("v") or 0) not in {2, 3}:
+        if not isinstance(payload, dict) or int(payload.get("v") or 0) != 2:
             raise ValueError("unsupported cursor")
         return (
             str(payload.get("conversations") or "").strip(),
@@ -4535,86 +4879,6 @@ def decode_imagine_saved_cursor(value: str) -> tuple[str, str, bool, bool, int]:
         )
     except (ValueError, TypeError, json.JSONDecodeError, UnicodeDecodeError):
         return "", "", False, False, 0
-
-
-def imagine_saved_official_order(post: dict) -> int | None:
-    metadata = post.get("metadata") if isinstance(post, dict) and isinstance(post.get("metadata"), dict) else {}
-    value = metadata.get("official_order")
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        return max(0, int(value))
-    except (TypeError, ValueError):
-        return None
-
-
-def imagine_stamp_saved_official_order(post: dict, order: int | None) -> dict:
-    if not isinstance(post, dict):
-        return post
-    metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
-    metadata = dict(metadata)
-    if order is None:
-        metadata.pop("official_order", None)
-    else:
-        metadata["official_order"] = max(0, int(order))
-    post["metadata"] = metadata
-    return post
-
-
-def imagine_merge_saved_official_order(destination: dict, source: dict) -> None:
-    orders = [
-        order
-        for order in (
-            imagine_saved_official_order(destination),
-            imagine_saved_official_order(source),
-        )
-        if order is not None
-    ]
-    if orders:
-        imagine_stamp_saved_official_order(destination, min(orders))
-
-
-def imagine_sort_saved_official(posts: list[dict]) -> list[dict]:
-    indexed = list(enumerate(posts if isinstance(posts, list) else []))
-    indexed.sort(key=lambda entry: (
-        imagine_saved_official_order(entry[1]) is None,
-        imagine_saved_official_order(entry[1]) if imagine_saved_official_order(entry[1]) is not None else 0,
-        entry[0],
-    ))
-    return [post for _, post in indexed]
-
-
-def imagine_saved_conversation_ids(post: dict) -> set[str]:
-    if not isinstance(post, dict):
-        return set()
-    metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
-    imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
-    values = {
-        str(metadata.get("conversation_id") or "").strip(),
-        str(imagine.get("conversation_id") or "").strip(),
-    }
-    for item in post.get("items") or []:
-        if not isinstance(item, dict):
-            continue
-        item_metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-        item_imagine = item_metadata.get("imagine") if isinstance(item_metadata.get("imagine"), dict) else {}
-        values.update({
-            str(item.get("conversation_id") or "").strip(),
-            str(item_metadata.get("conversation_id") or "").strip(),
-            str(item_imagine.get("conversation_id") or "").strip(),
-        })
-    return {value for value in values if value}
-
-
-def imagine_asset_source_conversation_id(asset: dict) -> str:
-    if not isinstance(asset, dict):
-        return ""
-    return str(
-        asset.get("sourceConversationId")
-        or asset.get("rootAssetSourceConversationId")
-        or asset.get("conversationId")
-        or ""
-    ).strip()
 
 
 def imagine_item_asset_id(item: dict) -> str:
@@ -4871,7 +5135,13 @@ def merge_imagine_saved_lineage_cards(cards: list[dict]) -> list[dict]:
         return active
 
     root_ids: list[str] = []
-    identities = [imagine_post_saved_identity(card) for card in active]
+    identities = [
+        (
+            imagine_post_saved_identity(card)[0],
+            imagine_saved_display_group_id(card) or imagine_post_saved_identity(card)[1],
+        )
+        for card in active
+    ]
     root_owner_by_id: dict[tuple[str, str, str], int] = {}
     for index, card in enumerate(active):
         metadata = card.get("metadata") if isinstance(card.get("metadata"), dict) else {}
@@ -4901,7 +5171,61 @@ def merge_imagine_saved_lineage_cards(cards: list[dict]) -> list[dict]:
                 owner_by_item_id.setdefault((*identities[index], item_id), index)
 
     parent_indexes = list(range(len(active)))
+
+    def canonical_group_owner(indexes: list[int]) -> int:
+        def rank(index: int) -> tuple:
+            card = active[index]
+            _, anchor = imagine_post_saved_identity(card)
+            display_group_id = imagine_saved_display_group_id(card)
+            owns_flat_group = bool(
+                display_group_id.startswith("asset:")
+                and anchor
+                and display_group_id == f"asset:{anchor}"
+            )
+            own_lineage = 0
+            foreign_lineage = 0
+            for item in card.get("items") or []:
+                if not isinstance(item, dict):
+                    continue
+                item_metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+                item_imagine = item_metadata.get("imagine") if isinstance(item_metadata.get("imagine"), dict) else {}
+                lineage_id = str(
+                    item.get("root_post_id")
+                    or item.get("conversation_id")
+                    or item_imagine.get("root_post_id")
+                    or item_imagine.get("conversation_id")
+                    or ""
+                ).strip()
+                if not lineage_id:
+                    continue
+                if anchor and lineage_id == anchor:
+                    own_lineage += 1
+                else:
+                    foreign_lineage += 1
+            return (
+                0 if owns_flat_group else 1,
+                0 if own_lineage and not foreign_lineage else 1,
+                -own_lineage,
+                str(card.get("created_at") or "9999"),
+                anchor,
+            )
+
+        return min(indexes, key=rank)
+
+    indexes_by_identity: dict[tuple[str, str], list[int]] = {}
+    for index, identity in enumerate(identities):
+        indexes_by_identity.setdefault(identity, []).append(index)
+    for member_indexes in indexes_by_identity.values():
+        if len(member_indexes) < 2:
+            continue
+        owner_index = canonical_group_owner(member_indexes)
+        for member_index in member_indexes:
+            if member_index != owner_index:
+                parent_indexes[member_index] = owner_index
+
     for index, candidate in enumerate(active):
+        if parent_indexes[index] != index:
+            continue
         candidate_metadata = candidate.get("metadata") if isinstance(candidate.get("metadata"), dict) else {}
         identity = identities[index]
         root_id = root_ids[index]
@@ -4980,7 +5304,6 @@ def merge_imagine_saved_lineage_cards(cards: list[dict]) -> list[dict]:
             *(index for index in member_indexes if index != root_index),
         ]
         for member_index in ordered_indexes:
-            imagine_merge_saved_official_order(anchor, active[member_index])
             for item in active[member_index].get("items") or []:
                 if not isinstance(item, dict):
                     continue
@@ -4992,6 +5315,22 @@ def merge_imagine_saved_lineage_cards(cards: list[dict]) -> list[dict]:
                     known_item_ids.add(item_id)
         representative = imagine_representative_item(merged_items)
         anchor["items"] = merged_items
+        anchor_metadata = anchor.get("metadata") if isinstance(anchor.get("metadata"), dict) else {}
+        anchor_aliases = {
+            imagine_post_saved_identity(active[member_index])[1]
+            for member_index in member_indexes
+            if imagine_post_saved_identity(active[member_index])[1]
+        }
+        if anchor_aliases:
+            anchor_metadata["saved_anchor_aliases"] = sorted(anchor_aliases)
+        display_group_id = imagine_saved_display_group_id(anchor)
+        if display_group_id:
+            anchor_metadata["saved_display_group_id"] = display_group_id
+        anchor["metadata"] = anchor_metadata
+        imagine_preserve_earliest_official_order(
+            anchor,
+            *(active[member_index] for member_index in member_indexes),
+        )
         if representative:
             anchor["representative_item"] = representative
             anchor["representative"] = (
@@ -5080,9 +5419,23 @@ def merge_imagine_flat_saved_post(groups: dict[str, dict], post: dict) -> None:
     if not imagine_posts_share_saved_identity(existing, post):
         groups[group_key] = imagine_stamp_saved_identity(post)
         return
-    imagine_merge_saved_official_order(existing, post)
     existing_metadata = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
     post_metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+    anchor_aliases = {
+        str(value).strip()
+        for value in [
+            *(existing_metadata.get("saved_anchor_aliases") or []),
+            *(post_metadata.get("saved_anchor_aliases") or []),
+            imagine_post_saved_identity(existing)[1],
+            imagine_post_saved_identity(post)[1],
+        ]
+        if str(value or "").strip()
+    }
+    if anchor_aliases:
+        existing_metadata["saved_anchor_aliases"] = sorted(anchor_aliases)
+    display_group_id = imagine_saved_display_group_id(existing) or imagine_saved_display_group_id(post)
+    if display_group_id:
+        existing_metadata["saved_display_group_id"] = display_group_id
     membership_ids = {
         str(value).strip()
         for value in [
@@ -5095,7 +5448,8 @@ def merge_imagine_flat_saved_post(groups: dict[str, dict], post: dict) -> None:
     }
     if membership_ids:
         existing_metadata["liked_membership_asset_ids"] = sorted(membership_ids)
-        existing["metadata"] = existing_metadata
+    existing["metadata"] = existing_metadata
+    imagine_preserve_earliest_official_order(existing, post)
     known_ids = {imagine_item_asset_id(item) for item in existing.get("items") or []}
     for item in post.get("items") or []:
         item_id = imagine_item_asset_id(item)
@@ -5178,7 +5532,6 @@ def merge_imagine_local_heart_post(
             destination = groups.pop(folder_path, None)
             if not isinstance(destination, dict):
                 continue
-            imagine_merge_saved_official_order(anchor, destination)
             created_at_values.append(str(destination.get("created_at") or ""))
             for item in destination.get("items") or []:
                 if not isinstance(item, dict):
@@ -5274,9 +5627,9 @@ def merge_imagine_local_heart_post(
 
 
 def imagine_remote_cache_post_key(post: dict) -> str:
-    provenance, anchor = imagine_post_saved_identity(post)
-    if anchor:
-        return f"{provenance}:{anchor}"
+    group_key = imagine_saved_group_key(post)
+    if group_key:
+        return group_key
     metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
     imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
     if metadata.get("flat_only") is True:
@@ -5334,6 +5687,17 @@ def imagine_remote_cache_records(posts: list[dict]) -> list[dict]:
         imagine_stamp_saved_identity(post)
         group_key = imagine_saved_group_key(post)
         if group_key:
+            provenance, anchor = imagine_post_saved_identity(post)
+            post_metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+            prior_anchors = {
+                str(value).strip()
+                for value in [anchor, *(post_metadata.get("saved_anchor_aliases") or [])]
+                if str(value or "").strip()
+            }
+            for prior_anchor in prior_anchors:
+                previous_scoped_key = f"{provenance}:{prior_anchor}"
+                if previous_scoped_key != group_key:
+                    legacy_keys_by_group.setdefault(group_key, set()).add(previous_scoped_key)
             legacy_key = imagine_remote_cache_legacy_post_key(post)
             if legacy_key:
                 legacy_keys_by_group.setdefault(group_key, set()).add(legacy_key)
@@ -5365,7 +5729,6 @@ def imagine_remote_cache_records(posts: list[dict]) -> list[dict]:
             ],
             "created_at": str(post.get("created_at") or ""),
             "activity_at": library_index.post_activity_at(post),
-            "official_order": imagine_saved_official_order(post),
             "asset_ids": sorted(asset_ids),
             "post": normalize_json_unicode(post),
         })
@@ -5557,8 +5920,10 @@ def list_imagine_saved_cache(payload: dict) -> dict:
         root,
         imagine_account_settings_key(account),
     )
-    hidden_remote_ids = card_view_state["hidden_ids"]
     relations = card_view_state["relations"]
+    # The app paints main from this cache before the live list arrives, so it has to leave
+    # out the same things: a copy and everything made from it belong on the Liked card only.
+    hidden_remote_ids = card_view_state["hidden_ids"] | imagine_liked_card_asset_ids(root, account, relations)
     posts: list[dict] = []
     for raw_post in cached.get("posts") or []:
         if not isinstance(raw_post, dict):
@@ -5567,6 +5932,8 @@ def list_imagine_saved_cache(payload: dict) -> dict:
         if imagine_hidden_bundle_card(post, relations):
             continue
         imagine_apply_generated_relations(post, root, account, relations)
+        if imagine_post_liked_anchor_keys(post) & hidden_remote_ids:
+            continue
         post["items"] = [
             item
             for item in post.get("items") or []
@@ -5586,7 +5953,8 @@ def list_imagine_saved_cache(payload: dict) -> dict:
     if offset == 0:
         posts.extend(imagine_missing_generated_relation_posts(root, account, relations, posts))
     posts = merge_imagine_saved_lineage_cards(posts)
-    posts = imagine_sort_saved_official(posts)
+    posts = imagine_filter_liked_scope_posts(posts, hidden_remote_ids)
+    imagine_sort_saved_by_official_order(posts)
     normalized_posts = normalize_json_unicode(posts)
     return {
         "ok": True,
@@ -5597,6 +5965,7 @@ def list_imagine_saved_cache(payload: dict) -> dict:
         "next_offset": int(cached.get("next_offset") or 0),
         "has_more": bool(cached.get("has_more")),
         "refreshed_at": float(cached.get("refreshed_at") or 0),
+        "liked_exclusion": imagine_liked_exclusion_payload(root, account, relations),
         "imagine": {
             "id": account.get("id") or "",
             "email": account.get("email") or "",
@@ -5604,48 +5973,6 @@ def list_imagine_saved_cache(payload: dict) -> dict:
             "tier": account.get("tier") or "",
         },
     }
-
-
-# grok.com stamps a copy with the id it was made from, so a copy identifies itself from the
-# asset alone — no local bookkeeping, and it still holds for a copy made on another machine
-# or before this build. Measured 2026-08-11 on this account: /rest/assets and a
-# conversation's /responses both carry auxKeys.duplicated_from_asset_id, and only the two
-# copies had it. Nothing generated here did, so filtering on it cannot take a result down.
-def imagine_asset_duplicated_from_id(node: object) -> str:
-    if not isinstance(node, dict):
-        return ""
-    aux_keys = node.get("auxKeys") if isinstance(node.get("auxKeys"), dict) else {}
-    for source in (aux_keys, node):
-        for key in ("duplicated_from_asset_id", "duplicatedFromAssetId"):
-            value = str(source.get(key) or "").strip()
-            if value:
-                return value
-    return ""
-
-
-# The mark sits on the asset node itself, so there is no reason to sweep a whole response
-# looking for it. A conversation keeps its assets in one place; read that and nothing else.
-# Walking every node cost 8.8ms per 3.8MB of detail on every list request for the same
-# answer a direct lookup gives for free.
-def imagine_detail_cloned_copy_ids(detail: object) -> set[str]:
-    found: set[str] = set()
-    responses = detail.get("responses") if isinstance(detail, dict) else None
-    if not isinstance(responses, list):
-        return found
-    for response in responses:
-        if not isinstance(response, dict):
-            continue
-        for key in ("fileAttachmentAssetMetadata", "assetMetadata", "assets"):
-            entries = response.get(key)
-            if not isinstance(entries, list):
-                continue
-            for entry in entries:
-                if not isinstance(entry, dict):
-                    continue
-                asset_id = str(entry.get("assetId") or "").strip()
-                if asset_id and imagine_asset_duplicated_from_id(entry):
-                    found.add(asset_id)
-    return found
 
 
 def list_imagine_saved(payload: dict) -> dict:
@@ -5662,6 +5989,14 @@ def list_imagine_saved(payload: dict) -> dict:
         limit = 20
     limit = min(40, max(1, limit))
     cursor = str((payload or {}).get("cursor") or "").strip()
+    if not cursor:
+        try:
+            imagine_refresh_liked_membership_snapshot(root, account)
+        except Exception as exc:
+            imagine_debug_event("liked_membership_refresh_failed", {
+                "account_id": str(account.get("id") or ""),
+                "error": str(exc)[:400],
+            })
     sync_token = str((payload or {}).get("sync_token") or "").strip()[:128]
     conversation_cursor, asset_cursor, conversations_done, assets_done, conversation_offset = decode_imagine_saved_cursor(cursor)
     query_params = {
@@ -5697,29 +6032,12 @@ def list_imagine_saved(payload: dict) -> dict:
             raise RuntimeError("Imagine login expired. Register the account again.") from exc
         raise
     raw_conversations = data.get("conversations") if isinstance(data.get("conversations"), list) else []
-    conversation_orders = {
-        str(conversation.get("conversationId") or "").strip(): conversation_offset + index
+    conversation_entries = [
+        (conversation_offset + index, conversation)
         for index, conversation in enumerate(raw_conversations)
-        if isinstance(conversation, dict) and str(conversation.get("conversationId") or "").strip()
-    }
-    try:
-        cached_order_posts = library_index.query_imagine_remote_posts(
-            root, imagine_account_settings_key(account), offset=0, limit=5000,
-        ).get("posts") or []
-    except Exception:
-        cached_order_posts = []
-    for cached_post in cached_order_posts:
-        order = imagine_saved_official_order(cached_post)
-        if order is None:
-            continue
-        for cached_conversation_id in imagine_saved_conversation_ids(cached_post):
-            conversation_orders.setdefault(cached_conversation_id, order)
-    conversations = raw_conversations
-    conversations = [
-        conversation
-        for conversation in conversations
         if isinstance(conversation, dict) and isinstance(conversation.get("latestAssetMetadata"), dict)
     ]
+    conversations = [conversation for _, conversation in conversation_entries]
     details: dict[str, dict] = {}
     if conversations:
         with ThreadPoolExecutor(max_workers=min(8, len(conversations))) as executor:
@@ -5743,13 +6061,7 @@ def list_imagine_saved(payload: dict) -> dict:
     hidden_bundle_asset_ids = imagine_hidden_bundle_asset_ids(relations)
     pending_delete_ids = imagine_pending_delete_ids(root, account)
     local_exclusion_ids = imagine_local_exclusion_ids(root, account)
-    hidden_remote_ids = pending_delete_ids | local_exclusion_ids
-    # A copy belongs on its Liked card and nowhere else. The conversation detail carries the
-    # mark, so the cards built from it can be filtered before the asset pass runs.
-    cloned_copy_ids: set[str] = set()
-    for detail in details.values():
-        cloned_copy_ids |= imagine_detail_cloned_copy_ids(detail)
-    hidden_remote_ids |= cloned_copy_ids
+    hidden_remote_ids = pending_delete_ids | local_exclusion_ids | imagine_liked_card_asset_ids(root, account, relations)
     external_reference_ids = imagine_account_setting_ids(
         root,
         "imagine_external_reference_asset_ids",
@@ -5763,14 +6075,18 @@ def list_imagine_saved(payload: dict) -> dict:
         )
     ]
     posts = []
-    for conversation in conversations:
+    for official_order, conversation in conversation_entries:
         conversation_id = str(conversation.get("conversationId") or "")
         post = imagine_saved_post_from_conversation(conversation, details.get(conversation_id, {}), account)
         if post:
             if imagine_hidden_bundle_card(post, relations):
                 continue
             post = imagine_apply_generated_relations(post, root, account, relations)
-            imagine_stamp_saved_official_order(post, conversation_orders.get(conversation_id))
+            post_metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+            post_metadata["official_order"] = official_order
+            post["metadata"] = post_metadata
+            if imagine_post_liked_anchor_keys(post) & hidden_remote_ids:
+                continue
             post["items"] = [
                 item
                 for item in post.get("items") or []
@@ -5825,49 +6141,11 @@ def list_imagine_saved(payload: dict) -> dict:
     # way the asset and local-heart passes below already do.
     saved_groups: dict[str, dict] = {}
     for post in posts:
-        folder_path = str(post.get("folder_path") or "")
-        if not folder_path:
-            continue
-        group_key = imagine_saved_group_key(post)
-        existing = saved_groups.get(group_key)
-        if not existing:
-            saved_groups[group_key] = imagine_stamp_saved_identity(post)
-            continue
-        if not imagine_posts_share_saved_identity(existing, post):
-            saved_groups[group_key] = imagine_stamp_saved_identity(post)
-            continue
-        imagine_merge_saved_official_order(existing, post)
-        known_ids = {
-            imagine_item_asset_id(item)
-            for item in existing.get("items") or []
-            if imagine_item_asset_id(item)
-        }
-        merged_items = list(existing.get("items") or [])
-        for item in post.get("items") or []:
-            item_id = imagine_item_asset_id(item)
-            if item_id and item_id in known_ids:
-                continue
-            merged_items.append(item)
-            if item_id:
-                known_ids.add(item_id)
-        existing["items"] = merged_items
-        representative = imagine_representative_item(merged_items) or merged_items[-1]
-        existing["representative_item"] = representative
-        existing["representative"] = (
-            representative.get("url")
-            or representative.get("remote_url")
-            or representative.get("item_id")
-            or existing.get("representative")
-            or ""
-        )
+        merge_imagine_flat_saved_post(saved_groups, post)
     for asset in assets:
         if not isinstance(asset, dict) or imagine_asset_upload_only(asset):
             continue
         asset_id = str(asset.get("assetId") or asset.get("id") or "").strip()
-        # A copy carries the id it was made from; it belongs on its Liked card, not here.
-        if asset_id and imagine_asset_duplicated_from_id(asset):
-            cloned_copy_ids.add(asset_id)
-            continue
         if (
             not asset_id
             or asset_id in hidden_remote_ids
@@ -5891,10 +6169,6 @@ def list_imagine_saved(payload: dict) -> dict:
             external_reference=external_reference,
         )
         if flat_post:
-            imagine_stamp_saved_official_order(
-                flat_post,
-                conversation_orders.get(imagine_asset_source_conversation_id(asset)),
-            )
             merge_imagine_flat_saved_post(saved_groups, flat_post)
     for local_post in local_heart_posts:
         if not cursor or imagine_post_is_link_source(local_post):
@@ -5908,37 +6182,15 @@ def list_imagine_saved(payload: dict) -> dict:
             root, account, relations, list(saved_groups.values()),
         ):
             merge_imagine_flat_saved_post(saved_groups, relation_post)
-    posts = imagine_sort_saved_official(
-        merge_imagine_saved_lineage_cards(list(saved_groups.values()))
-    )
+    posts = merge_imagine_saved_lineage_cards(list(saved_groups.values()))
+    posts = imagine_filter_liked_scope_posts(posts, hidden_remote_ids)
+    imagine_sort_saved_by_official_order(posts)
     try:
         cache_imagine_remote_posts(root, account, posts, sync_token=sync_token)
     except Exception as exc:
         imagine_debug_event("saved_cache_update_failed", {
             "account_id": str(account.get("id") or ""),
             "error": str(exc)[:400],
-        })
-    if cloned_copy_ids:
-        # A card the copy shared with generated results is rewritten by the upsert above,
-        # so only a card that was nothing but the copy is left behind. Those rows have to
-        # go by hand or the cached view keeps drawing them.
-        live_post_keys = {
-            imagine_remote_cache_post_key(post)
-            for post in posts
-            if imagine_remote_cache_post_key(post)
-        }
-        stale_copy_keys = cloned_copy_ids - live_post_keys
-        if stale_copy_keys:
-            remove_imagine_remote_cache_post_keys(
-                root,
-                account,
-                stale_copy_keys,
-                allowed_provenances={"cloned-liked"},
-            )
-        imagine_debug_event("cloned_copies_hidden_from_main", {
-            "account_id": str(account.get("id") or ""),
-            "cloned_copy_ids": sorted(cloned_copy_ids),
-            "cache_rows_removed": sorted(stale_copy_keys),
         })
 
     next_conversation_cursor = str(data.get("nextPageToken") or "").strip()
@@ -5956,7 +6208,10 @@ def list_imagine_saved(payload: dict) -> dict:
             next_asset_cursor,
             conversations_done=next_conversations_done,
             assets_done=next_assets_done,
-            conversation_offset=conversation_offset + len(raw_conversations),
+            conversation_offset=(
+                conversation_offset
+                + (0 if conversations_done else len(raw_conversations))
+            ),
         )
         if has_more
         else ""
@@ -5983,6 +6238,7 @@ def list_imagine_saved(payload: dict) -> dict:
         "next_cursor": next_cursor,
         "has_more": has_more,
         "sync_token": sync_token,
+        "liked_exclusion": imagine_liked_exclusion_payload(root, account, relations),
         "imagine": {
             "id": account.get("id") or "",
             "email": account.get("email") or "",
@@ -5990,6 +6246,21 @@ def list_imagine_saved(payload: dict) -> dict:
             "tier": account.get("tier") or "",
         },
     }
+
+
+# grok.com stamps a copy with the id it was made from, so a clone identifies itself from
+# the asset alone — no local bookkeeping, and it still holds for a copy made on another
+# machine or after the library record is gone.
+def imagine_asset_duplicated_from_id(node: object) -> str:
+    if not isinstance(node, dict):
+        return ""
+    aux_keys = node.get("auxKeys") if isinstance(node.get("auxKeys"), dict) else {}
+    for source in (aux_keys, node):
+        for key in ("duplicated_from_asset_id", "duplicatedFromAssetId"):
+            value = str(source.get(key) or "").strip()
+            if value:
+                return value
+    return ""
 
 
 def imagine_media_post_with_asset_prompt(post: dict, post_id: str, account: dict, timeout: int = 12) -> dict:
@@ -6297,6 +6568,10 @@ def imagine_get_public_page_post(post_id: str, account: dict, timeout: int = 12)
     }
 
 
+# Liked cards cost a media-post lookup and an asset lookup each, so the view sat empty for
+# a couple of seconds per card before anything appeared. Imagine main solved this long ago
+# by painting from its SQLite cache and letting the network catch up behind it; the same
+# store serves here under its own account namespace, so no new table is needed.
 def imagine_liked_cache_account_key(account: dict) -> str:
     return f"{imagine_account_settings_key(account)}:liked"
 
@@ -6313,10 +6588,8 @@ def imagine_store_liked_cache(
     records = imagine_remote_cache_records(posts)
     account_key = imagine_liked_cache_account_key(account)
     try:
-        # A membership page or a partially hydrated page proves nothing about cached cards
-        # that were not returned. Only a complete, error-free collection snapshot may prune
-        # them; every other response is an upsert so a transient Grok failure cannot erase the
-        # last usable Liked view.
+        # A partial page or a partly hydrated page says nothing about cards it omitted.
+        # Only a complete, error-free membership snapshot may remove cached cards.
         if prune:
             current = library_index.query_imagine_remote_posts(root, account_key, offset=0, limit=5000)
             live_keys = {record["post_key"] for record in records}
@@ -6417,10 +6690,13 @@ def list_imagine_liked_cache(payload: dict) -> dict:
         limit=limit,
     )
     hidden = imagine_pending_delete_ids(root, account) | imagine_local_exclusion_ids(root, account)
+    ensure_imagine_state_migrated(root)
+    relations = imagine_state.load_generated_relations(root)
     posts: list[dict] = []
-    for post in cached.get("posts") or []:
-        if not isinstance(post, dict):
+    for cached_post in cached.get("posts") or []:
+        if not isinstance(cached_post, dict):
             continue
+        post = imagine_apply_generated_relations(cached_post, root, account, relations)
         imagine_stamp_saved_identity(post)
         post["items"] = [
             item
@@ -6435,7 +6711,13 @@ def list_imagine_liked_cache(payload: dict) -> dict:
             representative.get("url") or representative.get("remote_url") or representative.get("item_id") or ""
         )
         posts.append(post)
-    return {"ok": True, "posts": posts, "errors": [], "cached": True}
+    return {
+        "ok": True,
+        "posts": posts,
+        "errors": [],
+        "cached": True,
+        "liked_exclusion": imagine_liked_exclusion_payload(root, account, relations),
+    }
 
 
 # The Liked view on grok.com is two steps: the collection hands back bare asset ids, then
@@ -6455,16 +6737,25 @@ def list_imagine_liked(payload: dict) -> dict:
     except (TypeError, ValueError):
         limit = 100
     safe_limit = max(1, min(limit, 200))
-    membership = imagine_collection_asset_membership(account, limit=safe_limit)
+    membership = imagine_collection_asset_membership_all(account, page_limit=min(200, max(100, safe_limit)))
+    if membership.get("complete"):
+        imagine_store_liked_membership_snapshot(
+            root,
+            account,
+            {
+                str(entry.get("asset_id") or "").strip()
+                for entry in membership.get("entries") or []
+                if isinstance(entry, dict) and str(entry.get("asset_id") or "").strip()
+            },
+        )
     membership_errors = [
         {**error, "stage": "membership"}
         for error in (membership.get("errors") or [])
         if isinstance(error, dict)
     ]
     if not membership.get("ok"):
-        # A failed membership lookup is not an empty Liked collection. Return the last good
-        # snapshot and leave it untouched so a temporary network/auth failure cannot blank the
-        # view or destroy the only hydrated copies of those cards.
+        # A failed membership lookup is not an empty Liked collection. Keep and return the
+        # last usable snapshot so a temporary Grok failure cannot blank the view.
         cached = list_imagine_liked_cache({
             "account_id": str(account.get("id") or ""),
             "limit": max(200, safe_limit),
@@ -6484,18 +6775,26 @@ def list_imagine_liked(payload: dict) -> dict:
             "membership_complete": False,
             "complete": False,
             "cached": True,
+            "liked_exclusion": cached.get("liked_exclusion") or {},
         }
     entries = membership.get("entries") if isinstance(membership.get("entries"), list) else []
     posts: list[dict] = []
     errors: list[dict] = list(membership_errors)
-    # One heart puts one id in, so a second entry is a genuinely separate card. Nothing is
-    # filtered out here any more.
     covered_asset_ids: set[str] = set()
     collection_ids = {entry.get("asset_id") for entry in entries if entry.get("asset_id")}
+    liked_hidden_ids = (
+        imagine_pending_delete_ids(root, account)
+        | imagine_local_exclusion_ids(root, account)
+    )
+    # One heart copies a whole card, so the source image arrives as its own collection entry
+    # beside the asset that was pressed and would stand up a second card for the same thing.
+    # Build every entry's card first, then drop the ones that are only the source of another:
+    # a copy carries the id it was made from, and the card built for the pressed asset lists
+    # that same original among its items, which is what pairs them back up.
     # Each card costs a media-post lookup plus the asset lookup behind it, and walking one
-    # after another put a card's worth of round trips between the button and every single
-    # card. The saved list already fetches its conversation details in parallel for the same
-    # reason; do the same here so the wait stops growing with the collection.
+    # after another put a card's worth of round trips — measured at ~2s — between the button
+    # and every single card. The saved list has fetched its conversation details in parallel
+    # for the same reason; do the same here so the wait stops growing with the collection.
     wanted_entries = [entry for entry in entries if entry.get("asset_id")]
 
     def fetch_liked_entry(entry: dict) -> dict:
@@ -6503,11 +6802,11 @@ def list_imagine_liked(payload: dict) -> dict:
         try:
             raw_post = imagine_get_media_post_direct(asset_id, account, timeout=12)
             post = imagine_saved_post_from_root(raw_post, account)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             return {"asset_id": asset_id, "error": str(exc)[:300]}
         if not post:
             return {"asset_id": asset_id, "error": "Liked asset returned no post."}
-        return {"entry": entry, "asset_id": asset_id, "post": post, "raw_post": raw_post}
+        return {"entry": entry, "asset_id": asset_id, "raw_post": raw_post, "post": post}
 
     fetched: list[dict] = []
     if wanted_entries:
@@ -6520,53 +6819,71 @@ def list_imagine_liked(payload: dict) -> dict:
         # Keep the collection's own order; as_completed hands them back by whoever finished.
         fetched = [results[entry["asset_id"]] for entry in wanted_entries if entry["asset_id"] in results]
 
-    # Hearting a link on an older build filed the copy of the source image alongside the
-    # copy of the video, so the collection holds two ids for what was one press. The copy
-    # says what it was made from, and the card for the other id already shows that origin as
-    # its source — so this entry is the same card twice. Fold it away instead of drawing it
-    # as a second card holding nothing but the original image.
+    built: list[dict] = []
+    for record in fetched:
+        if record.get("error"):
+            errors.append({"asset_id": record.get("asset_id"), "error": record["error"]})
+            continue
+        post = record["post"]
+        # The collection only holds the copy, so grok.com answers with the copy and its
+        # source and knows nothing of what has been made from it since. Imagine main reads
+        # that from the relations this app keeps; Liked never did, which left every i2i, i2v
+        # and extend result belonging to a card it was not shown on.
+        post = imagine_apply_generated_relations(post, root, account)
+        # The relations remember every result the copy ever produced, including ones that
+        # have since been deleted, so a deleted image came back the next time Liked was
+        # opened. Main drops them by the same two lists.
+        post["items"] = [
+            item
+            for item in post.get("items") or []
+            if isinstance(item, dict) and imagine_item_asset_id(item) not in liked_hidden_ids
+        ]
+        if not post["items"]:
+            continue
+        record["post"] = post
+        built.append(record)
+
     item_ids_by_asset_id = {
         record["asset_id"]: {
             imagine_item_asset_id(item)
             for item in record["post"].get("items") or []
             if isinstance(item, dict) and imagine_item_asset_id(item)
         }
-        for record in fetched
-        if not record.get("error")
+        for record in built
+    }
+    origin_by_asset_id = {
+        record["asset_id"]: imagine_asset_duplicated_from_id(record["raw_post"])
+        or imagine_asset_duplicated_from_id(record["post"])
+        for record in built
     }
     # A clone and the plain membership it came from are separate cards. Sharing the
     # original asset is not duplicate identity, so do not fold either collection entry.
     folded_asset_ids: set[str] = set()
 
-    for record in fetched:
-        if record.get("error"):
-            errors.append({"asset_id": record.get("asset_id"), "error": record["error"]})
-            continue
+    for record in built:
         entry = record["entry"]
         asset_id = record["asset_id"]
         raw_post = record["raw_post"]
         post = record["post"]
         if asset_id in folded_asset_ids:
             continue
-        # Liked shows what the heart was pressed on and the source it came from, nothing
-        # else. Anything generated from it afterwards lands in its own card on grok.com's
-        # saved view, and it was turning up glued onto the Liked card here.
-        kept_items = []
-        for item in post.get("items") or []:
-            if not isinstance(item, dict):
-                continue
-            item_asset_id = imagine_item_asset_id(item)
-            if item_asset_id == asset_id or imagine_item_is_source(item):
-                kept_items.append(item)
+        # Everything made from a copy belongs on the copy's card. Stripping the card back to
+        # the copy and its source sent i2i, i2v and extend results off to their own cards in
+        # Imagine main, away from the card they were made from.
+        kept_items = [item for item in post.get("items") or [] if isinstance(item, dict)]
         if kept_items:
             post["items"] = kept_items
             representative = imagine_representative_item(kept_items) or kept_items[-1]
             post["representative_item"] = representative
-        metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+        # A copy is already this account's asset, so there is nothing left to save and the
+        # heart has no second state to move to. Mark it here and the detail view drops the
+        # heart entirely; Delete is what removes a copy, and that takes it out of the saved
+        # view and Liked together instead of leaving it owned but hidden.
         cloned_from_asset_id = (
             imagine_asset_duplicated_from_id(raw_post)
             or imagine_asset_duplicated_from_id(post)
         )
+        metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
         metadata.update({
             "remote_view": "link",
             "link_source": True,
@@ -6597,22 +6914,16 @@ def list_imagine_liked(payload: dict) -> dict:
             item_metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
             imagine = item_metadata.get("imagine") if isinstance(item_metadata.get("imagine"), dict) else {}
             item_is_saved = item_asset_id in collection_ids if item_asset_id else False
-            item_metadata.update({
+            item_stamps = {
                 "remote_view": "link",
                 "link_source": True,
                 "link_post_id": asset_id,
                 "liked": item_is_saved,
                 "cloned_copy": bool(cloned_from_asset_id),
                 "cloned_from_asset_id": cloned_from_asset_id,
-            })
-            imagine.update({
-                "remote_view": "link",
-                "link_source": True,
-                "link_post_id": asset_id,
-                "liked": item_is_saved,
-                "cloned_copy": bool(cloned_from_asset_id),
-                "cloned_from_asset_id": cloned_from_asset_id,
-            })
+            }
+            item_metadata.update(item_stamps)
+            imagine.update(item_stamps)
             item_metadata["imagine"] = imagine
             item["metadata"] = item_metadata
         covered_asset_ids.add(asset_id)
@@ -6628,7 +6939,6 @@ def list_imagine_liked(payload: dict) -> dict:
         "requested": len(entries),
         "posts": len(posts),
         "errors": len(errors),
-        "folded_copies": sorted(folded_asset_ids),
         "membership_complete": bool(membership.get("complete")),
         "complete": complete,
     })
@@ -6641,6 +6951,9 @@ def list_imagine_liked(payload: dict) -> dict:
         "has_more": bool(membership.get("has_more")),
         "membership_complete": bool(membership.get("complete")),
         "complete": complete,
+        "liked_exclusion": imagine_liked_exclusion_payload(
+            root, account, imagine_state.load_generated_relations(root),
+        ),
     }
 
 
@@ -8395,7 +8708,6 @@ def list_imagine_uploads(payload: dict) -> dict:
         ("mimeTypes", "image/webp"),
         ("orderBy", "ORDER_BY_LAST_USE_TIME"),
         ("source", "SOURCE_UPLOADED"),
-        ("isLatest", "true"),
         ("includeImagineFiles", "true"),
     ]
     if cursor:
@@ -9165,6 +9477,7 @@ def imagine_collection_add_assets(account: dict, asset_ids) -> dict:
         "account_id": str(account.get("id") or ""),
         "asset_ids": wanted,
     })
+    imagine_update_complete_liked_membership_snapshot(account, add=set(wanted))
     return {"added": wanted, "failed": []}
 
 
@@ -9194,10 +9507,11 @@ def imagine_collection_remove_assets(account: dict, asset_ids) -> dict:
         "account_id": str(account.get("id") or ""),
         "asset_ids": wanted,
     })
+    imagine_update_complete_liked_membership_snapshot(account, remove=set(wanted))
     return {"removed": wanted, "failed": []}
 
 
-def imagine_collection_asset_membership(account: dict, limit: int = 100) -> dict:
+def imagine_collection_asset_membership(account: dict, limit: int = 100, cursor: str = "") -> dict:
     safe_limit = max(1, min(int(limit or 100), 200))
     collection_id = imagine_liked_collection_id(account)
     if not collection_id:
@@ -9211,9 +9525,12 @@ def imagine_collection_asset_membership(account: dict, limit: int = 100) -> dict
             "complete": False,
         }
     try:
+        request_body = {"collectionId": collection_id, "limit": safe_limit}
+        if str(cursor or "").strip():
+            request_body["cursor"] = str(cursor).strip()
         result = imagine_post_json(
             "/rest/media/collection/assets/list",
-            {"collectionId": collection_id, "limit": safe_limit},
+            request_body,
             account,
             referer=IMAGINE_BASE + "/imagine/saved",
         )
@@ -9270,14 +9587,8 @@ def imagine_collection_asset_membership(account: dict, limit: int = 100) -> dict
     ).strip()
     has_more_keys = ("hasMore", "has_more")
     has_explicit_more = any(key in result for key in has_more_keys)
-    explicit_more = bool(result.get("hasMore") or result.get("has_more"))
-    has_more = bool(next_cursor) or explicit_more
-    if has_explicit_more:
-        complete = not has_more
-    else:
-        # Without an explicit end marker, a short page is the only proof that the complete
-        # collection was returned. An exactly-full page may have another page behind it.
-        complete = not next_cursor and len(raw_items) < safe_limit
+    has_more = bool(next_cursor) or bool(result.get("hasMore") or result.get("has_more"))
+    complete = not has_more if has_explicit_more else not next_cursor
     if errors:
         complete = False
     return {
@@ -9291,11 +9602,68 @@ def imagine_collection_asset_membership(account: dict, limit: int = 100) -> dict
     }
 
 
+def imagine_collection_asset_membership_all(account: dict, page_limit: int = 200) -> dict:
+    entries_by_id: dict[str, dict] = {}
+    errors: list[dict] = []
+    cursor = ""
+    seen_cursors: set[str] = set()
+    collection_id = ""
+    while True:
+        page = imagine_collection_asset_membership(account, limit=page_limit, cursor=cursor)
+        collection_id = str(page.get("collection_id") or collection_id)
+        errors.extend(error for error in page.get("errors") or [] if isinstance(error, dict))
+        if not page.get("ok"):
+            return {
+                "ok": False,
+                "entries": list(entries_by_id.values()),
+                "errors": errors,
+                "collection_id": collection_id,
+                "complete": False,
+            }
+        for entry in page.get("entries") or []:
+            if isinstance(entry, dict) and str(entry.get("asset_id") or "").strip():
+                entries_by_id[str(entry["asset_id"]).strip()] = entry
+        next_cursor = str(page.get("next_cursor") or "").strip()
+        if not next_cursor:
+            return {
+                "ok": not errors,
+                "entries": list(entries_by_id.values()),
+                "errors": errors,
+                "collection_id": collection_id,
+                "complete": not errors,
+            }
+        if next_cursor in seen_cursors:
+            errors.append({"error": "Liked collection cursor repeated."})
+            return {
+                "ok": False,
+                "entries": list(entries_by_id.values()),
+                "errors": errors,
+                "collection_id": collection_id,
+                "complete": False,
+            }
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+
+
+def imagine_refresh_liked_membership_snapshot(root: Path, account: dict) -> dict:
+    membership = imagine_collection_asset_membership_all(account)
+    if membership.get("complete"):
+        return imagine_store_liked_membership_snapshot(
+            root,
+            account,
+            {
+                str(entry.get("asset_id") or "").strip()
+                for entry in membership.get("entries") or []
+                if isinstance(entry, dict) and str(entry.get("asset_id") or "").strip()
+            },
+        )
+    return imagine_liked_membership_snapshot(root, account)
+
+
 def imagine_collection_asset_entries(account: dict, limit: int = 100) -> list[dict]:
     membership = imagine_collection_asset_membership(account, limit=limit)
-    # Existing callers use this only as a best-effort heart-state probe. Preserve that
-    # contract; the Liked list itself consumes the structured membership result above so it
-    # can distinguish a failed lookup from a genuinely empty collection.
+    # Existing callers use this as a best-effort heart-state probe. The Liked list itself
+    # consumes the structured result above so it can distinguish failure from true empty.
     return membership.get("entries") if membership.get("ok") and isinstance(membership.get("entries"), list) else []
 
 
@@ -22680,7 +23048,6 @@ def save_image_editor_upload_result(payload: dict, mime_type: str, image_data: s
     if not raw:
         raise RuntimeError("Edited image is empty.")
     upload_hash = hashlib.sha256(raw).hexdigest()
-    source_name = str(payload.get("name") or "").strip()
     existing = find_uploaded_media_by_hash(root, upload_hash)
     if existing:
         folder_path, item_id = existing
@@ -22695,6 +23062,7 @@ def save_image_editor_upload_result(payload: dict, mime_type: str, image_data: s
                 "metadata": {"editor_save_target": "upload"},
             },
         }
+    source_name = str(payload.get("name") or "").strip()
     ext = extension_from_mime_type(mime_type, "png")
     now = now_iso()
     date_name = datetime.now().strftime("%Y-%m-%d")
