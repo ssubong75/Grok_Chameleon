@@ -14,7 +14,9 @@ function cardRenderKeyForPost(post, className, backTargetOverride = null) {
   return [
     className || "card",
     cardBackTargetKey(backTargetOverride),
-    post?.folder_path || post?.post_id || post?.id || "",
+    typeof libraryPostStableIdentity === "function"
+      ? libraryPostStableIdentity(post)
+      : (post?.folder_path || post?.post_id || post?.id || ""),
   ].join("|");
 }
 
@@ -88,6 +90,7 @@ function cardRenderHashForPost(post, className, backTargetOverride = null) {
     className || "card",
     cardBackTargetKey(backTargetOverride),
     post?.folder_path || "",
+    typeof libraryPostStableIdentity === "function" ? libraryPostStableIdentity(post) : "",
     post?.post_id || "",
     post?.title || "",
     post?.area || "",
@@ -564,11 +567,15 @@ function bindVirtualCardListScroll(listKey, list, onScroll = null) {
 }
 
 function cardVisualSelectButton(post) {
-  const selected = library_state.selectedItems.has(post.folder_path || "");
+  const selectionKey = typeof libraryPostStableIdentity === "function"
+    ? libraryPostStableIdentity(post)
+    : (post.folder_path || "");
+  const selected = library_state.selectedItems.has(selectionKey);
   const button = document.createElement("button");
   button.className = "card_visual_select_btn item-select media-card-select-button";
   button.type = "button";
   button.dataset.libraryPostPath = post.folder_path || "";
+  button.dataset.libraryPostIdentity = selectionKey;
   button.setAttribute("aria-label", "Select");
   button.setAttribute("aria-pressed", selected ? "true" : "false");
   button.innerHTML = `
@@ -581,7 +588,7 @@ function cardVisualSelectButton(post) {
   `;
   button.addEventListener("click", (event) => {
     stopVisualCardAction(event);
-    toggleCardSelection(post.folder_path);
+    toggleCardSelection(selectionKey);
   });
   return button;
 }
@@ -675,7 +682,7 @@ function cardVisualActions(post) {
       "move-card-btn media-card-move-button",
       "Move",
       `<svg class="media-card-action-glyph" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M7 17 17 7"></path><path d="M10 7h7v7"></path></svg>`,
-      () => openMoveToCollectionDialog({ postPath: post.folder_path }),
+      () => openMoveToCollectionDialog({ postPath: post.folder_path, postObject: post }),
     ),
     cardVisualActionButton(
       "delete-card-btn danger-card-btn media-card-delete-button",
@@ -700,7 +707,7 @@ function cardVisualActionsShell(post) {
       "move-card-btn media-card-move-button",
       "Move",
       `<svg class="media-card-action-glyph" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M7 17 17 7"></path><path d="M10 7h7v7"></path></svg>`,
-      () => openMoveToCollectionDialog({ postPath: post.folder_path }),
+      () => openMoveToCollectionDialog({ postPath: post.folder_path, postObject: post }),
     ),
   ];
   if (allowDelete) {
@@ -763,10 +770,14 @@ function mediaCardForPost(post, className, backTargetOverride = null) {
   const type = representative.type || "image";
   const remoteOnly = Boolean(post.remote || post.area === "imagine_remote");
   const article = document.createElement("article");
-  article.className = `card ${className}${attachedJob ? ` gallery_job_card${attachedJobFailed ? " failed" : " is_generating"}` : ""}${library_state.selectedItems.has(post.folder_path || "") ? " selected" : ""}`;
+  const postIdentity = typeof libraryPostStableIdentity === "function"
+    ? libraryPostStableIdentity(post)
+    : (post.folder_path || "");
+  article.className = `card ${className}${attachedJob ? ` gallery_job_card${attachedJobFailed ? " failed" : " is_generating"}` : ""}${library_state.selectedItems.has(postIdentity) ? " selected" : ""}`;
   article.tabIndex = 0;
   article.setAttribute("role", "button");
   article.dataset.libraryPostPath = post.folder_path;
+  article.dataset.libraryPostIdentity = postIdentity;
   if (attachedJob && typeof generationJobDatasetKey === "function") {
     article.dataset[generationJobDatasetKey(attachedJob)] = attachedJob.id || "";
   }
@@ -839,7 +850,7 @@ function mediaCardForPost(post, className, backTargetOverride = null) {
   const activate = () => {
     const representativeId = mediaItemKey(rawRepresentative);
     if (representativeId) library_state.selectedDetailItemId = representativeId;
-    selectLibraryPost(post.folder_path);
+    selectLibraryPost(post);
     if (attachedJob && typeof generationJobProvider === "function" && generationJobProvider(attachedJob) === "imagine") {
       library_state.selectedImagineJobId = String(attachedJob.id || "");
       library_state.selectedJobId = "";
@@ -887,6 +898,9 @@ function mediaCardForItem(post, item, backTarget = { screenId: "2nd_main", activ
   article.tabIndex = 0;
   article.setAttribute("role", "button");
   article.dataset.libraryPostPath = post.folder_path;
+  article.dataset.libraryPostIdentity = typeof libraryPostStableIdentity === "function"
+    ? libraryPostStableIdentity(post)
+    : (post.folder_path || "");
   article.dataset.libraryItemId = mediaItemKey(item);
   applyStableCardRenderData(
     article,
@@ -927,7 +941,7 @@ function mediaCardForItem(post, item, backTarget = { screenId: "2nd_main", activ
   article.append(media, caption);
 
   const activate = () => {
-    selectLibraryPost(post.folder_path);
+    selectLibraryPost(post);
     setSelectedDetailItem(mediaItemKey(item));
     const detailType = cardUsesImagineDetail(post, "") ? "imagine" : "build";
     const storedBackTarget = { ...backTarget };

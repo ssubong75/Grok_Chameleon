@@ -59,6 +59,7 @@ function browserHistoryState(screenId, activeButtonId = "") {
     currentImagineNavBtn: screen_state.current_i_nav_btn,
     currentBuildNavBtn: screen_state.current_b_nav_btn,
     selectedPostPath: library_state.selectedPostPath,
+    selectedPostIdentity: library_state.selectedPostIdentity,
     selectedDetailItemId: library_state.selectedDetailItemId,
     selectedCollectionPath: library_state.selectedCollectionPath,
     selectedCollectionPostPath: library_state.selectedCollectionPostPath,
@@ -79,6 +80,7 @@ function browserHistoryKey(state) {
     activeButtonId: state.activeButtonId,
     accountVisible: Boolean(state.accountVisible),
     selectedPostPath: state.selectedPostPath,
+    selectedPostIdentity: state.selectedPostIdentity,
     selectedDetailItemId: state.selectedDetailItemId,
     selectedCollectionPath: state.selectedCollectionPath,
     selectedCollectionPostPath: state.selectedCollectionPostPath,
@@ -134,9 +136,13 @@ function restoreBrowserHistoryState(state) {
     library_state.selectedCollectionPostPath = state.selectedCollectionPostPath || "";
     library_state.selectedDetailItemId = state.selectedDetailItemId || "";
     if (state.selectedPostPath) {
-      selectLibraryPost(state.selectedPostPath, { loadFull: state.screenId !== "2nd_main" });
+      selectLibraryPost(state.selectedPostPath, {
+        loadFull: state.screenId !== "2nd_main",
+        identity: state.selectedPostIdentity || "",
+      });
     } else {
       library_state.selectedPostPath = "";
+      library_state.selectedPostIdentity = "";
       renderDetailViews();
     }
     renderSourceCards("build");

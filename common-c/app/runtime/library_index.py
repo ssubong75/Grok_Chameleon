@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 LIST_SUMMARY_VERSION = 2
 STATE_DIRECTORY = "sql_data"
 DATABASE_FILENAME = "library_index.sqlite3"
@@ -138,7 +138,7 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             account_key TEXT NOT NULL,
             asset_id TEXT NOT NULL,
             post_key TEXT NOT NULL,
-            PRIMARY KEY (account_key, asset_id),
+            PRIMARY KEY (account_key, asset_id, post_key),
             FOREIGN KEY (account_key, post_key)
                 REFERENCES imagine_remote_posts(account_key, post_key)
                 ON DELETE CASCADE
@@ -170,6 +170,36 @@ def _create_schema(connection: sqlite3.Connection) -> None:
         str(row["name"])
         for row in connection.execute("PRAGMA table_info(imagine_remote_posts)").fetchall()
     }
+    imagine_remote_asset_pk = [
+        str(row["name"])
+        for row in sorted(
+            connection.execute("PRAGMA table_info(imagine_remote_assets)").fetchall(),
+            key=lambda row: int(row["pk"] or 0),
+        )
+        if int(row["pk"] or 0) > 0
+    ]
+    if imagine_remote_asset_pk == ["account_key", "asset_id"]:
+        # A source/result may legitimately be visible on more than one provenance-scoped
+        # card. The old one-card-per-asset index deleted whichever card was cached first.
+        connection.executescript(
+            """
+            ALTER TABLE imagine_remote_assets RENAME TO imagine_remote_assets_legacy;
+            CREATE TABLE imagine_remote_assets (
+                account_key TEXT NOT NULL,
+                asset_id TEXT NOT NULL,
+                post_key TEXT NOT NULL,
+                PRIMARY KEY (account_key, asset_id, post_key),
+                FOREIGN KEY (account_key, post_key)
+                    REFERENCES imagine_remote_posts(account_key, post_key)
+                    ON DELETE CASCADE
+            );
+            INSERT OR IGNORE INTO imagine_remote_assets(account_key, asset_id, post_key)
+            SELECT account_key, asset_id, post_key FROM imagine_remote_assets_legacy;
+            DROP TABLE imagine_remote_assets_legacy;
+            CREATE INDEX IF NOT EXISTS imagine_remote_assets_post_idx
+                ON imagine_remote_assets(account_key, post_key);
+            """
+        )
     library_post_columns = {
         str(row["name"])
         for row in connection.execute("PRAGMA table_info(library_posts)").fetchall()
@@ -976,6 +1006,35 @@ def query_imagine_remote_posts(
     }
 
 
+def imagine_remote_asset_account_keys(root: Path, asset_ids: set[str]) -> set[str]:
+    """Return accounts that currently index any of the exact remote asset ids."""
+    normalized_ids = sorted({
+        str(asset_id).strip()
+        for asset_id in (asset_ids or set())
+        if str(asset_id).strip()
+    })
+    if not normalized_ids:
+        return set()
+    path = Path(root) / STATE_DIRECTORY / DATABASE_FILENAME
+    if not path.is_file():
+        return set()
+    try:
+        with _lock_for(root):
+            with _connection(root) as connection:
+                placeholders = ",".join("?" for _ in normalized_ids)
+                rows = connection.execute(
+                    f"""
+                    SELECT DISTINCT account_key
+                    FROM imagine_remote_assets
+                    WHERE asset_id IN ({placeholders})
+                    """,
+                    normalized_ids,
+                ).fetchall()
+    except sqlite3.Error:
+        return set()
+    return {str(row["account_key"]).strip().lower() for row in rows if str(row["account_key"] or "").strip()}
+
+
 def query_imagine_discover_posts(
     root: Path,
     account_key: str,
@@ -1117,12 +1176,18 @@ def upsert_imagine_remote_posts(
             for asset_id in (record.get("asset_ids") or [])
             if str(asset_id).strip()
         })
+        legacy_post_keys = sorted({
+            str(value).strip()
+            for value in (record.get("legacy_post_keys") or [])
+            if str(value or "").strip() and str(value).strip() != post_key
+        })
         normalized_records.append((
             post_key,
             str(record.get("created_at") or post.get("created_at") or ""),
             str(record.get("activity_at") or post_activity_at(post)),
             post,
             asset_ids,
+            legacy_post_keys,
         ))
     if not normalized_account or not normalized_records:
         return 0
@@ -1130,31 +1195,15 @@ def upsert_imagine_remote_posts(
     with _lock_for(root):
         with _connection(root, write=True) as connection:
             _create_schema(connection)
-            for post_key, created_at, activity_at, post, asset_ids in normalized_records:
-                conflicting_keys: set[str] = set()
-                if asset_ids:
-                    placeholders = ",".join("?" for _ in asset_ids)
-                    rows = connection.execute(
-                        f"""
-                        SELECT DISTINCT post_key
-                        FROM imagine_remote_assets
-                        WHERE account_key = ? AND asset_id IN ({placeholders})
-                        """,
-                        (normalized_account, *asset_ids),
-                    ).fetchall()
-                    conflicting_keys = {
-                        str(row["post_key"])
-                        for row in rows
-                        if str(row["post_key"]) != post_key
-                    }
-                if conflicting_keys:
-                    placeholders = ",".join("?" for _ in conflicting_keys)
+            for post_key, created_at, activity_at, post, asset_ids, legacy_post_keys in normalized_records:
+                if legacy_post_keys:
+                    placeholders = ",".join("?" for _ in legacy_post_keys)
                     connection.execute(
                         f"""
                         DELETE FROM imagine_remote_posts
                         WHERE account_key = ? AND post_key IN ({placeholders})
                         """,
-                        (normalized_account, *sorted(conflicting_keys)),
+                        (normalized_account, *legacy_post_keys),
                     )
                 connection.execute(
                     """
@@ -1194,8 +1243,7 @@ def upsert_imagine_remote_posts(
                         """
                         INSERT INTO imagine_remote_assets(account_key, asset_id, post_key)
                         VALUES(?, ?, ?)
-                        ON CONFLICT(account_key, asset_id) DO UPDATE SET
-                            post_key = excluded.post_key
+                        ON CONFLICT(account_key, asset_id, post_key) DO NOTHING
                         """,
                         [
                             (normalized_account, asset_id, post_key)
@@ -1326,7 +1374,7 @@ def prune_imagine_remote_assets(
                     for item in items
                     if isinstance(item, dict) and item_asset_id(item) not in target_ids
                 ]
-                if not isinstance(post, dict) or not items or len(remaining) == len(items):
+                if not isinstance(post, dict) or not items:
                     connection.execute(
                         """
                         DELETE FROM imagine_remote_posts
@@ -1335,6 +1383,17 @@ def prune_imagine_remote_assets(
                         (normalized_account, post_key),
                     )
                     changed_posts += 1
+                    continue
+                if len(remaining) == len(items):
+                    connection.execute(
+                        f"""
+                        DELETE FROM imagine_remote_assets
+                        WHERE account_key = ?
+                          AND post_key = ?
+                          AND asset_id IN ({placeholders})
+                        """,
+                        (normalized_account, post_key, *normalized_ids),
+                    )
                     continue
                 if not remaining:
                     connection.execute(

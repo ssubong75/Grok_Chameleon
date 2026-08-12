@@ -4,9 +4,15 @@
   function cardPostByPath(path) {
     const target = String(path || "");
     if (!target) return null;
-    return library_state.posts.find((post) => post.folder_path === target)
+    return library_state.posts.find((post) => (
+      typeof libraryPostMatchesIdentity === "function" && libraryPostMatchesIdentity(post, target)
+    ))
+      || library_state.posts.find((post) => post.folder_path === target)
       || library_state.collections.flatMap((collection) => collection.posts || [])
-        .find((post) => post.folder_path === target)
+        .find((post) => (
+          (typeof libraryPostMatchesIdentity === "function" && libraryPostMatchesIdentity(post, target))
+          || post.folder_path === target
+        ))
       || null;
   }
 
@@ -71,7 +77,9 @@
       );
     }
     for (const card of document.querySelectorAll("[data-library-post-path]")) {
-      const selected = library_state.selectedItems?.has(card.dataset.libraryPostPath || "");
+      const selected = library_state.selectedItems?.has(
+        card.dataset.libraryPostIdentity || card.dataset.libraryPostPath || "",
+      );
       if (card.classList.contains("card") || card.classList.contains("collection_2nd_card")) {
         card.classList.toggle("selected", Boolean(selected));
       }
@@ -215,6 +223,7 @@
     }
     openMoveToCollectionDialog({
       postPaths: posts.map((post) => post.folder_path),
+      postObjects: posts,
     });
   }
 
@@ -350,8 +359,8 @@
 
 
   async function mergeSelectedCardItems() {
-    const selectedPaths = Array.from(library_state.selectedItems || [])
-      .map((path) => String(path || "").trim())
+    const selectedPaths = selectedCardPosts()
+      .map((post) => String(post?.folder_path || "").trim())
       .filter(Boolean);
     if (selectedPaths.length < 2) {
       showErrorPanel("Merge unavailable", "Select two or more cards to merge.");

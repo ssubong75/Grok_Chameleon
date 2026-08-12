@@ -446,6 +446,10 @@
     library_state.imagineDiscoverError = "";
     library_state.imagineDiscoverCursor = "";
     library_state.imagineDiscoverHasMore = false;
+    library_state.imagineLikedPosts = [];
+    library_state.imagineLikedLoaded = false;
+    library_state.imagineLikedLoading = false;
+    library_state.imagineLikedError = "";
     library_state.imagineUnsavedPosts = [];
     library_state.imagineUnsavedLoaded = false;
     library_state.imagineUnsavedLoading = false;
@@ -472,6 +476,7 @@
     }
     if (selectedRemoteImagine) {
       library_state.selectedPostPath = "";
+      library_state.selectedPostIdentity = "";
       library_state.selectedDetailItemId = "";
       if (screen_state.current_screen === "i_detail") {
         openScreen("i_main", screen_state.current_i_nav_btn || "i_imagine_nav_btn");

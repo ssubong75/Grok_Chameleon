@@ -11,6 +11,23 @@ function resolutionOptions(provider, mode) {
   return [];
 }
 
+function isBuildImageModel20(value) {
+  const selected = String(value || "").trim().toLowerCase();
+  return selected === "m 2.0" || selected === "m2.0" || selected === "grok-imagine-image-2.0";
+}
+
+function buildImage20OutputResolution(value) {
+  const match = String(value || "").trim().match(/^(1k|2k)\b/i);
+  return match ? match[1].toUpperCase() : "";
+}
+
+function buildImage20OutputQuality(value) {
+  const selected = String(value || "").trim().toLowerCase();
+  if (selected.endsWith(" low")) return "low";
+  if (selected.endsWith(" med")) return "medium";
+  return "";
+}
+
 function isVideoModel10(value) {
   return /\b1\.0\b/.test(String(value || ""));
 }
@@ -189,28 +206,44 @@ function renderComposerOptions() {
     const isBuildDetailImageEdit = composerIsBuildDetailImageEdit();
     const isImageToImage = isBuildDetailImageEdit || composerEffectiveImageAttachmentCount() > 0;
     const hideImagineImageToImageOptions = provider === "imagine" && isImageToImage;
-    // Build image edits always go out as grok-imagine-image-quality: the composer sends an
-    // empty image_model once a picture is attached, and image_model_from_option only picks
-    // grok-imagine-image on an explicit "Speed". Offering the choice implied it mattered.
-    const showImageModel = isImageToImage
+    const isBuildImage = provider === "build";
+    setControlVisible(composerControls.buildImageModel, isBuildImage);
+    if (isBuildImage) {
+      setCustomSelectOptions(
+        composerControls.buildImageModel,
+        buildImageModelOptions,
+        "M 2.0",
+        `${provider}:${mode}:build-image-model`,
+      );
+    }
+    const selectedBuildImageModel = selectedComposerControl(composerControls.buildImageModel);
+    const buildImage20 = isBuildImage && isBuildImageModel20(selectedBuildImageModel);
+    // M 1.5 retains the legacy Quality/Speed + 1K/2K controls. M 2.0 exposes its
+    // supported resolution/quality pairs in one output selector.
+    const showImageModel = buildImage20 || (isImageToImage
       ? false
-      : (provider === "build" || !hideImagineImageToImageOptions);
+      : (provider === "build" || !hideImagineImageToImageOptions));
     const imageAspectDefault = "Auto";
     const imageCountOptions = provider === "imagine"
       ? imagineT2iCountOptions
-      : buildT2iCountOptions;
-    const imageCountDefault = provider === "imagine" ? "4" : "5";
+      : (buildImage20 ? buildImage20CountOptions : buildT2iCountOptions);
+    const imageCountDefault = provider === "imagine" ? "4" : (buildImage20 ? "2" : "5");
     setControlVisible(composerControls.aspect, !hideImagineImageToImageOptions);
     setControlVisible(composerControls.imageModel, showImageModel);
-    setControlVisible(composerControls.resolution, provider === "build");
+    setControlVisible(composerControls.resolution, isBuildImage && !buildImage20);
     setControlVisible(composerControls.count, !isImageToImage && !hideImagineImageToImageOptions);
     if (!hideImagineImageToImageOptions) {
       setCustomSelectOptions(composerControls.aspect, aspectOptions(provider, mode), imageAspectDefault, `${provider}:${mode}:aspect`);
     }
     if (showImageModel) {
-      setCustomSelectOptions(composerControls.imageModel, ["Quality", "Speed"], "Quality", `${provider}:${mode}:image-model`);
+      setCustomSelectOptions(
+        composerControls.imageModel,
+        buildImage20 ? buildImage20OutputOptions : ["Quality", "Speed"],
+        buildImage20 ? "1K Low" : "Quality",
+        `${provider}:${mode}:image-model:${buildImage20 ? "m2" : "legacy"}`,
+      );
     }
-    if (provider === "build") {
+    if (isBuildImage && !buildImage20) {
       setCustomSelectOptions(composerControls.resolution, resolutionOptions(provider, mode), "1K", `${provider}:${mode}:resolution`);
     }
     if (!isImageToImage && !hideImagineImageToImageOptions) {
@@ -299,11 +332,23 @@ function composerRequestOptions() {
   const isBuildDetailImageEdit = composerIsBuildDetailImageEdit();
   const isImageToImage = composerState.mode === "image" && (isBuildDetailImageEdit || composerEffectiveImageAttachmentCount() > 0);
   const isImagineImageToImage = composerState.provider === "imagine" && isImageToImage;
+  const selectedBuildImageModel = selectedComposerControl(composerControls.buildImageModel);
+  const buildImage20 = composerState.provider === "build"
+    && composerState.mode === "image"
+    && isBuildImageModel20(selectedBuildImageModel);
+  const selectedImageOutput = selectedComposerControl(composerControls.imageModel);
   const options = {
     duration: selectedComposerControl(composerControls.duration),
     aspect_ratio: isImagineImageToImage ? "" : composerAspectOption(selectedComposerControl(composerControls.aspect)),
-    image_model: isImagineImageToImage ? "" : selectedComposerControl(composerControls.imageModel),
-    resolution: isImagineImageToImage ? "" : composerResolutionOption(selectedComposerControl(composerControls.resolution)),
+    image_model: isImagineImageToImage
+      ? ""
+      : (buildImage20 ? "grok-imagine-image-2.0" : selectedImageOutput),
+    resolution: isImagineImageToImage
+      ? ""
+      : (buildImage20
+        ? buildImage20OutputResolution(selectedImageOutput)
+        : composerResolutionOption(selectedComposerControl(composerControls.resolution))),
+    quality: buildImage20 ? buildImage20OutputQuality(selectedImageOutput) : "",
     count: isImageToImage ? "1" : selectedComposerControl(composerControls.count),
   };
   if (composerState.mode === "video" && composerState.provider === "build") {

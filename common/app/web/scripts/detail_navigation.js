@@ -3,9 +3,11 @@ function uniquePostsByPath(posts) {
   const seen = new Set();
   const result = [];
   for (const post of posts || []) {
-    const path = post?.folder_path || "";
-    if (!path || seen.has(path) || !post?.items?.length) continue;
-    seen.add(path);
+    const identity = typeof libraryPostStableIdentity === "function"
+      ? libraryPostStableIdentity(post)
+      : (post?.folder_path || "");
+    if (!identity || seen.has(identity) || !post?.items?.length) continue;
+    seen.add(identity);
     result.push(post);
   }
   return result;
@@ -85,6 +87,12 @@ function detailPostSequence(detailType = detailTypeForScreen()) {
 }
 
 function detailPostIndex(sequence, path = library_state.selectedPostPath) {
+  if (library_state.selectedPostIdentity && typeof libraryPostMatchesIdentity === "function") {
+    const identityIndex = sequence.findIndex((post) => (
+      libraryPostMatchesIdentity(post, library_state.selectedPostIdentity)
+    ));
+    if (identityIndex >= 0) return identityIndex;
+  }
   return sequence.findIndex((post) => post.folder_path === path);
 }
 
@@ -156,7 +164,7 @@ async function navigateDetailPost(offset) {
     library_state.selectedCollectionPostPath = nextPost.folder_path;
     renderSecondMain(nextPost);
   }
-  selectLibraryPost(nextPost.folder_path);
+  selectLibraryPost(nextPost);
   openScreen(detailScreenForType(nextDetailType), target.activeButtonId || "", {
     replaceHistory: true,
   });

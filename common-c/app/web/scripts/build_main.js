@@ -394,7 +394,10 @@
     const job = (library_state.jobs || []).find((candidate) => String(candidate.id || "") === String(jobId || ""));
     if (!job) return;
     library_state.selectedJobId = String(job.id);
-    if (!options.keepDetailPost) library_state.selectedPostPath = "";
+    if (!options.keepDetailPost) {
+      library_state.selectedPostPath = "";
+      library_state.selectedPostIdentity = "";
+    }
     const focusedSlot = options.slotIndex
       || (options.focusJobThumb ? (visibleGenerationJobSlots(job)[0] || 1) : 0);
     if (focusedSlot) library_state.selectedDetailItemId = `job-${job.id}-${focusedSlot}`;
@@ -1019,7 +1022,12 @@
     article.append(buildJobActionButton(job, slotIndex));
 
     const activate = () => {
-      if (basePost?.folder_path) library_state.selectedPostPath = basePost.folder_path;
+      if (basePost?.folder_path) {
+        library_state.selectedPostPath = basePost.folder_path;
+        library_state.selectedPostIdentity = typeof libraryPostStableIdentity === "function"
+          ? libraryPostStableIdentity(basePost)
+          : "";
+      }
       if (backTargetOverride && provider === "build") {
         const storedBackTarget = { ...backTargetOverride };
         if (typeof captureLibraryCardListScroll === "function") {

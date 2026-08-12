@@ -113,10 +113,12 @@ function mergeImagineLinkPosts(posts) {
   if (!normalized.length) return [];
   const merged = new Map();
   for (const post of library_state.imagineRemotePosts || []) {
-    if (post?.folder_path) merged.set(post.folder_path, post);
+    const key = imagineSavedCardPathKey(post);
+    if (key) merged.set(key, post);
   }
   for (const post of normalized) {
-    if (post?.folder_path) merged.set(post.folder_path, post);
+    const key = imagineSavedCardPathKey(post);
+    if (key) merged.set(key, post);
   }
   library_state.imagineRemotePosts = Array.from(merged.values());
   syncImagineRemotePostsIntoLibrary();
@@ -159,7 +161,7 @@ async function openImagineLinkPost(value) {
       screenId: "i_main",
       activeButtonId: screen_state.current_i_nav_btn || "i_imagine_nav_btn",
     };
-    selectLibraryPost(targetPost.folder_path);
+    selectLibraryPost(targetPost);
     if (targetItem) library_state.selectedDetailItemId = mediaItemKey(targetItem);
     openScreen("i_detail", screen_state.current_i_nav_btn || "i_imagine_nav_btn");
     setImagineLinkInputOpen(false);
@@ -190,6 +192,58 @@ function imaginePostIdKeysForPost(post) {
       representativeImagine.root_post_id,
     ]),
   ].map((value) => String(value || "").trim()).filter(Boolean);
+}
+
+function imagineSavedMetadataValue(source, key) {
+  const metadata = source?.metadata && typeof source.metadata === "object" ? source.metadata : {};
+  const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
+  return source?.[key] || metadata[key] || imagine[key] || "";
+}
+
+// Saved, a link/local-heart reference, and an owned clone can legitimately point at
+// the same Grok asset. They are separate top-level cards, so carry their provenance
+// into every card-level identity used by the client.
+function imagineSavedPostProvenance(post) {
+  const explicit = String(imagineSavedMetadataValue(post, "saved_provenance") || "").trim().toLowerCase();
+  if (["normal-saved", "plain-liked", "cloned-liked"].includes(explicit)) return explicit;
+  const remoteView = String(imagineSavedMetadataValue(post, "remote_view") || "").toLowerCase();
+  const structurallyReferenced = Boolean(
+    imagineSavedMetadataValue(post, "link_source")
+    || imagineSavedMetadataValue(post, "local_heart")
+    || imagineSavedMetadataValue(post, "external_reference")
+    || String(post?.mode || "").toLowerCase() === "link"
+    || remoteView === "link"
+  );
+  const topLevelCloned = Boolean(
+    imagineSavedMetadataValue(post, "cloned_copy")
+    || imagineSavedMetadataValue(post, "cloned_from_asset_id")
+    || imagineSavedMetadataValue(post, "official_clone_asset_id")
+    || imagineSavedMetadataValue(post, "official_clone_source_asset_id")
+  );
+  const itemCloned = structurallyReferenced && (post?.items || []).some((item) => Boolean(
+    imagineSavedMetadataValue(item, "cloned_copy")
+    || imagineSavedMetadataValue(item, "cloned_from_asset_id")
+    || imagineSavedMetadataValue(item, "official_clone_asset_id")
+    || imagineSavedMetadataValue(item, "official_clone_source_asset_id")
+  ));
+  if (topLevelCloned || itemCloned) return "cloned-liked";
+  return structurallyReferenced ? "plain-liked" : "normal-saved";
+}
+
+function imagineSavedScopedIdentity(post, value) {
+  const identity = String(value || "").trim();
+  return identity ? `${imagineSavedPostProvenance(post)}\u001f${identity}` : "";
+}
+
+function imagineSavedCardAnchor(post) {
+  const metadata = post?.metadata && typeof post.metadata === "object" ? post.metadata : {};
+  const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
+  return String(metadata.saved_anchor_id || imagine.saved_anchor_id || "").trim();
+}
+
+function imagineSavedCardPathKey(post) {
+  const anchor = imagineSavedCardAnchor(post);
+  return imagineSavedScopedIdentity(post, anchor || post?.folder_path);
 }
 
 function rememberHiddenImaginePost(post) {
@@ -276,13 +330,15 @@ function isSessionImagineT2iPost(post) {
 function mergeImagineRemotePosts(existingPosts, nextPosts) {
   const merged = new Map();
   for (const post of existingPosts || []) {
-    if (post?.folder_path) merged.set(post.folder_path, post);
+    const key = imagineSavedCardPathKey(post);
+    if (key) merged.set(key, post);
   }
   for (const post of nextPosts || []) {
     if (!post?.folder_path) continue;
-    const existing = merged.get(post.folder_path);
+    const key = imagineSavedCardPathKey(post);
+    const existing = merged.get(key);
     if (!existing) {
-      merged.set(post.folder_path, post);
+      merged.set(key, post);
       continue;
     }
     const existingFlat = existing?.metadata?.flat_only === true;
@@ -298,7 +354,7 @@ function mergeImagineRemotePosts(existingPosts, nextPosts) {
       for (const key of keys) known.add(key);
     }
     const representative = representativeItem(items, { ...primary, items }) || items[0];
-    merged.set(post.folder_path, normalizeServerPost({
+    merged.set(key, normalizeServerPost({
       ...primary,
       items,
       representative: representative?.file || representative?.url || representative?.item_id || "",
@@ -317,7 +373,7 @@ function imagineSavedPostMatchIndex(posts) {
   const byKey = new Map();
   for (let index = 0; index < posts.length; index += 1) {
     const post = posts[index];
-    const path = String(post?.folder_path || "");
+    const path = imagineSavedCardPathKey(post);
     if (path) {
       if (!byPath.has(path)) byPath.set(path, []);
       byPath.get(path).push(index);
@@ -331,7 +387,7 @@ function imagineSavedPostMatchIndex(posts) {
 }
 
 function takeImagineSavedPostMatch(index, post, matchedIndexes, acceptKeyMatch = null) {
-  const path = String(post?.folder_path || "");
+  const path = imagineSavedCardPathKey(post);
   for (const candidateIndex of index.byPath.get(path) || []) {
     if (!matchedIndexes.has(candidateIndex)) return candidateIndex;
   }
@@ -478,7 +534,11 @@ function mergeImagineRefreshedPosts(existingPosts, refreshedPosts) {
   ], comparePostsByRecentActivity);
 }
 
-function mergeImagineSyncedPosts(existingPosts, refreshedPosts, { replacesList = false } = {}) {
+function mergeImagineSyncedPosts(
+  existingPosts,
+  refreshedPosts,
+  { replacesList = false, preserveMatchedAnchors = !replacesList } = {},
+) {
   const existing = reconcileImagineSavedDisplayPosts(existingPosts || []);
   const refreshed = reconcileImagineSavedDisplayPosts(refreshedPosts || []);
   if (!existing.length) return sortPostsIfNeeded([...refreshed], comparePostsByRecentActivity);
@@ -506,8 +566,21 @@ function mergeImagineSyncedPosts(existingPosts, refreshedPosts, { replacesList =
     matchedExistingIndexes.add(matchedIndex);
     refreshedForExistingIndex.set(
       matchedIndex,
-      mergeImaginePreservedGeneratedRelations(existing[matchedIndex], post),
+      preserveMatchedAnchors
+        ? mergeImagineIncrementalSavedPost(existing[matchedIndex], post)
+        : mergeImaginePreservedGeneratedRelations(existing[matchedIndex], post),
     );
+  }
+
+  // A paged response is only a fragment of Saved. Keep the existing card as the
+  // anchor when that fragment identifies one of its children, otherwise the card's
+  // folder_path changes to the child id for one render and the virtual list flashes.
+  // Reconciliation below can still fold newly returned children into that anchor.
+  if (!replacesList) {
+    return sortPostsIfNeeded([
+      ...existing.map((post, index) => refreshedForExistingIndex.get(index) || post),
+      ...newPosts,
+    ], comparePostsByRecentActivity);
   }
 
   // An unmatched card was not in this response. On a reload that starts from an empty cursor
@@ -540,6 +613,118 @@ function mergeImagineSyncedPosts(existingPosts, refreshedPosts, { replacesList =
       ))
       .filter(Boolean),
   ], comparePostsByRecentActivity);
+}
+
+function mergeImagineIncrementalSavedPost(existingPost, refreshedPost) {
+  if (!existingPost) return refreshedPost;
+  if (!refreshedPost) return existingPost;
+
+  const stabilized = mergeImaginePreservedGeneratedRelations(existingPost, refreshedPost);
+  const existingPostMetadata = existingPost.metadata && typeof existingPost.metadata === "object"
+    ? existingPost.metadata
+    : {};
+  const refreshedPostMetadata = stabilized.metadata && typeof stabilized.metadata === "object"
+    ? stabilized.metadata
+    : {};
+  const existingFlat = existingPostMetadata.flat_only === true;
+  const refreshedFlat = refreshedPostMetadata.flat_only === true;
+  const preferRefreshedStructure = existingFlat && !refreshedFlat;
+  const basePost = preferRefreshedStructure ? stabilized : existingPost;
+  const items = [...(existingPost.items || [])];
+  const itemIndexByKey = new Map();
+  const indexItem = (item, index) => {
+    for (const key of imaginePostIdKeysForItem(item)) {
+      if (!itemIndexByKey.has(key)) itemIndexByKey.set(key, index);
+    }
+  };
+  items.forEach(indexItem);
+
+  for (const refreshedItem of stabilized.items || []) {
+    const matchedIndex = imaginePostIdKeysForItem(refreshedItem)
+      .map((key) => itemIndexByKey.get(key))
+      .find((index) => Number.isInteger(index));
+    if (!Number.isInteger(matchedIndex)) {
+      const nextIndex = items.length;
+      items.push(refreshedItem);
+      indexItem(refreshedItem, nextIndex);
+      continue;
+    }
+    const existingItem = items[matchedIndex] || {};
+    const existingMetadata = existingItem.metadata && typeof existingItem.metadata === "object"
+      ? existingItem.metadata
+      : {};
+    const refreshedMetadata = refreshedItem.metadata && typeof refreshedItem.metadata === "object"
+      ? refreshedItem.metadata
+      : {};
+    const existingImagineMetadata = existingMetadata.imagine && typeof existingMetadata.imagine === "object"
+      ? existingMetadata.imagine
+      : {};
+    const refreshedImagineMetadata = refreshedMetadata.imagine && typeof refreshedMetadata.imagine === "object"
+      ? refreshedMetadata.imagine
+      : {};
+    items[matchedIndex] = {
+      ...existingItem,
+      ...refreshedItem,
+      created_at: existingItem.created_at || refreshedItem.created_at || "",
+      metadata: {
+        ...existingMetadata,
+        ...refreshedMetadata,
+        imagine: {
+          ...existingImagineMetadata,
+          ...refreshedImagineMetadata,
+          ...(existingImagineMetadata.app_generated_relation === true
+            ? { app_generated_relation: true }
+            : {}),
+        },
+        ...(existingMetadata.app_generated_relation === true
+          ? { app_generated_relation: true }
+          : {}),
+      },
+    };
+    indexItem(items[matchedIndex], matchedIndex);
+  }
+
+  const representative = representativeItem(items, { ...existingPost, items }) || items[0];
+  const lowPriorityMetadata = preferRefreshedStructure ? existingPostMetadata : refreshedPostMetadata;
+  const highPriorityMetadata = preferRefreshedStructure ? refreshedPostMetadata : existingPostMetadata;
+  const lowPriorityImagine = lowPriorityMetadata.imagine && typeof lowPriorityMetadata.imagine === "object"
+    ? lowPriorityMetadata.imagine
+    : {};
+  const highPriorityImagine = highPriorityMetadata.imagine && typeof highPriorityMetadata.imagine === "object"
+    ? highPriorityMetadata.imagine
+    : {};
+  return normalizeServerPost({
+    ...basePost,
+    folder_path: existingPost.folder_path || basePost.folder_path || "",
+    post_id: existingPost.post_id || basePost.post_id || "",
+    created_at: existingPost.created_at || basePost.created_at || "",
+    items,
+    representative: representative?.file || representative?.url || representative?.item_id || "",
+    representative_item: representative,
+    metadata: {
+      ...lowPriorityMetadata,
+      ...highPriorityMetadata,
+      imagine: {
+        ...lowPriorityImagine,
+        ...highPriorityImagine,
+        ...(lowPriorityImagine.app_generated_relation === true
+          ? { app_generated_relation: true }
+          : {}),
+      },
+      ...((lowPriorityMetadata.app_generated_relation === true
+        || lowPriorityMetadata.app_preserved_generated_relations === true)
+        ? {
+          ...(lowPriorityMetadata.app_generated_relation === true
+            ? { app_generated_relation: true }
+            : {}),
+          ...(lowPriorityMetadata.app_preserved_generated_relations === true
+            ? { app_preserved_generated_relations: true }
+            : {}),
+        }
+        : {}),
+      flat_only: existingFlat && refreshedFlat,
+    },
+  });
 }
 
 function imagineSavedItemAssetId(item) {
@@ -648,6 +833,8 @@ function imagineUploadOriginBundleCard(post, items) {
       grouped: true,
       t2i_group_container: false,
       upload_origin_bundle: true,
+      saved_anchor_id: conversationId,
+      saved_provenance: imagineSavedPostProvenance(post),
       upload_source_asset_id: String(
         metadata.upload_source_asset_id
         || imagineSavedItemAssetId(sourceItem)
@@ -760,6 +947,8 @@ function imagineSavedLineageCards(post) {
         t2i_group_container: false,
         lineage_root_asset_id: rootId,
         lineage_source_post_id: String(post.post_id || ""),
+        saved_anchor_id: rootId,
+        saved_provenance: imagineSavedPostProvenance(post),
       },
     });
   });
@@ -774,45 +963,59 @@ function mergeImagineSavedLineageCards(cards) {
   if (active.length < 2) return active;
 
   const rootIds = [];
+  const provenances = [];
+  const lineageScopes = [];
   const rootOwnerById = new Map();
   active.forEach((card, index) => {
+    const provenance = imagineSavedPostProvenance(card);
+    const savedAnchor = imagineSavedCardAnchor(card);
+    const lineageScope = `${provenance}\u001f${savedAnchor ? `anchor:${savedAnchor}` : "legacy"}`;
     const rootId = String(
       card?.metadata?.lineage_root_asset_id
       || card?.post_id
       || "",
     ).trim();
+    provenances.push(provenance);
+    lineageScopes.push(lineageScope);
     rootIds.push(rootId);
-    if (rootId && !rootOwnerById.has(rootId)) rootOwnerById.set(rootId, index);
+    const scopedRootId = rootId ? `${lineageScope}\u001f${rootId}` : "";
+    if (scopedRootId && !rootOwnerById.has(scopedRootId)) rootOwnerById.set(scopedRootId, index);
   });
 
   const ownerByItemId = new Map(rootOwnerById);
   const sourceOwnerById = new Map();
   const uploadBundleOwnerByItemId = new Map();
   active.forEach((card, index) => {
+    const lineageScope = lineageScopes[index];
     for (const item of card.items || []) {
       const itemId = imagineSavedItemAssetId(item);
-      if (card?.metadata?.upload_origin_bundle === true && itemId && !uploadBundleOwnerByItemId.has(itemId)) {
-        uploadBundleOwnerByItemId.set(itemId, index);
+      const scopedItemId = itemId ? `${lineageScope}\u001f${itemId}` : "";
+      if (card?.metadata?.upload_origin_bundle === true && scopedItemId && !uploadBundleOwnerByItemId.has(scopedItemId)) {
+        uploadBundleOwnerByItemId.set(scopedItemId, index);
       }
       if (imagineSavedItemIsSource(item)) {
-        if (itemId && !sourceOwnerById.has(itemId)) sourceOwnerById.set(itemId, index);
+        if (scopedItemId && !sourceOwnerById.has(scopedItemId)) sourceOwnerById.set(scopedItemId, index);
         continue;
       }
-      if (itemId && !ownerByItemId.has(itemId)) ownerByItemId.set(itemId, index);
+      if (scopedItemId && !ownerByItemId.has(scopedItemId)) ownerByItemId.set(scopedItemId, index);
     }
   });
 
   const parentIndexes = active.map((_, index) => index);
   active.forEach((candidate, index) => {
+    const lineageScope = lineageScopes[index];
     const rootId = rootIds[index];
-    const duplicateOwner = rootId ? rootOwnerById.get(rootId) : undefined;
+    const duplicateOwner = rootId ? rootOwnerById.get(`${lineageScope}\u001f${rootId}`) : undefined;
     if (duplicateOwner !== undefined && duplicateOwner !== index) {
       parentIndexes[index] = duplicateOwner;
       return;
     }
     if (candidate?.metadata?.upload_origin_bundle !== true) {
       const uploadBundleOwner = (candidate.items || [])
-        .map((item) => uploadBundleOwnerByItemId.get(imagineSavedItemAssetId(item)))
+        .map((item) => {
+          const itemId = imagineSavedItemAssetId(item);
+          return itemId ? uploadBundleOwnerByItemId.get(`${lineageScope}\u001f${itemId}`) : undefined;
+        })
         .find((owner) => owner !== undefined);
       if (uploadBundleOwner !== undefined && uploadBundleOwner !== index) {
         parentIndexes[index] = uploadBundleOwner;
@@ -822,7 +1025,8 @@ function mergeImagineSavedLineageCards(cards) {
     const rootItem = (candidate.items || [])
       .find((item) => imagineSavedItemAssetId(item) === rootId);
     const parentId = imagineSavedItemSourceId(rootItem);
-    const parentOwner = ownerByItemId.get(parentId) ?? sourceOwnerById.get(parentId);
+    const scopedParentId = parentId ? `${lineageScope}\u001f${parentId}` : "";
+    const parentOwner = ownerByItemId.get(scopedParentId) ?? sourceOwnerById.get(scopedParentId);
     if (parentId && parentOwner !== undefined && parentOwner !== index) {
       parentIndexes[index] = parentOwner;
       return;
@@ -834,8 +1038,9 @@ function mergeImagineSavedLineageCards(cards) {
     // merge_imagine_saved_lineage_cards on the server, which reruns the same grouping.
     if (parentId && parentOwner === undefined) {
       const generationRootId = String(candidate?.metadata?.root_generation_asset_id || "").trim();
-      const generationOwner = ownerByItemId.get(generationRootId)
-        ?? sourceOwnerById.get(generationRootId);
+      const scopedGenerationRootId = generationRootId ? `${lineageScope}\u001f${generationRootId}` : "";
+      const generationOwner = ownerByItemId.get(scopedGenerationRootId)
+        ?? sourceOwnerById.get(scopedGenerationRootId);
       if (generationRootId && generationOwner !== undefined && generationOwner !== index) {
         parentIndexes[index] = generationOwner;
       }
@@ -960,6 +1165,30 @@ function restoreImaginePendingSavedPosts() {
 }
 
 function imagineSavedPostMatchKeys(post) {
+  const metadata = post?.metadata && typeof post.metadata === "object" ? post.metadata : {};
+  const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
+  const provenance = imagineSavedPostProvenance(post);
+  const savedAnchor = imagineSavedCardAnchor(post);
+  if (savedAnchor) return new Set([imagineSavedScopedIdentity(post, savedAnchor)]);
+  const exactAnchors = provenance === "cloned-liked"
+    ? [post?.folder_path, metadata.link_post_id, imagine.link_post_id]
+    : [post?.folder_path, post?.post_id, metadata.imagine_root_post_id];
+  const compatibleAnchors = provenance === "cloned-liked" ? [] : [
+    metadata.local_saved_group_id,
+    metadata.conversation_id,
+    imagine.conversation_id,
+    metadata.link_post_id,
+    imagine.link_post_id,
+  ];
+  const keys = new Set([...exactAnchors, ...compatibleAnchors]
+    .map((value) => imagineSavedScopedIdentity(post, value))
+    .filter(Boolean));
+  return keys;
+}
+
+// Pending save confirmation is the one place where an item URL may be used as a
+// short-lived acknowledgement. It must not leak into top-level card matching.
+function imaginePendingSavedConfirmationKeys(post) {
   const keys = new Set(imaginePostIdKeysForPost(post).map((value) => String(value || "").trim()).filter(Boolean));
   for (const item of post?.items || []) {
     for (const key of imaginePostIdKeysForItem(item)) keys.add(String(key || "").trim());
@@ -983,22 +1212,35 @@ function reconcileImaginePendingSavedPosts(remotePosts, memoryPending = []) {
   if (!pendingByPath.size) return remotePosts;
   const remoteWithKeys = (remotePosts || []).map((post) => ({
     post,
-    keys: imagineSavedPostMatchKeys(post),
+    provenance: imagineSavedPostProvenance(post),
+    keys: imaginePendingSavedConfirmationKeys(post),
   }));
   const unresolved = [];
   for (const pending of pendingByPath.values()) {
     const expected = imaginePendingSavedExpectedKeys(pending);
+    const pendingProvenance = imagineSavedPostProvenance(pending);
     const confirmed = expected.length > 0 && expected.every((candidateKeys) => (
-      Array.from(candidateKeys).some((key) => remoteWithKeys.some((entry) => entry.keys.has(key)))
+      Array.from(candidateKeys).some((key) => remoteWithKeys.some((entry) => (
+        entry.provenance === pendingProvenance && entry.keys.has(key)
+      )))
     ));
     if (!confirmed) unresolved.push(pending);
   }
   if (!unresolved.length) return remotePosts;
-  const unresolvedKeys = new Set(unresolved.flatMap((post) => (
-    imaginePendingSavedExpectedKeys(post).flatMap((keys) => Array.from(keys))
-  )));
+  const unresolvedKeysByProvenance = new Map();
+  for (const post of unresolved) {
+    const provenance = imagineSavedPostProvenance(post);
+    if (!unresolvedKeysByProvenance.has(provenance)) unresolvedKeysByProvenance.set(provenance, new Set());
+    const keys = unresolvedKeysByProvenance.get(provenance);
+    for (const expected of imaginePendingSavedExpectedKeys(post)) {
+      for (const key of expected) keys.add(key);
+    }
+  }
   const withoutPartialDuplicates = remoteWithKeys
-    .filter((entry) => !Array.from(entry.keys).some((key) => unresolvedKeys.has(key)))
+    .filter((entry) => {
+      const unresolvedKeys = unresolvedKeysByProvenance.get(entry.provenance);
+      return !unresolvedKeys || !Array.from(entry.keys).some((key) => unresolvedKeys.has(key));
+    })
     .map((entry) => entry.post);
   return [...unresolved, ...withoutPartialDuplicates];
 }
@@ -1158,10 +1400,9 @@ async function syncImagineSavedCards(
       sync_token: library_state.imagineRemoteSyncToken,
     }, { signal: context.controller.signal });
     if (!imagineSavedResponseMatches(context, data)) return;
-    // A request that starts from an empty cursor answers with the whole first page, so
-    // anything the list still holds from that range is gone upstream. Only then may the
-    // merge drop it; an append is one page of many and says nothing about the rest.
-    applyImagineSavedRemotePage(data, { updatePosts, replacesList: !append });
+    // A refresh response is always an incremental page. Only a separately assembled,
+    // explicitly complete snapshot may remove unmatched cached cards.
+    applyImagineSavedRemotePage(data, { updatePosts, replacesList: false });
     library_state.imagineRemoteError = "";
   } catch (error) {
     if (!imagineSavedRequestCancelled(error, context) && !library_state.imagineRemotePosts.length) {
@@ -1426,7 +1667,12 @@ async function loadImagineDiscoverCacheCards() {
     });
     if (!imagineAccountResponseIsCurrent(accountId, requestEpoch, data)) return;
     const cachedPosts = normalizeImagineDiscoverPosts(Array.isArray(data.posts) ? data.posts : []);
-    if (cachedPosts.length) library_state.imagineDiscoverPosts = cachedPosts;
+    if (cachedPosts.length) {
+      library_state.imagineDiscoverPosts = mergeImagineDiscoverRefreshedPosts(
+        library_state.imagineDiscoverPosts || [],
+        cachedPosts,
+      );
+    }
     library_state.imagineDiscoverCursor = String(data.next_cursor || "");
     library_state.imagineDiscoverHasMore = Boolean(data.has_more && library_state.imagineDiscoverCursor);
   } catch (_) {
@@ -1591,26 +1837,39 @@ async function loadImagineLikedCards({ force = false } = {}) {
   library_state.imagineLikedLoading = true;
   library_state.imagineLikedError = "";
   renderImagineSourceCards();
-  // Every card here costs two round trips to grok.com, so the view stayed empty for seconds
-  // after the button. Paint what was stored last time first, the way the saved list does,
-  // and let the fetch below replace it.
-  try {
-    const cached = await qApi("/api/imagine/liked/cache", { account_id: accountId, limit: 200 });
-    if (imagineAccountResponseIsCurrent(accountId, requestEpoch, cached)) {
-      const cachedPosts = (Array.isArray(cached?.posts) ? cached.posts : []).map(normalizeServerPost);
-      if (cachedPosts.length) {
-        library_state.imagineLikedPosts = cachedPosts;
-        syncImagineRemotePostsIntoLibrary();
-        renderImagineSourceCards();
+  // Every card here costs multiple round trips to grok.com. Paint the account cache only
+  // when memory has no cards, then keep that stable view while the live page revalidates.
+  if (!(library_state.imagineLikedPosts || []).length) {
+    try {
+      const cached = await qApi("/api/imagine/liked/cache", { account_id: accountId, limit: 5000 });
+      if (imagineAccountResponseIsCurrent(accountId, requestEpoch, cached)) {
+        const cachedPosts = (Array.isArray(cached?.posts) ? cached.posts : []).map(normalizeServerPost);
+        if (cachedPosts.length) {
+          library_state.imagineLikedPosts = mergeImagineSyncedPosts(
+            library_state.imagineLikedPosts || [],
+            cachedPosts,
+            { replacesList: false, preserveMatchedAnchors: true },
+          );
+          syncImagineRemotePostsIntoLibrary();
+          renderImagineSourceCards();
+        }
       }
+    } catch (error) {
+      console.warn(error);
     }
-  } catch (error) {
-    console.warn(error);
   }
   try {
     const data = await qApi("/api/imagine/liked", { account_id: accountId, limit: 100 });
     if (!imagineAccountResponseIsCurrent(accountId, requestEpoch, data)) return;
-    library_state.imagineLikedPosts = (Array.isArray(data.posts) ? data.posts : []).map(normalizeServerPost);
+    const livePosts = (Array.isArray(data.posts) ? data.posts : []).map(normalizeServerPost);
+    library_state.imagineLikedPosts = mergeImagineSyncedPosts(
+      library_state.imagineLikedPosts || [],
+      livePosts,
+      {
+        replacesList: data.complete === true,
+        preserveMatchedAnchors: true,
+      },
+    );
     library_state.imagineLikedLoaded = true;
     syncImagineRemotePostsIntoLibrary();
   } catch (error) {
@@ -1712,6 +1971,7 @@ function renderImagineSourceCards() {
   const posts = filterPostsBySearch(imagineSourcePosts());
   const visibleJobs = imagineVisibleJobs();
   const t2iView = library_state.iMainView === imagineViewValue("T2I", "t2i");
+  const likedView = library_state.iMainView === imagineViewValue("LIKED", "liked");
   const mainJobEntries = visibleJobs.map((job) => ({
     key: mainGenerationActivityKey("job", job?.id),
     cards: (
@@ -1736,7 +1996,13 @@ function renderImagineSourceCards() {
   }));
   const list = document.querySelector(".i_card_list");
   if (list) {
-    if (library_state.imagineUploadLoading && !posts.length && uploadView) {
+    if (library_state.imagineLikedLoading && !posts.length && likedView) {
+      disableVirtualCardList(IMAGINE_VIRTUAL_LIST_KEY, list);
+      list.replaceChildren(emptyLibraryNode("Loading . . ."));
+    } else if (library_state.imagineLikedError && !posts.length && likedView) {
+      disableVirtualCardList(IMAGINE_VIRTUAL_LIST_KEY, list);
+      list.replaceChildren(emptyLibraryNode(library_state.imagineLikedError));
+    } else if (library_state.imagineUploadLoading && !posts.length && uploadView) {
       disableVirtualCardList(IMAGINE_VIRTUAL_LIST_KEY, list);
       list.replaceChildren(emptyLibraryNode("Loading . . ."));
     } else if (library_state.imagineUploadError && !posts.length && uploadView) {
@@ -1750,23 +2016,23 @@ function renderImagineSourceCards() {
       list.replaceChildren(emptyLibraryNode(library_state.imagineRemoteError));
     } else if (
       imagineSavedAccountNeedsLogin()
-      && (library_state.iMainView === imagineViewValue("IMAGINE", "imagine") || uploadView)
+      && (library_state.iMainView === imagineViewValue("IMAGINE", "imagine") || uploadView || likedView)
     ) {
       disableVirtualCardList(IMAGINE_VIRTUAL_LIST_KEY, list);
       list.replaceChildren(emptyLibraryNode("Imagine login expired. Register the account again."));
     } else if (!posts.length && !visibleJobs.length) {
       disableVirtualCardList(IMAGINE_VIRTUAL_LIST_KEY, list);
       list.replaceChildren(emptyLibraryNode(
-        t2iView ? "No T2I items." : (uploadView ? "No upload images." : ""),
+        t2iView ? "No T2I items." : (uploadView ? "No upload images." : (likedView ? "No liked items." : "")),
       ));
-    } else if (library_state.iMainView === imagineViewValue("IMAGINE", "imagine") || uploadView) {
+    } else if (library_state.iMainView === imagineViewValue("IMAGINE", "imagine") || uploadView || likedView) {
       renderVirtualCardList(IMAGINE_VIRTUAL_LIST_KEY, list, orderedMainGenerationCards(
         "imagine",
         [...mainJobEntries, ...mainPostEntries],
       ), {
-        loading: uploadView
-          ? library_state.imagineUploadLoading
-          : library_state.imagineRemoteLoading,
+        loading: likedView
+          ? library_state.imagineLikedLoading
+          : (uploadView ? library_state.imagineUploadLoading : library_state.imagineRemoteLoading),
         remoteMedia: true,
       });
     } else {
@@ -1791,9 +2057,7 @@ function renderImagineSourceCards() {
       : 1
   ), 0);
   if (count) count.textContent = `${posts.length + jobSlots} items`;
-  if (library_state.iMainView === imagineViewValue("IMAGINE", "imagine")) {
-    requestAnimationFrame(maybeLoadMoreImagineSavedCards);
-  } else if (uploadView) {
+  if (uploadView) {
     requestAnimationFrame(maybeLoadMoreImagineUploadCards);
   }
 }
@@ -1867,7 +2131,7 @@ function renderImagineDiscoverCards() {
         activeButtonId: "i_discover_nav_btn",
       })),
     ], {
-      loading: false,
+      loading: library_state.imagineDiscoverLoading,
       remoteMedia: true,
     });
   }

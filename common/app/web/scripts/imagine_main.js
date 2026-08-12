@@ -61,7 +61,7 @@ function openImagineMainView(buttonId = "i_imagine_tab_btn") {
     });
   }
   if (view === IMAGINE_MAIN_VIEWS.LIKED && typeof loadImagineLikedCards === "function") {
-    loadImagineLikedCards({ force: true }).catch((error) => {
+    loadImagineLikedCards({ force: false }).catch((error) => {
       library_state.imagineLikedError = error?.message || "Imagine liked failed.";
       library_state.imagineLikedLoading = false;
       renderSourceCards("imagine");

@@ -108,6 +108,7 @@ function normalizeDetailModelLabel(type, raw) {
     if (/^grok-imagine-video(?:$|[^0-9.])/.test(value)) return "M 1.0";
     return "";
   }
+  if (value.includes("grok-imagine-image-2.0") || value.includes("m 2.0") || value.includes("m2.0")) return "M 2.0";
   if (value.includes("quality")) return "Quality";
   if (value.includes("speed") || (value.includes("grok-imagine-image") && !value.includes("quality"))) return "Speed";
   if (isImageName && !isVideoName) return "Quality";

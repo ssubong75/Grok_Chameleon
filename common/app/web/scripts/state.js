@@ -56,6 +56,7 @@ function normalizeNfcText(value = "") {
   };
   const composerAttachments = [];
   const composerControls = {
+    buildImageModel: document.querySelector('[data-composer-control="build-image-model"]'),
     videoModel: document.querySelector('[data-composer-control="video-model"]'),
     duration: document.querySelector('[data-composer-control="duration"]'),
     aspect: document.querySelector('[data-composer-control="aspect"]'),
@@ -76,6 +77,9 @@ function normalizeNfcText(value = "") {
   const imagineExtensionDurationOptions = ["10s", "6s"];
   const imageResolutionOptions = ["2K", "1K"];
   const buildT2iResolutionOptions = ["2K", "1K"];
+  const buildImageModelOptions = ["M 2.0", "M 1.5"];
+  const buildImage20OutputOptions = ["2K Med", "1K Med", "2K Low", "1K Low"];
+  const buildImage20CountOptions = ["10", "8", "4", "2"];
   const videoResolutionOptions = ["1080", "720", "480"];
   const countOptions = ["Auto", "1", "2", "4", "8", "10"];
   const buildT2iCountOptions = ["10", "8", "5", "4", "1"];
@@ -125,6 +129,7 @@ function normalizeNfcText(value = "") {
     collections: [],
     prompts: [],
     libraryIndexEnabled: false,
+    libraryIndexEpoch: 0,
     libraryIndexCounts: {
       posts: 0,
       build: 0,
@@ -158,6 +163,7 @@ function normalizeNfcText(value = "") {
     collectionSort: "",
     collectionDraftLayout: null,
       selectedPostPath: "",
+      selectedPostIdentity: "",
       selectedDetailItemId: "",
       sourcePickPending: false,
       splitPickPending: false,
@@ -203,6 +209,10 @@ function normalizeNfcText(value = "") {
       imagineDiscoverError: "",
       imagineDiscoverCursor: "",
       imagineDiscoverHasMore: false,
+      imagineLikedPosts: [],
+      imagineLikedLoaded: false,
+      imagineLikedLoading: false,
+      imagineLikedError: "",
       imagineUnsavedPosts: [],
       imagineUnsavedLoaded: false,
       imagineUnsavedLoading: false,
@@ -435,6 +445,68 @@ function normalizeNfcText(value = "") {
     };
   }
 
+  function libraryPostServerPath(postOrPath) {
+    return String(
+      postOrPath && typeof postOrPath === "object"
+        ? postOrPath.folder_path || ""
+        : postOrPath || "",
+    ).trim();
+  }
+
+  function libraryPostStableIdentity(post) {
+    const path = libraryPostServerPath(post);
+    if (!post || !path) return path;
+    const metadata = post.metadata && typeof post.metadata === "object" ? post.metadata : {};
+    const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
+    const imaginePost = Boolean(
+      post.source === "imagine"
+      || post.remote
+      || post.area === "imagine_remote"
+      || post.area === "imagine_upload_remote"
+      || /^imagine_(saved|discover|unsaved|search|link|upload|generated)\//.test(path)
+    );
+    if (!imaginePost) return path;
+    const provenance = typeof imagineSavedPostProvenance === "function"
+      ? imagineSavedPostProvenance(post)
+      : (metadata.cloned_copy || metadata.cloned_from_asset_id
+        ? "cloned-liked"
+        : (metadata.link_source || metadata.local_heart || metadata.external_reference
+          ? "plain-liked"
+          : "normal-saved"));
+    const savedAnchor = String(metadata.saved_anchor_id || imagine.saved_anchor_id || "").trim();
+    const provenanceAnchor = provenance === "cloned-liked"
+      ? (
+        metadata.link_post_id
+        || imagine.link_post_id
+        || metadata.official_clone_asset_id
+        || imagine.official_clone_asset_id
+        || metadata.lineage_root_asset_id
+      )
+      : (provenance === "plain-liked"
+        ? (
+          metadata.local_saved_group_id
+          || imagine.local_saved_group_id
+          || metadata.link_post_id
+          || imagine.link_post_id
+          || metadata.lineage_root_asset_id
+          || post.post_id
+        )
+        : (
+          metadata.lineage_root_asset_id
+          || metadata.local_saved_group_id
+          || post.post_id
+          || metadata.conversation_id
+          || imagine.conversation_id
+        ));
+    const anchor = String(savedAnchor || provenanceAnchor || path).trim();
+    return `imagine\u001f${provenance}\u001f${anchor}`;
+  }
+
+  function libraryPostMatchesIdentity(post, identity) {
+    const target = String(identity || "").trim();
+    return Boolean(target) && libraryPostStableIdentity(post) === target;
+  }
+
   function generationSnapshotTimestamp(post) {
     for (const value of [
       post?.updated_at,
@@ -515,7 +587,10 @@ function normalizeNfcText(value = "") {
           ? library_state.libraryIndexCounts.build_main_with_collections
           : library_state.libraryIndexCounts.build_main,
       ) || 0;
-      if (data.index_rebuilt || !previouslyIndexed) {
+      if (data.index_rebuilt) {
+        library_state.libraryIndexEpoch = Number(library_state.libraryIndexEpoch || 0) + 1;
+      }
+      if (!previouslyIndexed) {
         library_state.posts = [];
         library_state.indexedBuildPosts = [];
         library_state.indexedBuildTotal = Number(data.library_index?.counts?.build_main || 0);
@@ -531,20 +606,50 @@ function normalizeNfcText(value = "") {
         library_state.indexedSearchBuildQuery = "";
         library_state.indexedUploadPosts = [];
         library_state.indexedUploadLoaded = false;
+      } else if (data.index_rebuilt) {
+        // A rebuild changes the index revision, not the identity of every visible card.
+        // Keep the last complete view on screen while each active scope revalidates.
+        library_state.indexedBuildOffset = 0;
+        library_state.indexedBuildHasMore = library_state.indexedBuildTotal > 0;
+        library_state.indexedBuildLoading = false;
+        library_state.indexedBuildLoaded = false;
+        library_state.indexedSearchBuildOffset = 0;
+        library_state.indexedSearchBuildHasMore = Boolean(library_state.indexedSearchBuildPosts.length);
+        library_state.indexedSearchBuildLoading = false;
+        library_state.indexedSearchBuildLoaded = false;
+        library_state.indexedUploadLoading = false;
+        library_state.indexedUploadLoaded = false;
       }
       const previousCollections = new Map(
         (library_state.collections || []).map((collection) => [collection.path, collection]),
       );
       library_state.collections = Array.isArray(data.collections)
-        ? data.collections.map((collection) => ({
-          ...collection,
-          posts: previousCollections.get(collection.path)?.posts || [],
-          indexed_loaded: Boolean(previousCollections.get(collection.path)?.indexed_loaded),
-          indexed_loading: false,
-          indexed_total: Number(previousCollections.get(collection.path)?.indexed_total || 0),
-          indexed_offset: Number(previousCollections.get(collection.path)?.indexed_offset || 0),
-          indexed_has_more: Boolean(previousCollections.get(collection.path)?.indexed_has_more),
-        }))
+        ? data.collections.map((collection) => {
+          const previous = previousCollections.get(collection.path);
+          const posts = previous?.posts || [];
+          if (data.index_rebuilt) {
+            for (const post of posts) {
+              if (!("_indexed_children_loaded" in post)) continue;
+              post._indexed_children_loaded = false;
+              post._indexed_children_loading = false;
+              post._indexed_children_offset = 0;
+              post._indexed_children_has_more = Number(post._indexed_children_total || 0) > 0;
+            }
+          }
+          return {
+            ...collection,
+            posts,
+            indexed_loaded: data.index_rebuilt ? false : Boolean(previous?.indexed_loaded),
+            indexed_loading: false,
+            indexed_total: data.index_rebuilt
+              ? Number(collection.post_count || previous?.indexed_total || 0)
+              : Number(previous?.indexed_total || 0),
+            indexed_offset: data.index_rebuilt ? 0 : Number(previous?.indexed_offset || 0),
+            indexed_has_more: data.index_rebuilt
+              ? Number(collection.post_count || previous?.indexed_total || 0) > 0
+              : Boolean(previous?.indexed_has_more),
+          };
+        })
         : library_state.collections;
       const deletedPaths = Array.isArray(data.deleted_paths) ? data.deleted_paths : [];
       if (deletedPaths.length) {
@@ -603,10 +708,12 @@ function normalizeNfcText(value = "") {
         ),
       );
       sortPostsIfNeeded(library_state.indexedBuildPosts, comparePostsByRecentActivity);
-      library_state.indexedBuildOffset = library_state.indexedBuildPosts.length;
-      library_state.indexedBuildHasMore = (
-        library_state.indexedBuildOffset < library_state.indexedBuildTotal
-      );
+      if (!data.index_rebuilt) {
+        library_state.indexedBuildOffset = library_state.indexedBuildPosts.length;
+        library_state.indexedBuildHasMore = (
+          library_state.indexedBuildOffset < library_state.indexedBuildTotal
+        );
+      }
       library_state.indexedUploadPosts = replaceChangedPosts(
         library_state.indexedUploadPosts,
         changedPosts,
@@ -640,16 +747,23 @@ function normalizeNfcText(value = "") {
         }))
         : [];
     }
+    const selectablePosts = [
+      ...library_state.posts,
+      ...library_state.collections.flatMap((collection) => collection.posts || []),
+    ];
     const selectablePaths = new Set([
-      ...library_state.posts.map((post) => post.folder_path).filter(Boolean),
-      ...library_state.collections.flatMap((collection) => (collection.posts || []).map((post) => post.folder_path)).filter(Boolean),
+      ...selectablePosts.map((post) => post.folder_path).filter(Boolean),
+      ...selectablePosts.map(libraryPostStableIdentity).filter(Boolean),
     ]);
     for (const selectedPath of Array.from(library_state.selectedItems || [])) {
       if (!selectablePaths.has(selectedPath)) library_state.selectedItems.delete(selectedPath);
     }
     library_state.prompts = Array.isArray(data.prompts) ? data.prompts : [];
     applyAccountSnapshot(data);
-    if (data.selected_path) library_state.selectedPostPath = data.selected_path;
+    if (data.selected_path) {
+      library_state.selectedPostPath = data.selected_path;
+      library_state.selectedPostIdentity = "";
+    }
     if (data.selected_item_id) library_state.selectedDetailItemId = data.selected_item_id;
     if ("selected_collection_path" in data) library_state.selectedCollectionPath = data.selected_collection_path || "";
     if ("selected_collection_post_path" in data) library_state.selectedCollectionPostPath = data.selected_collection_post_path || "";
@@ -725,6 +839,16 @@ function normalizeNfcText(value = "") {
     library_state.imagineLikedPosts = likedPosts;
     const posts = [...localPosts, ...savedDisplayPosts, ...discoverPosts, ...unsavedPosts, ...searchPosts, ...uploadPosts, ...likedPosts];
     library_state.posts = posts;
+    if (library_state.selectedPostIdentity) {
+      const selectedPost = posts.find((post) => (
+        post.folder_path === library_state.selectedPostPath
+        && libraryPostMatchesIdentity(post, library_state.selectedPostIdentity)
+      ));
+      if (selectedPost) library_state.selectedPostPath = selectedPost.folder_path || library_state.selectedPostPath;
+    } else if (library_state.selectedPostPath) {
+      const selectedPost = posts.find((post) => post.folder_path === library_state.selectedPostPath);
+      if (selectedPost) library_state.selectedPostIdentity = libraryPostStableIdentity(selectedPost);
+    }
     imagineRemoteLibrarySyncMemo = {
       posts,
       remotePosts,

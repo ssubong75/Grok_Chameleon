@@ -164,7 +164,16 @@
   }) {
     const sources = (itemKey ? [sourcePost] : (sourcePosts.length ? sourcePosts : [sourcePost]))
       .filter((post) => post?.folder_path)
-      .filter((post, index, posts) => posts.findIndex((candidate) => candidate.folder_path === post.folder_path) === index);
+      .filter((post, index, posts) => {
+        const identity = typeof libraryPostStableIdentity === "function"
+          ? libraryPostStableIdentity(post)
+          : post.folder_path;
+        return posts.findIndex((candidate) => (
+          (typeof libraryPostStableIdentity === "function"
+            ? libraryPostStableIdentity(candidate)
+            : candidate.folder_path) === identity
+        )) === index;
+      });
     if (!sources.length) return;
     if (!library_state.apiReady) {
       setLibraryMessage("Move needs the local app launcher.");
@@ -193,7 +202,12 @@
         applyLibrarySnapshot(data);
       }
       closeMoveToCollectionDialog();
-      for (const source of sources) library_state.selectedItems?.delete?.(source.folder_path);
+      for (const source of sources) {
+        const selectionKey = typeof libraryPostStableIdentity === "function"
+          ? libraryPostStableIdentity(source)
+          : source.folder_path;
+        library_state.selectedItems?.delete?.(selectionKey);
+      }
       if (!library_state.selectedItems?.size) library_state.cardSelectionScreen = "";
       if (typeof syncCardSelectionControls === "function") syncCardSelectionControls();
       toast(sources.length > 1 ? "Moved items to Collection." : "Moved to Collection.");
@@ -396,15 +410,24 @@
     });
   }
 
-  function openMoveToCollectionDialog({ postPath = "", postPaths = [], itemKey = "" } = {}) {
+  function openMoveToCollectionDialog({ postPath = "", postPaths = [], postObject = null, postObjects = [], itemKey = "" } = {}) {
     closeMoveToCollectionDialog();
     const requestedPaths = (postPaths.length ? postPaths : [postPath])
       .map((path) => String(path || "").trim())
       .filter(Boolean);
-    const sourcePosts = requestedPaths
-      .map(moveDialogPost)
+    const requestedPosts = postObjects.length ? postObjects : (postObject ? [postObject] : requestedPaths.map(moveDialogPost));
+    const sourcePosts = requestedPosts
       .filter(Boolean)
-      .filter((post, index, posts) => posts.findIndex((candidate) => candidate.folder_path === post.folder_path) === index);
+      .filter((post, index, posts) => {
+        const identity = typeof libraryPostStableIdentity === "function"
+          ? libraryPostStableIdentity(post)
+          : post.folder_path;
+        return posts.findIndex((candidate) => (
+          (typeof libraryPostStableIdentity === "function"
+            ? libraryPostStableIdentity(candidate)
+            : candidate.folder_path) === identity
+        )) === index;
+      });
     const sourcePost = sourcePosts[0] || null;
     if (!sourcePost) {
       setLibraryMessage("Select a post to move.");
@@ -846,6 +869,7 @@
     }
     openMoveToCollectionDialog({
       postPath: post.folder_path,
+      postObject: post,
       itemKey: mediaItemKey(item),
     });
   }

@@ -79,13 +79,13 @@ function buildSourcePosts() {
     ));
   }
   if (library_state.libraryIndexEnabled) {
-    if (
-      library_state.indexedBuildKey !== indexedBuildQueryKey()
-      && !library_state.indexedBuildLoading
-      && typeof loadIndexedBuildPosts === "function"
-    ) {
-      loadIndexedBuildPosts({ force: true }).catch((error) => console.warn(error));
-      return [];
+    if (library_state.indexedBuildKey !== indexedBuildQueryKey()) {
+      if (typeof loadIndexedBuildPosts === "function") {
+        loadIndexedBuildPosts({ force: true }).catch((error) => console.warn(error));
+      }
+      // loadIndexedBuildPosts changes the key synchronously and retains only cards that are
+      // valid in the new scope. If it could not start, do not expose the previous scope.
+      if (library_state.indexedBuildKey !== indexedBuildQueryKey()) return [];
     }
     const indexedPosts = library_state.indexedBuildPosts || [];
     const byPath = new Map(indexedPosts.map((post) => [post?.folder_path, post]));
