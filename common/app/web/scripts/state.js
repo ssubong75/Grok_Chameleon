@@ -213,6 +213,10 @@ function normalizeNfcText(value = "") {
       imagineLikedLoaded: false,
       imagineLikedLoading: false,
       imagineLikedError: "",
+      imagineLikedExclusionIds: new Set(),
+      imagineLikedExclusionComplete: false,
+      imagineLikedExclusionRevision: "",
+      imagineLikedExclusionAccountId: "",
       imagineUnsavedPosts: [],
       imagineUnsavedLoaded: false,
       imagineUnsavedLoading: false,
@@ -474,6 +478,9 @@ function normalizeNfcText(value = "") {
           ? "plain-liked"
           : "normal-saved"));
     const savedAnchor = String(metadata.saved_anchor_id || imagine.saved_anchor_id || "").trim();
+    const savedDisplayGroup = provenance === "normal-saved"
+      ? String(metadata.saved_display_group_id || imagine.saved_display_group_id || "").trim()
+      : "";
     const provenanceAnchor = provenance === "cloned-liked"
       ? (
         metadata.link_post_id
@@ -498,7 +505,7 @@ function normalizeNfcText(value = "") {
           || metadata.conversation_id
           || imagine.conversation_id
         ));
-    const anchor = String(savedAnchor || provenanceAnchor || path).trim();
+    const anchor = String(savedDisplayGroup || savedAnchor || provenanceAnchor || path).trim();
     return `imagine\u001f${provenance}\u001f${anchor}`;
   }
 
