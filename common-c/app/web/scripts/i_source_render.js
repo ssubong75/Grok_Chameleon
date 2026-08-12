@@ -246,6 +246,57 @@ function imagineSavedCardPathKey(post) {
   return imagineSavedScopedIdentity(post, anchor || post?.folder_path);
 }
 
+// Saved order comes from grok.com's top-level conversation list. Child activity is
+// intentionally excluded: adding a generated child must not move its existing card.
+function imagineSavedOfficialOrder(post) {
+  const metadata = post?.metadata && typeof post.metadata === "object" ? post.metadata : {};
+  const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
+  const candidates = [
+    post?.official_order,
+    metadata.official_order,
+    imagine.official_order,
+    post?.official_rank,
+    metadata.official_rank,
+    imagine.official_rank,
+  ];
+  for (const candidate of candidates) {
+    if (candidate === "" || candidate === null || candidate === undefined) continue;
+    const value = Number(candidate);
+    if (Number.isFinite(value) && value >= 0) return value;
+  }
+  return null;
+}
+
+function imagineSavedMinimumOfficialOrder(posts) {
+  let minimum = null;
+  for (const post of posts || []) {
+    const value = imagineSavedOfficialOrder(post);
+    if (value !== null && (minimum === null || value < minimum)) minimum = value;
+  }
+  return minimum;
+}
+
+function imagineSavedStampOfficialOrder(post, order) {
+  if (!post || order === null) return post;
+  const metadata = post.metadata && typeof post.metadata === "object" ? post.metadata : {};
+  if (Number(metadata.official_order) === order) return post;
+  return normalizeServerPost({
+    ...post,
+    metadata: { ...metadata, official_order: order },
+  });
+}
+
+function sortImagineSavedNewPosts(posts) {
+  return (posts || []).map((post, index) => ({ post, index })).sort((left, right) => {
+    const leftOrder = imagineSavedOfficialOrder(left.post);
+    const rightOrder = imagineSavedOfficialOrder(right.post);
+    if (leftOrder === null && rightOrder === null) return left.index - right.index;
+    if (leftOrder === null) return 1;
+    if (rightOrder === null) return -1;
+    return leftOrder - rightOrder || left.index - right.index;
+  }).map((entry) => entry.post);
+}
+
 function rememberHiddenImaginePost(post) {
   if (!(library_state.imagineHiddenRemotePostIds instanceof Set)) {
     library_state.imagineHiddenRemotePostIds = new Set();
@@ -354,6 +405,7 @@ function mergeImagineRemotePosts(existingPosts, nextPosts) {
       for (const key of keys) known.add(key);
     }
     const representative = representativeItem(items, { ...primary, items }) || items[0];
+    const officialOrder = imagineSavedMinimumOfficialOrder([existing, post]);
     merged.set(key, normalizeServerPost({
       ...primary,
       items,
@@ -362,6 +414,7 @@ function mergeImagineRemotePosts(existingPosts, nextPosts) {
       metadata: {
         ...(primary.metadata || {}),
         flat_only: existingFlat && nextFlat,
+        ...(officialOrder === null ? {} : { official_order: officialOrder }),
       },
     }));
   }
@@ -488,50 +541,10 @@ function mergeImagineExternalRefreshedPosts(existingPosts, refreshedPosts) {
 }
 
 function mergeImagineRefreshedPosts(existingPosts, refreshedPosts) {
-  const existing = reconcileImagineSavedDisplayPosts(existingPosts || []);
-  const refreshed = reconcileImagineSavedDisplayPosts(refreshedPosts || []);
-  if (!existing.length) return sortPostsIfNeeded([...refreshed], comparePostsByRecentActivity);
-  if (!refreshed.length) return [];
-
-  const existingIndex = imagineSavedPostMatchIndex(existing);
-  const matchedExistingIndexes = new Set();
-  const refreshedForExistingIndex = new Map();
-  const newPosts = [];
-
-  for (const post of refreshed) {
-    const matchedIndex = takeImagineSavedPostMatch(
-      existingIndex,
-      post,
-      matchedExistingIndexes,
-      (index) => (
-        !(
-          isImagineT2iGroupContainer(post)
-          && existing[index]?.metadata?.local_heart === true
-        )
-        && !(
-          post?.metadata?.local_heart === true
-          && isImagineT2iGroupContainer(existing[index])
-        )
-      ),
-    );
-    if (matchedIndex < 0) {
-      newPosts.push(post);
-      continue;
-    }
-    matchedExistingIndexes.add(matchedIndex);
-    refreshedForExistingIndex.set(
-      matchedIndex,
-      mergeImaginePreservedGeneratedRelations(existing[matchedIndex], post),
-    );
-  }
-
-  return sortPostsIfNeeded([
-    ...newPosts,
-    ...existing.map((post, index) => (
-      refreshedForExistingIndex.get(index)
-      || (imaginePostHasPreservedGeneratedRelations(post) ? post : null)
-    )).filter(Boolean),
-  ], comparePostsByRecentActivity);
+  return mergeImagineSavedOrderedPosts(existingPosts, refreshedPosts, {
+    replacesList: true,
+    preserveMatchedAnchors: false,
+  });
 }
 
 function mergeImagineSyncedPosts(
@@ -615,6 +628,66 @@ function mergeImagineSyncedPosts(
   ], comparePostsByRecentActivity);
 }
 
+// Saved pages are fragments of one official sequence. Replace matched cards in their
+// current slots, and use the absolute official ordinal only to place genuinely new
+// top-level cards. Liked continues to use mergeImagineSyncedPosts and its activity sort.
+function mergeImagineSavedOrderedPosts(
+  existingPosts,
+  refreshedPosts,
+  { replacesList = false, preserveMatchedAnchors = !replacesList } = {},
+) {
+  const existing = reconcileImagineSavedDisplayPosts(existingPosts || []);
+  const refreshed = reconcileImagineSavedDisplayPosts(refreshedPosts || []);
+  if (!existing.length) return sortImagineSavedNewPosts(refreshed);
+  if (!refreshed.length) return replacesList ? [] : [...existing];
+
+  const existingIndex = imagineSavedPostMatchIndex(existing);
+  const matchedExistingIndexes = new Set();
+  const refreshedForExistingIndex = new Map();
+  const refreshedResults = [];
+  const newPosts = [];
+  for (const post of refreshed) {
+    const matchedIndex = takeImagineSavedPostMatch(existingIndex, post, matchedExistingIndexes);
+    if (matchedIndex < 0) {
+      newPosts.push(post);
+      refreshedResults.push(post);
+      continue;
+    }
+    matchedExistingIndexes.add(matchedIndex);
+    const existingPost = existing[matchedIndex];
+    const mergedPost = preserveMatchedAnchors
+      ? mergeImagineIncrementalSavedPost(existingPost, post)
+      : mergeImaginePreservedGeneratedRelations(existingPost, post);
+    const orderedMergedPost = imagineSavedStampOfficialOrder(
+      mergedPost,
+      imagineSavedMinimumOfficialOrder([existingPost, post]),
+    );
+    refreshedForExistingIndex.set(matchedIndex, orderedMergedPost);
+    refreshedResults.push(orderedMergedPost);
+  }
+
+  if (replacesList) {
+    return sortImagineSavedNewPosts(refreshedResults);
+  }
+
+  const ordered = existing.map((post, index) => refreshedForExistingIndex.get(index) || post);
+  for (const post of sortImagineSavedNewPosts(newPosts)) {
+    const officialOrder = imagineSavedOfficialOrder(post);
+    if (officialOrder === null) {
+      ordered.push(post);
+      continue;
+    }
+    const insertAt = ordered.findIndex((candidate) => {
+      if (imagineSavedPostIsPending(candidate)) return false;
+      const candidateOrder = imagineSavedOfficialOrder(candidate);
+      return candidateOrder === null || candidateOrder > officialOrder;
+    });
+    if (insertAt < 0) ordered.push(post);
+    else ordered.splice(insertAt, 0, post);
+  }
+  return ordered;
+}
+
 function mergeImagineIncrementalSavedPost(existingPost, refreshedPost) {
   if (!existingPost) return refreshedPost;
   if (!refreshedPost) return existingPost;
@@ -693,6 +766,7 @@ function mergeImagineIncrementalSavedPost(existingPost, refreshedPost) {
   const highPriorityImagine = highPriorityMetadata.imagine && typeof highPriorityMetadata.imagine === "object"
     ? highPriorityMetadata.imagine
     : {};
+  const officialOrder = imagineSavedMinimumOfficialOrder([existingPost, stabilized]);
   return normalizeServerPost({
     ...basePost,
     folder_path: existingPost.folder_path || basePost.folder_path || "",
@@ -723,6 +797,7 @@ function mergeImagineIncrementalSavedPost(existingPost, refreshedPost) {
         }
         : {}),
       flat_only: existingFlat && refreshedFlat,
+      ...(officialOrder === null ? {} : { official_order: officialOrder }),
     },
   });
 }
@@ -1102,11 +1177,18 @@ function mergeImagineSavedLineageCards(cards) {
       }
     }
     const representative = representativeItem(items, { ...anchor, items }) || items[0];
+    const officialOrder = imagineSavedMinimumOfficialOrder(
+      memberIndexes.map((index) => active[index]),
+    );
     return normalizeServerPost({
       ...anchor,
       items,
       representative: representative?.file || representative?.url || representative?.item_id || "",
       representative_item: representative,
+      metadata: {
+        ...(anchor.metadata || {}),
+        ...(officialOrder === null ? {} : { official_order: officialOrder }),
+      },
     });
   });
 }
@@ -1366,7 +1448,7 @@ function applyImagineSavedRemotePage(data, { updatePosts = true, replacesList = 
       .filter((post) => !imagineSavedPostIsPending(post));
     library_state.imagineRemotePosts = reconcileImagineSavedDisplayPosts(
       reconcileImaginePendingSavedPosts(
-        mergeImagineSyncedPosts(currentPosts, normalized, { replacesList }),
+        mergeImagineSavedOrderedPosts(currentPosts, normalized, { replacesList }),
         pending,
       ),
     );
@@ -1513,7 +1595,7 @@ async function loadImagineSavedCards({ force = false, append = false } = {}) {
         ];
         library_state.imagineRemotePosts = reconcileImagineSavedDisplayPosts(
           reconcileImaginePendingSavedPosts(
-            mergeImagineSyncedPosts(currentPosts, cachedPosts),
+            mergeImagineSavedOrderedPosts(currentPosts, cachedPosts),
             pending,
           ),
         );
@@ -1913,8 +1995,7 @@ function imagineSourcePosts() {
     const sourcePosts = library_state.imagineRemotePosts || [];
     if (imagineSavedDisplayPostsMemoSource !== sourcePosts) {
       imagineSavedDisplayPostsMemoSource = sourcePosts;
-      imagineSavedDisplayPostsMemoResult = reconcileImagineSavedDisplayPosts(sourcePosts)
-        .sort(comparePostsByRecentActivity);
+      imagineSavedDisplayPostsMemoResult = reconcileImagineSavedDisplayPosts(sourcePosts);
       imagineSavedVisiblePostsMemoResult = imagineSavedDisplayPostsMemoResult.filter((post) => (
         !isImagineT2iGroupContainer(post)
       ));
@@ -1942,6 +2023,7 @@ function imagineVisibleJobs() {
 function renderImagineSourceCards() {
   if (library_state.imagineRemotePosts?.length) syncImagineRemotePostsIntoLibrary();
   const uploadView = library_state.iMainView === imagineViewValue("UPLOAD", "upload");
+  const savedView = library_state.iMainView === imagineViewValue("IMAGINE", "imagine");
   if (
     uploadView
     && !library_state.imagineUploadLoaded
@@ -2025,11 +2107,11 @@ function renderImagineSourceCards() {
       list.replaceChildren(emptyLibraryNode(
         t2iView ? "No T2I items." : (uploadView ? "No upload images." : (likedView ? "No liked items." : "")),
       ));
-    } else if (library_state.iMainView === imagineViewValue("IMAGINE", "imagine") || uploadView || likedView) {
-      renderVirtualCardList(IMAGINE_VIRTUAL_LIST_KEY, list, orderedMainGenerationCards(
-        "imagine",
-        [...mainJobEntries, ...mainPostEntries],
-      ), {
+    } else if (savedView || uploadView || likedView) {
+      const entries = [...mainJobEntries, ...mainPostEntries];
+      renderVirtualCardList(IMAGINE_VIRTUAL_LIST_KEY, list, savedView
+        ? entries.flatMap((entry) => entry.cards)
+        : orderedMainGenerationCards("imagine", entries), {
         loading: likedView
           ? library_state.imagineLikedLoading
           : (uploadView ? library_state.imagineUploadLoading : library_state.imagineRemoteLoading),

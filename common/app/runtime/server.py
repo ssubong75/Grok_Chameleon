@@ -4485,7 +4485,7 @@ def imagine_conversation_detail(conversation_id: str, account: dict, timeout: in
     )
 
 
-IMAGINE_SAVED_CURSOR_PREFIX = "gc-saved-v2."
+IMAGINE_SAVED_CURSOR_PREFIX = "gc-saved-v3."
 
 
 def encode_imagine_saved_cursor(
@@ -4494,39 +4494,127 @@ def encode_imagine_saved_cursor(
     *,
     conversations_done: bool,
     assets_done: bool,
+    conversation_offset: int = 0,
 ) -> str:
     payload = {
-        "v": 2,
+        "v": 3,
         "conversations": str(conversation_cursor or ""),
         "assets": str(asset_cursor or ""),
         "conversations_done": bool(conversations_done),
         "assets_done": bool(assets_done),
+        "conversation_offset": max(0, int(conversation_offset or 0)),
     }
     raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     token = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
     return IMAGINE_SAVED_CURSOR_PREFIX + token
 
 
-def decode_imagine_saved_cursor(value: str) -> tuple[str, str, bool, bool]:
+def decode_imagine_saved_cursor(value: str) -> tuple[str, str, bool, bool, int]:
     text = str(value or "").strip()
     if not text:
-        return "", "", False, False
-    if not text.startswith(IMAGINE_SAVED_CURSOR_PREFIX):
-        return text, "", False, False
-    token = text[len(IMAGINE_SAVED_CURSOR_PREFIX):]
+        return "", "", False, False, 0
+    cursor_prefix = next((
+        prefix
+        for prefix in (IMAGINE_SAVED_CURSOR_PREFIX, "gc-saved-v2.")
+        if text.startswith(prefix)
+    ), "")
+    if not cursor_prefix:
+        return text, "", False, False, 0
+    token = text[len(cursor_prefix):]
     try:
         raw = base64.urlsafe_b64decode(token + ("=" * (-len(token) % 4)))
         payload = json.loads(raw.decode("utf-8"))
-        if not isinstance(payload, dict) or int(payload.get("v") or 0) != 2:
+        if not isinstance(payload, dict) or int(payload.get("v") or 0) not in {2, 3}:
             raise ValueError("unsupported cursor")
         return (
             str(payload.get("conversations") or "").strip(),
             str(payload.get("assets") or "").strip(),
             bool(payload.get("conversations_done")),
             bool(payload.get("assets_done")),
+            max(0, int(payload.get("conversation_offset") or 0)),
         )
     except (ValueError, TypeError, json.JSONDecodeError, UnicodeDecodeError):
-        return "", "", False, False
+        return "", "", False, False, 0
+
+
+def imagine_saved_official_order(post: dict) -> int | None:
+    metadata = post.get("metadata") if isinstance(post, dict) and isinstance(post.get("metadata"), dict) else {}
+    value = metadata.get("official_order")
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def imagine_stamp_saved_official_order(post: dict, order: int | None) -> dict:
+    if not isinstance(post, dict):
+        return post
+    metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+    metadata = dict(metadata)
+    if order is None:
+        metadata.pop("official_order", None)
+    else:
+        metadata["official_order"] = max(0, int(order))
+    post["metadata"] = metadata
+    return post
+
+
+def imagine_merge_saved_official_order(destination: dict, source: dict) -> None:
+    orders = [
+        order
+        for order in (
+            imagine_saved_official_order(destination),
+            imagine_saved_official_order(source),
+        )
+        if order is not None
+    ]
+    if orders:
+        imagine_stamp_saved_official_order(destination, min(orders))
+
+
+def imagine_sort_saved_official(posts: list[dict]) -> list[dict]:
+    indexed = list(enumerate(posts if isinstance(posts, list) else []))
+    indexed.sort(key=lambda entry: (
+        imagine_saved_official_order(entry[1]) is None,
+        imagine_saved_official_order(entry[1]) if imagine_saved_official_order(entry[1]) is not None else 0,
+        entry[0],
+    ))
+    return [post for _, post in indexed]
+
+
+def imagine_saved_conversation_ids(post: dict) -> set[str]:
+    if not isinstance(post, dict):
+        return set()
+    metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+    imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
+    values = {
+        str(metadata.get("conversation_id") or "").strip(),
+        str(imagine.get("conversation_id") or "").strip(),
+    }
+    for item in post.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        item_metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        item_imagine = item_metadata.get("imagine") if isinstance(item_metadata.get("imagine"), dict) else {}
+        values.update({
+            str(item.get("conversation_id") or "").strip(),
+            str(item_metadata.get("conversation_id") or "").strip(),
+            str(item_imagine.get("conversation_id") or "").strip(),
+        })
+    return {value for value in values if value}
+
+
+def imagine_asset_source_conversation_id(asset: dict) -> str:
+    if not isinstance(asset, dict):
+        return ""
+    return str(
+        asset.get("sourceConversationId")
+        or asset.get("rootAssetSourceConversationId")
+        or asset.get("conversationId")
+        or ""
+    ).strip()
 
 
 def imagine_item_asset_id(item: dict) -> str:
@@ -4892,6 +4980,7 @@ def merge_imagine_saved_lineage_cards(cards: list[dict]) -> list[dict]:
             *(index for index in member_indexes if index != root_index),
         ]
         for member_index in ordered_indexes:
+            imagine_merge_saved_official_order(anchor, active[member_index])
             for item in active[member_index].get("items") or []:
                 if not isinstance(item, dict):
                     continue
@@ -4991,6 +5080,7 @@ def merge_imagine_flat_saved_post(groups: dict[str, dict], post: dict) -> None:
     if not imagine_posts_share_saved_identity(existing, post):
         groups[group_key] = imagine_stamp_saved_identity(post)
         return
+    imagine_merge_saved_official_order(existing, post)
     existing_metadata = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
     post_metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
     membership_ids = {
@@ -5088,6 +5178,7 @@ def merge_imagine_local_heart_post(
             destination = groups.pop(folder_path, None)
             if not isinstance(destination, dict):
                 continue
+            imagine_merge_saved_official_order(anchor, destination)
             created_at_values.append(str(destination.get("created_at") or ""))
             for item in destination.get("items") or []:
                 if not isinstance(item, dict):
@@ -5274,6 +5365,7 @@ def imagine_remote_cache_records(posts: list[dict]) -> list[dict]:
             ],
             "created_at": str(post.get("created_at") or ""),
             "activity_at": library_index.post_activity_at(post),
+            "official_order": imagine_saved_official_order(post),
             "asset_ids": sorted(asset_ids),
             "post": normalize_json_unicode(post),
         })
@@ -5494,6 +5586,7 @@ def list_imagine_saved_cache(payload: dict) -> dict:
     if offset == 0:
         posts.extend(imagine_missing_generated_relation_posts(root, account, relations, posts))
     posts = merge_imagine_saved_lineage_cards(posts)
+    posts = imagine_sort_saved_official(posts)
     normalized_posts = normalize_json_unicode(posts)
     return {
         "ok": True,
@@ -5570,7 +5663,7 @@ def list_imagine_saved(payload: dict) -> dict:
     limit = min(40, max(1, limit))
     cursor = str((payload or {}).get("cursor") or "").strip()
     sync_token = str((payload or {}).get("sync_token") or "").strip()[:128]
-    conversation_cursor, asset_cursor, conversations_done, assets_done = decode_imagine_saved_cursor(cursor)
+    conversation_cursor, asset_cursor, conversations_done, assets_done, conversation_offset = decode_imagine_saved_cursor(cursor)
     query_params = {
         "pageSize": str(limit),
         "kind": "CONVERSATION_KIND_IMAGINE",
@@ -5603,7 +5696,25 @@ def list_imagine_saved(payload: dict) -> dict:
                 write_imagine_auth(root, files["imagine"])
             raise RuntimeError("Imagine login expired. Register the account again.") from exc
         raise
-    conversations = data.get("conversations") if isinstance(data.get("conversations"), list) else []
+    raw_conversations = data.get("conversations") if isinstance(data.get("conversations"), list) else []
+    conversation_orders = {
+        str(conversation.get("conversationId") or "").strip(): conversation_offset + index
+        for index, conversation in enumerate(raw_conversations)
+        if isinstance(conversation, dict) and str(conversation.get("conversationId") or "").strip()
+    }
+    try:
+        cached_order_posts = library_index.query_imagine_remote_posts(
+            root, imagine_account_settings_key(account), offset=0, limit=5000,
+        ).get("posts") or []
+    except Exception:
+        cached_order_posts = []
+    for cached_post in cached_order_posts:
+        order = imagine_saved_official_order(cached_post)
+        if order is None:
+            continue
+        for cached_conversation_id in imagine_saved_conversation_ids(cached_post):
+            conversation_orders.setdefault(cached_conversation_id, order)
+    conversations = raw_conversations
     conversations = [
         conversation
         for conversation in conversations
@@ -5659,6 +5770,7 @@ def list_imagine_saved(payload: dict) -> dict:
             if imagine_hidden_bundle_card(post, relations):
                 continue
             post = imagine_apply_generated_relations(post, root, account, relations)
+            imagine_stamp_saved_official_order(post, conversation_orders.get(conversation_id))
             post["items"] = [
                 item
                 for item in post.get("items") or []
@@ -5724,6 +5836,7 @@ def list_imagine_saved(payload: dict) -> dict:
         if not imagine_posts_share_saved_identity(existing, post):
             saved_groups[group_key] = imagine_stamp_saved_identity(post)
             continue
+        imagine_merge_saved_official_order(existing, post)
         known_ids = {
             imagine_item_asset_id(item)
             for item in existing.get("items") or []
@@ -5778,6 +5891,10 @@ def list_imagine_saved(payload: dict) -> dict:
             external_reference=external_reference,
         )
         if flat_post:
+            imagine_stamp_saved_official_order(
+                flat_post,
+                conversation_orders.get(imagine_asset_source_conversation_id(asset)),
+            )
             merge_imagine_flat_saved_post(saved_groups, flat_post)
     for local_post in local_heart_posts:
         if not cursor or imagine_post_is_link_source(local_post):
@@ -5791,8 +5908,9 @@ def list_imagine_saved(payload: dict) -> dict:
             root, account, relations, list(saved_groups.values()),
         ):
             merge_imagine_flat_saved_post(saved_groups, relation_post)
-    posts = merge_imagine_saved_lineage_cards(list(saved_groups.values()))
-    posts.sort(key=library_index.post_activity_at, reverse=True)
+    posts = imagine_sort_saved_official(
+        merge_imagine_saved_lineage_cards(list(saved_groups.values()))
+    )
     try:
         cache_imagine_remote_posts(root, account, posts, sync_token=sync_token)
     except Exception as exc:
@@ -5838,6 +5956,7 @@ def list_imagine_saved(payload: dict) -> dict:
             next_asset_cursor,
             conversations_done=next_conversations_done,
             assets_done=next_assets_done,
+            conversation_offset=conversation_offset + len(raw_conversations),
         )
         if has_more
         else ""
