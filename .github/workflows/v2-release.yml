@@ -334,7 +334,7 @@ jobs:
             '"database": "sql_data/state.sqlite3"',
             'relation_recovery_action = action in {"i2i", "i2v", "t2v", "extend"}',
             'events, bridge_parent_ids, bridge_baseline_ids, canonical_container_id = native_bridge_fetch_events(',
-            'def imagine_generated_relation_baseline_ids(root: Path, source_post_path: str, expected_type: str) -> set[str]:',
+            'def imagine_generated_relation_baseline_ids(root: Path, source_post_path: str, expected_type: str, account: dict) -> set[str]:',
             '"relation_count": relation_baseline_count',
             'def imagine_conversation_root_generation(responses: list[dict]) -> dict:',
             '"t2i_group_container": bool(root_generation.get("is_t2i_group_container"))',
@@ -804,7 +804,7 @@ jobs:
           grep -F 'def sync_snapshot(root: Path) -> bool:' "$imagine_state_py"
           grep -F 'relation_recovery_action = action in {"i2i", "i2v", "t2v", "extend"}' "$server_py"
           grep -F 'events, bridge_parent_ids, bridge_baseline_ids, canonical_container_id = native_bridge_fetch_events(' "$server_py"
-          grep -F 'def imagine_generated_relation_baseline_ids(root: Path, source_post_path: str, expected_type: str) -> set[str]:' "$server_py"
+          grep -F 'def imagine_generated_relation_baseline_ids(root: Path, source_post_path: str, expected_type: str, account: dict) -> set[str]:' "$server_py"
           grep -F '"relation_count": relation_baseline_count' "$server_py"
           grep -F 'def imagine_conversation_root_generation(responses: list[dict]) -> dict:' "$server_py"
           grep -F '"t2i_group_container": bool(root_generation.get("is_t2i_group_container"))' "$server_py"
