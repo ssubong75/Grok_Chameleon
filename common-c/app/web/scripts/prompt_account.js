@@ -450,10 +450,6 @@
     library_state.imagineLikedLoaded = false;
     library_state.imagineLikedLoading = false;
     library_state.imagineLikedError = "";
-    library_state.imagineLikedExclusionIds = new Set();
-    library_state.imagineLikedExclusionComplete = false;
-    library_state.imagineLikedExclusionRevision = "";
-    library_state.imagineLikedExclusionAccountId = String(nextAccountId || "");
     library_state.imagineUnsavedPosts = [];
     library_state.imagineUnsavedLoaded = false;
     library_state.imagineUnsavedLoading = false;
