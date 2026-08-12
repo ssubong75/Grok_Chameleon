@@ -135,8 +135,33 @@ document.getElementById("titleImagineBtn")?.addEventListener("click", () => {
   refreshCurrentMainView().catch((error) => setLibraryMessage(error.message || "Refresh failed."));
 });
 
+let brandImagineReloading = false;
 document.getElementById("brandImagineBtn")?.addEventListener("click", () => {
-  refreshCurrentMainView().catch((error) => setLibraryMessage(error.message || "Refresh failed."));
+  if (brandImagineReloading) return;
+  brandImagineReloading = true;
+  const button = document.getElementById("brandImagineBtn");
+  if (button) {
+    button.disabled = true;
+    button.setAttribute("aria-disabled", "true");
+  }
+  try {
+    const historySnapshot = typeof browserHistoryState === "function"
+      ? browserHistoryState(screen_state.current_screen, activeNavButtonId())
+      : null;
+    const selectedPost = typeof selectedLibraryPost === "function" ? selectedLibraryPost() : null;
+    sessionStorage.setItem("grokChameleonUiReloadStateV1", JSON.stringify({
+      history: historySnapshot,
+      imagineActiveId: String(account_state.imagine?.active_id || ""),
+      buildActiveId: String(account_state.build?.active_id || ""),
+      searchQuery: String(library_state.searchQuery || searchInput?.value || ""),
+      selectedPostSnapshot: selectedPost || null,
+    }));
+    // A renderer reload is internal navigation, not an app/window close.
+    sessionStorage.setItem("grokChameleonInternalNavigation", "ui-reload");
+  } catch (_) {
+    // Reload still works if session storage is temporarily unavailable.
+  }
+  window.location.reload();
 });
 
 document.getElementById("i_imagine_nav_btn")?.addEventListener("click", () => {
