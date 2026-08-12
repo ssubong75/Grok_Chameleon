@@ -48,68 +48,6 @@ document.querySelector(".topbar_history_forward")?.addEventListener("click", () 
 let browserClosingSent = false;
 const INTERNAL_NAVIGATION_KEY = "grokChameleonInternalNavigation";
 
-function consumeUiReloadState() {
-  try {
-    const raw = sessionStorage.getItem("grokChameleonUiReloadStateV1") || "";
-    sessionStorage.removeItem("grokChameleonUiReloadStateV1");
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === "object" ? parsed : null;
-  } catch (_) {
-    return null;
-  }
-}
-
-const pendingUiReloadState = consumeUiReloadState();
-
-function restoreUiReloadState(saved) {
-  if (!saved || typeof saved !== "object") return false;
-  const imagineActiveId = String(saved.imagineActiveId || "");
-  const buildActiveId = String(saved.buildActiveId || "");
-  if (imagineActiveId && account_state.imagine.accounts.some((account) => account.id === imagineActiveId)) {
-    account_state.imagine.active_id = imagineActiveId;
-  }
-  if (buildActiveId && account_state.build.accounts.some((account) => account.id === buildActiveId)) {
-    account_state.build.active_id = buildActiveId;
-  }
-  const historySnapshot = saved.history && typeof saved.history === "object" ? saved.history : null;
-  const selectedPostSnapshot = saved.selectedPostSnapshot && typeof saved.selectedPostSnapshot === "object"
-    ? saved.selectedPostSnapshot
-    : null;
-  if (historySnapshot?.selectedPostPath && selectedPostSnapshot && typeof restoreImageEditorReturnPost === "function") {
-    const detailType = historySnapshot.screenId === "b_detail" ? "build" : "imagine";
-    const backTarget = detailType === "build"
-      ? historySnapshot.detailBack?.build
-      : historySnapshot.detailBack?.imagine;
-    restoreImageEditorReturnPost(
-      JSON.stringify(selectedPostSnapshot),
-      String(historySnapshot.selectedPostPath),
-      detailType,
-      backTarget || { screenId: detailType === "build" ? "b_main" : "i_main" },
-    );
-  }
-  const searchQuery = String(saved.searchQuery || "");
-  library_state.searchQuery = searchQuery;
-  if (searchInput) searchInput.value = searchQuery;
-  renderAccounts();
-  if (historySnapshot && typeof restoreBrowserHistoryState === "function") {
-    restoreBrowserHistoryState(historySnapshot);
-  }
-  renderLibrary();
-  if (
-    historySnapshot?.screenId === "i_main"
-    && library_state.iMainView === imagineViewValue("LIKED", "liked")
-    && typeof loadImagineLikedCards === "function"
-  ) {
-    loadImagineLikedCards({ force: false }).catch((error) => {
-      library_state.imagineLikedError = error?.message || "Imagine liked failed.";
-      library_state.imagineLikedLoading = false;
-      renderSourceCards("imagine");
-    });
-  }
-  return true;
-}
-
 function notifyBrowserClosing() {
   if (location.protocol === "file:") return;
   if (sessionStorage.getItem(INTERNAL_NAVIGATION_KEY)) {
@@ -150,7 +88,6 @@ window.addEventListener("popstate", (event) => {
 openScreen(screen_state.current_main, "i_imagine_nav_btn", { replaceHistory: true });
 scheduleSidebarTogglePosition();
 restoreLibraryRoot().then(() => {
-  restoreUiReloadState(pendingUiReloadState);
   consumeImageEditorReturn().catch((error) => showErrorPanel("Edit failed", error?.message || "Edit failed."));
   if (typeof refreshBuildJobs === "function") refreshBuildJobs();
   if (

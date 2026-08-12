@@ -552,41 +552,6 @@ function upsertImagineRemotePost(post) {
   return normalized.folder_path;
 }
 
-function mergeImagineResultIntoLikedSource(sourcePath, items, selectedItemId = "") {
-  if (!sourcePath || !items?.length) return false;
-  const likedPosts = Array.isArray(library_state.imagineLikedPosts)
-    ? library_state.imagineLikedPosts
-    : [];
-  const matchingIndexes = likedPosts
-    .map((post, index) => (String(post?.folder_path || "") === sourcePath ? index : -1))
-    .filter((index) => index >= 0);
-  if (!matchingIndexes.length) return false;
-  const selectedIdentity = (
-    String(library_state.selectedPostPath || "") === sourcePath
-      ? String(library_state.selectedPostIdentity || "")
-      : ""
-  );
-  const sourceIndex = selectedIdentity && typeof libraryPostMatchesIdentity === "function"
-    ? matchingIndexes.find((index) => libraryPostMatchesIdentity(likedPosts[index], selectedIdentity))
-    : (matchingIndexes.length === 1 ? matchingIndexes[0] : -1);
-  if (sourceIndex === undefined || sourceIndex < 0) return false;
-  const mergedPost = mergeImagineGeneratedItems(likedPosts[sourceIndex], items, {
-    markGeneratedRelation: true,
-  });
-  library_state.imagineLikedPosts = likedPosts.map((post, index) => (
-    index === sourceIndex ? mergedPost : post
-  ));
-  if (typeof syncImagineRemotePostsIntoLibrary === "function") {
-    syncImagineRemotePostsIntoLibrary();
-  }
-  const selectedExists = Boolean(selectedItemId && (mergedPost.items || []).some((candidate) => (
-    mediaItemKey(candidate) === String(selectedItemId)
-    || String(candidate?.item_id || "") === String(selectedItemId)
-  )));
-  if (selectedExists) library_state.selectedDetailItemId = selectedItemId;
-  return true;
-}
-
 function applyImagineDirectResult(result, options = {}) {
   if (!result) return;
   let selectedPath = "";
@@ -597,12 +562,6 @@ function applyImagineDirectResult(result, options = {}) {
   const targetPath = String(result.target_folder_path || result.source_post_path || "");
   const items = Array.isArray(result.items) && result.items.length ? result.items : [result.item].filter(Boolean);
   const item = items[items.length - 1] || null;
-  if (mergeImagineResultIntoLikedSource(sourcePath, items, result.selected_item_id || "")) {
-    renderImagineSourceCards();
-    if (options.stayOnImagineMain) showImagineMainNow();
-    else renderDetailViews();
-    return;
-  }
   const keepSourceDetail = Boolean(
     sourcePath
     && targetPath

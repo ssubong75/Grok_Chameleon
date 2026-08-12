@@ -241,32 +241,60 @@ function imagineSavedCardAnchor(post) {
   return String(metadata.saved_anchor_id || imagine.saved_anchor_id || "").trim();
 }
 
-function imagineSavedDisplayGroup(post) {
-  if (imagineSavedPostProvenance(post) !== "normal-saved") return "";
-  return String(imagineSavedMetadataValue(post, "saved_display_group_id") || "").trim();
+function imagineSavedCardPathKey(post) {
+  const anchor = imagineSavedCardAnchor(post);
+  return imagineSavedScopedIdentity(post, anchor || post?.folder_path);
 }
 
+// Saved order comes from grok.com's top-level conversation list. Child activity is
+// intentionally excluded: adding a generated child must not move its existing card.
 function imagineSavedOfficialOrder(post) {
-  const value = imagineSavedMetadataValue(post, "official_order");
-  const order = Number(value);
-  return Number.isInteger(order) && order >= 0 ? order : null;
+  const metadata = post?.metadata && typeof post.metadata === "object" ? post.metadata : {};
+  const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
+  const candidates = [
+    post?.official_order,
+    metadata.official_order,
+    imagine.official_order,
+    post?.official_rank,
+    metadata.official_rank,
+    imagine.official_rank,
+  ];
+  for (const candidate of candidates) {
+    if (candidate === "" || candidate === null || candidate === undefined) continue;
+    const value = Number(candidate);
+    if (Number.isFinite(value) && value >= 0) return value;
+  }
+  return null;
 }
 
-function compareImagineSavedOfficialOrder(left, right) {
-  const leftOrder = imagineSavedOfficialOrder(left);
-  const rightOrder = imagineSavedOfficialOrder(right);
-  if (leftOrder !== null || rightOrder !== null) {
+function imagineSavedMinimumOfficialOrder(posts) {
+  let minimum = null;
+  for (const post of posts || []) {
+    const value = imagineSavedOfficialOrder(post);
+    if (value !== null && (minimum === null || value < minimum)) minimum = value;
+  }
+  return minimum;
+}
+
+function imagineSavedStampOfficialOrder(post, order) {
+  if (!post || order === null) return post;
+  const metadata = post.metadata && typeof post.metadata === "object" ? post.metadata : {};
+  if (Number(metadata.official_order) === order) return post;
+  return normalizeServerPost({
+    ...post,
+    metadata: { ...metadata, official_order: order },
+  });
+}
+
+function sortImagineSavedNewPosts(posts) {
+  return (posts || []).map((post, index) => ({ post, index })).sort((left, right) => {
+    const leftOrder = imagineSavedOfficialOrder(left.post);
+    const rightOrder = imagineSavedOfficialOrder(right.post);
+    if (leftOrder === null && rightOrder === null) return left.index - right.index;
     if (leftOrder === null) return 1;
     if (rightOrder === null) return -1;
-    if (leftOrder !== rightOrder) return leftOrder - rightOrder;
-  }
-  return comparePostsByRecentActivity(left, right);
-}
-
-function imagineSavedCardPathKey(post) {
-  const displayGroup = imagineSavedDisplayGroup(post);
-  const anchor = imagineSavedCardAnchor(post);
-  return imagineSavedScopedIdentity(post, displayGroup || anchor || post?.folder_path);
+    return leftOrder - rightOrder || left.index - right.index;
+  }).map((entry) => entry.post);
 }
 
 function rememberHiddenImaginePost(post) {
@@ -377,6 +405,7 @@ function mergeImagineRemotePosts(existingPosts, nextPosts) {
       for (const key of keys) known.add(key);
     }
     const representative = representativeItem(items, { ...primary, items }) || items[0];
+    const officialOrder = imagineSavedMinimumOfficialOrder([existing, post]);
     merged.set(key, normalizeServerPost({
       ...primary,
       items,
@@ -385,6 +414,7 @@ function mergeImagineRemotePosts(existingPosts, nextPosts) {
       metadata: {
         ...(primary.metadata || {}),
         flat_only: existingFlat && nextFlat,
+        ...(officialOrder === null ? {} : { official_order: officialOrder }),
       },
     }));
   }
@@ -511,50 +541,10 @@ function mergeImagineExternalRefreshedPosts(existingPosts, refreshedPosts) {
 }
 
 function mergeImagineRefreshedPosts(existingPosts, refreshedPosts) {
-  const existing = reconcileImagineSavedDisplayPosts(existingPosts || []);
-  const refreshed = reconcileImagineSavedDisplayPosts(refreshedPosts || []);
-  if (!existing.length) return sortPostsIfNeeded([...refreshed], comparePostsByRecentActivity);
-  if (!refreshed.length) return [];
-
-  const existingIndex = imagineSavedPostMatchIndex(existing);
-  const matchedExistingIndexes = new Set();
-  const refreshedForExistingIndex = new Map();
-  const newPosts = [];
-
-  for (const post of refreshed) {
-    const matchedIndex = takeImagineSavedPostMatch(
-      existingIndex,
-      post,
-      matchedExistingIndexes,
-      (index) => (
-        !(
-          isImagineT2iGroupContainer(post)
-          && existing[index]?.metadata?.local_heart === true
-        )
-        && !(
-          post?.metadata?.local_heart === true
-          && isImagineT2iGroupContainer(existing[index])
-        )
-      ),
-    );
-    if (matchedIndex < 0) {
-      newPosts.push(post);
-      continue;
-    }
-    matchedExistingIndexes.add(matchedIndex);
-    refreshedForExistingIndex.set(
-      matchedIndex,
-      mergeImaginePreservedGeneratedRelations(existing[matchedIndex], post),
-    );
-  }
-
-  return sortPostsIfNeeded([
-    ...newPosts,
-    ...existing.map((post, index) => (
-      refreshedForExistingIndex.get(index)
-      || (imaginePostHasPreservedGeneratedRelations(post) ? post : null)
-    )).filter(Boolean),
-  ], comparePostsByRecentActivity);
+  return mergeImagineSavedOrderedPosts(existingPosts, refreshedPosts, {
+    replacesList: true,
+    preserveMatchedAnchors: false,
+  });
 }
 
 function mergeImagineSyncedPosts(
@@ -638,6 +628,66 @@ function mergeImagineSyncedPosts(
   ], comparePostsByRecentActivity);
 }
 
+// Saved pages are fragments of one official sequence. Replace matched cards in their
+// current slots, and use the absolute official ordinal only to place genuinely new
+// top-level cards. Liked continues to use mergeImagineSyncedPosts and its activity sort.
+function mergeImagineSavedOrderedPosts(
+  existingPosts,
+  refreshedPosts,
+  { replacesList = false, preserveMatchedAnchors = !replacesList } = {},
+) {
+  const existing = reconcileImagineSavedDisplayPosts(existingPosts || []);
+  const refreshed = reconcileImagineSavedDisplayPosts(refreshedPosts || []);
+  if (!existing.length) return sortImagineSavedNewPosts(refreshed);
+  if (!refreshed.length) return replacesList ? [] : [...existing];
+
+  const existingIndex = imagineSavedPostMatchIndex(existing);
+  const matchedExistingIndexes = new Set();
+  const refreshedForExistingIndex = new Map();
+  const refreshedResults = [];
+  const newPosts = [];
+  for (const post of refreshed) {
+    const matchedIndex = takeImagineSavedPostMatch(existingIndex, post, matchedExistingIndexes);
+    if (matchedIndex < 0) {
+      newPosts.push(post);
+      refreshedResults.push(post);
+      continue;
+    }
+    matchedExistingIndexes.add(matchedIndex);
+    const existingPost = existing[matchedIndex];
+    const mergedPost = preserveMatchedAnchors
+      ? mergeImagineIncrementalSavedPost(existingPost, post)
+      : mergeImaginePreservedGeneratedRelations(existingPost, post);
+    const orderedMergedPost = imagineSavedStampOfficialOrder(
+      mergedPost,
+      imagineSavedMinimumOfficialOrder([existingPost, post]),
+    );
+    refreshedForExistingIndex.set(matchedIndex, orderedMergedPost);
+    refreshedResults.push(orderedMergedPost);
+  }
+
+  if (replacesList) {
+    return sortImagineSavedNewPosts(refreshedResults);
+  }
+
+  const ordered = existing.map((post, index) => refreshedForExistingIndex.get(index) || post);
+  for (const post of sortImagineSavedNewPosts(newPosts)) {
+    const officialOrder = imagineSavedOfficialOrder(post);
+    if (officialOrder === null) {
+      ordered.push(post);
+      continue;
+    }
+    const insertAt = ordered.findIndex((candidate) => {
+      if (imagineSavedPostIsPending(candidate)) return false;
+      const candidateOrder = imagineSavedOfficialOrder(candidate);
+      return candidateOrder === null || candidateOrder > officialOrder;
+    });
+    if (insertAt < 0) ordered.push(post);
+    else ordered.splice(insertAt, 0, post);
+  }
+  return ordered;
+}
+
 function mergeImagineIncrementalSavedPost(existingPost, refreshedPost) {
   if (!existingPost) return refreshedPost;
   if (!refreshedPost) return existingPost;
@@ -716,6 +766,7 @@ function mergeImagineIncrementalSavedPost(existingPost, refreshedPost) {
   const highPriorityImagine = highPriorityMetadata.imagine && typeof highPriorityMetadata.imagine === "object"
     ? highPriorityMetadata.imagine
     : {};
+  const officialOrder = imagineSavedMinimumOfficialOrder([existingPost, stabilized]);
   return normalizeServerPost({
     ...basePost,
     folder_path: existingPost.folder_path || basePost.folder_path || "",
@@ -746,6 +797,7 @@ function mergeImagineIncrementalSavedPost(existingPost, refreshedPost) {
         }
         : {}),
       flat_only: existingFlat && refreshedFlat,
+      ...(officialOrder === null ? {} : { official_order: officialOrder }),
     },
   });
 }
@@ -762,82 +814,6 @@ function imagineSavedItemAssetId(item) {
     || imagine.post_id
     || "",
   ).trim();
-}
-
-function imagineLikedExclusionCardKeys(post) {
-  const metadata = post?.metadata && typeof post.metadata === "object" ? post.metadata : {};
-  const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
-  const membershipIds = Array.isArray(metadata.liked_membership_asset_ids)
-    ? metadata.liked_membership_asset_ids
-    : [];
-  const folderTail = String(post?.folder_path || "").split("/").filter(Boolean).pop() || "";
-  return new Set([
-    imagineSavedCardAnchor(post),
-    post?.post_id,
-    folderTail,
-    metadata.link_post_id,
-    imagine.link_post_id,
-    metadata.clone_batch_id,
-    imagine.clone_batch_id,
-    ...membershipIds,
-  ].map((value) => String(value || "").trim()).filter(Boolean));
-}
-
-function filterImagineMainLikedScopePosts(posts) {
-  const excluded = library_state.imagineLikedExclusionIds instanceof Set
-    ? library_state.imagineLikedExclusionIds
-    : new Set();
-  return (posts || []).flatMap((post) => {
-    if (!post) return [];
-    if (["plain-liked", "cloned-liked"].includes(imagineSavedPostProvenance(post))) return [];
-    if (Array.from(imagineLikedExclusionCardKeys(post)).some((key) => excluded.has(key))) return [];
-    const items = (post.items || []).filter((item) => {
-      const assetId = imagineSavedItemAssetId(item);
-      return !assetId || !excluded.has(assetId);
-    });
-    if (!items.length) return [];
-    if (items.length === (post.items || []).length) return [post];
-    const representative = representativeItem(items, { ...post, items }) || items[0];
-    return [normalizeServerPost({
-      ...post,
-      items,
-      representative_item: representative,
-      representative: representative?.file || representative?.url || representative?.item_id || "",
-    })];
-  });
-}
-
-function applyImagineLikedExclusionSnapshot(data, accountId) {
-  const payload = data?.liked_exclusion;
-  if (!payload || !Array.isArray(payload.ids)) return false;
-  const normalizedAccountId = String(accountId || "");
-  const previousAccountId = String(library_state.imagineLikedExclusionAccountId || "");
-  let nextIds = previousAccountId === normalizedAccountId && library_state.imagineLikedExclusionIds instanceof Set
-    ? new Set(library_state.imagineLikedExclusionIds)
-    : new Set();
-  const incoming = new Set(payload.ids.map((value) => String(value || "").trim()).filter(Boolean));
-  if (payload.complete === true) nextIds = incoming;
-  else for (const value of incoming) nextIds.add(value);
-  const previousSignature = Array.from(
-    library_state.imagineLikedExclusionIds instanceof Set
-      ? library_state.imagineLikedExclusionIds
-      : [],
-  ).sort().join("\u0000");
-  const nextSignature = Array.from(nextIds).sort().join("\u0000");
-  library_state.imagineLikedExclusionIds = nextIds;
-  library_state.imagineLikedExclusionComplete = payload.complete === true
-    || (previousAccountId === normalizedAccountId && library_state.imagineLikedExclusionComplete === true);
-  library_state.imagineLikedExclusionRevision = String(
-    payload.revision || library_state.imagineLikedExclusionRevision || "",
-  );
-  library_state.imagineLikedExclusionAccountId = normalizedAccountId;
-  const before = library_state.imagineRemotePosts || [];
-  const after = filterImagineMainLikedScopePosts(before);
-  const changed = previousSignature !== nextSignature
-    || after.length !== before.length
-    || after.some((post, index) => post !== before[index]);
-  if (changed) library_state.imagineRemotePosts = after;
-  return changed;
 }
 
 function imagineSavedItemSourceIds(item) {
@@ -1201,11 +1177,18 @@ function mergeImagineSavedLineageCards(cards) {
       }
     }
     const representative = representativeItem(items, { ...anchor, items }) || items[0];
+    const officialOrder = imagineSavedMinimumOfficialOrder(
+      memberIndexes.map((index) => active[index]),
+    );
     return normalizeServerPost({
       ...anchor,
       items,
       representative: representative?.file || representative?.url || representative?.item_id || "",
       representative_item: representative,
+      metadata: {
+        ...(anchor.metadata || {}),
+        ...(officialOrder === null ? {} : { official_order: officialOrder }),
+      },
     });
   });
 }
@@ -1267,8 +1250,6 @@ function imagineSavedPostMatchKeys(post) {
   const metadata = post?.metadata && typeof post.metadata === "object" ? post.metadata : {};
   const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
   const provenance = imagineSavedPostProvenance(post);
-  const displayGroup = imagineSavedDisplayGroup(post);
-  if (displayGroup) return new Set([imagineSavedScopedIdentity(post, displayGroup)]);
   const savedAnchor = imagineSavedCardAnchor(post);
   if (savedAnchor) return new Set([imagineSavedScopedIdentity(post, savedAnchor)]);
   const exactAnchors = provenance === "cloned-liked"
@@ -1455,10 +1436,6 @@ function finishImagineSavedRequest(context) {
 }
 
 function applyImagineSavedRemotePage(data, { updatePosts = true, replacesList = false } = {}) {
-  const exclusionChanged = applyImagineLikedExclusionSnapshot(
-    data,
-    imaginePendingSavedAccountId(),
-  );
   if (updatePosts) {
     const normalized = normalizeImagineRemotePosts(
       Array.isArray(data.posts) ? data.posts : [],
@@ -1469,21 +1446,17 @@ function applyImagineSavedRemotePage(data, { updatePosts = true, replacesList = 
     ];
     const currentPosts = (library_state.imagineRemotePosts || [])
       .filter((post) => !imagineSavedPostIsPending(post));
-    library_state.imagineRemotePosts = filterImagineMainLikedScopePosts(reconcileImagineSavedDisplayPosts(
+    library_state.imagineRemotePosts = reconcileImagineSavedDisplayPosts(
       reconcileImaginePendingSavedPosts(
-        mergeImagineSyncedPosts(currentPosts, normalized, { replacesList }),
+        mergeImagineSavedOrderedPosts(currentPosts, normalized, { replacesList }),
         pending,
       ),
-    ));
+    );
   }
   library_state.imagineRemoteCursor = String(data.next_cursor || "");
   library_state.imagineRemoteSyncToken = String(
     data.sync_token || library_state.imagineRemoteSyncToken || "",
   );
-  if (exclusionChanged) {
-    syncImagineRemotePostsIntoLibrary();
-    if (!updatePosts) renderImagineSourceCards();
-  }
 }
 
 async function syncImagineSavedCards(
@@ -1610,7 +1583,6 @@ async function loadImagineSavedCards({ force = false, append = false } = {}) {
           offset: append ? library_state.imagineRemoteCacheOffset : 0,
         }, { signal: context.controller.signal });
         if (!imagineSavedResponseMatches(context, cacheData)) return;
-        applyImagineLikedExclusionSnapshot(cacheData, context.accountId);
         const cachedPosts = normalizeImagineRemotePosts(
           Array.isArray(cacheData.posts) ? cacheData.posts : [],
         );
@@ -1621,12 +1593,12 @@ async function loadImagineSavedCards({ force = false, append = false } = {}) {
           ...restoreImaginePendingSavedPosts(),
           ...imaginePendingSavedPosts(),
         ];
-        library_state.imagineRemotePosts = filterImagineMainLikedScopePosts(reconcileImagineSavedDisplayPosts(
+        library_state.imagineRemotePosts = reconcileImagineSavedDisplayPosts(
           reconcileImaginePendingSavedPosts(
-            mergeImagineSyncedPosts(currentPosts, cachedPosts),
+            mergeImagineSavedOrderedPosts(currentPosts, cachedPosts),
             pending,
           ),
-        ));
+        );
         library_state.imagineRemoteCacheLoaded = true;
         library_state.imagineRemoteCacheOffset = Number(
           cacheData.next_offset || cachedPosts.length,
@@ -1953,7 +1925,6 @@ async function loadImagineLikedCards({ force = false } = {}) {
     try {
       const cached = await qApi("/api/imagine/liked/cache", { account_id: accountId, limit: 5000 });
       if (imagineAccountResponseIsCurrent(accountId, requestEpoch, cached)) {
-        applyImagineLikedExclusionSnapshot(cached, accountId);
         const cachedPosts = (Array.isArray(cached?.posts) ? cached.posts : []).map(normalizeServerPost);
         if (cachedPosts.length) {
           library_state.imagineLikedPosts = mergeImagineSyncedPosts(
@@ -1972,7 +1943,6 @@ async function loadImagineLikedCards({ force = false } = {}) {
   try {
     const data = await qApi("/api/imagine/liked", { account_id: accountId, limit: 100 });
     if (!imagineAccountResponseIsCurrent(accountId, requestEpoch, data)) return;
-    applyImagineLikedExclusionSnapshot(data, accountId);
     const livePosts = (Array.isArray(data.posts) ? data.posts : []).map(normalizeServerPost);
     library_state.imagineLikedPosts = mergeImagineSyncedPosts(
       library_state.imagineLikedPosts || [],
@@ -2025,9 +1995,7 @@ function imagineSourcePosts() {
     const sourcePosts = library_state.imagineRemotePosts || [];
     if (imagineSavedDisplayPostsMemoSource !== sourcePosts) {
       imagineSavedDisplayPostsMemoSource = sourcePosts;
-      imagineSavedDisplayPostsMemoResult = reconcileImagineSavedDisplayPosts(sourcePosts)
-        .filter((post) => imagineSavedPostProvenance(post) === "normal-saved")
-        .sort(compareImagineSavedOfficialOrder);
+      imagineSavedDisplayPostsMemoResult = reconcileImagineSavedDisplayPosts(sourcePosts);
       imagineSavedVisiblePostsMemoResult = imagineSavedDisplayPostsMemoResult.filter((post) => (
         !isImagineT2iGroupContainer(post)
       ));
@@ -2055,6 +2023,7 @@ function imagineVisibleJobs() {
 function renderImagineSourceCards() {
   if (library_state.imagineRemotePosts?.length) syncImagineRemotePostsIntoLibrary();
   const uploadView = library_state.iMainView === imagineViewValue("UPLOAD", "upload");
+  const savedView = library_state.iMainView === imagineViewValue("IMAGINE", "imagine");
   if (
     uploadView
     && !library_state.imagineUploadLoaded
@@ -2138,11 +2107,11 @@ function renderImagineSourceCards() {
       list.replaceChildren(emptyLibraryNode(
         t2iView ? "No T2I items." : (uploadView ? "No upload images." : (likedView ? "No liked items." : "")),
       ));
-    } else if (library_state.iMainView === imagineViewValue("IMAGINE", "imagine") || uploadView || likedView) {
-      renderVirtualCardList(IMAGINE_VIRTUAL_LIST_KEY, list, orderedMainGenerationCards(
-        "imagine",
-        [...mainJobEntries, ...mainPostEntries],
-      ), {
+    } else if (savedView || uploadView || likedView) {
+      const entries = [...mainJobEntries, ...mainPostEntries];
+      renderVirtualCardList(IMAGINE_VIRTUAL_LIST_KEY, list, savedView
+        ? entries.flatMap((entry) => entry.cards)
+        : orderedMainGenerationCards("imagine", entries), {
         loading: likedView
           ? library_state.imagineLikedLoading
           : (uploadView ? library_state.imagineUploadLoading : library_state.imagineRemoteLoading),
