@@ -299,7 +299,7 @@ jobs:
           foreach ($marker in @(
             'const imageCountOptions = provider === "imagine"',
             '? imagineT2iCountOptions',
-            'const imageCountDefault = provider === "imagine" ? "4" : "5";',
+            'const imageCountDefault = provider === "imagine" ? "4" : (buildImage20 ? "2" : "5");',
             'setControlVisible(composerControls.count, !isImageToImage'
           )) {
             if (-not $composerText.Contains($marker)) { throw "Windows composer marker missing: $marker" }
@@ -782,7 +782,7 @@ jobs:
           PY
           grep -F 'const imageCountOptions = provider === "imagine"' "$target"
           grep -F '? imagineT2iCountOptions' "$target"
-          grep -F 'const imageCountDefault = provider === "imagine" ? "4" : "5";' "$target"
+          grep -F 'const imageCountDefault = provider === "imagine" ? "4" : (buildImage20 ? "2" : "5");' "$target"
           grep -F 'const generationResponseCaptures = [];' "$preload_js"
           grep -F 'conversation_request_route_applied' "$preload_js"
           grep -F 'canonicalContainerId' "$preload_js"
