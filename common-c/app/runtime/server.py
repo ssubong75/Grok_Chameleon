@@ -3126,16 +3126,18 @@ def imagine_generated_relation_anchor_post(
         # relation asset is indexed by one and only one account. This recovers the old
         # orphan without ever guessing from a shared source/conversation id.
         relation_asset_ids = {
-            imagine_relation_item_key(item)
+            imagine_item_asset_id(item)
             for item in (record.get("items") if isinstance(record.get("items"), list) else [])
-            if isinstance(item, dict) and imagine_relation_item_key(item)
+            if isinstance(item, dict) and imagine_item_asset_id(item)
         }
         owners = library_index.imagine_remote_asset_account_keys(root, relation_asset_ids)
         if owners == {active_account_key}:
             account_key = active_account_key
             record["account_key"] = active_account_key
             try:
-                imagine_state.upsert_generated_relation(root, anchor_id, record)
+                imagine_state.upsert_generated_relation(
+                    root, anchor_id, record, active_account_key,
+                )
             except Exception:
                 return None
     if not active_account_key or account_key != active_account_key:
@@ -3253,7 +3255,8 @@ def imagine_persist_generated_relation(
         upload_source["metadata"] = source_metadata
     ensure_imagine_state_migrated(root)
     with IMAGINE_RELATION_STATE_LOCK:
-        relations = imagine_state.load_generated_relations(root)
+        relation_account_key = imagine_account_settings_key(account or {})
+        relations = imagine_state.load_generated_relations(root, relation_account_key)
         record = relations.get(record_id) if isinstance(relations.get(record_id), dict) else {}
         merged: dict[str, dict] = {}
         candidate_records = [record]
@@ -3294,7 +3297,7 @@ def imagine_persist_generated_relation(
                 "upload_source_item": imagine_relation_stored_item(upload_source),
                 "source_hidden_in_bundle": bool(record.get("source_hidden_in_bundle")),
             })
-        imagine_state.upsert_generated_relation(root, record_id, next_record)
+        imagine_state.upsert_generated_relation(root, record_id, next_record, relation_account_key)
     anchor_post = imagine_generated_relation_anchor_post(record_id, next_record, root, account or {})
     if anchor_post:
         try:
@@ -3386,9 +3389,52 @@ def imagine_update_complete_liked_membership_snapshot(
     imagine_store_liked_membership_snapshot(root, account, ids)
 
 
-def imagine_liked_card_asset_ids(root: Path, account: dict, relations: dict[str, dict]) -> set[str]:
+def imagine_liked_relation_record_ids(record_id: str, record: dict) -> set[str]:
+    if not isinstance(record, dict):
+        return set()
+    ids = {
+        str(value).strip()
+        for value in (
+            record_id,
+            record.get("source_post_id"),
+            record.get("source_item_id"),
+            record.get("display_source_post_id"),
+            record.get("upload_source_asset_id"),
+            record.get("rematerialized_bundle_id"),
+            record.get("generation_container_id"),
+            *(
+                value
+                for value in (record.get("item_ids") or [])
+                if not str(value or "").strip().lower().startswith(("http://", "https://", "data:"))
+            ),
+            *(
+                value
+                for value in (record.get("hidden_asset_ids") or [])
+                if not str(value or "").strip().lower().startswith(("http://", "https://", "data:"))
+            ),
+        )
+        if str(value or "").strip()
+    }
+    for item in record.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        item_id = imagine_item_asset_id(item)
+        if item_id:
+            ids.add(item_id)
+        ids.update(imagine_item_explicit_relation_ids(item))
+    return ids
+
+
+def imagine_liked_scope_groups(root: Path, account: dict, relations: dict[str, dict]) -> list[dict]:
+    """Build account-scoped Liked components from authoritative scope signals.
+
+    The generic ``liked`` flags on Saved objects are presentation compatibility fields and
+    are intentionally never read here. Authority is limited to current collection
+    membership, clone records, and a persisted explicit owner mismatch.
+    """
     snapshot = imagine_liked_membership_snapshot(root, account)
-    liked_ids = set(snapshot.get("ids") or [])
+    membership_ids = set(snapshot.get("ids") or [])
+    cloned_ids = imagine_account_setting_ids(root, "imagine_cloned_asset_ids", account)
     try:
         cached = library_index.query_imagine_remote_posts(
             root,
@@ -3398,12 +3444,13 @@ def imagine_liked_card_asset_ids(root: Path, account: dict, relations: dict[str,
         )
     except Exception:
         cached = {"posts": []}
+    groups: list[dict] = []
     for post in cached.get("posts") or []:
         if not isinstance(post, dict):
             continue
         provenance, anchor = imagine_post_saved_identity(post)
         metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
-        membership_ids = {
+        explicit_membership_ids = {
             str(value).strip()
             for value in (
                 metadata.get("link_post_id"),
@@ -3411,7 +3458,7 @@ def imagine_liked_card_asset_ids(root: Path, account: dict, relations: dict[str,
             )
             if str(value or "").strip()
         }
-        post_aliases = {
+        post_ids = {
             str(value).strip()
             for value in (
                 anchor,
@@ -3422,60 +3469,139 @@ def imagine_liked_card_asset_ids(root: Path, account: dict, relations: dict[str,
             )
             if str(value or "").strip()
         }
-        if snapshot.get("complete"):
-            if not membership_ids & liked_ids:
-                continue
-        elif provenance not in {"plain-liked", "cloned-liked"} and not membership_ids:
-            continue
-        liked_ids.update(post_aliases)
-        liked_ids.update(membership_ids)
-    if not liked_ids:
-        return set()
-    hidden = set(liked_ids)
-    changed = True
-    while changed:
-        changed = False
-        for source_id, record in (relations or {}).items():
-            if not isinstance(record, dict):
-                continue
-            record_account_key = str(record.get("account_key") or "").strip().lower()
-            if record_account_key and record_account_key != imagine_account_settings_key(account):
-                continue
-            related = {
+        post_ids.update(
+            imagine_item_asset_id(item)
+            for item in post.get("items") or []
+            if isinstance(item, dict) and imagine_item_asset_id(item)
+        )
+        reason = str(metadata.get("liked_scope_reason") or "").strip().lower()
+        if reason == "foreign-owner":
+            # This stamp is written only after both owner ids were explicitly observed for
+            # this active account. An old Saved `liked:true` can never create this group.
+            foreign_owner_ids = {
                 str(value).strip()
-                for value in (
-                    source_id,
-                    record.get("source_post_id"),
-                    record.get("source_item_id"),
-                    record.get("display_source_post_id"),
-                    record.get("upload_source_asset_id"),
-                )
+                for value in (metadata.get("foreign_owner_user_ids") or [])
                 if str(value or "").strip()
             }
-            if not related & hidden:
+            resolved_current_owner = str(metadata.get("resolved_current_owner_user_id") or "").strip()
+            if not foreign_owner_ids or not resolved_current_owner:
                 continue
-            expanded = set(related)
-            expanded.update(
-                str(value).strip()
-                for value in (*(record.get("item_ids") or []), *(record.get("hidden_asset_ids") or []))
-                if str(value or "").strip()
-            )
-            expanded.update(
-                imagine_relation_item_key(item)
-                for item in record.get("items") or []
-                if isinstance(item, dict) and imagine_relation_item_key(item)
-            )
-            before = len(hidden)
-            hidden.update(expanded)
-            changed = changed or len(hidden) != before
-    return hidden
+            group_provenance = "plain-liked"
+        else:
+            active_memberships = explicit_membership_ids & membership_ids
+            active_clones = post_ids & cloned_ids
+            if snapshot.get("complete"):
+                if not active_memberships and not active_clones:
+                    continue
+            elif provenance not in {"plain-liked", "cloned-liked"} and not explicit_membership_ids and not active_clones:
+                continue
+            reason = "clone" if active_clones else "official-membership"
+            group_provenance = "cloned-liked" if reason == "clone" else "plain-liked"
+        post_ids.update(explicit_membership_ids)
+        if not post_ids:
+            continue
+        groups.append({
+            "anchor_id": str(anchor or metadata.get("link_post_id") or sorted(post_ids)[0]),
+            "provenance": group_provenance,
+            "reason": reason,
+            "ids": post_ids,
+        })
+
+    represented_ids = {value for group in groups for value in group["ids"]}
+    for membership_id in sorted(membership_ids - represented_ids):
+        groups.append({
+            "anchor_id": membership_id,
+            "provenance": "plain-liked",
+            "reason": "official-membership",
+            "ids": {membership_id},
+        })
+    for clone_id in sorted(cloned_ids - represented_ids):
+        groups.append({
+            "anchor_id": clone_id,
+            "provenance": "cloned-liked",
+            "reason": "clone",
+            "ids": {clone_id},
+        })
+
+    account_key = imagine_account_settings_key(account)
+    relation_components_by_id: dict[str, list[set[str]]] = {}
+    for source_id, record in (relations or {}).items():
+        if not isinstance(record, dict):
+            continue
+        record_account_key = str(record.get("account_key") or "").strip().lower()
+        if record_account_key and record_account_key != account_key:
+            continue
+        component = imagine_liked_relation_record_ids(str(source_id or ""), record)
+        if not component:
+            continue
+        for value in component:
+            relation_components_by_id.setdefault(value, []).append(component)
+    for group in groups:
+        pending_ids = list(group["ids"])
+        visited_component_ids: set[int] = set()
+        while pending_ids:
+            value = pending_ids.pop()
+            for component in relation_components_by_id.get(value, []):
+                component_id = id(component)
+                if component_id in visited_component_ids:
+                    continue
+                visited_component_ids.add(component_id)
+                additions = component - group["ids"]
+                if additions:
+                    group["ids"].update(additions)
+                    pending_ids.extend(additions)
+
+    # Merge only groups with the same provenance whose explicit id graphs overlap. A clone
+    # may retain the id of its origin as attribution; provenance keeps it separate from a
+    # plain membership for that same original.
+    merged: list[dict] = []
+    for group in groups:
+        destination = next((
+            existing
+            for existing in merged
+            if existing["provenance"] == group["provenance"]
+            and existing["ids"] & group["ids"]
+        ), None)
+        if destination is None:
+            merged.append(group)
+            continue
+        destination["ids"].update(group["ids"])
+        if destination["reason"] != group["reason"]:
+            if "foreign-owner" in {destination["reason"], group["reason"]}:
+                destination["reason"] = "foreign-owner"
+    return [
+        {
+            "anchor_id": str(group["anchor_id"]),
+            "provenance": str(group["provenance"]),
+            "reason": str(group["reason"]),
+            "ids": sorted(group["ids"]),
+        }
+        for group in merged
+        if group["ids"]
+    ]
+
+
+def imagine_liked_card_asset_ids(root: Path, account: dict, relations: dict[str, dict]) -> set[str]:
+    return {
+        value
+        for group in imagine_liked_scope_groups(root, account, relations)
+        for value in group.get("ids") or []
+        if str(value or "").strip()
+    }
 
 
 def imagine_liked_exclusion_payload(root: Path, account: dict, relations: dict[str, dict]) -> dict:
     snapshot = imagine_liked_membership_snapshot(root, account)
-    ids = imagine_liked_card_asset_ids(root, account, relations)
+    groups = imagine_liked_scope_groups(root, account, relations)
+    ids = {
+        str(value).strip()
+        for group in groups
+        for value in group.get("ids") or []
+        if str(value or "").strip()
+    }
     return {
         "ids": sorted(ids),
+        "groups": groups,
         "complete": bool(snapshot.get("complete")),
         "revision": str(snapshot.get("revision") or ""),
     }
@@ -3503,12 +3629,165 @@ def imagine_post_liked_anchor_keys(post: dict) -> set[str]:
     }
 
 
+def imagine_post_owner_scope(post: dict, current_owner_user_id: str) -> tuple[bool, set[str]]:
+    """Return explicit owner mismatch state for one active-account post."""
+    current_owner = str(current_owner_user_id or "").strip()
+    if not isinstance(post, dict) or not current_owner:
+        return False, set()
+    foreign_owner_ids: set[str] = set()
+    for item in post.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
+        owner_user_id = str(
+            item.get("owner_user_id")
+            or metadata.get("owner_user_id")
+            or imagine.get("owner_user_id")
+            or ""
+        ).strip()
+        if owner_user_id and owner_user_id != current_owner:
+            foreign_owner_ids.add(owner_user_id)
+    return bool(foreign_owner_ids), foreign_owner_ids
+
+
+def imagine_stamp_foreign_owner_scope(post: dict, current_owner_user_id: str) -> bool:
+    is_foreign, foreign_owner_ids = imagine_post_owner_scope(post, current_owner_user_id)
+    if not is_foreign:
+        return False
+    metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+    prior_provenance = str(metadata.get("saved_provenance") or "").strip().lower()
+    scope_provenance = "cloned-liked" if prior_provenance == "cloned-liked" else "plain-liked"
+    metadata.update({
+        "saved_provenance": scope_provenance,
+        "liked_scope_reason": "foreign-owner",
+        "foreign_owner_user_ids": sorted(foreign_owner_ids),
+        "resolved_current_owner_user_id": str(current_owner_user_id or "").strip(),
+    })
+    post["metadata"] = metadata
+    return True
+
+
+def imagine_asset_owner_lookup(account: dict, asset_id: str) -> dict:
+    """Resolve an asset and its owner through Grok for the active account only."""
+    asset_id = str(asset_id or "").strip()
+    if not asset_id:
+        return {}
+    try:
+        data = imagine_get_json(
+            f"/rest/assets/{quote(asset_id, safe='')}",
+            account,
+            timeout=10,
+            referer=IMAGINE_BASE + "/imagine/saved",
+        )
+    except Exception:
+        return {}
+    asset = data.get("asset") if isinstance(data.get("asset"), dict) else data
+    if not isinstance(asset, dict):
+        return {}
+    return {
+        "asset": asset,
+        "owner_user_id": imagine_asset_owner_user_id(asset),
+    }
+
+
+def imagine_resolve_missing_source_owners(posts: list[dict], account: dict, current_owner_user_id: str) -> None:
+    """Resolve bounded missing source ids and persist the explicit result on their posts."""
+    current_owner = str(current_owner_user_id or "").strip()
+    if not current_owner:
+        return
+    source_ids_by_post: dict[int, set[str]] = {}
+    all_item_ids = {
+        imagine_item_asset_id(item)
+        for post in posts
+        if isinstance(post, dict)
+        for item in post.get("items") or []
+        if isinstance(item, dict) and imagine_item_asset_id(item)
+    }
+    unresolved_ids: set[str] = set()
+    for index, post in enumerate(posts):
+        if not isinstance(post, dict):
+            continue
+        referenced_ids = {
+            relation_id
+            for item in post.get("items") or []
+            if isinstance(item, dict)
+            for relation_id in imagine_item_explicit_relation_ids(item)
+            if relation_id not in all_item_ids
+        }
+        if referenced_ids:
+            source_ids_by_post[index] = referenced_ids
+            unresolved_ids.update(referenced_ids)
+    # One page is at most forty conversations/assets. Bound lookups independently so a
+    # malformed response cannot fan out into unbounded official calls.
+    record_by_asset_id: dict[str, dict] = {}
+    lookup_ids = sorted(unresolved_ids)[:80]
+    if lookup_ids:
+        with ThreadPoolExecutor(max_workers=min(8, len(lookup_ids))) as executor:
+            future_ids = {
+                executor.submit(imagine_asset_owner_lookup, account, asset_id): asset_id
+                for asset_id in lookup_ids
+            }
+            for future in as_completed(future_ids):
+                asset_id = future_ids[future]
+                try:
+                    result = future.result()
+                    record_by_asset_id[asset_id] = result if isinstance(result, dict) else {}
+                except Exception:
+                    record_by_asset_id[asset_id] = {}
+    for index, source_ids in source_ids_by_post.items():
+        foreign_owner_ids = {
+            str((record_by_asset_id.get(source_id) or {}).get("owner_user_id") or "").strip()
+            for source_id in source_ids
+            if str((record_by_asset_id.get(source_id) or {}).get("owner_user_id") or "").strip()
+            and str((record_by_asset_id.get(source_id) or {}).get("owner_user_id") or "").strip() != current_owner
+        }
+        if not foreign_owner_ids:
+            continue
+        post = posts[index]
+        known_item_ids = {
+            imagine_item_asset_id(item)
+            for item in post.get("items") or []
+            if isinstance(item, dict) and imagine_item_asset_id(item)
+        }
+        for source_id in source_ids:
+            record = record_by_asset_id.get(source_id) or {}
+            owner_user_id = str(record.get("owner_user_id") or "").strip()
+            if not owner_user_id or owner_user_id not in foreign_owner_ids or source_id in known_item_ids:
+                continue
+            source_post = imagine_unsaved_post_from_asset(record.get("asset") or {}, account)
+            source_item = next((
+                dict(item)
+                for item in (source_post or {}).get("items") or []
+                if isinstance(item, dict) and imagine_item_asset_id(item) == source_id
+            ), None)
+            if not source_item:
+                continue
+            source_item.update({
+                "role": "source",
+                "relation": "external-source",
+                "liked": True,
+                "favorite": True,
+            })
+            source_metadata = source_item.get("metadata") if isinstance(source_item.get("metadata"), dict) else {}
+            source_imagine = source_metadata.get("imagine") if isinstance(source_metadata.get("imagine"), dict) else {}
+            source_metadata.update({"owner_user_id": owner_user_id, "external_reference": True})
+            source_imagine.update({"owner_user_id": owner_user_id, "external_reference": True})
+            source_metadata["imagine"] = source_imagine
+            source_item["metadata"] = source_metadata
+            post.setdefault("items", []).insert(0, source_item)
+            known_item_ids.add(source_id)
+
+
 def imagine_filter_liked_scope_posts(posts: list[dict], hidden_ids: set[str]) -> list[dict]:
     if not hidden_ids:
         return posts
     filtered: list[dict] = []
     for post in posts:
         if not isinstance(post, dict) or imagine_post_liked_anchor_keys(post) & hidden_ids:
+            continue
+        metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+        if str(metadata.get("liked_scope_reason") or "").strip().lower() == "foreign-owner":
             continue
         items = [
             item
@@ -3615,7 +3894,7 @@ def imagine_persist_rematerialized_generated_relation(
     liked_source = False
     if link_source and account:
         ensure_imagine_state_migrated(root)
-        relation_snapshot = imagine_state.load_generated_relations(root)
+        relation_snapshot = imagine_state.load_generated_relations(root, imagine_account_settings_key(account))
         liked_scope_ids = imagine_liked_card_asset_ids(root, account, relation_snapshot)
         liked_source = bool(
             {source_id, str(source_item_id or "").strip()} & liked_scope_ids
@@ -3641,7 +3920,8 @@ def imagine_persist_rematerialized_generated_relation(
         hidden_asset_ids.add(upload_source_asset_id)
     ensure_imagine_state_migrated(root)
     with IMAGINE_RELATION_STATE_LOCK:
-        relations = imagine_state.load_generated_relations(root)
+        relation_account_key = imagine_account_settings_key(account or {}) if account else ""
+        relations = imagine_state.load_generated_relations(root, relation_account_key)
         source_record = relations.get(source_id) if isinstance(relations.get(source_id), dict) else {}
         source_record.update({
             "account_key": imagine_account_settings_key(account or {}) if account else str(source_record.get("account_key") or ""),
@@ -3650,7 +3930,7 @@ def imagine_persist_rematerialized_generated_relation(
             "liked_source_relation": bool(liked_source),
             "updated_at": now_iso(),
         })
-        imagine_state.upsert_generated_relation(root, source_id, source_record)
+        imagine_state.upsert_generated_relation(root, source_id, source_record, relation_account_key)
         bundle_record = relations.get(bundle_id) if isinstance(relations.get(bundle_id), dict) else {}
         bundle_record.update({
             "account_key": imagine_account_settings_key(account or {}) if account else str(bundle_record.get("account_key") or ""),
@@ -3665,7 +3945,7 @@ def imagine_persist_rematerialized_generated_relation(
             "updated_at": now_iso(),
             "items": bundle_record.get("items") if isinstance(bundle_record.get("items"), list) else [],
         })
-        imagine_state.upsert_generated_relation(root, bundle_id, bundle_record)
+        imagine_state.upsert_generated_relation(root, bundle_id, bundle_record, relation_account_key)
     imagine_debug_event("rematerialized_bundle_hidden", {
         "request_id": request_id,
         "action": action,
@@ -3711,6 +3991,7 @@ def imagine_restore_generated_relation_resolutions(
     post: dict,
     root: Path,
     relations: dict[str, dict] | None = None,
+    account: dict | None = None,
 ) -> bool:
     if not isinstance(post, dict):
         return False
@@ -3719,7 +4000,9 @@ def imagine_restore_generated_relation_resolutions(
         return False
     if not isinstance(relations, dict):
         ensure_imagine_state_migrated(root)
-        relations = imagine_state.load_generated_relations(root)
+        relations = imagine_state.load_generated_relations(
+            root, imagine_account_settings_key(account or {}),
+        )
     record = relations.get(post_id) if isinstance(relations.get(post_id), dict) else None
     if not record:
         return False
@@ -3813,7 +4096,9 @@ def imagine_ensure_upload_bundle_record(
     current_comparable.pop("updated_at", None)
     if comparable != current_comparable:
         with IMAGINE_RELATION_STATE_LOCK:
-            imagine_state.upsert_generated_relation(root, post_id, next_record)
+            imagine_state.upsert_generated_relation(
+                root, post_id, next_record, imagine_account_settings_key(account),
+            )
         relations[post_id] = next_record
         imagine_debug_event("upload_bundle_relation_migrated", {
             "post_id": post_id,
@@ -3894,7 +4179,9 @@ def imagine_bundle_background_worker() -> None:
             post = task.get("post") if isinstance(task.get("post"), dict) else None
             if not account or not post:
                 continue
-            relations = imagine_state.load_generated_relations(root)
+            relations = imagine_state.load_generated_relations(
+                root, imagine_account_settings_key(account),
+            )
             imagine_ensure_upload_bundle_record(post, root, account, relations)
         except Exception:
             pass
@@ -4194,7 +4481,9 @@ def imagine_apply_generated_relations(
         return post
     if not isinstance(relations, dict):
         ensure_imagine_state_migrated(root)
-        relations = imagine_state.load_generated_relations(root)
+        relations = imagine_state.load_generated_relations(
+            root, imagine_account_settings_key(account),
+        )
     post_metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
     conversation_id = str(post_metadata.get("conversation_id") or "").strip()
     link_source = imagine_post_is_link_source(post)
@@ -4212,7 +4501,47 @@ def imagine_apply_generated_relations(
         record = upload_record
     if not record:
         return post
-    enriched_existing = imagine_restore_generated_relation_resolutions(post, root, relations)
+    active_account_key = imagine_account_settings_key(account)
+    record_account_key = str(record.get("account_key") or "").strip().lower()
+    if record_account_key:
+        if not active_account_key or record_account_key != active_account_key:
+            return post
+    else:
+        # Legacy relations predate account scoping. Adopt only when their exact asset ids
+        # are indexed by one and only one account; a shared Liked source or unknown owner
+        # must never carry one account's generated items into another account's card.
+        relation_asset_ids = {
+            imagine_item_asset_id(item)
+            for item in record.get("items") or []
+            if isinstance(item, dict) and imagine_item_asset_id(item)
+        }
+        relation_asset_ids.update({
+            str(value).strip()
+            for value in (
+                record.get("source_item_id"),
+                record.get("upload_source_asset_id"),
+            )
+            if str(value or "").strip()
+        })
+        owners = library_index.imagine_remote_asset_account_keys(root, relation_asset_ids)
+        if not active_account_key or owners != {active_account_key}:
+            return post
+        record["account_key"] = active_account_key
+        try:
+            relation_key = next((
+                key
+                for key, candidate in relations.items()
+                if candidate is record
+            ), "")
+            if relation_key:
+                imagine_state.upsert_generated_relation(
+                    root, relation_key, record, active_account_key,
+                )
+        except Exception:
+            return post
+    enriched_existing = imagine_restore_generated_relation_resolutions(
+        post, root, relations, account,
+    )
     existing_items = [dict(item) for item in post.get("items") or [] if isinstance(item, dict)]
     if record.get("upload_origin_bundle"):
         upload_source_id = str(record.get("upload_source_asset_id") or record.get("source_item_id") or "").strip()
@@ -4915,6 +5244,53 @@ def imagine_item_source_id(item: dict) -> str:
     ).strip()
 
 
+def imagine_item_explicit_relation_ids(item: dict) -> set[str]:
+    """Return only server-provided lineage ids; never infer lineage from a URL."""
+    if not isinstance(item, dict):
+        return set()
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
+    values: set[str] = set()
+    for holder in (item, metadata, imagine):
+        for key in (
+            "source_item_id", "parent_post_id", "original_post_id",
+            "source_asset_id", "parent_asset_id", "original_asset_id",
+        ):
+            value = str(holder.get(key) or "").strip()
+            if value:
+                values.add(value)
+    values.discard(imagine_item_asset_id(item))
+    return values
+
+
+def imagine_post_conversation_id(post: dict) -> str:
+    if not isinstance(post, dict):
+        return ""
+    metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+    imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
+    return str(
+        metadata.get("conversation_id")
+        or imagine.get("conversation_id")
+        or post.get("conversation_id")
+        or ""
+    ).strip()
+
+
+def imagine_post_explicit_generation_root_id(post: dict) -> str:
+    """Return an explicit generation root, not a display/grouping fallback."""
+    if not isinstance(post, dict):
+        return ""
+    metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+    imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
+    return str(
+        metadata.get("root_generation_asset_id")
+        or imagine.get("root_generation_asset_id")
+        or metadata.get("generation_root_asset_id")
+        or imagine.get("generation_root_asset_id")
+        or ""
+    ).strip()
+
+
 def imagine_item_is_source(item: dict) -> bool:
     if not isinstance(item, dict):
         return False
@@ -5135,14 +5511,15 @@ def merge_imagine_saved_lineage_cards(cards: list[dict]) -> list[dict]:
         return active
 
     root_ids: list[str] = []
+    provenances = [imagine_post_saved_identity(card)[0] for card in active]
     identities = [
         (
-            imagine_post_saved_identity(card)[0],
+            provenances[index],
             imagine_saved_display_group_id(card) or imagine_post_saved_identity(card)[1],
         )
-        for card in active
+        for index, card in enumerate(active)
     ]
-    root_owner_by_id: dict[tuple[str, str, str], int] = {}
+    root_owner_by_id: dict[tuple[str, str], int] = {}
     for index, card in enumerate(active):
         metadata = card.get("metadata") if isinstance(card.get("metadata"), dict) else {}
         root_id = str(
@@ -5152,25 +5529,42 @@ def merge_imagine_saved_lineage_cards(cards: list[dict]) -> list[dict]:
         ).strip()
         root_ids.append(root_id)
         if root_id:
-            root_owner_by_id.setdefault((*identities[index], root_id), index)
+            root_owner_by_id.setdefault((provenances[index], root_id), index)
 
     owner_by_item_id = dict(root_owner_by_id)
-    source_owner_by_id: dict[tuple[str, str, str], int] = {}
-    upload_bundle_owner_by_item_id: dict[tuple[str, str, str], int] = {}
+    source_owner_by_id: dict[tuple[str, str], int] = {}
+    upload_bundle_owner_by_item_id: dict[tuple[str, str], int] = {}
     for index, card in enumerate(active):
         card_metadata = card.get("metadata") if isinstance(card.get("metadata"), dict) else {}
         for item in card.get("items") or []:
             item_id = imagine_item_asset_id(item)
             if card_metadata.get("upload_origin_bundle") and item_id:
-                upload_bundle_owner_by_item_id.setdefault((*identities[index], item_id), index)
+                upload_bundle_owner_by_item_id.setdefault((provenances[index], item_id), index)
             if imagine_item_is_source(item):
                 if item_id:
-                    source_owner_by_id.setdefault((*identities[index], item_id), index)
+                    source_owner_by_id.setdefault((provenances[index], item_id), index)
                 continue
             if item_id:
-                owner_by_item_id.setdefault((*identities[index], item_id), index)
+                owner_by_item_id.setdefault((provenances[index], item_id), index)
 
     parent_indexes = list(range(len(active)))
+
+    def find(index: int) -> int:
+        while parent_indexes[index] != index:
+            parent_indexes[index] = parent_indexes[parent_indexes[index]]
+            index = parent_indexes[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root == right_root:
+            return
+        # Component ownership is selected after all explicit edges are known. Keeping the
+        # smaller temporary root here merely makes the union operation deterministic.
+        if right_root < left_root:
+            left_root, right_root = right_root, left_root
+        parent_indexes[right_root] = left_root
 
     def canonical_group_owner(indexes: list[int]) -> int:
         def rank(index: int) -> tuple:
@@ -5218,81 +5612,61 @@ def merge_imagine_saved_lineage_cards(cards: list[dict]) -> list[dict]:
     for member_indexes in indexes_by_identity.values():
         if len(member_indexes) < 2:
             continue
-        owner_index = canonical_group_owner(member_indexes)
         for member_index in member_indexes:
-            if member_index != owner_index:
-                parent_indexes[member_index] = owner_index
+            union(member_indexes[0], member_index)
 
     for index, candidate in enumerate(active):
-        if parent_indexes[index] != index:
-            continue
         candidate_metadata = candidate.get("metadata") if isinstance(candidate.get("metadata"), dict) else {}
-        identity = identities[index]
+        provenance = provenances[index]
         root_id = root_ids[index]
-        duplicate_owner = root_owner_by_id.get((*identity, root_id)) if root_id else None
+        duplicate_owner = root_owner_by_id.get((provenance, root_id)) if root_id else None
         if duplicate_owner is not None and duplicate_owner != index:
-            parent_indexes[index] = duplicate_owner
-            continue
+            union(index, duplicate_owner)
         if not candidate_metadata.get("upload_origin_bundle"):
             upload_bundle_owner = next((
-                upload_bundle_owner_by_item_id.get((*identity, imagine_item_asset_id(item)))
+                upload_bundle_owner_by_item_id.get((provenance, imagine_item_asset_id(item)))
                 for item in candidate.get("items") or []
-                if upload_bundle_owner_by_item_id.get((*identity, imagine_item_asset_id(item))) is not None
+                if upload_bundle_owner_by_item_id.get((provenance, imagine_item_asset_id(item))) is not None
             ), None)
             if upload_bundle_owner is not None and upload_bundle_owner != index:
-                parent_indexes[index] = upload_bundle_owner
+                union(index, upload_bundle_owner)
+        # Explicit parent/source/original ids are authoritative across card boundaries.
+        # The old code looked only at a card's chosen root and scoped that lookup by the
+        # already-computed display group, so a one-hop group difference permanently split
+        # a real parent and its children.
+        for item in candidate.get("items") or []:
+            if not isinstance(item, dict):
                 continue
-        root_item = next((
-            item
-            for item in candidate.get("items") or []
-            if imagine_item_asset_id(item) == root_id
-        ), None)
-        parent_id = imagine_item_source_id(root_item or {})
-        parent_owner = owner_by_item_id.get((*identity, parent_id))
-        if parent_owner is None:
-            parent_owner = source_owner_by_id.get((*identity, parent_id))
-        if parent_id and parent_owner is not None and parent_owner != index:
-            parent_indexes[index] = parent_owner
-            continue
-        # This used to fall back to the generation root when the parent was unreachable, to
-        # rejoin a clone-batch pair whose chain was cut. Nothing is cloned any more, so the
-        # only unreachable parents are other people's assets, and the fallback dragged the
-        # owner's own media and everything generated from it into one card. grok.com files a
-        # generation off someone else's asset as its own card, so leave it as its own root.
+            for parent_id in imagine_item_explicit_relation_ids(item):
+                parent_owner = owner_by_item_id.get((provenance, parent_id))
+                if parent_owner is None:
+                    parent_owner = source_owner_by_id.get((provenance, parent_id))
+                if parent_owner is not None and parent_owner != index:
+                    union(index, parent_owner)
 
-    resolved_roots: dict[int, int] = {}
-    for start_index in range(len(active)):
-        if start_index in resolved_roots:
+    # Sibling outputs may not name one another, but Grok supplies both their conversation
+    # and their explicit generation root. Only that pair is a grouping edge; conversation
+    # alone is deliberately insufficient and URLs never participate.
+    sibling_owner: dict[tuple[str, str, str], int] = {}
+    for index, card in enumerate(active):
+        conversation_id = imagine_post_conversation_id(card)
+        generation_root_id = imagine_post_explicit_generation_root_id(card)
+        if not conversation_id or not generation_root_id:
             continue
-        path: list[int] = []
-        positions: dict[int, int] = {}
-        current_index = start_index
-        while (
-            current_index not in resolved_roots
-            and parent_indexes[current_index] != current_index
-            and current_index not in positions
-        ):
-            positions[current_index] = len(path)
-            path.append(current_index)
-            current_index = parent_indexes[current_index]
-        if current_index in resolved_roots:
-            root_index = resolved_roots[current_index]
-        elif current_index in positions:
-            root_index = min(path[positions[current_index]:])
-        else:
-            root_index = current_index
-        resolved_roots[current_index] = root_index
-        for path_index in reversed(path):
-            resolved_roots[path_index] = root_index
+        sibling_key = (provenances[index], conversation_id, generation_root_id)
+        prior = sibling_owner.setdefault(sibling_key, index)
+        if prior != index:
+            union(index, prior)
 
     members_by_root: dict[int, list[int]] = {}
     for index in range(len(active)):
-        root_index = resolved_roots.get(index, index)
+        root_index = find(index)
         members_by_root.setdefault(root_index, []).append(index)
 
     merged_cards: list[dict] = []
     for root_index in sorted(members_by_root):
         member_indexes = members_by_root[root_index]
+        root_index = canonical_group_owner(member_indexes)
         anchor = active[root_index]
         if len(member_indexes) == 1:
             merged_cards.append(anchor)
@@ -5323,9 +5697,48 @@ def merge_imagine_saved_lineage_cards(cards: list[dict]) -> list[dict]:
         }
         if anchor_aliases:
             anchor_metadata["saved_anchor_aliases"] = sorted(anchor_aliases)
-        display_group_id = imagine_saved_display_group_id(anchor)
-        if display_group_id:
-            anchor_metadata["saved_display_group_id"] = display_group_id
+        prior_display_groups = {
+            imagine_saved_display_group_id(active[member_index])
+            for member_index in member_indexes
+            if imagine_saved_display_group_id(active[member_index])
+        }
+        if prior_display_groups:
+            anchor_metadata["saved_display_group_aliases"] = sorted(prior_display_groups)
+        merged_item_ids = {
+            imagine_item_asset_id(item)
+            for item in merged_items
+            if isinstance(item, dict) and imagine_item_asset_id(item)
+        }
+        referenced_item_ids = {
+            relation_id
+            for item in merged_items
+            if isinstance(item, dict)
+            for relation_id in imagine_item_explicit_relation_ids(item)
+            if relation_id in merged_item_ids
+        }
+        canonical_asset_id = next((
+            item_id
+            for item_id in sorted(referenced_item_ids)
+            if not any(
+                item_id in imagine_item_explicit_relation_ids(item)
+                for item in merged_items
+                if imagine_item_asset_id(item) in referenced_item_ids
+                and imagine_item_asset_id(item) != item_id
+            )
+        ), "")
+        if not canonical_asset_id:
+            canonical_asset_id = next((
+                root_ids[member_index]
+                for member_index in member_indexes
+                if root_ids[member_index] in merged_item_ids
+            ), "")
+        canonical_display_group = (
+            f"asset:{canonical_asset_id}"
+            if canonical_asset_id
+            else imagine_saved_display_group_id(anchor)
+        )
+        if canonical_display_group:
+            anchor_metadata["saved_display_group_id"] = canonical_display_group
         anchor["metadata"] = anchor_metadata
         imagine_preserve_earliest_official_order(
             anchor,
@@ -5698,6 +6111,13 @@ def imagine_remote_cache_records(posts: list[dict]) -> list[dict]:
                 previous_scoped_key = f"{provenance}:{prior_anchor}"
                 if previous_scoped_key != group_key:
                     legacy_keys_by_group.setdefault(group_key, set()).add(previous_scoped_key)
+            for prior_display_group in post_metadata.get("saved_display_group_aliases") or []:
+                prior_display_group = str(prior_display_group or "").strip()
+                if not prior_display_group:
+                    continue
+                previous_group_key = f"{provenance}:group:{prior_display_group}"
+                if previous_group_key != group_key:
+                    legacy_keys_by_group.setdefault(group_key, set()).add(previous_group_key)
             legacy_key = imagine_remote_cache_legacy_post_key(post)
             if legacy_key:
                 legacy_keys_by_group.setdefault(group_key, set()).add(legacy_key)
@@ -6057,7 +6477,9 @@ def list_imagine_saved(payload: dict) -> dict:
                         "error": str(exc)[:400],
                     })
     ensure_imagine_state_migrated(root)
-    relations = imagine_state.load_generated_relations(root)
+    relations = imagine_state.load_generated_relations(
+        root, imagine_account_settings_key(account),
+    )
     hidden_bundle_asset_ids = imagine_hidden_bundle_asset_ids(relations)
     pending_delete_ids = imagine_pending_delete_ids(root, account)
     local_exclusion_ids = imagine_local_exclusion_ids(root, account)
@@ -6074,6 +6496,7 @@ def list_imagine_saved(payload: dict) -> dict:
             imagine_apply_generated_relations(local_post, root, account, relations)
         )
     ]
+    owner_scope_source_posts: list[dict] = []
     posts = []
     for official_order, conversation in conversation_entries:
         conversation_id = str(conversation.get("conversationId") or "")
@@ -6085,18 +6508,7 @@ def list_imagine_saved(payload: dict) -> dict:
             post_metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
             post_metadata["official_order"] = official_order
             post["metadata"] = post_metadata
-            if imagine_post_liked_anchor_keys(post) & hidden_remote_ids:
-                continue
-            post["items"] = [
-                item
-                for item in post.get("items") or []
-                if imagine_item_asset_id(item) not in hidden_remote_ids
-            ]
-            if not post["items"]:
-                continue
-            representative = imagine_representative_item(post["items"]) or post["items"][-1]
-            post["representative_item"] = representative
-            post["representative"] = representative.get("url") or representative.get("item_id") or ""
+            owner_scope_source_posts.append(post)
             posts.extend(imagine_saved_lineage_cards(post))
 
     asset_query = [
@@ -6182,10 +6594,56 @@ def list_imagine_saved(payload: dict) -> dict:
             root, account, relations, list(saved_groups.values()),
         ):
             merge_imagine_flat_saved_post(saved_groups, relation_post)
-    posts = merge_imagine_saved_lineage_cards(list(saved_groups.values()))
+    owner_scope_candidates = [*owner_scope_source_posts, *list(saved_groups.values())]
+    owner_scope_candidates_by_key: dict[str, dict] = {}
+    for owner_scope_post in owner_scope_candidates:
+        key = imagine_remote_cache_legacy_post_key(owner_scope_post) or str(id(owner_scope_post))
+        owner_scope_candidates_by_key.setdefault(key, owner_scope_post)
+    owner_scope_candidates = list(owner_scope_candidates_by_key.values())
+    imagine_resolve_missing_source_owners(
+        owner_scope_candidates,
+        account,
+        current_owner_user_id,
+    )
+    owner_scope_cards = [
+        split_post
+        for owner_scope_post in owner_scope_candidates
+        for split_post in imagine_saved_lineage_cards(owner_scope_post)
+    ]
+    for owner_scope_card in owner_scope_cards:
+        imagine_stamp_foreign_owner_scope(owner_scope_card, current_owner_user_id)
+    posts = merge_imagine_saved_lineage_cards(owner_scope_cards)
+    foreign_owner_liked_posts = [
+        post
+        for post in posts
+        if isinstance(post, dict)
+        and str(
+            (post.get("metadata") if isinstance(post.get("metadata"), dict) else {}).get("liked_scope_reason")
+            or ""
+        ).strip().lower() == "foreign-owner"
+    ]
+    if foreign_owner_liked_posts:
+        try:
+            imagine_store_liked_cache(root, account, foreign_owner_liked_posts, prune=False)
+        except Exception as exc:
+            imagine_debug_event("foreign_owner_liked_cache_failed", {
+                "account_id": str(account.get("id") or ""),
+                "error": str(exc)[:400],
+            })
+    # Owner resolution can turn a normal Saved component into Liked scope during this
+    # request. Rebuild the groups from the now-stamped posts before filtering main.
+    transient_liked_ids = {
+        imagine_item_asset_id(item)
+        for post in foreign_owner_liked_posts
+        for item in post.get("items") or []
+        if isinstance(item, dict) and imagine_item_asset_id(item)
+    }
+    hidden_remote_ids.update(transient_liked_ids)
     posts = imagine_filter_liked_scope_posts(posts, hidden_remote_ids)
     imagine_sort_saved_by_official_order(posts)
     try:
+        # Persist both scopes under separate namespaces. Keeping foreign-owner cards out of
+        # main's cache prevents a cold cache paint from showing them before live filtering.
         cache_imagine_remote_posts(root, account, posts, sync_token=sync_token)
     except Exception as exc:
         imagine_debug_event("saved_cache_update_failed", {
@@ -6691,12 +7149,29 @@ def list_imagine_liked_cache(payload: dict) -> dict:
     )
     hidden = imagine_pending_delete_ids(root, account) | imagine_local_exclusion_ids(root, account)
     ensure_imagine_state_migrated(root)
-    relations = imagine_state.load_generated_relations(root)
+    relations = imagine_state.load_generated_relations(
+        root, imagine_account_settings_key(account),
+    )
+    current_owner_user_id = imagine_current_owner_user_id(account)
     posts: list[dict] = []
     for cached_post in cached.get("posts") or []:
         if not isinstance(cached_post, dict):
             continue
         post = imagine_apply_generated_relations(cached_post, root, account, relations)
+        metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+        if str(metadata.get("liked_scope_reason") or "").strip().lower() == "foreign-owner":
+            foreign_owner_ids = {
+                str(value).strip()
+                for value in (metadata.get("foreign_owner_user_ids") or [])
+                if str(value or "").strip()
+            }
+            stamped_current_owner = str(metadata.get("resolved_current_owner_user_id") or "").strip()
+            if (
+                not current_owner_user_id
+                or stamped_current_owner != current_owner_user_id
+                or not foreign_owner_ids
+            ):
+                continue
         imagine_stamp_saved_identity(post)
         post["items"] = [
             item
@@ -6732,6 +7207,7 @@ def list_imagine_liked(payload: dict) -> dict:
     account = active_imagine_account(root, str((payload or {}).get("account_id") or ""))
     if not account:
         raise RuntimeError("Select or capture an Imagine account first.")
+    current_owner_user_id = imagine_current_owner_user_id(account)
     try:
         limit = int((payload or {}).get("limit") or 100)
     except (TypeError, ValueError):
@@ -6785,6 +7261,10 @@ def list_imagine_liked(payload: dict) -> dict:
     liked_hidden_ids = (
         imagine_pending_delete_ids(root, account)
         | imagine_local_exclusion_ids(root, account)
+    )
+    ensure_imagine_state_migrated(root)
+    relations = imagine_state.load_generated_relations(
+        root, imagine_account_settings_key(account),
     )
     # One heart copies a whole card, so the source image arrives as its own collection entry
     # beside the asset that was pressed and would stand up a second card for the same thing.
@@ -6928,6 +7408,49 @@ def list_imagine_liked(payload: dict) -> dict:
             item["metadata"] = item_metadata
         covered_asset_ids.add(asset_id)
         posts.append(imagine_stamp_saved_identity(post))
+    # Foreign-owner sources are Liked scope even when the current official collection has
+    # no membership row. They were resolved from Grok under this active account while Saved
+    # was loaded and cached with their complete source/result graph.
+    cached_foreign = library_index.query_imagine_remote_posts(
+        root,
+        imagine_liked_cache_account_key(account),
+        offset=0,
+        limit=5000,
+    )
+    existing_keys = {imagine_saved_group_key(post) for post in posts if isinstance(post, dict)}
+    for cached_post in cached_foreign.get("posts") or []:
+        if not isinstance(cached_post, dict):
+            continue
+        metadata = cached_post.get("metadata") if isinstance(cached_post.get("metadata"), dict) else {}
+        if str(metadata.get("liked_scope_reason") or "").strip().lower() != "foreign-owner":
+            continue
+        if (
+            not current_owner_user_id
+            or str(metadata.get("resolved_current_owner_user_id") or "").strip() != current_owner_user_id
+            or not {
+                str(value).strip()
+                for value in (metadata.get("foreign_owner_user_ids") or [])
+                if str(value or "").strip()
+            }
+        ):
+            continue
+        cached_post = imagine_apply_generated_relations(cached_post, root, account, relations)
+        cached_post["items"] = [
+            item
+            for item in cached_post.get("items") or []
+            if isinstance(item, dict) and imagine_item_asset_id(item) not in liked_hidden_ids
+        ]
+        if not cached_post["items"]:
+            continue
+        cached_post["mode"] = "link"
+        cached_post["liked"] = True
+        cached_post["favorite"] = True
+        group_key = imagine_saved_group_key(cached_post)
+        if group_key and group_key in existing_keys:
+            continue
+        if group_key:
+            existing_keys.add(group_key)
+        posts.append(imagine_stamp_saved_identity(cached_post))
     complete = bool(membership.get("complete")) and not errors
     if complete:
         reconcile_imagine_local_hearts_with_complete_liked_membership(
@@ -6952,7 +7475,11 @@ def list_imagine_liked(payload: dict) -> dict:
         "membership_complete": bool(membership.get("complete")),
         "complete": complete,
         "liked_exclusion": imagine_liked_exclusion_payload(
-            root, account, imagine_state.load_generated_relations(root),
+            root,
+            account,
+            imagine_state.load_generated_relations(
+                root, imagine_account_settings_key(account),
+            ),
         ),
     }
 
@@ -7170,7 +7697,9 @@ def list_imagine_discover(payload: dict) -> dict:
     data = imagine_post_json("/rest/media/post/list", request_payload, account, referer=IMAGINE_BASE + "/imagine")
     root_posts = data.get("posts") if isinstance(data.get("posts"), list) else []
     posts = [post for post in (imagine_discover_post_from_root(item, account) for item in root_posts) if post]
-    relations = imagine_state.load_generated_relations(root)
+    relations = imagine_state.load_generated_relations(
+        root, imagine_account_settings_key(account),
+    )
     posts = [
         imagine_apply_generated_relations(
             post,
@@ -7338,7 +7867,9 @@ def search_imagine_media(payload: dict) -> dict:
     )
     results = data.get("results") if isinstance(data.get("results"), list) else []
     posts = [post for post in (imagine_search_post_from_result(item, account, query) for item in results) if post]
-    relations = imagine_state.load_generated_relations(root)
+    relations = imagine_state.load_generated_relations(
+        root, imagine_account_settings_key(account),
+    )
     posts = [
         imagine_apply_generated_relations(
             post,
@@ -7624,6 +8155,7 @@ def imagine_local_exclusion_ids(root: Path | None, account: dict) -> set[str]:
 def remove_imagine_generated_relation_state(
     root: Path,
     *,
+    account: dict | None = None,
     asset_ids: set[str] | None = None,
     group_ids: set[str] | None = None,
 ) -> None:
@@ -7641,7 +8173,8 @@ def remove_imagine_generated_relation_state(
         return
     ensure_imagine_state_migrated(root)
     with IMAGINE_RELATION_STATE_LOCK:
-        relations = imagine_state.load_generated_relations(root)
+        relation_account_key = imagine_account_settings_key(account or {}) if account else ""
+        relations = imagine_state.load_generated_relations(root, relation_account_key)
         next_relations: dict[str, dict] = {}
         changed = False
         for source_id, raw_record in relations.items():
@@ -7687,13 +8220,16 @@ def remove_imagine_generated_relation_state(
             record["items"] = items
             next_relations[source_id] = record
         if changed:
-            imagine_state.replace_generated_relations(root, next_relations)
+            imagine_state.replace_generated_relations(
+                root, next_relations, relation_account_key,
+            )
 
 
 def set_imagine_upload_bundle_source_hidden(
     root: Path,
     bundle_id: str,
     source_asset_id: str,
+    account: dict,
 ) -> None:
     bundle_id = str(bundle_id or "").strip()
     source_asset_id = str(source_asset_id or "").strip()
@@ -7701,9 +8237,11 @@ def set_imagine_upload_bundle_source_hidden(
         raise RuntimeError("Imagine upload bundle id is required.")
     ensure_imagine_state_migrated(root)
     with IMAGINE_RELATION_STATE_LOCK:
-        relations = imagine_state.load_generated_relations(root)
+        relation_account_key = imagine_account_settings_key(account)
+        relations = imagine_state.load_generated_relations(root, relation_account_key)
         record = relations.get(bundle_id) if isinstance(relations.get(bundle_id), dict) else {}
         record.update({
+            "account_key": relation_account_key,
             "source_post_id": bundle_id,
             "source_post_path": f"imagine_saved/{bundle_id}",
             "source_item_id": str(record.get("source_item_id") or source_asset_id),
@@ -7713,7 +8251,9 @@ def set_imagine_upload_bundle_source_hidden(
             "updated_at": now_iso(),
             "items": record.get("items") if isinstance(record.get("items"), list) else [],
         })
-        imagine_state.upsert_generated_relation(root, bundle_id, record)
+        imagine_state.upsert_generated_relation(
+            root, bundle_id, record, relation_account_key,
+        )
 
 
 def imagine_asset_owner_user_id(asset: dict, media_url: str = "") -> str:
@@ -8556,7 +9096,9 @@ def list_imagine_unsaved(payload: dict) -> dict:
         current_anchor = ""
         response_cursor = encode_imagine_unsaved_cursor(current_cursor)
         has_more = True
-    relations = imagine_state.load_generated_relations(root)
+    relations = imagine_state.load_generated_relations(
+        root, imagine_account_settings_key(account),
+    )
     posts = [
         imagine_apply_generated_relations(
             post,
@@ -8984,9 +9526,9 @@ def delete_imagine_asset(payload: dict) -> dict:
             remove_entire_link_post=False,
         )
         if bundle_source_only:
-            set_imagine_upload_bundle_source_hidden(root, bundle_id, asset_id)
+            set_imagine_upload_bundle_source_hidden(root, bundle_id, asset_id, account)
         else:
-            remove_imagine_generated_relation_state(root, asset_ids={asset_id})
+            remove_imagine_generated_relation_state(root, account=account, asset_ids={asset_id})
         update_imagine_account_setting_ids(
             root,
             "imagine_external_reference_asset_ids",
@@ -9063,7 +9605,7 @@ def discard_missing_imagine_asset(payload: dict) -> dict:
         account,
         remove={asset_id},
     )
-    remove_imagine_generated_relation_state(root, asset_ids={asset_id})
+    remove_imagine_generated_relation_state(root, account=account, asset_ids={asset_id})
     prune_imagine_remote_cache_assets(root, account, {asset_id})
     invalidate_imagine_saved_media_keys_cache(account)
     imagine_debug_event("missing_asset_pruned", {
@@ -9092,7 +9634,7 @@ def delete_imagine_asset_metadata(payload: dict) -> dict:
         rollback_imagine_delete_race_guard(root, account, asset_id)
         raise
     if root:
-        remove_imagine_generated_relation_state(root, asset_ids={asset_id})
+        remove_imagine_generated_relation_state(root, account=account, asset_ids={asset_id})
     return {"ok": True, "asset_id": asset_id, "result": result}
 
 
@@ -9121,7 +9663,7 @@ def delete_imagine_conversation(payload: dict) -> dict:
             account,
             remove_group_ids={conversation_id},
         )
-        remove_imagine_generated_relation_state(root, group_ids={conversation_id})
+        remove_imagine_generated_relation_state(root, account=account, group_ids={conversation_id})
         remove_imagine_remote_cache_post_keys(
             root,
             account,
@@ -10058,9 +10600,9 @@ def unsave_imagine_media_post(payload: dict) -> dict:
             external_asset_ids,
         )
     if payload_link_source or matched_link_asset_ids:
-        remove_imagine_generated_relation_state(root, group_ids=removal_group_ids)
+        remove_imagine_generated_relation_state(root, account=account, group_ids=removal_group_ids)
     elif owned_asset_ids:
-        remove_imagine_generated_relation_state(root, asset_ids=owned_asset_ids)
+        remove_imagine_generated_relation_state(root, account=account, asset_ids=owned_asset_ids)
     if delete_operation and official_delete_ids:
         remove_imagine_remote_cache_assets(root, account, official_delete_ids)
     cache_group_ids = removal_group_ids | clone_group_ids
@@ -10959,6 +11501,7 @@ def imagine_clone_id_by_origin(root: Path | None, account: dict) -> dict[str, di
     return mapping
 
 
+
 def imagine_substitute_cloned_source(
     attachments: list[dict],
     account: dict,
@@ -11057,6 +11600,7 @@ def imagine_substitute_cloned_source(
             "origin_asset_id": origin_id,
             "clone_asset_id": clone_id,
         })
+
 
 
 def imagine_prepare_direct_image_attachments(
@@ -13669,12 +14213,19 @@ def imagine_saved_candidate_ids(account: dict, expected_type: str, parent_ids: s
     return {value for value in ids if value}
 
 
-def imagine_generated_relation_baseline_ids(root: Path, source_post_path: str, expected_type: str) -> set[str]:
+def imagine_generated_relation_baseline_ids(
+    root: Path,
+    source_post_path: str,
+    expected_type: str,
+    account: dict,
+) -> set[str]:
     source_id = imagine_relation_source_id(source_post_path)
     if not source_id:
         return set()
     ensure_imagine_state_migrated(root)
-    relations = imagine_state.load_generated_relations(root)
+    relations = imagine_state.load_generated_relations(
+        root, imagine_account_settings_key(account),
+    )
     record = relations.get(source_id) if isinstance(relations.get(source_id), dict) else {}
     ids: set[str] = set()
     for item in record.get("items") if isinstance(record.get("items"), list) else []:
@@ -14320,11 +14871,6 @@ def imagine_video_request(payload: dict, prompt: str, request_id: str, action: s
     if image_attachments:
         imagine_mark_external_lineage_fresh_source(payload, image_attachments, account or {})
         imagine_prepare_direct_image_attachments(image_attachments, account or {}, request_id, action, payload=payload)
-    # Extend takes a video, so it never reaches the image path where a copy is swapped in
-    # for the original it was made from. Without this it would send the other account's
-    # asset and conversation, which grok.com answers with its anti-bot rejection.
-    if action == "extend" and isinstance(video_attachment, dict):
-        imagine_substitute_cloned_source([video_attachment], account or {}, request_id, action, payload)
     context_attachment = video_attachment if action == "extend" else (image_attachments[0] if image_attachments else None)
     conversation_id, parent_response_id = imagine_source_conversation_context(payload, context_attachment, account)
     direct_upload = bool(
@@ -15034,7 +15580,9 @@ def imagine_native_bridge_generate(
         else None
     )
     source_post_path = str(payload.get("source_post_path") or "")
-    baseline_ids = imagine_generated_relation_baseline_ids(root, source_post_path, expected_type)
+    baseline_ids = imagine_generated_relation_baseline_ids(
+        root, source_post_path, expected_type, account,
+    )
     relation_baseline_count = len(baseline_ids)
     try:
         baseline_ids.update(imagine_saved_candidate_ids(account, expected_type, parent_ids, ignored_urls))

@@ -1218,10 +1218,15 @@ def upsert_imagine_remote_posts(
     if not normalized_account or not normalized_records:
         return 0
     refreshed_at = time.time()
+    canonical_post_keys = {record[0] for record in normalized_records}
     with _lock_for(root):
         with _connection(root, write=True) as connection:
             _create_schema(connection)
-            for post_key, created_at, activity_at, post, asset_ids, legacy_post_keys, official_order in normalized_records:
+            # Resolve every inherited position before deleting superseded rows. A single
+            # legacy card can split into several canonical cards, and each successor must
+            # retain the same official position even after the old row is removed.
+            inherited_orders: list[int | None] = []
+            for post_key, _, _, _, _, legacy_post_keys, _ in normalized_records:
                 inherited_order = None
                 order_keys = [post_key, *legacy_post_keys]
                 if order_keys:
@@ -1235,15 +1240,22 @@ def upsert_imagine_remote_posts(
                         (normalized_account, *order_keys),
                     ).fetchone()
                     inherited_order = order_row["official_order"] if order_row else None
+                inherited_orders.append(inherited_order)
+            for record, inherited_order in zip(normalized_records, inherited_orders):
+                post_key, created_at, activity_at, post, asset_ids, legacy_post_keys, official_order = record
                 resolved_order = official_order if official_order is not None else inherited_order
-                if legacy_post_keys:
-                    placeholders = ",".join("?" for _ in legacy_post_keys)
+                removable_legacy_keys = [
+                    key for key in legacy_post_keys
+                    if key not in canonical_post_keys
+                ]
+                if removable_legacy_keys:
+                    placeholders = ",".join("?" for _ in removable_legacy_keys)
                     connection.execute(
                         f"""
                         DELETE FROM imagine_remote_posts
                         WHERE account_key = ? AND post_key IN ({placeholders})
                         """,
-                        (normalized_account, *legacy_post_keys),
+                        (normalized_account, *removable_legacy_keys),
                     )
                 connection.execute(
                     """

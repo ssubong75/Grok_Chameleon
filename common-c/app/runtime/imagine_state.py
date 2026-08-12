@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 STATE_DIRECTORY = "sql_data"
 DATABASE_FILENAME = "state.sqlite3"
 BACKUP_FILENAME = "state.backup.sqlite3"
@@ -443,9 +443,11 @@ def _connect(
             ON imagine_saved_assets(account_key, group_id);
 
         CREATE TABLE IF NOT EXISTS imagine_generated_relations (
-            source_id TEXT PRIMARY KEY,
+            account_key TEXT NOT NULL DEFAULT '',
+            source_id TEXT NOT NULL,
             relation_json TEXT NOT NULL,
-            updated_at REAL NOT NULL
+            updated_at REAL NOT NULL,
+            PRIMARY KEY (account_key, source_id)
         );
 
         CREATE TABLE IF NOT EXISTS imagine_upload_cache (
@@ -488,6 +490,43 @@ def _connect(
         CREATE INDEX IF NOT EXISTS account_registry_email_idx
             ON account_registry(email, provider);
         """
+                )
+                generated_relation_columns = {
+                    str(row["name"])
+                    for row in connection.execute(
+                        "PRAGMA table_info(imagine_generated_relations)"
+                    ).fetchall()
+                }
+                if "account_key" not in generated_relation_columns:
+                    # The old table keyed every account's relation by source_id alone.
+                    # Preserve those rows as explicitly unscoped legacy data. The server
+                    # may adopt one only after proving a unique owning account.
+                    connection.executescript(
+                        """
+                        ALTER TABLE imagine_generated_relations
+                            RENAME TO imagine_generated_relations_legacy_v4;
+                        CREATE TABLE imagine_generated_relations (
+                            account_key TEXT NOT NULL DEFAULT '',
+                            source_id TEXT NOT NULL,
+                            relation_json TEXT NOT NULL,
+                            updated_at REAL NOT NULL,
+                            PRIMARY KEY (account_key, source_id)
+                        );
+                        INSERT INTO imagine_generated_relations(
+                            account_key, source_id, relation_json, updated_at
+                        )
+                        SELECT '', source_id, relation_json, updated_at
+                        FROM imagine_generated_relations_legacy_v4;
+                        DROP TABLE imagine_generated_relations_legacy_v4;
+                        CREATE INDEX IF NOT EXISTS imagine_generated_relations_updated_idx
+                            ON imagine_generated_relations(account_key, updated_at, source_id);
+                        """
+                    )
+                connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS imagine_generated_relations_updated_idx
+                    ON imagine_generated_relations(account_key, updated_at, source_id)
+                    """
                 )
                 connection.execute(
                     """
@@ -803,24 +842,63 @@ def update_external_reference_ids(
     return external_reference_ids(root, account_key)
 
 
-def load_generated_relations(root: Path) -> dict[str, dict]:
-    with _connect(root) as connection:
-        rows = connection.execute(
-            """
-            SELECT source_id, relation_json
-            FROM imagine_generated_relations
-            ORDER BY updated_at ASC, source_id ASC
-            """
-        ).fetchall()
+def _generated_relation_account_key(value) -> str:
+    return _normalized_text(value).lower()
+
+
+def _decode_generated_relations(rows) -> dict[str, dict]:
     relations: dict[str, dict] = {}
     for row in rows:
         try:
             relation = json.loads(str(row["relation_json"]))
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
-        if isinstance(relation, dict):
-            relations[str(row["source_id"])] = relation
+        if not isinstance(relation, dict):
+            continue
+        relation = dict(relation)
+        storage_account_key = _generated_relation_account_key(row["account_key"])
+        if storage_account_key:
+            relation["account_key"] = storage_account_key
+            relation.pop("_legacy_unscoped", None)
+        else:
+            relation["_legacy_unscoped"] = True
+        relations[_normalized_text(row["source_id"])] = relation
     return relations
+
+
+def load_generated_relations(
+    root: Path,
+    account_key: str = "",
+    *,
+    include_legacy: bool = True,
+) -> dict[str, dict]:
+    normalized_account = _generated_relation_account_key(account_key)
+    with _connect(root) as connection:
+        if normalized_account:
+            rows = connection.execute(
+                """
+                SELECT account_key, source_id, relation_json
+                FROM imagine_generated_relations
+                WHERE account_key = ? OR (? = 1 AND account_key = '')
+                ORDER BY
+                    CASE WHEN account_key = '' THEN 0 ELSE 1 END,
+                    updated_at ASC,
+                    source_id ASC
+                """,
+                (normalized_account, int(bool(include_legacy))),
+            ).fetchall()
+        else:
+            # Compatibility calls without an account see legacy rows only. Combining every
+            # account into a source_id-keyed dict would recreate the cross-account overwrite.
+            rows = connection.execute(
+                """
+                SELECT account_key, source_id, relation_json
+                FROM imagine_generated_relations
+                WHERE account_key = ''
+                ORDER BY updated_at ASC, source_id ASC
+                """
+            ).fetchall()
+    return _decode_generated_relations(rows)
 
 
 def load_card_view_state_readonly(root: Path, account_key: str) -> dict:
@@ -855,13 +933,33 @@ def load_card_view_state_readonly(root: Path, account_key: str) -> dict:
                 """,
                 (str(account_key),),
             ).fetchall()
-            relation_rows = connection.execute(
-                """
-                SELECT source_id, relation_json
-                FROM imagine_generated_relations
-                ORDER BY updated_at ASC, source_id ASC
-                """
-            ).fetchall()
+            relation_columns = {
+                str(row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(imagine_generated_relations)"
+                ).fetchall()
+            }
+            if "account_key" in relation_columns:
+                relation_rows = connection.execute(
+                    """
+                    SELECT account_key, source_id, relation_json
+                    FROM imagine_generated_relations
+                    WHERE account_key IN ('', ?)
+                    ORDER BY
+                        CASE WHEN account_key = '' THEN 0 ELSE 1 END,
+                        updated_at ASC,
+                        source_id ASC
+                    """,
+                    (_generated_relation_account_key(account_key),),
+                ).fetchall()
+            else:
+                relation_rows = connection.execute(
+                    """
+                    SELECT '' AS account_key, source_id, relation_json
+                    FROM imagine_generated_relations
+                    ORDER BY updated_at ASC, source_id ASC
+                    """
+                ).fetchall()
         finally:
             connection.close()
     except sqlite3.Error:
@@ -870,72 +968,94 @@ def load_card_view_state_readonly(root: Path, account_key: str) -> dict:
         str(row["asset_id"])
         for row in (*pending_rows, *exclusion_rows)
     }
-    relations: dict[str, dict] = {}
-    for row in relation_rows:
-        try:
-            relation = json.loads(str(row["relation_json"]))
-        except (TypeError, ValueError, json.JSONDecodeError):
-            continue
-        if isinstance(relation, dict):
-            relations[str(row["source_id"])] = relation
     return {
         "hidden_ids": hidden_ids,
-        "relations": relations,
+        "relations": _decode_generated_relations(relation_rows),
     }
 
 
-def replace_generated_relations(root: Path, relations: dict[str, dict]) -> None:
+def replace_generated_relations(
+    root: Path,
+    relations: dict[str, dict],
+    account_key: str = "",
+) -> None:
+    normalized_account = _generated_relation_account_key(account_key)
     now = time.time()
+    records = []
+    for index, (source_id, relation) in enumerate(relations.items()):
+        normalized_source = _normalized_text(source_id)
+        if not normalized_source or not isinstance(relation, dict):
+            continue
+        stored_relation = dict(relation)
+        stored_relation.pop("_legacy_unscoped", None)
+        if normalized_account:
+            stored_relation["account_key"] = normalized_account
+        records.append((
+            normalized_account,
+            normalized_source,
+            json.dumps(stored_relation, ensure_ascii=False, separators=(",", ":")),
+            now + (index / 1000000),
+        ))
     with _connect(root, write=True) as connection:
-        connection.execute("DELETE FROM imagine_generated_relations")
+        connection.execute(
+            "DELETE FROM imagine_generated_relations WHERE account_key = ?",
+            (normalized_account,),
+        )
         connection.executemany(
             """
             INSERT INTO imagine_generated_relations(
-                source_id, relation_json, updated_at
-            ) VALUES(?, ?, ?)
+                account_key, source_id, relation_json, updated_at
+            ) VALUES(?, ?, ?, ?)
             """,
-            [
-                (
-                    str(source_id),
-                    json.dumps(relation, ensure_ascii=False, separators=(",", ":")),
-                    now + (index / 1000000),
-                )
-                for index, (source_id, relation) in enumerate(relations.items())
-                if str(source_id).strip() and isinstance(relation, dict)
-            ],
+            records,
         )
 
 
-def upsert_generated_relation(root: Path, source_id: str, relation: dict) -> None:
-    source_id = str(source_id).strip()
+def upsert_generated_relation(
+    root: Path,
+    source_id: str,
+    relation: dict,
+    account_key: str = "",
+) -> None:
+    source_id = _normalized_text(source_id)
     if not source_id or not isinstance(relation, dict):
         return
+    normalized_account = _generated_relation_account_key(account_key)
+    if not normalized_account and relation.get("_legacy_unscoped") is not True:
+        normalized_account = _generated_relation_account_key(relation.get("account_key"))
+    stored_relation = dict(relation)
+    stored_relation.pop("_legacy_unscoped", None)
+    if normalized_account:
+        stored_relation["account_key"] = normalized_account
     with _connect(root, write=True) as connection:
         connection.execute(
             """
             INSERT INTO imagine_generated_relations(
-                source_id, relation_json, updated_at
-            ) VALUES(?, ?, ?)
-            ON CONFLICT(source_id) DO UPDATE SET
+                account_key, source_id, relation_json, updated_at
+            ) VALUES(?, ?, ?, ?)
+            ON CONFLICT(account_key, source_id) DO UPDATE SET
                 relation_json = excluded.relation_json,
                 updated_at = excluded.updated_at
             """,
             (
+                normalized_account,
                 source_id,
-                json.dumps(relation, ensure_ascii=False, separators=(",", ":")),
+                json.dumps(stored_relation, ensure_ascii=False, separators=(",", ":")),
                 time.time(),
             ),
         )
         connection.execute(
             """
             DELETE FROM imagine_generated_relations
-            WHERE source_id IN (
+            WHERE account_key = ? AND source_id IN (
                 SELECT source_id
                 FROM imagine_generated_relations
+                WHERE account_key = ?
                 ORDER BY updated_at DESC
                 LIMIT -1 OFFSET 500
             )
-            """
+            """,
+            (normalized_account, normalized_account),
         )
 
 

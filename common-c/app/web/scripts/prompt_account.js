@@ -451,6 +451,8 @@
     library_state.imagineLikedLoading = false;
     library_state.imagineLikedError = "";
     library_state.imagineLikedExclusionIds = new Set();
+    library_state.imagineLikedExclusionGroups = [];
+    library_state.imagineLikedPendingRelations = new Map();
     library_state.imagineLikedExclusionComplete = false;
     library_state.imagineLikedExclusionRevision = "";
     library_state.imagineLikedExclusionAccountId = String(nextAccountId || "");
