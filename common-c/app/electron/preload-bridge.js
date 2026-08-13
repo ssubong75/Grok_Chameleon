@@ -1500,6 +1500,44 @@
     return getMediaStoreState();
   }
 
+  // Find the store as soon as the page is up, instead of when a generation asks for it.
+  // Nothing ever clears capturedMediaStore, so one successful capture serves this document
+  // for its whole life -- the scan only ever ran repeatedly because it started too late. The
+  // store lives in a Turbopack module that may not be evaluated at DOMContentLoaded, so this
+  // retries on load and once more after, and does nothing at all once the store is in hand.
+  let mediaStorePrimed = false;
+  async function primeMediaStore(timeoutMs = 20000) {
+    if (capturedMediaStore || mediaStorePrimed) return Boolean(capturedMediaStore);
+    mediaStorePrimed = true;
+    try {
+      await waitForMediaStore(timeoutMs);
+    } catch (_) {
+    } finally {
+      mediaStorePrimed = false;
+    }
+    if (capturedMediaStore) {
+      pushStoreTrace("media_store_primed", {
+        path: capturedMediaStorePath,
+        moduleId: capturedMediaStoreModule,
+        readyState: document.readyState,
+      });
+    }
+    return Boolean(capturedMediaStore);
+  }
+
+  function schedulePrimeMediaStore() {
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", () => primeMediaStore(), { once: true });
+    } else {
+      primeMediaStore();
+    }
+    window.addEventListener("load", () => primeMediaStore(), { once: true });
+    // A route change can pull the module in later than the first two attempts.
+    setTimeout(() => primeMediaStore(), 8000);
+  }
+
+  schedulePrimeMediaStore();
+
   function mediaStoreStateForRecord(record) {
     const state = record?.store?.getState?.();
     wrapMediaStoreStateMethods(state, record);
@@ -3597,5 +3635,6 @@
     },
     runStoreGeneration,
     runCropImage,
+    primeMediaStore,
   };
 })();
