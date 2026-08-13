@@ -470,7 +470,10 @@
   async function chooseLibraryPath() {
     const apiData = await tryQApi("/api/choose-library-folder", { current: library_state.rootPath });
     if (apiData) {
-      if (!apiData.cancelled) applyLibrarySnapshot(apiData);
+      // cancelled: nothing was picked. unchanged: the folder already in use was picked again,
+      // so the server left it alone -- repainting from an identical snapshot would only make
+      // the grid flash for no reason.
+      if (!apiData.cancelled && !apiData.unchanged) applyLibrarySnapshot(apiData);
       return;
     }
     if (!window.showDirectoryPicker) {

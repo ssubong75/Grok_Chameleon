@@ -3503,6 +3503,109 @@ def imagine_post_liked_anchor_keys(post: dict) -> set[str]:
     }
 
 
+IMAGINE_PUBLIC_SAMPLE_HOSTS = ("imagine-public.x.ai", "images-public.x.ai")
+
+
+def imagine_item_is_public_sample(item: dict) -> bool:
+    """Is this a Discover/sample asset served from the public bucket?
+
+    These are somebody else's work by definition, and they are a legitimate ingredient in the
+    owner's own Saved list, so every ownership test below has to skip them first. Treating
+    "not mine" as "belongs on Liked" without this guard once swept the whole Discover feed
+    into Liked.
+    """
+    if not isinstance(item, dict):
+        return False
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
+    return any(
+        host in str(value or "").lower()
+        for value in (
+            item.get("url"),
+            item.get("remote_url"),
+            item.get("media_url"),
+            metadata.get("remote_url"),
+            metadata.get("media_url"),
+            imagine.get("media_url"),
+        )
+        for host in IMAGINE_PUBLIC_SAMPLE_HOSTS
+    )
+
+
+def imagine_item_owner_user_id(item: dict) -> str:
+    if not isinstance(item, dict):
+        return ""
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
+    return str(metadata.get("owner_user_id") or imagine.get("owner_user_id") or "").strip()
+
+
+def imagine_foreign_origin_asset_ids(
+    root: Path | None,
+    account: dict,
+    posts: list[dict],
+    owner_user_id: str = "",
+) -> set[str]:
+    """Assets that belong on the Liked card only: someone else's, plus anything made from them.
+
+    Copies arrive by two routes that grok.com cannot tell apart once they land in Saved -- the
+    clone-batch build copies an asset outright, the plain build Likes it -- so provenance flags
+    are unreliable and ownership is what we go on. Public samples are excluded up front; see
+    imagine_item_is_public_sample. An owner id that is missing proves nothing and is left alone.
+
+    A clone-batch copy is the one case ownership cannot see: grok.com files the copy as this
+    account's own asset, so the owner id matches and nothing marks it apart. imagine_cloned_asset_ids
+    is written at copy time for exactly this reason, so seed the answer with it. A Liked one needs
+    no seed -- its owner id stays the original owner's, which the test below already catches.
+    """
+    mine = str(owner_user_id or "").strip()
+    parent_by_asset: dict[str, str] = {}
+    held_ids: set[str] = set()
+    foreign: set[str] = set(imagine_account_setting_ids(root, "imagine_cloned_asset_ids", account))
+    for post in posts or []:
+        if not isinstance(post, dict):
+            continue
+        for item in post.get("items") or []:
+            asset_id = imagine_item_asset_id(item)
+            if not asset_id or imagine_item_is_public_sample(item):
+                continue
+            held_ids.add(asset_id)
+            parent_id = imagine_item_source_id(item)
+            if parent_id:
+                parent_by_asset[asset_id] = parent_id
+            item_owner = imagine_item_owner_user_id(item)
+            if mine and item_owner and item_owner != mine:
+                foreign.add(asset_id)
+    # A parent that is missing from Saved is not proof of anything on its own -- the owner may
+    # have deleted it. It counts against us only when another account in this library indexes
+    # it, which makes it demonstrably somebody else's.
+    account_key = imagine_account_settings_key(account).strip().lower()
+    if root and account_key:
+        for parent_id in {
+            parent_id
+            for parent_id in parent_by_asset.values()
+            if parent_id and parent_id not in held_ids
+        }:
+            try:
+                keys = library_index.imagine_remote_asset_account_keys(root, {parent_id})
+            except Exception:
+                continue
+            if keys and account_key not in keys:
+                foreign.update(
+                    asset_id
+                    for asset_id, value in parent_by_asset.items()
+                    if value == parent_id
+                )
+    changed = True
+    while changed:
+        changed = False
+        for asset_id, parent_id in parent_by_asset.items():
+            if parent_id in foreign and asset_id not in foreign:
+                foreign.add(asset_id)
+                changed = True
+    return foreign
+
+
 def imagine_filter_liked_scope_posts(posts: list[dict], hidden_ids: set[str]) -> list[dict]:
     if not hidden_ids:
         return posts
@@ -3528,6 +3631,52 @@ def imagine_filter_liked_scope_posts(posts: list[dict], hidden_ids: set[str]) ->
         )
         filtered.append(post)
     return filtered
+
+
+def imagine_hidden_scope_posts(posts: list[dict], hidden_ids: set[str]) -> list[dict]:
+    """The exact complement of imagine_filter_liked_scope_posts: what that call throws away.
+
+    Main hides a copy, but hiding is only half of it -- the copy has to surface on Liked, and
+    Liked's own source is the grok.com collection, which a clone-batch copy never enters
+    (grok.com files it under the owner's own /saved). So the cache has to keep what main
+    hides, or the card exists nowhere: not on main, not on Liked, and after
+    finalize_imagine_remote_sync drops every row missing the current sync token, not in the
+    cache either. Copies are returned so the caller can merge and cache them without
+    disturbing the posts the visible pass is about to rewrite in place.
+    """
+    if not hidden_ids:
+        return []
+    hidden_posts: list[dict] = []
+    for post in posts:
+        if not isinstance(post, dict):
+            continue
+        anchored = bool(imagine_post_liked_anchor_keys(post) & hidden_ids)
+        items = [
+            dict(item)
+            for item in post.get("items") or []
+            if isinstance(item, dict)
+            and (anchored or imagine_item_asset_id(item) in hidden_ids)
+        ]
+        if not items:
+            continue
+        hidden_post = dict(post)
+        hidden_post["items"] = items
+        metadata = dict(post.get("metadata") or {}) if isinstance(post.get("metadata"), dict) else {}
+        # Marks the card as living on Liked by this app's judgement rather than by collection
+        # membership. The Liked view re-derives ownership itself, so nothing depends on this
+        # flag being right; it is here to make a cache row explainable when reading it back.
+        metadata["liked_scope"] = "foreign-origin"
+        hidden_post["metadata"] = metadata
+        representative = imagine_representative_item(items) or items[-1]
+        hidden_post["representative_item"] = representative
+        hidden_post["representative"] = (
+            representative.get("url")
+            or representative.get("remote_url")
+            or representative.get("item_id")
+            or ""
+        )
+        hidden_posts.append(hidden_post)
+    return hidden_posts
 
 
 def imagine_hide_generated_results_for_cloned_source(
@@ -5154,8 +5303,14 @@ def merge_imagine_saved_lineage_cards(cards: list[dict]) -> list[dict]:
         if root_id:
             root_owner_by_id.setdefault((*identities[index], root_id), index)
 
-    owner_by_item_id = dict(root_owner_by_id)
-    source_owner_by_id: dict[tuple[str, str, str], int] = {}
+    # Parent lookups key on provenance + asset id only, never the display group id. An asset
+    # id is a globally unique uuid, so narrowing by group is pure loss: a single-item card
+    # names its own *parent* as its group, a multi-item card names an asset it *holds*, and
+    # those two coordinate systems sit one generation apart. A child pointing at its parent's
+    # asset therefore missed the card holding it and every chain stayed split. Provenance
+    # still separates normal-saved from liked and cloned copies, which is the wall that matters.
+    owner_by_item_id = {(key[0], key[2]): index for key, index in root_owner_by_id.items()}
+    source_owner_by_id: dict[tuple[str, str], int] = {}
     upload_bundle_owner_by_item_id: dict[tuple[str, str, str], int] = {}
     for index, card in enumerate(active):
         card_metadata = card.get("metadata") if isinstance(card.get("metadata"), dict) else {}
@@ -5165,10 +5320,10 @@ def merge_imagine_saved_lineage_cards(cards: list[dict]) -> list[dict]:
                 upload_bundle_owner_by_item_id.setdefault((*identities[index], item_id), index)
             if imagine_item_is_source(item):
                 if item_id:
-                    source_owner_by_id.setdefault((*identities[index], item_id), index)
+                    source_owner_by_id.setdefault((identities[index][0], item_id), index)
                 continue
             if item_id:
-                owner_by_item_id.setdefault((*identities[index], item_id), index)
+                owner_by_item_id.setdefault((identities[index][0], item_id), index)
 
     parent_indexes = list(range(len(active)))
 
@@ -5248,17 +5403,53 @@ def merge_imagine_saved_lineage_cards(cards: list[dict]) -> list[dict]:
             if imagine_item_asset_id(item) == root_id
         ), None)
         parent_id = imagine_item_source_id(root_item or {})
-        parent_owner = owner_by_item_id.get((*identity, parent_id))
+        parent_owner = owner_by_item_id.get((identity[0], parent_id))
         if parent_owner is None:
-            parent_owner = source_owner_by_id.get((*identity, parent_id))
+            parent_owner = source_owner_by_id.get((identity[0], parent_id))
         if parent_id and parent_owner is not None and parent_owner != index:
             parent_indexes[index] = parent_owner
             continue
         # This used to fall back to the generation root when the parent was unreachable, to
-        # rejoin a clone-batch pair whose chain was cut. Nothing is cloned any more, so the
-        # only unreachable parents are other people's assets, and the fallback dragged the
-        # owner's own media and everything generated from it into one card. grok.com files a
-        # generation off someone else's asset as its own card, so leave it as its own root.
+        # rejoin a clone-batch pair whose chain was cut. That fallback dragged the owner's own
+        # media and everything generated from it into one card, so it stays gone. An
+        # unreachable parent is not evidence of anything: it can be someone else's asset, or
+        # simply one the owner deleted. Leave the card as its own root and let the sibling
+        # pass below rejoin it when grok.com itself says the two belong together.
+
+    # grok.com files one conversation as one entry, so two cards carrying the same
+    # official_order are one card upstream that we split. Requiring a shared conversation on
+    # top of that keeps a coincidental order collision from fusing unrelated cards, and cards
+    # with no official_order sit this out entirely rather than pooling under a shared None.
+    order_groups: dict[tuple[str, int], list[int]] = {}
+    for index, card in enumerate(active):
+        if parent_indexes[index] != index:
+            continue
+        official_order = imagine_saved_official_order(card)
+        if official_order is None:
+            continue
+        order_groups.setdefault((identities[index][0], official_order), []).append(index)
+    for member_indexes in order_groups.values():
+        if len(member_indexes) < 2:
+            continue
+        conversations: dict[int, set[str]] = {}
+        for index in member_indexes:
+            values = set()
+            for item in active[index].get("items") or []:
+                if not isinstance(item, dict):
+                    continue
+                value = str(item.get("conversation_id") or "").strip()
+                if value:
+                    values.add(value)
+            conversations[index] = values
+        owner_index = min(
+            member_indexes,
+            key=lambda index: (str(active[index].get("created_at") or "9999"), index),
+        )
+        for index in member_indexes:
+            if index == owner_index:
+                continue
+            if conversations[index] & conversations[owner_index]:
+                parent_indexes[index] = owner_index
 
     resolved_roots: dict[int, int] = {}
     for start_index in range(len(active)):
@@ -5924,6 +6115,15 @@ def list_imagine_saved_cache(payload: dict) -> dict:
     # The app paints main from this cache before the live list arrives, so it has to leave
     # out the same things: a copy and everything made from it belong on the Liked card only.
     hidden_remote_ids = card_view_state["hidden_ids"] | imagine_liked_card_asset_ids(root, account, relations)
+    # Ownership has to be judged here too, or a copy flashes on main until the live list lands.
+    # remember_imagine_owner_user_id reads the cached id and never calls out, so this stays a
+    # local read; with no id cached yet only the parent-account half of the test applies.
+    hidden_remote_ids = hidden_remote_ids | imagine_foreign_origin_asset_ids(
+        root,
+        account,
+        [post for post in cached.get("posts") or [] if isinstance(post, dict)],
+        remember_imagine_owner_user_id(account),
+    )
     posts: list[dict] = []
     for raw_post in cached.get("posts") or []:
         if not isinstance(raw_post, dict):
@@ -6182,11 +6382,30 @@ def list_imagine_saved(payload: dict) -> dict:
             root, account, relations, list(saved_groups.values()),
         ):
             merge_imagine_flat_saved_post(saved_groups, relation_post)
-    posts = merge_imagine_saved_lineage_cards(list(saved_groups.values()))
+    # Drop the copies before merging, not after. Merging first lets a generation off someone
+    # else's asset fuse into a card the owner made, and once fused it can no longer be lifted
+    # out -- the whole card would have to go to Liked, taking the owner's own media with it.
+    hidden_remote_ids = hidden_remote_ids | imagine_foreign_origin_asset_ids(
+        root,
+        account,
+        list(saved_groups.values()),
+        current_owner_user_id,
+    )
+    # Take the complement first: the visible pass rewrites these same posts in place.
+    hidden_cards = merge_imagine_saved_lineage_cards(
+        imagine_hidden_scope_posts(list(saved_groups.values()), hidden_remote_ids)
+    )
+    posts = imagine_filter_liked_scope_posts(list(saved_groups.values()), hidden_remote_ids)
+    posts = merge_imagine_saved_lineage_cards(posts)
     posts = imagine_filter_liked_scope_posts(posts, hidden_remote_ids)
     imagine_sort_saved_by_official_order(posts)
     try:
-        cache_imagine_remote_posts(root, account, posts, sync_token=sync_token)
+        # Cache both halves. Returning only the visible ones is right -- this is the main
+        # list -- but caching only those would let finalize_imagine_remote_sync delete the
+        # rest on the next full sync, and Liked reads its foreign-origin cards from here.
+        cache_imagine_remote_posts(
+            root, account, [*posts, *hidden_cards], sync_token=sync_token,
+        )
     except Exception as exc:
         imagine_debug_event("saved_cache_update_failed", {
             "account_id": str(account.get("id") or ""),
@@ -6720,6 +6939,82 @@ def list_imagine_liked_cache(payload: dict) -> dict:
     }
 
 
+def imagine_foreign_origin_liked_cards(
+    root: Path,
+    account: dict,
+    covered_asset_ids: set[str],
+) -> list[dict]:
+    """Liked cards this app derives itself, for copies the grok.com collection never lists.
+
+    A clone-batch copy lands in the owner's own /saved and nowhere near the collection, so the
+    membership walk above cannot see it. Main already hides it and caches it (see
+    imagine_hidden_scope_posts); this reads those rows back and hands them to Liked, which is
+    the half that makes hiding safe rather than destructive. Served straight from cache, so no
+    extra asset lookups. Ownership is re-derived here rather than trusted from a cached flag.
+    """
+    account_key = imagine_account_settings_key(account)
+    if not account_key:
+        return []
+    try:
+        cached = library_index.query_imagine_remote_posts(root, account_key, offset=0, limit=5000)
+    except Exception:
+        return []
+    cached_posts = [post for post in cached.get("posts") or [] if isinstance(post, dict)]
+    if not cached_posts:
+        return []
+    foreign_ids = imagine_foreign_origin_asset_ids(
+        root, account, cached_posts, remember_imagine_owner_user_id(account),
+    )
+    if not foreign_ids:
+        return []
+    cards = merge_imagine_saved_lineage_cards(
+        imagine_hidden_scope_posts(cached_posts, foreign_ids)
+    )
+    derived: list[dict] = []
+    for card in cards:
+        item_ids = {
+            imagine_item_asset_id(item)
+            for item in card.get("items") or []
+            if isinstance(item, dict) and imagine_item_asset_id(item)
+        }
+        if not item_ids or item_ids & covered_asset_ids:
+            # Already standing as a real collection card; a second one would be a duplicate.
+            continue
+        owner_user_id = remember_imagine_owner_user_id(account)
+        foreign_owned = any(
+            (item_owner := imagine_item_owner_user_id(item))
+            and owner_user_id
+            and item_owner != owner_user_id
+            for item in card.get("items") or []
+            if isinstance(item, dict)
+        )
+        anchor_id = str(
+            (card.get("metadata") or {}).get("lineage_root_asset_id")
+            or card.get("post_id")
+            or ""
+        ).strip()
+        metadata = card.get("metadata") if isinstance(card.get("metadata"), dict) else {}
+        # A Liked one keeps the original owner's asset, so it reads as a link and keeps its
+        # heart. A clone-batch copy is this account's own asset with no second heart state --
+        # same distinction list_imagine_liked draws for collection cards.
+        metadata.update({
+            "liked": True,
+            "liked_scope": "foreign-origin",
+            "cloned_copy": not foreign_owned,
+            "link_post_id": anchor_id,
+        })
+        if foreign_owned:
+            metadata.update({"remote_view": "link", "link_source": True})
+        card["metadata"] = metadata
+        card["liked"] = True
+        card["favorite"] = True
+        if foreign_owned:
+            card["mode"] = "link"
+        covered_asset_ids.update(item_ids)
+        derived.append(imagine_stamp_saved_identity(card))
+    return derived
+
+
 # The Liked view on grok.com is two steps: the collection hands back bare asset ids, then
 # each one is looked up for its media. Nothing about it goes through /rest/media/post/list,
 # and the assets stay under their original owner, so this cannot be served from the saved
@@ -6928,6 +7223,9 @@ def list_imagine_liked(payload: dict) -> dict:
             item["metadata"] = item_metadata
         covered_asset_ids.add(asset_id)
         posts.append(imagine_stamp_saved_identity(post))
+    # Copies grok.com files under /saved instead of the collection. Main hides them, so this
+    # is the only place they can appear.
+    posts.extend(imagine_foreign_origin_liked_cards(root, account, covered_asset_ids))
     complete = bool(membership.get("complete")) and not errors
     if complete:
         reconcile_imagine_local_hearts_with_complete_liked_membership(
@@ -22707,7 +23005,17 @@ def copy_imagine_remote_post_to_collection(payload: dict, item_only: bool = Fals
             return data
 
         account = active_imagine_account(root, str(source_post.get("account_id") or ""))
-        base_name = source_post.get("title") or source_post.get("post_id") or source_post.get("folderName") or "imagine"
+        # Name the folder after the asset id, not the title. An Imagine card's title is its
+        # prompt, so titles put a whole prompt -- punctuation, spaces and all -- into a path
+        # segment, and safe_name caps nothing. The asset id is unique, fixed width and already
+        # the thing every lookup keys on. Moving a single item names the folder after that
+        # item rather than the card it came from.
+        base_name = (
+            (imagine_item_asset_id(items[0]) if item_only and items else "")
+            or source_post.get("post_id")
+            or source_post.get("folderName")
+            or "imagine"
+        )
         suffix = "-item" if item_only else ""
         target_dir = target_parent / unique_directory_name(target_parent, safe_name(f"{base_name}{suffix}", "imagine"))
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -24159,12 +24467,26 @@ class Handler(SimpleHTTPRequestHandler):
             cancel_scheduled_shutdown_for_request(parsed.path, "POST")
             if parsed.path == "/api/choose-library-folder":
                 selected = choose_library_folder(str(payload.get("current") or ""))
+                root = library_root()
                 if selected is None:
-                    root = library_root()
                     data = current_library_snapshot(root) if root else empty_snapshot()
                     data["cancelled"] = True
                     self.send_json(data)
                     return
+                # Picking the folder already in use is a no-op, not a re-set. Rewriting the
+                # settings and pointer files and rescanning the whole library to arrive at
+                # the state we are already in is work with nothing to show for it, so say
+                # nothing changed and leave the loaded library alone.
+                if root:
+                    try:
+                        same_root = Path(selected).expanduser().resolve() == root.resolve()
+                    except OSError:
+                        same_root = False
+                    if same_root:
+                        data = current_library_snapshot(root)
+                        data["unchanged"] = True
+                        self.send_json(data)
+                        return
                 self.send_json(scan_library(set_library_root(selected)))
                 return
             route_handler = POST_JSON_ROUTES.get(parsed.path)
