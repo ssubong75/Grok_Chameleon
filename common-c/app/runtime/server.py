@@ -4279,11 +4279,17 @@ def imagine_preserve_earliest_official_order(destination: dict, *posts: dict) ->
 
 
 def imagine_sort_saved_by_official_order(posts: list[dict]) -> None:
+    """Newest first, by the most recent time anything on the card was made.
+
+    This used to sort by official_order, which is not a position grok.com hands out: it is the
+    index a conversation happened to land on in the conversation list. Generating from a card
+    opens a new conversation, so that new one took index 0 and the card just worked from slid
+    down the page -- editing an image pushed the original away from the top instead of bringing
+    its group forward. post_activity_at reads the latest timestamp across the card and all its
+    items, so a card rises the moment anything is added to it. official_order stays on the
+    metadata; merging still folds cards onto the lowest one, it just no longer decides the page.
+    """
     posts.sort(key=library_index.post_activity_at, reverse=True)
-    posts.sort(key=lambda post: (
-        imagine_saved_official_order(post) is None,
-        imagine_saved_official_order(post) or 0,
-    ))
 
 
 def imagine_stamp_saved_identity(post: dict) -> dict:
@@ -5432,21 +5438,34 @@ def merge_imagine_saved_lineage_cards(cards: list[dict]) -> list[dict]:
         if len(member_indexes) < 2:
             continue
         conversations: dict[int, set[str]] = {}
+        # A text-to-image result is its own root: asking for four images makes four separate
+        # things that merely share a request, not one thing in four parts. So a card holding
+        # nothing but roots never merges with another such card, however the order and
+        # conversation line up. What this rule is for is the opposite shape -- a generation
+        # whose parent is missing from Saved, stranded away from the card it came from -- and
+        # there at least one side carries a derived item, which is what the test below asks.
+        roots_only: dict[int, bool] = {}
         for index in member_indexes:
             values = set()
+            derived = False
             for item in active[index].get("items") or []:
                 if not isinstance(item, dict):
                     continue
                 value = str(item.get("conversation_id") or "").strip()
                 if value:
                     values.add(value)
+                if imagine_item_source_id(item):
+                    derived = True
             conversations[index] = values
+            roots_only[index] = not derived
         owner_index = min(
             member_indexes,
             key=lambda index: (str(active[index].get("created_at") or "9999"), index),
         )
         for index in member_indexes:
             if index == owner_index:
+                continue
+            if roots_only[index] and roots_only[owner_index]:
                 continue
             if conversations[index] & conversations[owner_index]:
                 parent_indexes[index] = owner_index
@@ -15447,6 +15466,31 @@ def imagine_native_bridge_generate(
     max_progress = max([imagine_event_numeric_progress(event) or 0 for event in result_events] or [0])
     lucky_reason = imagine_lucky_reason_from_events(result_events) if expected_type == "video" else ""
     post_candidates = imagine_event_video_post_candidates(result_events) if expected_type == "video" else imagine_event_image_post_candidates(result_events)
+    # Anything made before this request was sent cannot be its result. The bridge reloads the
+    # saved list mid-stream, so those posts arrive as events too, and with a thin baseline they
+    # were taken for the generation: one i2i picked a month-old asset belonging to someone else
+    # and filed a relation binding eleven unrelated assets to the source, which then fused
+    # separate cards. Judge by creation time, which is on every candidate, rather than by what
+    # the baseline happened to catch. A candidate with no readable time is left in, since a
+    # missing timestamp is not evidence that it is stale.
+    if post_candidates and job_started_at:
+        request_started = datetime.fromtimestamp(job_started_at, tz=timezone.utc) - timedelta(seconds=5)
+        fresh_candidates = []
+        stale_candidates = []
+        for candidate in post_candidates:
+            created = parse_iso_time(candidate.get("created_at"))
+            (stale_candidates if created and created < request_started else fresh_candidates).append(candidate)
+        if stale_candidates:
+            imagine_debug_event("native_bridge_stale_candidates_dropped", {
+                "request_id": request_id,
+                "action": action,
+                "kept": [candidate.get("post_id") or "" for candidate in fresh_candidates],
+                "dropped": [
+                    {"post_id": candidate.get("post_id") or "", "created_at": candidate.get("created_at") or ""}
+                    for candidate in stale_candidates
+                ],
+            })
+        post_candidates = fresh_candidates
     confirmed_moderation = any(imagine_event_has_moderation_flag(event) for event in result_events)
     moderation_detected_at = imagine_confirmed_moderation_detected_at(result_events) if confirmed_moderation else None
     if expected_type == "video" and any(imagine_event_is_moderated(event) for event in events):
@@ -15465,6 +15509,26 @@ def imagine_native_bridge_generate(
         })
 
     direct_items = imagine_direct_items_from_events(result_events, expected_type, account, prompt, action, request_id, source_info, ignored_urls)
+    # Same cut-off as the candidates above: the item that gets returned as "the result" is
+    # picked from this list, so a pre-existing post reaching it is what actually did the damage.
+    if direct_items and job_started_at:
+        request_started = datetime.fromtimestamp(job_started_at, tz=timezone.utc) - timedelta(seconds=5)
+        fresh_items = []
+        stale_items = []
+        for candidate_item in direct_items:
+            created = parse_iso_time(candidate_item.get("created_at"))
+            (stale_items if created and created < request_started else fresh_items).append(candidate_item)
+        if stale_items:
+            imagine_debug_event("native_bridge_stale_items_dropped", {
+                "request_id": request_id,
+                "action": action,
+                "kept": len(fresh_items),
+                "dropped": [
+                    {"item_id": stale.get("item_id") or "", "created_at": stale.get("created_at") or ""}
+                    for stale in stale_items
+                ],
+            })
+        direct_items = fresh_items
     if action == "aspect":
         direct_items = [item for item in direct_items if not imagine_item_uses_data_url(item)]
         imagine_apply_aspect_ratio_to_items(direct_items, source_info)
