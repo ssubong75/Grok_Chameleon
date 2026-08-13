@@ -7151,6 +7151,34 @@ def list_imagine_liked(payload: dict) -> dict:
     # original asset is not duplicate identity, so do not fold either collection entry.
     folded_asset_ids: set[str] = set()
 
+    # One clone-batch of an image and the video made from it arrives as two collection
+    # entries, so it stood up two cards: the video's card carried the original image
+    # (still the other owner's asset) while the copy of that image sat on a card of its
+    # own. Fold them when one clone's origin is an item on another clone's card -- both
+    # sides being clones is what makes this safe, and is exactly the case the rule above
+    # is not about. The copy replaces the original in place, so the foreign asset drops
+    # out and the card is left holding only what this account owns.
+    items_by_clone_id = {
+        record["asset_id"]: [
+            item for item in record["post"].get("items") or [] if isinstance(item, dict)
+        ]
+        for record in built
+    }
+    clone_origin_by_asset_id = {
+        clone_id: origin_id
+        for clone_id, origin_id in origin_by_asset_id.items()
+        if origin_id
+    }
+    replacement_by_origin_id: dict[str, str] = {}
+    for clone_id, origin_id in clone_origin_by_asset_id.items():
+        for host_id, host_items in item_ids_by_asset_id.items():
+            if host_id == clone_id or not clone_origin_by_asset_id.get(host_id):
+                continue
+            if origin_id in host_items:
+                replacement_by_origin_id[origin_id] = clone_id
+                folded_asset_ids.add(clone_id)
+                break
+
     for record in built:
         entry = record["entry"]
         asset_id = record["asset_id"]
@@ -7162,6 +7190,29 @@ def list_imagine_liked(payload: dict) -> dict:
         # the copy and its source sent i2i, i2v and extend results off to their own cards in
         # Imagine main, away from the card they were made from.
         kept_items = [item for item in post.get("items") or [] if isinstance(item, dict)]
+        if replacement_by_origin_id:
+            swapped_items: list[dict] = []
+            swapped_ids: set[str] = set()
+            for item in kept_items:
+                item_id = imagine_item_asset_id(item)
+                clone_id = replacement_by_origin_id.get(item_id)
+                source_items = (
+                    [
+                        clone_item
+                        for clone_item in (items_by_clone_id.get(clone_id) or [])
+                        if isinstance(clone_item, dict)
+                    ]
+                    if clone_id
+                    else [item]
+                ) or [item]
+                for source_item in source_items:
+                    source_id = imagine_item_asset_id(source_item)
+                    if source_id and source_id in swapped_ids:
+                        continue
+                    if source_id:
+                        swapped_ids.add(source_id)
+                    swapped_items.append(source_item)
+            kept_items = swapped_items
         if kept_items:
             post["items"] = kept_items
             representative = imagine_representative_item(kept_items) or kept_items[-1]
