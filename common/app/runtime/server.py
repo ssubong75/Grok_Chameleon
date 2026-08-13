@@ -7362,6 +7362,20 @@ def imagine_discover_cache_post_key(post: dict) -> str:
     return imagine_remote_cache_post_key(post)
 
 
+IMAGINE_DISCOVER_CACHE_KEY = "shared:discover"
+
+
+def imagine_discover_cache_account_key(account: dict) -> str:
+    """One cache for Discover, shared by every account.
+
+    Discover is a public sample feed, identical whoever is signed in, so keying it per account
+    stored the same posts once per registered account and re-fetched them once per account.
+    The account is still taken as an argument to keep these calls reading like the saved-cache
+    ones beside them, and to leave room for a per-account feed later without touching callers.
+    """
+    return IMAGINE_DISCOVER_CACHE_KEY
+
+
 def list_imagine_discover_cache(payload: dict) -> dict:
     root = library_root()
     if not root:
@@ -7375,7 +7389,7 @@ def list_imagine_discover_cache(payload: dict) -> dict:
         limit = 5000
     cached = library_index.query_imagine_discover_posts(
         root,
-        imagine_account_settings_key(account),
+        imagine_discover_cache_account_key(account),
         limit=limit,
     )
     return {
@@ -7405,7 +7419,7 @@ def cache_imagine_discover_posts(
 ) -> str:
     existing = library_index.query_imagine_discover_posts(
         root,
-        imagine_account_settings_key(account),
+        imagine_discover_cache_account_key(account),
         limit=5000,
     )
     existing_posts = [post for post in existing.get("posts") or [] if isinstance(post, dict)]
@@ -7427,7 +7441,7 @@ def cache_imagine_discover_posts(
         cache_cursor = cached_cursor
     library_index.replace_imagine_discover_posts(
         root,
-        imagine_account_settings_key(account),
+        imagine_discover_cache_account_key(account),
         records,
         next_cursor=cache_cursor,
     )
