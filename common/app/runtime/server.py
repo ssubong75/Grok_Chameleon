@@ -111,8 +111,8 @@ IMAGINE_DIRECT_I2I_MAX_WAIT_SECONDS = 14
 # Results still finish the bar early when they arrive sooner.
 IMAGINE_DIRECT_T2I_DISPLAY_SECONDS = 26
 IMAGINE_DIRECT_T2I_DISPLAY_MAX_PROGRESS = 99
-IMAGINE_DIRECT_I2I_DISPLAY_SECONDS = 12
-IMAGINE_DIRECT_I2I_DISPLAY_MAX_PROGRESS = 99
+IMAGINE_DIRECT_I2I_DISPLAY_SECONDS = 10
+IMAGINE_DIRECT_I2I_DISPLAY_MAX_PROGRESS = 98
 IMAGINE_DIRECT_I2V_DISPLAY_SECONDS = 20
 IMAGINE_DIRECT_I2V_DISPLAY_MAX_PROGRESS = 99
 IMAGINE_DIRECT_LONG_I2V_DISPLAY_SECONDS = 140
@@ -3161,6 +3161,13 @@ def imagine_generated_relation_anchor_post(
         seen_ids.add(item_id)
     if not generated_items:
         return None
+    # The relation stores a Discover card whole, source and result alike, so a rebuilt card
+    # whose results are all public samples is that Discover card itself, not something the
+    # account made from it. Main is the owner's own media, so require at least one result
+    # that is not a sample. A Discover sample used as a source stays welcome -- the
+    # generated result is what earns the card its place on main.
+    if all(imagine_item_is_public_sample(item) for item in generated_items):
+        return None
     source_item.update({"role": "source", "relation": "upload", "official_upload_source": True})
     visible_items = generated_items if record.get("source_hidden_in_bundle") else [source_item, *generated_items]
     prompt = next((str(item.get("prompt") or "").strip() for item in reversed(generated_items) if str(item.get("prompt") or "").strip()), "")
@@ -5454,16 +5461,27 @@ def merge_imagine_saved_lineage_cards(cards: list[dict]) -> list[dict]:
                     derived = True
             conversations[index] = values
             roots_only[index] = not derived
-        owner_index = min(
-            member_indexes,
-            key=lambda index: (str(active[index].get("created_at") or "9999"), index),
-        )
+        # Pick the owner per conversation, not once for the whole order group. One order can
+        # hold cards from several conversations -- a t2i batch and a chain that starts from
+        # one of its results share order 0 -- and a single owner made every other card compare
+        # itself against that one conversation. Two cards of the same conversation then never
+        # met each other, so a stranded extension stayed on its own card.
+        by_conversation: dict[str, list[int]] = {}
         for index in member_indexes:
-            if index == owner_index:
+            for conversation_id in conversations[index]:
+                by_conversation.setdefault(conversation_id, []).append(index)
+        for shared_indexes in by_conversation.values():
+            if len(shared_indexes) < 2:
                 continue
-            if roots_only[index] and roots_only[owner_index]:
-                continue
-            if conversations[index] & conversations[owner_index]:
+            owner_index = min(
+                shared_indexes,
+                key=lambda index: (str(active[index].get("created_at") or "9999"), index),
+            )
+            for index in shared_indexes:
+                if index == owner_index or parent_indexes[index] != index:
+                    continue
+                if roots_only[index] and roots_only[owner_index]:
+                    continue
                 parent_indexes[index] = owner_index
 
     resolved_roots: dict[int, int] = {}
@@ -7446,6 +7464,41 @@ def imagine_discover_cache_account_key(account: dict) -> str:
     return IMAGINE_DISCOVER_CACHE_KEY
 
 
+def imagine_discover_sample_only_posts(posts: list) -> list:
+    """Strip anything the owner generated from a Discover card before it is listed.
+
+    Cards cached while Discover still applied generated relations kept the owner's own
+    media on them, and those rows outlive the fix: the card shows the sample's thumbnail
+    and prompt with a generation stapled on. Discover is the public sample and nothing
+    else, so drop every item that is not served from the public bucket and rebuild the
+    representative from what is left.
+    """
+    cleaned: list = []
+    for post in posts if isinstance(posts, list) else []:
+        if not isinstance(post, dict):
+            continue
+        items = [item for item in post.get("items") or [] if isinstance(item, dict)]
+        sample_items = [item for item in items if imagine_item_is_public_sample(item)]
+        if not sample_items:
+            cleaned.append(post)
+            continue
+        if len(sample_items) == len(items):
+            cleaned.append(post)
+            continue
+        trimmed = dict(post)
+        trimmed["items"] = sample_items
+        representative = imagine_representative_item(sample_items) or sample_items[-1]
+        trimmed["representative_item"] = representative
+        trimmed["representative"] = (
+            representative.get("url")
+            or representative.get("remote_url")
+            or representative.get("item_id")
+            or ""
+        )
+        cleaned.append(trimmed)
+    return cleaned
+
+
 def list_imagine_discover_cache(payload: dict) -> dict:
     root = library_root()
     if not root:
@@ -7465,7 +7518,9 @@ def list_imagine_discover_cache(payload: dict) -> dict:
     return {
         "ok": True,
         "source": "discover_cache",
-        "posts": normalize_json_unicode(cached.get("posts") or []),
+        "posts": normalize_json_unicode(
+            imagine_discover_sample_only_posts(cached.get("posts") or [])
+        ),
         "total": int(cached.get("total") or 0),
         "next_cursor": str(cached.get("next_cursor") or ""),
         "has_more": bool(cached.get("next_cursor")),
@@ -7548,18 +7603,12 @@ def list_imagine_discover(payload: dict) -> dict:
     data = imagine_post_json("/rest/media/post/list", request_payload, account, referer=IMAGINE_BASE + "/imagine")
     root_posts = data.get("posts") if isinstance(data.get("posts"), list) else []
     posts = [post for post in (imagine_discover_post_from_root(item, account) for item in root_posts) if post]
-    relations = imagine_state.load_generated_relations(root)
-    posts = [
-        imagine_apply_generated_relations(
-            post,
-            root,
-            account,
-            relations,
-            preserve_representative=True,
-            ensure_upload_bundle=False,
-        )
-        for post in posts
-    ]
+    # Discover shows the sample as grok.com publishes it: the source image and its video,
+    # nothing else. Applying generated relations here hung the owner's own generations off
+    # the sample card, so a card the owner built from Discover appeared twice -- once on
+    # main where it belongs, and once grafted onto the public sample it came from. The
+    # relation still does its work on main; Discover just stops reading it.
+    posts = imagine_discover_sample_only_posts(posts)
     next_cursor = cache_imagine_discover_posts(
         root,
         account,
@@ -9235,13 +9284,21 @@ def delete_imagine_media_post(payload: dict) -> dict:
     root = library_root()
     account = active_imagine_account(root, str((payload or {}).get("account_id") or "")) if root else None
     if root and account:
-        remove_imagine_remote_cache_assets(
+        deleted_ids = {
+            str(result.get("id") or "").strip(),
+            str(result.get("requested_id") or "").strip(),
+        }
+        remove_imagine_remote_cache_assets(root, account, deleted_ids)
+        # Deleting the asset already does this; deleting the card did not, and the relation
+        # is a second place the card lives. Left behind, it rebuilds the card from scratch
+        # the moment the cache is empty -- a card the owner deleted comes back on its own.
+        # Dropping the relation only removes it from main: Discover keeps serving the sample
+        # (its listing never reads deletion state), and generating from that sample again
+        # writes a fresh relation, which is what puts the new card back on main.
+        remove_imagine_generated_relation_state(
             root,
-            account,
-            {
-                str(result.get("id") or "").strip(),
-                str(result.get("requested_id") or "").strip(),
-            },
+            asset_ids={value for value in deleted_ids if value},
+            group_ids={value for value in deleted_ids if value},
         )
     return result
 
@@ -14356,6 +14413,12 @@ def imagine_i2i_request(payload: dict, prompt: str, request_id: str, account: di
     aspect_ratio = requested_aspect_ratio or (attachment_aspect_ratio(source) if direct_upload else "")
     if aspect_ratio:
         image_config["aspectRatio"] = aspect_ratio
+    # imageEditModelConfig is not something grok.com sends -- traced 2026-08-14, its own
+    # edit carries modelMap.imageEditModel and nothing else. It stays because the bridge
+    # reads the source image out of it (imageReferenceUrls in preload-bridge.js): the site's
+    # page picks the image up from its own UI state, and the bridge has no UI to read, so
+    # this field is how the image reaches it. Removing it left the bridge with no source and
+    # the edit finished in 1.5s having generated nothing.
     media_gen_image = {
         "prompt": prompt,
         "inputAssets": input_asset_ids,
@@ -15582,9 +15645,13 @@ def imagine_native_bridge_generate(
 
     attach_to_source_actions = {"i2i", "i2v", "extend", "video_edit", "aspect"}
     fresh_source_rematerialized = bool(source_info.get("fresh_source_rematerialized"))
+    # start_new_conversation says what grok.com does with the generation, not where the card
+    # belongs here. Editing an asset that lives in another conversation makes the site open a
+    # new one -- that is its normal behaviour -- and keying off it sent the result to a card
+    # built from the generation root instead of the card the edit was started from. A card
+    # here is a lineage chain, so a generation always joins the card holding its source.
     attach_to_existing_source = bool(
         source_post_path
-        and (fresh_source_rematerialized or not source_info.get("start_new_conversation"))
         and (action in attach_to_source_actions or imagine_source_path_matches_source_info(source_post_path, source_info, item))
     )
     target_folder_path = source_post_path if (

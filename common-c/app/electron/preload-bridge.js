@@ -767,6 +767,20 @@
       if (post?.userId) return String(post.userId);
       if (post?.user?.id) return String(post.user.id);
     }
+    // Without an id here the store login patch never ran, and an unauthenticated store
+    // resolves fetchGenerateImageEdits immediately without generating anything -- the edit
+    // "succeeded" in 1.5s with no image. The exact posts asked for are often not loaded
+    // yet, so fall back to any post the store already holds, then to the owner id carried
+    // in an asset url (assets.grok.com/users/<id>/...). Every post here belongs to the
+    // signed-in account, so any of them names the same owner.
+    for (const post of Object.values(state?.byId || {})) {
+      const owner = post?.userId || post?.user?.id || "";
+      if (owner) return String(owner);
+    }
+    for (const value of ids) {
+      const matched = /\/users\/([0-9a-f-]{36})\//i.exec(String(value || ""));
+      if (matched) return matched[1];
+    }
     return "";
   }
 
@@ -2697,7 +2711,7 @@
         storeContext.record,
         requestId,
         "fetchGenerateImageEdits",
-        [containerId].concat(inputIds, directUploadAssetIds),
+        [containerId].concat(inputIds, directUploadAssetIds, urls),
       );
       if (!startNewConversation) syncCurrentRootContainer(state, requestId, variant.kind, containerId);
       const beforeIds = startNewConversation ? allCurrentIds(state, "image") : currentIds(state, containerId, "image");
