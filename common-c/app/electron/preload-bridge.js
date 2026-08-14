@@ -2702,14 +2702,20 @@
       const containerId = explicitImageContainerId || await ensureContainerFromInput(state, "image", prompt, inputIds, urls, "image/png");
       if (!containerId) throw new Error("Official image edit container could not be resolved.");
       const parentPostId = directUpload ? undefined : (imageConfig.parentPostId || inputIds[0] || containerId);
+      // Loading the source into the store has nothing to do with which conversation the
+      // edit belongs to -- the video path hydrates either way, and falls back to building a
+      // post from the url when the store still comes up empty. Skipping it here left the
+      // edit calling fetchGenerateImageEdits against a store that held neither the source
+      // nor a signed-in user, which returns in a second having generated nothing. Only
+      // pointing the store's current root at the existing conversation is conditional.
+      state = await hydrateGenerationSource(
+        storeContext,
+        parentPostId || inputIds[0] || containerId,
+        requestId,
+        variant.kind,
+        containerId,
+      );
       if (!startNewConversation) {
-        state = await hydrateGenerationSource(
-          storeContext,
-          parentPostId || inputIds[0] || containerId,
-          requestId,
-          variant.kind,
-          containerId,
-        );
         syncCurrentRootContainer(state, requestId, variant.kind, containerId);
       }
       state = ensureStoreLoginState(

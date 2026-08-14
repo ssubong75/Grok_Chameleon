@@ -11170,12 +11170,16 @@ def imagine_source_conversation_context(
         or payload.get("parent_response_id")
         or ""
     ).strip()
-    if not conversation_id or not parent_response_id:
-        asset_conversation_id, asset_response_id = imagine_asset_conversation_context(source, account)
-        if not conversation_id and asset_conversation_id:
-            conversation_id = asset_conversation_id
-        if not parent_response_id and asset_response_id:
-            parent_response_id = asset_response_id
+    # /rest/assets is the only place these ids are authoritative. The pair carried on the
+    # attachment is whatever the app recorded when it picked the generation up, and for an
+    # asset the app has just produced that is its own reading of a stream, not what the site
+    # filed. Continuing a thread on a mismatched pair is refused outright, so ask the site
+    # and let its answer win; fall back to the carried values when it has none.
+    asset_conversation_id, asset_response_id = imagine_asset_conversation_context(source, account)
+    if asset_conversation_id:
+        conversation_id = asset_conversation_id
+    if asset_response_id:
+        parent_response_id = asset_response_id
     return conversation_id, parent_response_id
 
 
@@ -13716,7 +13720,12 @@ def imagine_direct_item_from_candidate(
         stem = "" if is_data_url else file_stem(Path(urlparse(raw_url).path).name)
         item_id = f"{stem or expected_type}-{request_id[:8]}"
     parent_post_id = str(candidate.get("parent_post_id") or source_info.get("parent_post_id") or "").strip()
-    original_post_id = str(candidate.get("original_post_id") or source_info.get("original_post_id") or parent_post_id).strip()
+    # source_info carries the origin of the asset this generation started from, which stops
+    # being this result's origin once a chain runs past one step: an edit of an edit inherited
+    # the first source's originalPostId -- an asset from an unrelated card -- and the app sent
+    # that id back on the next request. grok.com carries none of these ids, so a wrong one is
+    # ours alone to cause. The parent is what this result actually came from.
+    original_post_id = str(candidate.get("original_post_id") or parent_post_id).strip()
     conversation_id = str(candidate.get("conversation_id") or source_info.get("conversation_id") or "").strip()
     response_id = str(candidate.get("response_id") or "").strip()
     parent_response_id = str(candidate.get("parent_response_id") or source_info.get("parent_response_id") or "").strip()
@@ -13886,7 +13895,12 @@ def imagine_moderated_item_from_candidate(
         order = safe_int(candidate.get("order"), 0)
         item_id = f"moderated-{request_id[:8]}-{order or uuid.uuid4().hex[:4]}"
     parent_post_id = str(candidate.get("parent_post_id") or source_info.get("parent_post_id") or "").strip()
-    original_post_id = str(candidate.get("original_post_id") or source_info.get("original_post_id") or parent_post_id).strip()
+    # source_info carries the origin of the asset this generation started from, which stops
+    # being this result's origin once a chain runs past one step: an edit of an edit inherited
+    # the first source's originalPostId -- an asset from an unrelated card -- and the app sent
+    # that id back on the next request. grok.com carries none of these ids, so a wrong one is
+    # ours alone to cause. The parent is what this result actually came from.
+    original_post_id = str(candidate.get("original_post_id") or parent_post_id).strip()
     root_post_id = str(candidate.get("root_post_id") or source_info.get("root_post_id") or parent_post_id or item_id).strip()
     source_item_id = str(source_info.get("source_item_id") or parent_post_id or original_post_id or "").strip()
     metadata = {
@@ -14129,6 +14143,20 @@ def imagine_generated_relation_baseline_ids(root: Path, source_post_path: str, e
     return ids
 
 
+def imagine_candidate_created_after_request(candidate: dict, request_started_at: float | None) -> bool:
+    """Could this asset be the result of a request that started at request_started_at?
+
+    Anything already there when the request went out cannot be. A missing or unreadable
+    timestamp is not evidence of staleness, so those are kept.
+    """
+    if not request_started_at:
+        return True
+    created = parse_iso_time((candidate or {}).get("created_at"))
+    if not created:
+        return True
+    return created >= datetime.fromtimestamp(request_started_at, tz=timezone.utc) - timedelta(seconds=5)
+
+
 def imagine_wait_for_saved_direct_result(
     account: dict,
     expected_type: str,
@@ -14311,6 +14339,13 @@ def imagine_wait_for_saved_direct_result(
                     media_key = imagine_media_candidate_key(entry_url)
                     if not entry_id or not entry_url:
                         continue
+                    # The stream candidates are already judged by creation time; this pass was
+                    # not, and it reads a whole conversation, so a sibling made seconds before
+                    # the request looked like the result. A failed edit then "succeeded" on a
+                    # t2i result from half a minute earlier and filed a relation making two
+                    # siblings parent and child, which fused their cards.
+                    if not imagine_candidate_created_after_request(conversation_item, progress_started_at):
+                        continue
                     if entry_id in baseline_ids or media_key in baseline_ids:
                         continue
                     if entry_id in source_ids or media_key in source_ids or media_key in ignored_keys:
@@ -14438,6 +14473,10 @@ def imagine_wait_for_saved_direct_result(
             media_key = imagine_media_candidate_key(str(entry.get("url") or ""))
             entry_id = str(entry.get("item_id") or "")
             if entry_id in baseline_ids or media_key in baseline_ids:
+                continue
+            # Same rule as the stream candidates: an asset that predates the request is not
+            # its result, whatever the baseline happened to catch.
+            if not imagine_candidate_created_after_request(entry, progress_started_at):
                 continue
             if media_key in ignored_keys or entry_id in source_ids or media_key in source_ids:
                 continue
