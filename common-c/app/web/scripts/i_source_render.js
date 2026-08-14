@@ -1253,6 +1253,15 @@ function persistImaginePendingSavedPosts() {
   }
 }
 
+function dropUnconfirmedImaginePendingSavedPosts() {
+  const before = library_state.imagineRemotePosts || [];
+  const remaining = before.filter((post) => !imagineSavedPostIsPending(post));
+  if (remaining.length === before.length) return;
+  library_state.imagineRemotePosts = remaining;
+  persistImaginePendingSavedPosts();
+  imaginePendingSavedRefreshAttempt = 0;
+}
+
 function restoreImaginePendingSavedPosts() {
   const storageKey = imaginePendingSavedStorageKey();
   if (!storageKey) return [];
@@ -1350,7 +1359,15 @@ function reconcileImaginePendingSavedPosts(remotePosts, memoryPending = []) {
 function scheduleImaginePendingSavedRefresh() {
   if (imaginePendingSavedRefreshTimer || !imaginePendingSavedPosts().length) return;
   const delays = [1500, 4000, 10000, 30000];
-  if (imaginePendingSavedRefreshAttempt >= delays.length) return;
+  // Every attempt is a forced refresh that reads Saved to its end, so a card still
+  // unconfirmed after the last one is not on grok.com -- deleted there, most often. Giving
+  // up used to mean leaving it on the list forever, which is how a card and a thumbnail
+  // with no media behind them survived refreshes and restarts.
+  if (imaginePendingSavedRefreshAttempt >= delays.length) {
+    dropUnconfirmedImaginePendingSavedPosts();
+    renderImagineSourceCards();
+    return;
+  }
   const delay = delays[imaginePendingSavedRefreshAttempt];
   imaginePendingSavedRefreshAttempt += 1;
   imaginePendingSavedRefreshTimer = window.setTimeout(() => {
@@ -1481,6 +1498,13 @@ function applyImagineSavedRemotePage(data, { updatePosts = true, replacesList = 
   library_state.imagineRemoteSyncToken = String(
     data.sync_token || library_state.imagineRemoteSyncToken || "",
   );
+  // A pending card is a local placeholder waiting for Saved to confirm it, and
+  // reconcileImaginePendingSavedPosts keeps every unconfirmed one on the list. Nothing ever
+  // gave up on one, so a card deleted on grok.com is never confirmed and its placeholder
+  // survives storage, refreshes and restarts -- a card and a thumbnail with no media behind
+  // them. Once a sync reaches the end of Saved the response is the site's full contents, so
+  // anything still unconfirmed is not coming back.
+  if (data.has_more === false) dropUnconfirmedImaginePendingSavedPosts();
   if (exclusionChanged) {
     syncImagineRemotePostsIntoLibrary();
     if (!updatePosts) renderImagineSourceCards();
