@@ -3188,6 +3188,10 @@ def imagine_generated_relation_anchor_post(
         "upload_source_asset_id": source_asset_id,
         "source_hidden_in_bundle": bool(record.get("source_hidden_in_bundle")),
         "app_preserved_generated_relations": True,
+        # This card has no remote half at all -- the relation is the whole of it. Cards that
+        # merely gained items from a relation do not carry this, so the Saved cache can tell
+        # the two apart and keep holding only what grok.com actually sent.
+        "relation_only_card": True,
         "grouped": True,
         "flat_only": False,
         "saved_provenance": "normal-saved",
@@ -3221,6 +3225,53 @@ def imagine_missing_generated_relation_posts(
         recovered.append(post)
         existing_identities.add(identity)
     return recovered
+
+
+def imagine_forget_relations_deleted_remotely(root: Path, account: dict) -> None:
+    """Drop relations whose generated assets are gone from a complete Saved snapshot.
+
+    A relation keeps a card alive while the Saved list is still catching up, so an asset
+    merely missing from the cache proves nothing -- a result generated seconds ago is
+    missing too. Once a sync has walked Saved to its end the cache is the site's full
+    contents, and an asset absent from it was deleted on grok.com. Deleting inside the app
+    already clears the relation; this covers deleting on the site, which the app never hears
+    about. Generating from the same source again writes a new relation and the card returns.
+    """
+    account_key = imagine_account_settings_key(account)
+    if not account_key:
+        return
+    ensure_imagine_state_migrated(root)
+    with IMAGINE_RELATION_STATE_LOCK:
+        relations = imagine_state.load_generated_relations(root)
+        if not isinstance(relations, dict) or not relations:
+            return
+        remaining = {
+            record_id: record
+            for record_id, record in relations.items()
+            if not imagine_relation_assets_deleted_remotely(root, record, account_key)
+        }
+        if len(remaining) == len(relations):
+            return
+        imagine_state.replace_generated_relations(root, remaining)
+    imagine_debug_event("generated_relations_pruned", {
+        "account_id": str(account.get("id") or ""),
+        "removed": sorted(set(relations) - set(remaining)),
+    })
+
+
+def imagine_relation_assets_deleted_remotely(root: Path, record: dict, account_key: str) -> bool:
+    if not isinstance(record, dict):
+        return False
+    if str(record.get("account_key") or "").strip().lower() not in {"", account_key}:
+        return False
+    asset_ids = {
+        imagine_relation_item_key(item)
+        for item in (record.get("items") if isinstance(record.get("items"), list) else [])
+        if isinstance(item, dict) and imagine_relation_item_key(item)
+    }
+    if not asset_ids:
+        return False
+    return not library_index.imagine_remote_asset_account_keys(root, asset_ids)
 
 
 def imagine_persist_generated_relation(
@@ -6444,8 +6495,19 @@ def list_imagine_saved(payload: dict) -> dict:
         # Cache both halves. Returning only the visible ones is right -- this is the main
         # list -- but caching only those would let finalize_imagine_remote_sync delete the
         # rest on the next full sync, and Liked reads its foreign-origin cards from here.
+        # A relation-only card exists because the site did not send it, so caching one would
+        # record an asset grok.com never returned. That asset then proves its own relation is
+        # still live and the relation rebuilds the card forever, which is why a card deleted
+        # on the site never fell out. Cards that only gained items from a relation still come
+        # from the site and stay cached.
         cache_imagine_remote_posts(
-            root, account, [*posts, *hidden_cards], sync_token=sync_token,
+            root,
+            account,
+            [
+                post for post in [*posts, *hidden_cards]
+                if not (post.get("metadata") or {}).get("relation_only_card")
+            ],
+            sync_token=sync_token,
         )
     except Exception as exc:
         imagine_debug_event("saved_cache_update_failed", {
@@ -6485,6 +6547,13 @@ def list_imagine_saved(payload: dict) -> dict:
             )
         except Exception as exc:
             imagine_debug_event("saved_cache_finalize_failed", {
+                "account_id": str(account.get("id") or ""),
+                "error": str(exc)[:400],
+            })
+        try:
+            imagine_forget_relations_deleted_remotely(root, account)
+        except Exception as exc:
+            imagine_debug_event("generated_relation_prune_failed", {
                 "account_id": str(account.get("id") or ""),
                 "error": str(exc)[:400],
             })
