@@ -14871,7 +14871,14 @@ def imagine_direct_video_candidate_deadline(
     absolute_deadline: float | None = None,
     candidate_grace_seconds: int = IMAGINE_DIRECT_VIDEO_CANDIDATE_MAX_WAIT_SECONDS,
 ) -> float:
-    return min(
+    # The grace period is time added after the official wait, not a cap replacing it. Taking
+    # the earlier of the two threw away whatever was left of that wait whenever the store
+    # stream finished early: an i2v whose stream ended in 18s got 10 more seconds instead of
+    # the tier's 80 + 10, and timed out on a video grok.com went on to finish. Take the later
+    # of the two so a tier means what it says, and keep it bounded -- the poll returns the
+    # moment the asset appears, so this only decides how long a missing one is chased. The
+    # image paths already work this way: they add their recovery window to the wait.
+    return max(
         absolute_deadline or default_deadline,
         time.time() + max(1, int(candidate_grace_seconds)),
     )
