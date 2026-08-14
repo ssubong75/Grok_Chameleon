@@ -873,7 +873,9 @@ async function submitImagineComposer() {
     const lockedPrimarySource = imaginePrimarySubmissionAttachment(lockedAttachments, composerState.mode);
     const lockedSourcePostPath = String(lockedPrimarySource?.detail_post_path || "").trim();
     const lockedSourceItemId = imagineAttachmentSubmissionItemId(lockedPrimarySource);
-    const lockedPreviewType = composerMediaKind(lockedPrimarySource) || "image";
+    const lockedPreviewType = lockedPrimarySource
+      ? (composerMediaKind(lockedPrimarySource) || "image")
+      : "";
     const lockedPreview = lockedPrimarySource
       ? {
         // preview_url on an Imagine attachment points at grok.com's preview_image.jpg, a
