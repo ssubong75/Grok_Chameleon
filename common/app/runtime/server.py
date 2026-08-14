@@ -3560,11 +3560,15 @@ def imagine_foreign_origin_asset_ids(
     are unreliable and ownership is what we go on. Public samples are excluded up front; see
     imagine_item_is_public_sample. An owner id that is missing proves nothing and is left alone.
 
+    A clone-batch copy is the one case ownership cannot see: grok.com files the copy as this
+    account's own asset, so the owner id matches and nothing marks it apart. imagine_cloned_asset_ids
+    is written at copy time for exactly this reason, so seed the answer with it. A Liked one needs
+    no seed -- its owner id stays the original owner's, which the test below already catches.
     """
     mine = str(owner_user_id or "").strip()
     parent_by_asset: dict[str, str] = {}
     held_ids: set[str] = set()
-    foreign: set[str] = set()
+    foreign: set[str] = set(imagine_account_setting_ids(root, "imagine_cloned_asset_ids", account))
     for post in posts or []:
         if not isinstance(post, dict):
             continue
@@ -5141,7 +5145,11 @@ def imagine_upload_origin_bundle_card(post: dict, items: list[dict]) -> dict | N
         "t2i_group_container": False,
         "metadata": card_metadata,
     })
-    return card
+    # Saved cards are matched by saved_display_group_id, which the Saved list stamps on every
+    # card it builds. Leaving it off here gave a freshly generated result a different identity
+    # than the very card it belongs to, so it appeared as its own card until the next Saved
+    # refresh replaced it with the stamped one. Stamp it the same way at the source.
+    return imagine_stamp_saved_identity(card)
 
 
 def imagine_saved_lineage_cards(post: dict) -> list[dict]:
@@ -9760,27 +9768,26 @@ def _like_imagine_media_post(payload: dict) -> dict:
     }
     clone_result = {"cloned": [], "failed": []}
     cloned_sources: set[str] = set()
-    # grok.com hearts an asset by dropping its id into the account's default collection and
-    # copies nothing, so someone else's asset keeps its own id. Cloning it here instead put
-    # a second copy in the saved list and cut the lineage chain, because the clone still
-    # named the original owner's asset as its parent. Match the site.
+    # Hearting someone else's asset copies it into this account instead of filing the
+    # original owner's id in the collection. The collection route leaves the entry owned by
+    # whoever made it, so it disappears when they delete the asset and cannot be generated
+    # from as your own. clone-batch makes it yours, and the copy is then added to Liked so
+    # it lands where an ordinary heart would.
     collection_result = {"added": [], "failed": []}
     if external_ids:
-        # grok.com puts exactly one id in: the asset the heart was pressed on. Sending the
-        # whole bundle also filed the source image, which came back as a second Liked card.
-        # Pick what the heart was pressed on, then the first result in target order. Sorting
-        # the ids picked whichever sorted first, which was the source image, so only that
-        # came into Liked instead of the video.
+        # Copy the whole card, source image included. Taking only the asset the heart was
+        # pressed on left the image belonging to whoever posted it, so deleting the copied
+        # video took the card's last owned asset with it and the image went too — nothing
+        # was left in the collection to hold the card up. list_imagine_liked folds the
+        # copies back into one card, which is what taking a single id used to avoid.
         pressed_id = str(
             (payload or {}).get("id")
             or (payload or {}).get("post_id")
             or (payload or {}).get("asset_id")
             or ""
         ).strip()
-        primary_id = ""
-        if pressed_id in external_ids:
-            primary_id = pressed_id
-        else:
+        primary_id = pressed_id if pressed_id in external_ids else ""
+        if not primary_id:
             for target in targets:
                 target_id = target.get("id")
                 if target_id in external_ids and not target.get("is_source"):
@@ -9788,12 +9795,49 @@ def _like_imagine_media_post(payload: dict) -> dict:
                     break
         if not primary_id:
             primary_id = next((t.get("id") for t in targets if t.get("id") in external_ids), sorted(external_ids)[0])
-        collection_result = imagine_collection_add_assets(account, {primary_id})
-        if collection_result.get("failed"):
+        clone_result = imagine_clone_external_assets(account, external_ids)
+        if clone_result.get("failed"):
             raise RuntimeError(
-                collection_result.get("error")
-                or f"Grok did not add {len(collection_result['failed'])} linked asset(s) to Liked."
+                clone_result.get("error")
+                or f"Grok did not copy {len(clone_result['failed'])} linked asset(s)."
             )
+        cloned_ids = {
+            str(record.get("asset_id") or "").strip()
+            for record in clone_result.get("cloned") or []
+            if str(record.get("asset_id") or "").strip()
+        }
+        cloned_sources = {
+            str(record.get("source_asset_id") or "").strip()
+            for record in clone_result.get("cloned") or []
+            if str(record.get("source_asset_id") or "").strip()
+        }
+        if cloned_ids:
+            # Remember which assets arrived by copy. The Imagine main list has to leave them
+            # out, and only this record can tell a copy apart from something generated here.
+            update_imagine_account_setting_ids(
+                root,
+                "imagine_cloned_asset_ids",
+                account,
+                add=cloned_ids,
+            )
+            # Keeping a copy out of Imagine main is imagine_liked_card_asset_ids' job, worked
+            # out where main is built. It must not go in the local exclusion list: Liked reads
+            # that list to drop what has been deleted, and a copy sitting in it would take the
+            # card down with it.
+            collection_result = imagine_collection_add_assets(account, cloned_ids)
+            if collection_result.get("failed"):
+                raise RuntimeError(
+                    collection_result.get("error")
+                    or f"Grok did not add {len(collection_result['failed'])} copied asset(s) to Liked."
+                )
+        imagine_debug_event("external_asset_heart_cloned", {
+            "account_id": str(account.get("id") or ""),
+            "pressed_id": primary_id,
+            "cloned": sorted(cloned_ids),
+            "cloned_sources": sorted(cloned_sources),
+            "collection_added": collection_result.get("added") or [],
+            "clone_records": clone_result.get("cloned") or [],
+        })
     released_exclusions = local_post_asset_ids & imagine_local_exclusion_ids(root, account)
     if released_exclusions:
         imagine_state.remove_local_exclusions(
@@ -11266,6 +11310,17 @@ def imagine_attachment_requires_fresh_source(attachment: dict) -> bool:
         return False
     metadata = attachment.get("metadata") if isinstance(attachment.get("metadata"), dict) else {}
     imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
+    # Re-uploading exists because a linked asset belongs to whoever posted it and cannot be
+    # generated from. A copy carries the same link stamps — it is reached the same way — but
+    # it is this account's own asset, so generating from it directly works. Re-uploading one
+    # left a stray upload card in Imagine main and cut the result off from the card it came
+    # from, which is why nothing made from a copy ever landed back on it.
+    if (
+        attachment.get("cloned_copy")
+        or metadata.get("cloned_copy")
+        or imagine.get("cloned_copy")
+    ):
+        return False
     return bool(
         attachment.get("fresh_source_required")
         or attachment.get("external_reference")
@@ -11321,7 +11376,145 @@ def imagine_mark_external_lineage_fresh_source(payload: dict, attachments: list[
         attachments[0]["fresh_source_required"] = True
 
 
-def imagine_prepare_direct_image_attachments(attachments: list[dict], account: dict, request_id: str, action: str, promote_cached_post: bool = True) -> None:
+# A Liked card shows the asset it was copied from, not the copy: the copy's references
+# still name the original owner's media, so that is what the detail hands the composer.
+# Generating straight from it asks grok.com to continue someone else's conversation, which
+# it answers with "Request rejected by anti-bot rules." Swap in the copy this account owns
+# and drop the foreign lineage, so the request is an ordinary one against its own asset.
+def imagine_clone_id_by_origin(root: Path | None, account: dict) -> dict[str, dict]:
+    cloned_ids = imagine_account_setting_ids(root, "imagine_cloned_asset_ids", account)
+    if not cloned_ids:
+        return {}
+    mapping: dict[str, dict] = {}
+    for clone_id in cloned_ids:
+        try:
+            data = imagine_get_json(
+                f"/rest/assets/{quote(clone_id, safe='')}",
+                account,
+                timeout=10,
+                referer=IMAGINE_BASE + "/imagine/saved",
+            )
+        except Exception:
+            continue
+        asset = data.get("asset") if isinstance(data.get("asset"), dict) else data
+        origin_id = imagine_asset_duplicated_from_id(asset)
+        if origin_id:
+            mapping[origin_id] = {
+                "asset_id": clone_id,
+                "media_url": imagine_asset_primary_media_url(asset) or "",
+            }
+    return mapping
+
+
+def imagine_substitute_cloned_source(
+    attachments: list[dict],
+    account: dict,
+    request_id: str,
+    action: str,
+    payload: dict | None = None,
+) -> None:
+    if not attachments:
+        return
+    root = library_root()
+    if not root:
+        return
+    candidates = {
+        str(attachment.get(key) or "").strip()
+        for attachment in attachments
+        if isinstance(attachment, dict)
+        for key in ("asset_id", "post_id", "source_item_id", "item_id", "parent_post_id")
+        if str(attachment.get(key) or "").strip()
+    }
+    if not candidates:
+        return
+    cloned_ids = imagine_account_setting_ids(root, "imagine_cloned_asset_ids", account)
+    if not cloned_ids or candidates & cloned_ids:
+        # Nothing to do when the attachment is already the copy.
+        return
+    mapping = imagine_clone_id_by_origin(root, account)
+    if not mapping:
+        return
+    for attachment in attachments:
+        if not isinstance(attachment, dict):
+            continue
+        origin_id = next(
+            (
+                str(attachment.get(key) or "").strip()
+                for key in ("asset_id", "post_id", "source_item_id", "item_id", "parent_post_id")
+                if str(attachment.get(key) or "").strip() in mapping
+            ),
+            "",
+        )
+        record = mapping.get(origin_id) or {}
+        clone_id = str(record.get("asset_id") or "")
+        clone_url = str(record.get("media_url") or "")
+        if not clone_id:
+            continue
+        # The request names its source by URL as well as by id. Leaving the original owner's
+        # media URL in place filed the result next to their asset, which is how a card for
+        # someone else's image turned up in Imagine main holding the new one.
+        if clone_url:
+            for key in ("url", "remote_url", "media_url", "raw_url", "object_url", "thumbnail_url"):
+                if str(attachment.get(key) or "").strip():
+                    attachment[key] = clone_url
+        for key in (
+            "conversation_id", "source_conversation_id", "response_id", "parent_response_id",
+            "parent_post_id", "root_post_id", "original_post_id", "detail_root_post_id",
+            "original_ref_type",
+        ):
+            attachment.pop(key, None)
+        for key in ("asset_id", "post_id", "item_id", "source_item_id", "detail_item_id"):
+            if str(attachment.get(key) or "").strip():
+                attachment[key] = clone_id
+        attachment["link_source"] = False
+        attachment["external_reference"] = False
+        attachment["fresh_source_required"] = False
+        metadata = attachment.get("metadata") if isinstance(attachment.get("metadata"), dict) else {}
+        imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
+        for holder in (metadata, imagine):
+            holder.pop("conversation_id", None)
+            holder.pop("response_id", None)
+            holder["link_source"] = False
+            holder["external_reference"] = False
+            if clone_url:
+                for key in ("media_url", "remote_url", "asset_url", "url"):
+                    if str(holder.get(key) or "").strip():
+                        holder[key] = clone_url
+            for key in ("asset_id", "post_id", "root_asset_id", "source_item_id"):
+                if str(holder.get(key) or "").strip() == origin_id:
+                    holder[key] = clone_id
+        metadata["imagine"] = imagine
+        attachment["metadata"] = metadata
+        # The request is also built from the payload's own copy of the source, so the foreign
+        # conversation would still be picked up from there.
+        if isinstance(payload, dict):
+            for key in (
+                "source_conversation_id", "conversation_id",
+                "parent_response_id", "response_id",
+            ):
+                payload.pop(key, None)
+            for key in ("source_item_id", "post_id"):
+                if str(payload.get(key) or "").strip() == origin_id:
+                    payload[key] = clone_id
+            payload["link_source"] = False
+            payload["source_is_t2i"] = False
+        imagine_debug_event("cloned_source_substituted", {
+            "request_id": request_id,
+            "action": action,
+            "origin_asset_id": origin_id,
+            "clone_asset_id": clone_id,
+        })
+
+
+def imagine_prepare_direct_image_attachments(
+    attachments: list[dict],
+    account: dict,
+    request_id: str,
+    action: str,
+    promote_cached_post: bool = True,
+    payload: dict | None = None,
+) -> None:
+    imagine_substitute_cloned_source(attachments, account, request_id, action, payload)
     for index, attachment in enumerate(attachments):
         if not isinstance(attachment, dict):
             continue
@@ -14408,7 +14601,7 @@ def imagine_i2i_request(payload: dict, prompt: str, request_id: str, account: di
     if not image_attachments:
         raise RuntimeError("Imagine i2i needs one source image.")
     imagine_mark_external_lineage_fresh_source(payload, image_attachments, account)
-    imagine_prepare_direct_image_attachments(image_attachments, account, request_id, "i2i")
+    imagine_prepare_direct_image_attachments(image_attachments, account, request_id, "i2i", payload=payload)
     source = image_attachments[0]
     conversation_id, parent_response_id = imagine_source_conversation_context(payload, source, account)
     start_new_conversation = not bool(conversation_id)
@@ -14528,7 +14721,7 @@ def imagine_aspect_ratio_request(payload: dict, request_id: str, account: dict) 
     if not image_attachments:
         raise RuntimeError("Imagine Aspect Ratio needs one source image.")
     imagine_mark_external_lineage_fresh_source(payload, image_attachments, account)
-    imagine_prepare_direct_image_attachments(image_attachments, account, request_id, "aspect")
+    imagine_prepare_direct_image_attachments(image_attachments, account, request_id, "aspect", payload=payload)
     imagine_ensure_upload_image_posts(image_attachments[:1], account, request_id, "aspect")
     source = image_attachments[0]
     conversation_id, parent_response_id = imagine_source_conversation_context(payload, source, account)
@@ -14614,7 +14807,12 @@ def imagine_video_request(payload: dict, prompt: str, request_id: str, action: s
         image_attachments = []
     if image_attachments:
         imagine_mark_external_lineage_fresh_source(payload, image_attachments, account or {})
-        imagine_prepare_direct_image_attachments(image_attachments, account or {}, request_id, action)
+        imagine_prepare_direct_image_attachments(image_attachments, account or {}, request_id, action, payload=payload)
+    # Extend takes a video, so it never reaches the image path where a copy is swapped in
+    # for the original it was made from. Without this it would send the other account's
+    # asset and conversation, which grok.com answers with its anti-bot rejection.
+    if action == "extend" and isinstance(video_attachment, dict):
+        imagine_substitute_cloned_source([video_attachment], account or {}, request_id, action, payload)
     context_attachment = video_attachment if action == "extend" else (image_attachments[0] if image_attachments else None)
     conversation_id, parent_response_id = imagine_source_conversation_context(payload, context_attachment, account)
     direct_upload = bool(

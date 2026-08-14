@@ -873,10 +873,19 @@ async function submitImagineComposer() {
     const lockedPrimarySource = imaginePrimarySubmissionAttachment(lockedAttachments, composerState.mode);
     const lockedSourcePostPath = String(lockedPrimarySource?.detail_post_path || "").trim();
     const lockedSourceItemId = imagineAttachmentSubmissionItemId(lockedPrimarySource);
+    const lockedPreviewType = composerMediaKind(lockedPrimarySource) || "image";
     const lockedPreview = lockedPrimarySource
       ? {
-        url: String(lockedPrimarySource.preview_url || lockedPrimarySource.source_url || lockedPrimarySource.raw_url || ""),
-        type: composerMediaKind(lockedPrimarySource) || "image",
+        // preview_url on an Imagine attachment points at grok.com's preview_image.jpg, a
+        // low-res thumbnail. The generation view draws this url full size, so the source
+        // showed up visibly softer than the image the user picked. Video still needs the
+        // poster, but for an image take the real media and keep preview as the fallback.
+        url: String(
+          lockedPreviewType === "image"
+            ? (lockedPrimarySource.source_url || lockedPrimarySource.raw_url || lockedPrimarySource.preview_url || "")
+            : (lockedPrimarySource.preview_url || lockedPrimarySource.source_url || lockedPrimarySource.raw_url || ""),
+        ),
+        type: lockedPreviewType,
         aspect_ratio: lockedPrimarySource.aspect_ratio || lockedPrimarySource.aspectRatio || "",
       }
       : {

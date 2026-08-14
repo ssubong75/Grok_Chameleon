@@ -5145,7 +5145,11 @@ def imagine_upload_origin_bundle_card(post: dict, items: list[dict]) -> dict | N
         "t2i_group_container": False,
         "metadata": card_metadata,
     })
-    return card
+    # Saved cards are matched by saved_display_group_id, which the Saved list stamps on every
+    # card it builds. Leaving it off here gave a freshly generated result a different identity
+    # than the very card it belongs to, so it appeared as its own card until the next Saved
+    # refresh replaced it with the stamped one. Stamp it the same way at the source.
+    return imagine_stamp_saved_identity(card)
 
 
 def imagine_saved_lineage_cards(post: dict) -> list[dict]:
