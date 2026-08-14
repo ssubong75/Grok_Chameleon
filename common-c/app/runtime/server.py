@@ -3564,6 +3564,11 @@ def imagine_post_liked_anchor_keys(post: dict) -> set[str]:
 IMAGINE_PUBLIC_SAMPLE_HOSTS = ("imagine-public.x.ai", "images-public.x.ai")
 
 
+def imagine_url_is_public_sample(url: str) -> bool:
+    text = str(url or "").lower()
+    return any(host in text for host in IMAGINE_PUBLIC_SAMPLE_HOSTS)
+
+
 def imagine_item_is_public_sample(item: dict) -> bool:
     """Is this a Discover/sample asset served from the public bucket?
 
@@ -12824,7 +12829,7 @@ def imagine_t2i_send_payloads(prompt: str, request_id: str, aspect_ratio: str, e
     return reset_payload, create_payload
 
 
-def imagine_t2i_candidate_from_event(event: dict, prompt: str) -> dict | None:
+def imagine_t2i_candidate_from_event(event: dict, prompt: str, owner_user_id: str = "") -> dict | None:
     if str(event.get("request_id") or "") == "":
         return None
     image_id = str(event.get("image_id") or event.get("job_id") or "").strip()
@@ -12834,6 +12839,14 @@ def imagine_t2i_candidate_from_event(event: dict, prompt: str) -> dict | None:
     # .png urls, and those 404 because no file is ever written for them. The event
     # normally carries the url, so this fallback only runs when it does not.
     raw_url = str(event.get("url") or "").strip() or f"https://imagine-public.x.ai/imagine-public/images/{image_id}.jpg"
+    # The t2i socket hands back the public bucket url, which is the same picture but not the
+    # account's copy of it. Editing from one sends grok.com a reference it does not treat as
+    # this account's asset, and the edit returns without generating anything. Traced
+    # 2026-08-14: the site's own edit off a t2i result carries assets.grok.com in both
+    # imageReferences and resolvedImageReferences. Use the account url whenever the owner is
+    # known; the public url stays as the fallback.
+    if owner_user_id and imagine_url_is_public_sample(raw_url):
+        raw_url = imagine_generated_image_urls(owner_user_id, image_id)[0]
     status = str(event.get("current_status") or "").strip().lower()
     progress = imagine_event_numeric_progress(event)
     moderated = imagine_event_is_moderated(event)
@@ -12875,6 +12888,10 @@ def imagine_t2i_direct_items(
 ) -> list[dict]:
     aspect_ratio, enable_pro, count = imagine_t2i_options(payload)
     receive_limit = count + 3
+    # Resolved before the socket opens: the results need the account's own asset url, and
+    # this falls back to /api/auth/session when the id is not cached yet, which is exactly
+    # the state right after a cold start.
+    owner_user_id = imagine_current_owner_user_id(account)
     reset_payload, create_payload = imagine_t2i_send_payloads(prompt, request_id, aspect_ratio, enable_pro, count)
     imagine_debug_event("t2i_request", {
         "request_id": request_id,
@@ -12987,7 +13004,7 @@ def imagine_t2i_direct_items(
             if len(last_events) > IMAGINE_DEBUG_LAST_EVENT_COUNT:
                 last_events.pop(0)
             event_moderated = imagine_event_is_moderated(event)
-            candidate = imagine_t2i_candidate_from_event(event, prompt)
+            candidate = imagine_t2i_candidate_from_event(event, prompt, owner_user_id)
             if event_moderated and not candidate:
                 imagine_debug_event("t2i_moderated", {"request_id": request_id, "event_payload": event})
                 raise RuntimeError("Imagine moderated the request.")
