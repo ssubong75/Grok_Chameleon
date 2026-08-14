@@ -252,7 +252,13 @@ async function consumeImageEditorReturn() {
   if (!post) return;
   selectLibraryPost(postPath);
   if (itemId) library_state.selectedDetailItemId = itemId;
-  const detailType = post.source === "imagine" ? "imagine" : "build";
+  // The screen the editor was opened from decides where the save lands. post.source says
+  // where the media came from, not which screen the user was on, so a Build card holding
+  // imagine media used to hand the save to the Imagine detail. Fall back to post.source
+  // only when the provider is missing, which means this return did not come from the editor.
+  const detailType = returnProvider
+    ? (returnProvider === "imagine" ? "imagine" : "build")
+    : (post.source === "imagine" ? "imagine" : "build");
   const activeButtonId = detailType === "imagine" ? "i_imagine_nav_btn" : "b_build_btn";
   screen_state.detail_back[detailType] = returnBackTarget;
   openScreen(
