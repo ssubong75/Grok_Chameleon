@@ -116,7 +116,13 @@ function syncImagineHeaderLayout() {
   const input = document.getElementById("i_link_input");
   if (!header || !button || !input) return;
   const metrics = imagineCardColumnMetrics();
-  if (!metrics) return;
+  // The grid has no resolved columns until the list has laid out, and on a cold load that is
+  // after this first runs. The boxes are hidden until placed, so a missed measurement would
+  // hide them for good -- ask again next frame instead.
+  if (!metrics) {
+    scheduleImagineHeaderLayout();
+    return;
+  }
   const { columns, gap, left } = metrics;
   const headerRect = header.getBoundingClientRect();
   const centreY = headerRect.top + (headerRect.height / 2);
@@ -134,6 +140,10 @@ function syncImagineHeaderLayout() {
   const likedRect = button.getBoundingClientRect();
   const likedCentreY = likedRect.height > 0 ? likedRect.top + (likedRect.height / 2) : centreY;
   placeImagineHeaderElement(input, secondCentre + (input.getBoundingClientRect().width / 2), likedCentreY);
+  // Both boxes are absolutely positioned with no coordinates of their own, so until this
+  // runs they sit at the header's left edge and then jump to the card columns a frame later.
+  // They stay hidden until the columns have been measured.
+  header.classList.add("i_main_header_placed");
 }
 
 let imagineHeaderLayoutFrame = 0;

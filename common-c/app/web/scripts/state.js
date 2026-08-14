@@ -299,7 +299,14 @@ function normalizeNfcText(value = "") {
     // layouts — only their labels go — so the same two anchors serve every state.
     const upperRect = document.getElementById("search_btn")?.getBoundingClientRect();
     const lowerRect = document.getElementById("folder_btn")?.getBoundingClientRect();
-    if (!upperRect || !lowerRect || upperRect.height === 0 || lowerRect.height === 0) return;
+    // On a cold load the rows can still measure zero, and the one scheduled call on startup
+    // was the only one -- the button then kept whatever the stylesheet guessed. It is hidden
+    // until placed now, so a missed measurement would hide it for good; keep asking until
+    // the sidebar has real geometry.
+    if (!upperRect || !lowerRect || upperRect.height === 0 || lowerRect.height === 0) {
+      scheduleSidebarTogglePosition();
+      return;
+    }
     const upperCenter = upperRect.top + (upperRect.height / 2);
     const lowerCenter = lowerRect.top + (lowerRect.height / 2);
     const rawToggleTop = (upperCenter + lowerCenter) / 2;
@@ -312,6 +319,7 @@ function normalizeNfcText(value = "") {
       Math.max(toggleHalf + edgeInset, rawToggleTop),
     );
     document.documentElement.style.setProperty("--sidebar-toggle-top", `${toggleTop}px`);
+    document.documentElement.classList.add("sidebar_toggle_placed");
   }
 
   function scheduleSidebarTogglePosition() {
