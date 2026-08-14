@@ -2690,7 +2690,13 @@
           });
         }
       }
-      const explicitImageContainerId = explicitImageContainerSeedId
+      // containerPostIdFor answers "which conversation holds this asset", so seeding it with
+      // the edit's source files the edit inside that conversation. That is right when the
+      // asset already belongs to the thread being continued, and wrong when it does not:
+      // grok.com opens a new conversation for an edit off another card's asset (traced
+      // 2026-08-14), and following the source's container instead put the result in the
+      // t2i batch card the source came from. Only look up a container when continuing.
+      const explicitImageContainerId = explicitImageContainerSeedId && !startNewConversation
         ? containerPostIdFor(state, explicitImageContainerSeedId)
         : "";
       const containerId = explicitImageContainerId || await ensureContainerFromInput(state, "image", prompt, inputIds, urls, "image/png");
@@ -2912,7 +2918,14 @@
           });
         }
       }
-      let rootContainerId = rootContainerIdFor(state, explicitRootSeedId || rootSeedId);
+      // Same rule as the image edit above: resolving a container from the source asset files
+      // the video inside whatever conversation that asset lives in. An i2v off a t2i result
+      // landed in the t2i batch card because of this, while grok.com would have opened a new
+      // conversation. Extension is excluded -- it continues its own video's thread, which is
+      // what the site does too.
+      let rootContainerId = (startNewConversation && variant.kind !== "videoExtension")
+        ? ""
+        : rootContainerIdFor(state, explicitRootSeedId || rootSeedId);
       let generateVideoMethod = resolveStoreMethod(state, storeContext.record, "generateVideoForImage");
       const stateFunctionNames = listFunctionNames(state);
       const storeFunctionNames = listFunctionNames(storeContext.record?.store);
