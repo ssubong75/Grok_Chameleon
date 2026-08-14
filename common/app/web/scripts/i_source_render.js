@@ -3,6 +3,7 @@ const IMAGINE_VIRTUAL_LIST_KEY = "imagine-main";
 const IMAGINE_DISCOVER_VIRTUAL_LIST_KEY = "imagine-discover";
 const IMAGINE_UNSAVED_VIRTUAL_LIST_KEY = "imagine-unsaved";
 const IMAGINE_SAVED_BACKGROUND_SYNC_DELAY_MS = 900;
+const IMAGINE_SAVED_REFRESH_PAGE_LIMIT = 40;
 let imagineSavedDisplayPostsMemoSource = null;
 let imagineSavedDisplayPostsMemoResult = [];
 let imagineSavedVisiblePostsMemoResult = [];
@@ -1671,6 +1672,29 @@ async function loadImagineSavedCards({ force = false, append = false } = {}) {
     }
 
     await syncImagineSavedCards(context, { append, force, showLoading: true });
+
+    // A refresh only counts as a finished sync once the last page lands: the server drops
+    // rows missing the current sync token in finalize_imagine_remote_sync, and that runs
+    // only when has_more goes false. Stopping at page one left cards deleted on grok.com
+    // sitting in the cache forever, and the cache is what paints the list first.
+    if (force) {
+      let pages = 0;
+      while (
+        library_state.imagineRemoteCursor
+        && pages < IMAGINE_SAVED_REFRESH_PAGE_LIMIT
+        && canLoadImagineSavedList()
+      ) {
+        pages += 1;
+        const cursorBefore = library_state.imagineRemoteCursor;
+        // syncImagineSavedCards closes the request context on its way out, so reusing the
+        // first page's context would make every later page look like a stale request and
+        // return before asking for anything.
+        const pageContext = beginImagineSavedRequest();
+        if (!pageContext) break;
+        await syncImagineSavedCards(pageContext, { append: true, force: false, showLoading: true });
+        if (library_state.imagineRemoteCursor === cursorBefore) break;
+      }
+    }
   } finally {
     if (
       imagineSavedRequestIsCurrent(context)
