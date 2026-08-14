@@ -176,6 +176,18 @@
   color: var(--danger);
 }
 
+/* The real position is measured from the Search and Open Folder rows two frames after
+   paint, and those rows change height with the responsive layout, so no fixed starting
+   value can match every window size -- the button always drew somewhere else first and slid
+   into place on load. Stay invisible until the measurement lands. */
+.sidebar_toggle {
+  visibility: hidden;
+}
+
+html.sidebar_toggle_placed .sidebar_toggle {
+  visibility: visible;
+}
+
 .sidebar_toggle {
   position: fixed;
   top: var(--sidebar-toggle-top, 62vh);

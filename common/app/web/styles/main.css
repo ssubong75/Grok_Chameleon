@@ -490,6 +490,12 @@
 #i_upload_image_btn,
 #i_link_input.sidebar_link_input {
   position: absolute;
+  visibility: hidden;
+}
+
+.i_main_header.i_main_header_placed #i_upload_image_btn,
+.i_main_header.i_main_header_placed #i_link_input.sidebar_link_input {
+  visibility: visible;
 }
 
 /* The clipboard glyph came from the sidebar row; the header box shows the label alone. */
