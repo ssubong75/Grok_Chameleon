@@ -1227,7 +1227,7 @@ html.landscape_six_card_grid .workspace .card_list {
   display: grid;
   place-items: center;
   overflow: hidden;
-  background: rgb(70 73 74 / 0.72);
+  background: rgb(121 126 127 / 0.72);
   pointer-events: none;
 }
 

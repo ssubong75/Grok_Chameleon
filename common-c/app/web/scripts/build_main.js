@@ -171,8 +171,12 @@
           || detailMediaUrlForItem(prefix, sourceItem, sourcePost)
         )
         : (
-          detailPreviewUrlForItem(prefix, sourceItem, sourcePost)
-          || detailMediaUrlForItem(prefix, sourceItem, sourcePost)
+          // grok.com's preview_image.jpg is a ~1.6KB thumbnail meant for card grids, and
+          // this frame draws it full size, so an image source rendered visibly softer than
+          // the one that was picked. Video still leads with its poster above; an image
+          // takes the real media and falls back to the preview only if it is missing.
+          detailMediaUrlForItem(prefix, sourceItem, sourcePost)
+          || detailPreviewUrlForItem(prefix, sourceItem, sourcePost)
         );
       if (url) return { url: String(url || ""), type: sourceType || contextType || buildJobTargetType(job) };
     }

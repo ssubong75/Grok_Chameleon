@@ -2702,19 +2702,23 @@
       const containerId = explicitImageContainerId || await ensureContainerFromInput(state, "image", prompt, inputIds, urls, "image/png");
       if (!containerId) throw new Error("Official image edit container could not be resolved.");
       const parentPostId = directUpload ? undefined : (imageConfig.parentPostId || inputIds[0] || containerId);
-      // Loading the source into the store has nothing to do with which conversation the
-      // edit belongs to -- the video path hydrates either way, and falls back to building a
-      // post from the url when the store still comes up empty. Skipping it here left the
-      // edit calling fetchGenerateImageEdits against a store that held neither the source
-      // nor a signed-in user, which returns in a second having generated nothing. Only
-      // pointing the store's current root at the existing conversation is conditional.
-      state = await hydrateGenerationSource(
-        storeContext,
-        parentPostId || inputIds[0] || containerId,
-        requestId,
-        variant.kind,
-        containerId,
-      );
+      // Loading the source into the store is about whether the source exists on grok.com,
+      // not about which conversation the edit joins. An edit off an account asset needs it
+      // even when it opens a new conversation: without it fetchGenerateImageEdits runs
+      // against a store holding neither the source nor a signed-in user and returns in a
+      // second having generated nothing. A direct upload has no media post to load, so
+      // hydrating only burns the timeout on fetchMediaPost calls for unrelated
+      // conversations that containerPostIdFor happens to hand back. Pointing the store's
+      // current root at an existing conversation stays conditional on continuing one.
+      if (!directUpload) {
+        state = await hydrateGenerationSource(
+          storeContext,
+          parentPostId || inputIds[0] || containerId,
+          requestId,
+          variant.kind,
+          containerId,
+        );
+      }
       if (!startNewConversation) {
         syncCurrentRootContainer(state, requestId, variant.kind, containerId);
       }
@@ -2818,10 +2822,19 @@
           [containerId, ...inputIds, ...directUploadAssetIds],
         )
         : "";
+      // canonicalGenerationContainerId falls back to any leftover store container when no
+      // container holds a new item (line 1933), which for a direct upload is whatever
+      // conversation the store still had open -- the previous edit's. Reporting that as the
+      // canonical container filed the result under the earlier card, so two uploads edited
+      // in a row showed up as one card until the bundle relation caught up minutes later.
+      // A direct upload starts its own conversation, so take only the id the site actually
+      // returned and leave it empty otherwise.
       const canonicalContainerId = startNewConversation
         ? (
           captureCanonicalContainerId
-          || canonicalGenerationContainerId(finalState, containerId, imageTracking, resultEvents, "image", inputIds)
+          || (directUpload
+            ? ""
+            : canonicalGenerationContainerId(finalState, containerId, imageTracking, resultEvents, "image", inputIds))
         )
         : "";
       if (startNewConversation && canonicalContainerId) {
