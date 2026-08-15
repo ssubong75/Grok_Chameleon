@@ -6371,11 +6371,20 @@ def list_imagine_saved(payload: dict) -> dict:
             imagine_apply_generated_relations(local_post, root, account, relations)
         )
     ]
+    # Keep a separate acknowledgement list from the *raw* Grok responses.  The posts sent
+    # to the renderer below are deliberately enriched with this app's generated-relations
+    # overlay, so their items cannot prove that Grok's Saved list has caught up yet.
+    official_asset_ids: set[str] = set()
     posts = []
     for official_order, conversation in conversation_entries:
         conversation_id = str(conversation.get("conversationId") or "")
         post = imagine_saved_post_from_conversation(conversation, details.get(conversation_id, {}), account)
         if post:
+            official_asset_ids.update({
+                imagine_item_asset_id(item)
+                for item in post.get("items") or []
+                if isinstance(item, dict) and imagine_item_asset_id(item)
+            })
             if imagine_hidden_bundle_card(post, relations):
                 continue
             post = imagine_apply_generated_relations(post, root, account, relations)
@@ -6440,9 +6449,13 @@ def list_imagine_saved(payload: dict) -> dict:
     for post in posts:
         merge_imagine_flat_saved_post(saved_groups, post)
     for asset in assets:
-        if not isinstance(asset, dict) or imagine_asset_upload_only(asset):
+        if not isinstance(asset, dict):
             continue
         asset_id = str(asset.get("assetId") or asset.get("id") or "").strip()
+        if asset_id:
+            official_asset_ids.add(asset_id)
+        if imagine_asset_upload_only(asset):
+            continue
         if (
             not asset_id
             or asset_id in hidden_remote_ids
@@ -6572,6 +6585,9 @@ def list_imagine_saved(payload: dict) -> dict:
         "next_cursor": next_cursor,
         "has_more": has_more,
         "sync_token": sync_token,
+        # This deliberately excludes generated-relation overlays.  The renderer uses it to
+        # decide when an optimistic result may become a confirmed Saved item.
+        "official_asset_ids": sorted(official_asset_ids),
         "liked_exclusion": imagine_liked_exclusion_payload(root, account, relations),
         "imagine": {
             "id": account.get("id") or "",

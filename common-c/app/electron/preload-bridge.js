@@ -372,7 +372,7 @@
         status: Number(payload.status || 0),
         modelName: requestBody?.modelName || "",
       });
-      return { matched: false };
+      return { matched: false, requestId: "" };
     }
     capture.requestCount += 1;
     capture.status = Number(payload.status || 0);
@@ -397,7 +397,7 @@
       rootPostId: capture.rootPostId,
       apiError: capture.apiError,
     });
-    return { matched: true, eventCount: capture.events.length };
+    return { matched: true, requestId: capture.requestId, eventCount: capture.events.length };
   }
 
   function generationCaptureEvents(capture, expectedType, conversationId = "", parentResponseId = "") {
@@ -472,6 +472,36 @@
     return next;
   }
 
+  // The native media store can retain its UI-only conversation metadata after an
+  // extension.  That metadata is not part of Grok's normal media-generation
+  // request and, when it leaks into the next i2v request, the service rejects
+  // the request as an anti-bot violation.  Keep the request's actual generation
+  // settings untouched; only omit the two proven UI-state additions.
+  function canonicalImagineGenerationRequestBody(body, capture, route) {
+    if (
+      !body
+      || typeof body !== "object"
+      || String(body.modelName || "") !== "imagine-video-gen"
+      || !body.mediaGenInput
+      || (!capture && !route)
+    ) return body;
+    const removed = [];
+    const next = { ...body };
+    for (const key of ["responseMetadata", "kind"]) {
+      if (!Object.prototype.hasOwnProperty.call(next, key)) continue;
+      delete next[key];
+      removed.push(key);
+    }
+    if (removed.length) {
+      pushStoreTrace("conversation_request_payload_normalized", {
+        requestId: capture?.requestId || route?.requestId || "",
+        variant: mediaGenVariant(next.mediaGenInput).kind,
+        removed,
+      });
+    }
+    return next;
+  }
+
   window.fetch = async function grokChameleonConversationFetch(input, init = undefined) {
     const route = activeConversationRequestRoute;
     const rawUrl = typeof input === "string" || input instanceof URL ? String(input) : String(input?.url || "");
@@ -492,8 +522,10 @@
       body = null;
     }
     if (!body || typeof body !== "object") return nativeFetch(input, init);
+    const capture = generationResponseCaptureForBody(body);
+    const canonicalBody = canonicalImagineGenerationRequestBody(body, capture, route);
     let targetInput = input;
-    let targetInit = init;
+    let targetInit = canonicalBody === body ? init : requestInitForReroute(input, init, canonicalBody);
     let endpoint = parsedUrl.pathname;
     if (route && (!route.modelName || body.modelName === route.modelName)) {
       endpoint = `/rest/app-chat/conversations/${encodeURIComponent(route.conversationId)}/responses`;
@@ -504,7 +536,7 @@
       // afterwards: grok.com answered "Response not found." and the app killed a job whose
       // video it had in fact finished. Send what the site sends and let the path route it.
       targetInit = requestInitForReroute(input, init, {
-        ...body,
+        ...canonicalBody,
         skipCancelCurrentInflightRequests: true,
       });
       clearConversationRequestRoute(route);
@@ -516,7 +548,6 @@
         endpoint,
       });
     }
-    const capture = generationResponseCaptureForBody(body);
     const response = await nativeFetch(targetInput, targetInit);
     if (capture) observeGenerationResponse(response, capture, endpoint);
     return response;
@@ -2632,7 +2663,16 @@
     const conversationId = String(payload.grokChameleonConversationId || "").trim();
     const parentResponseId = String(payload.grokChameleonParentResponseId || "").trim();
     const directUpload = Boolean(payload.grokChameleonDirectUpload);
-    let startNewConversation = Boolean(payload.grokChameleonStartNewConversation || directUpload);
+    // Grok creates a new conversation for i2v from an image.  Reusing the image
+    // card's (or a relation-overlay's) conversation can point at the preceding
+    // extension instead, and the request is then rejected.  Only videoExtension
+    // continues the video conversation.
+    const imageToVideoStartsNewConversation = variant.kind === "imageToVideo";
+    let startNewConversation = Boolean(
+      payload.grokChameleonStartNewConversation
+      || directUpload
+      || imageToVideoStartsNewConversation
+    );
     let continueExistingConversation = Boolean(conversationId) && !startNewConversation;
     const directUploadAssetIds = Array.isArray(payload.grokChameleonUploadAssetIds)
       ? payload.grokChameleonUploadAssetIds.map((value) => String(value || "").trim()).filter(Boolean)
@@ -2656,6 +2696,7 @@
       conversationId,
       parentResponseId,
       startNewConversation,
+      imageToVideoStartsNewConversation,
       mediaStorePath: capturedMediaStorePath,
       mediaStoreModule: capturedMediaStoreModule,
       storeId: storeContext.record?.id,
