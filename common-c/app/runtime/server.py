@@ -11229,11 +11229,17 @@ def imagine_source_conversation_context(
     # either back filed the edit inside the T2I group card. grok.com does not resolve anything
     # here — it posts to /conversations/new and lets the edit start its own thread — so match
     # that and return nothing, which sends this through the new-conversation path.
+    #
+    # Only an edit, though. Traced 2026-08-14: grok.com sends image-to-video and extend to
+    # /conversations/<id>/responses because the asset already lives in that conversation, and
+    # only an edit off another card's asset opens a new one. Blanking the id for every action
+    # sent i2v down the new-conversation path with no rootPostId, and grok.com refused it --
+    # which is why i2i off a t2i result worked while i2v off the same image never did.
     source_is_t2i = (
         source.get("source_is_t2i") is True
         or (payload or {}).get("source_is_t2i") is True
     )
-    if source_is_t2i:
+    if source_is_t2i and imagine_direct_action(payload or {}) in {"i2i", "aspect"}:
         return "", ""
     conversation_id = str(
         source.get("conversation_id")
@@ -15033,6 +15039,10 @@ def imagine_video_request(payload: dict, prompt: str, request_id: str, action: s
                 "detail_item_id",
             )
             original_post_id = "" if direct_upload else imagine_attachment_real_post_id(source, "original_post_id")
+            source_is_t2i_result = bool(
+                (source or {}).get("source_is_t2i") is True
+                or payload.get("source_is_t2i") is True
+            )
             if not direct_upload:
                 if not parent_post_id and input_asset_ids:
                     parent_post_id = input_asset_ids[0]
@@ -15040,7 +15050,14 @@ def imagine_video_request(payload: dict, prompt: str, request_id: str, action: s
                     input_asset_ids = [parent_post_id]
                 if upload_origin_i2v:
                     original_post_id = parent_post_id
-                elif not original_post_id:
+                elif not original_post_id and not source_is_t2i_result:
+                    # A T2I result is a root: it has no parent asset, so there is no original
+                    # to name. Filling this in with the asset itself is what made the pair
+                    # differ from every working request -- traced 2026-08-15, an i2v off an
+                    # i2i result carries originalPostId of the image it was edited from and
+                    # succeeds, while the same call off a T2I result pointed both at one id
+                    # and grok.com answered 403. Leave it empty and let the source stand
+                    # alone.
                     original_post_id = parent_post_id
             root_post_id = "" if direct_upload else (
                 imagine_attachment_real_post_id(source, "root_post_id", "detail_root_post_id") or parent_post_id

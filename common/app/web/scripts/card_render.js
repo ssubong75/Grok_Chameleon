@@ -702,6 +702,10 @@ function cardVisualActionsShell(post) {
       "download-card-btn media-card-download-button",
       "Download",
       `<svg class="media-card-action-glyph media-card-download-glyph" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 5v14"></path><path d="m7 14 5 5 5-5"></path></svg>`,
+      // Move and Delete carry handlers here; Download never did, so the button drew and did
+      // nothing on every remote card -- Imagine main, Discover and Liked alike. The detail
+      // view binds its own copy, which is why downloading worked once a card was open.
+      () => downloadLibraryCardPost(post).catch((error) => showErrorPanel("Download failed", error?.message || "Download failed.")),
     ),
     cardVisualActionButton(
       "move-card-btn media-card-move-button",
