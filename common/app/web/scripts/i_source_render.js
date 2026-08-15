@@ -1224,6 +1224,17 @@ const IMAGINE_PENDING_SAVED_STORAGE_PREFIX = "grok-chameleon:imagine-pending-sav
 let imaginePendingSavedRefreshTimer = 0;
 let imaginePendingSavedRefreshAttempt = 0;
 
+// Generated media reaches the browser stream before it necessarily reaches Grok's Saved
+// endpoints.  Keep that acknowledgement separate from the app's card grouping: a group
+// remains exactly as the app presents it, while only its new child item is pending.
+const IMAGINE_GENERATED_SAVED_SYNC_STORAGE_PREFIX = "grok-chameleon:imagine-generated-saved-sync:";
+const IMAGINE_GENERATED_SAVED_SYNC_DELAYS = [1500, 4000, 10000, 30000];
+let imagineGeneratedSavedSyncTimer = 0;
+let imagineGeneratedSavedSyncAttempt = 0;
+let imagineGeneratedSavedSyncAccountId = "";
+const imagineGeneratedSavedSyncAssetIds = new Set();
+const imagineGeneratedSavedOfficialAssetIds = new Set();
+
 function imaginePendingSavedAccountId() {
   return String(activeImagineSavedAccount()?.id || account_state.imagine?.active_id || "").trim();
 }
@@ -1231,6 +1242,184 @@ function imaginePendingSavedAccountId() {
 function imaginePendingSavedStorageKey() {
   const accountId = imaginePendingSavedAccountId();
   return accountId ? `${IMAGINE_PENDING_SAVED_STORAGE_PREFIX}${accountId}` : "";
+}
+
+function imagineGeneratedSavedSyncStorageKey(accountId = imaginePendingSavedAccountId()) {
+  return accountId ? `${IMAGINE_GENERATED_SAVED_SYNC_STORAGE_PREFIX}${accountId}` : "";
+}
+
+function imagineGeneratedSavedSyncInProgress() {
+  const accountId = imaginePendingSavedAccountId();
+  return Boolean(
+    accountId
+    && imagineGeneratedSavedSyncAccountId === accountId
+    && imagineGeneratedSavedSyncAssetIds.size,
+  );
+}
+
+function persistImagineGeneratedSavedSync() {
+  const storageKey = imagineGeneratedSavedSyncStorageKey(imagineGeneratedSavedSyncAccountId);
+  if (!storageKey) return;
+  try {
+    if (imagineGeneratedSavedSyncAssetIds.size) {
+      localStorage.setItem(storageKey, JSON.stringify([...imagineGeneratedSavedSyncAssetIds]));
+    } else {
+      localStorage.removeItem(storageKey);
+    }
+  } catch {
+    // The current session can still reconcile if browser storage is unavailable.
+  }
+}
+
+function imagineItemMatchesGeneratedSavedSync(item, assetIds) {
+  if (!item || !assetIds?.size) return false;
+  return imaginePostIdKeysForItem(item).some((key) => assetIds.has(String(key || "").trim()));
+}
+
+function setImagineGeneratedSavedSyncItemState(assetIds, pending) {
+  if (!assetIds?.size) return;
+  const updatePosts = (posts) => (posts || []).map((post) => {
+    let changed = false;
+    const items = (post?.items || []).map((item) => {
+      if (!imagineItemMatchesGeneratedSavedSync(item, assetIds)) return item;
+      const metadata = item?.metadata && typeof item.metadata === "object" ? { ...item.metadata } : {};
+      if (pending) metadata.saved_sync_pending = true;
+      else delete metadata.saved_sync_pending;
+      changed = true;
+      return { ...item, metadata };
+    });
+    if (!changed) return post;
+    const representative = imagineItemMatchesGeneratedSavedSync(post?.representative_item, assetIds)
+      ? (items.find((item) => imagineItemMatchesGeneratedSavedSync(item, assetIds)) || post.representative_item)
+      : post.representative_item;
+    return { ...post, items, representative_item: representative };
+  });
+  library_state.imagineRemotePosts = updatePosts(library_state.imagineRemotePosts);
+  library_state.imagineLikedPosts = updatePosts(library_state.imagineLikedPosts);
+  if (typeof syncImagineRemotePostsIntoLibrary === "function") syncImagineRemotePostsIntoLibrary();
+}
+
+function clearImagineGeneratedSavedSync() {
+  const settled = new Set(imagineGeneratedSavedSyncAssetIds);
+  if (imagineGeneratedSavedSyncTimer) window.clearTimeout(imagineGeneratedSavedSyncTimer);
+  imagineGeneratedSavedSyncTimer = 0;
+  imagineGeneratedSavedSyncAttempt = 0;
+  imagineGeneratedSavedOfficialAssetIds.clear();
+  imagineGeneratedSavedSyncAssetIds.clear();
+  setImagineGeneratedSavedSyncItemState(settled, false);
+  persistImagineGeneratedSavedSync();
+  renderImagineSourceCards();
+  if (typeof renderImagineDiscoverCards === "function") renderImagineDiscoverCards();
+  renderDetailViews();
+}
+
+function resetImagineGeneratedSavedSyncForAccountChange(nextAccountId = "") {
+  const previousAssetIds = new Set(imagineGeneratedSavedSyncAssetIds);
+  if (imagineGeneratedSavedSyncTimer) window.clearTimeout(imagineGeneratedSavedSyncTimer);
+  imagineGeneratedSavedSyncTimer = 0;
+  // Preserve the old account's pending acknowledgement so it can be reconciled if that
+  // account is selected again, but never let it affect the newly selected account's cards.
+  persistImagineGeneratedSavedSync();
+  setImagineGeneratedSavedSyncItemState(previousAssetIds, false);
+  imagineGeneratedSavedSyncAttempt = 0;
+  imagineGeneratedSavedOfficialAssetIds.clear();
+  imagineGeneratedSavedSyncAssetIds.clear();
+  imagineGeneratedSavedSyncAccountId = String(nextAccountId || "").trim();
+  if (!imagineGeneratedSavedSyncAccountId) return;
+  try {
+    const restored = JSON.parse(
+      localStorage.getItem(imagineGeneratedSavedSyncStorageKey(imagineGeneratedSavedSyncAccountId)) || "[]",
+    );
+    for (const assetId of Array.isArray(restored) ? restored : []) {
+      const value = String(assetId || "").trim();
+      if (value) imagineGeneratedSavedSyncAssetIds.add(value);
+    }
+  } catch {
+    // Ignore malformed old session data.
+  }
+  if (imagineGeneratedSavedSyncAssetIds.size) scheduleImagineGeneratedSavedSync();
+}
+
+function scheduleImagineGeneratedSavedSync(delayOverride = null) {
+  if (!imagineGeneratedSavedSyncInProgress() || imagineGeneratedSavedSyncTimer) return;
+  const delay = delayOverride === null
+    ? IMAGINE_GENERATED_SAVED_SYNC_DELAYS[Math.min(
+      imagineGeneratedSavedSyncAttempt,
+      IMAGINE_GENERATED_SAVED_SYNC_DELAYS.length - 1,
+    )]
+    : delayOverride;
+  imagineGeneratedSavedSyncAttempt += 1;
+  imagineGeneratedSavedSyncTimer = window.setTimeout(async () => {
+    imagineGeneratedSavedSyncTimer = 0;
+    if (!imagineGeneratedSavedSyncInProgress()) return;
+    if (library_state.imagineRemoteLoading || library_state.imagineRemoteSyncing) {
+      scheduleImagineGeneratedSavedSync(1000);
+      return;
+    }
+    imagineGeneratedSavedOfficialAssetIds.clear();
+    try {
+      await loadImagineSavedCards({ force: true });
+    } catch (error) {
+      console.warn("Imagine Saved synchronization failed", error);
+    }
+    if (!imagineGeneratedSavedSyncInProgress()) return;
+    const confirmed = [...imagineGeneratedSavedSyncAssetIds].every((assetId) => (
+      imagineGeneratedSavedOfficialAssetIds.has(assetId)
+    ));
+    if (confirmed) {
+      clearImagineGeneratedSavedSync();
+      toast("Saved 목록 반영 완료.");
+      return;
+    }
+    if (imagineGeneratedSavedSyncAttempt === IMAGINE_GENERATED_SAVED_SYNC_DELAYS.length) {
+      toast("Saved 목록 반영을 계속 확인 중입니다.");
+    }
+    scheduleImagineGeneratedSavedSync();
+  }, delay);
+}
+
+function restoreImagineGeneratedSavedSync() {
+  const accountId = imaginePendingSavedAccountId();
+  if (!accountId || imagineGeneratedSavedSyncAccountId === accountId) return;
+  resetImagineGeneratedSavedSyncForAccountChange(accountId);
+  if (imagineGeneratedSavedSyncAssetIds.size) {
+    setImagineGeneratedSavedSyncItemState(imagineGeneratedSavedSyncAssetIds, true);
+  }
+}
+
+function beginImagineGeneratedSavedSync(result) {
+  const items = Array.isArray(result?.items) && result.items.length
+    ? result.items
+    : [result?.item].filter(Boolean);
+  const assetIds = new Set(items.map((item) => {
+    const metadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
+    const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
+    return String(
+      item?.asset_id
+      || imagine.asset_id
+      || metadata.asset_id
+      || item?.item_id
+      || item?.id
+      || item?.post_id
+      || imagine.post_id
+      || metadata.post_id
+      || "",
+    ).trim();
+  }).filter(Boolean));
+  if (!assetIds.size) return;
+  const accountId = imaginePendingSavedAccountId();
+  if (!accountId) return;
+  if (imagineGeneratedSavedSyncTimer) window.clearTimeout(imagineGeneratedSavedSyncTimer);
+  imagineGeneratedSavedSyncTimer = 0;
+  imagineGeneratedSavedSyncAttempt = 0;
+  imagineGeneratedSavedSyncAccountId = accountId;
+  imagineGeneratedSavedOfficialAssetIds.clear();
+  imagineGeneratedSavedSyncAssetIds.clear();
+  for (const assetId of assetIds) imagineGeneratedSavedSyncAssetIds.add(assetId);
+  setImagineGeneratedSavedSyncItemState(assetIds, true);
+  persistImagineGeneratedSavedSync();
+  toast("생성 완료. Saved 목록 반영을 확인 중입니다.");
+  scheduleImagineGeneratedSavedSync();
 }
 
 function imagineSavedPostIsPending(post) {
@@ -1493,6 +1682,9 @@ function applyImagineSavedRemotePage(data, { updatePosts = true, replacesList = 
         pending,
       ),
     ));
+    if (imagineGeneratedSavedSyncInProgress()) {
+      setImagineGeneratedSavedSyncItemState(imagineGeneratedSavedSyncAssetIds, true);
+    }
   }
   library_state.imagineRemoteCursor = String(data.next_cursor || "");
   library_state.imagineRemoteSyncToken = String(
@@ -1534,6 +1726,15 @@ async function syncImagineSavedCards(
       sync_token: library_state.imagineRemoteSyncToken,
     }, { signal: context.controller.signal });
     if (!imagineSavedResponseMatches(context, data)) return;
+    if (
+      imagineGeneratedSavedSyncInProgress()
+      && imagineGeneratedSavedSyncAccountId === context.accountId
+    ) {
+      for (const assetId of Array.isArray(data.official_asset_ids) ? data.official_asset_ids : []) {
+        const value = String(assetId || "").trim();
+        if (value) imagineGeneratedSavedOfficialAssetIds.add(value);
+      }
+    }
     // A refresh response is always an incremental page. Only a separately assembled,
     // explicitly complete snapshot may remove unmatched cached cards.
     applyImagineSavedRemotePage(data, { updatePosts, replacesList: false });
@@ -1575,14 +1776,37 @@ function scheduleImagineSavedSync(context) {
         resolve();
         return;
       }
-      Promise.resolve(
-        syncImagineSavedCards(context, {
+      Promise.resolve((async () => {
+        await syncImagineSavedCards(context, {
           append: false,
           force: false,
           showLoading: false,
-          updatePosts: false,
-        }),
-      ).then(resolve, resolve);
+          // The cache is only a startup paint. Merge the live response into the existing
+          // app-specific groups so a restart does not leave stale cards or thumbnails.
+          updatePosts: true,
+        });
+        // A restart used to refresh only the first Saved page in the background. Complete
+        // the same snapshot here, otherwise a valid child can remain absent until the user
+        // manually refreshes or scrolls far enough to trigger another request.
+        let pages = 0;
+        while (
+          library_state.imagineRemoteCursor
+          && pages < IMAGINE_SAVED_REFRESH_PAGE_LIMIT
+          && canLoadImagineSavedList()
+        ) {
+          pages += 1;
+          const cursorBefore = library_state.imagineRemoteCursor;
+          const pageContext = beginImagineSavedRequest();
+          if (!pageContext) break;
+          await syncImagineSavedCards(pageContext, {
+            append: true,
+            force: false,
+            showLoading: false,
+            updatePosts: true,
+          });
+          if (library_state.imagineRemoteCursor === cursorBefore) break;
+        }
+      })()).then(resolve, resolve);
     }, IMAGINE_SAVED_BACKGROUND_SYNC_DELAY_MS);
   });
   library_state.imagineRemoteSyncPromise = syncPromise;
@@ -1607,6 +1831,7 @@ async function loadImagineSavedCards({ force = false, append = false } = {}) {
     && !library_state.imagineRemoteCursor
   ) return;
   if (!canLoadImagineSavedCache()) return;
+  restoreImagineGeneratedSavedSync();
   const context = beginImagineSavedRequest({ supersede: force });
   if (!context) return;
   const restoredPending = restoreImaginePendingSavedPosts();

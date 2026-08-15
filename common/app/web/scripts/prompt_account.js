@@ -416,6 +416,9 @@
       || selectedPost?.area === "imagine_remote"
       || selectedPost?.folder_path?.startsWith?.("imagine_")
     );
+    if (typeof resetImagineGeneratedSavedSyncForAccountChange === "function") {
+      resetImagineGeneratedSavedSyncForAccountChange(nextAccountId);
+    }
     library_state.imagineRemoteRequestController?.abort?.();
     library_state.imagineRemoteRequestEpoch = Number(library_state.imagineRemoteRequestEpoch || 0) + 1;
     library_state.imagineRemoteRequestController = null;

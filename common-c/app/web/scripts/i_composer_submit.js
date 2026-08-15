@@ -788,6 +788,9 @@ function finishImagineJob(job) {
     const stayOnImagineMain = typeof isTextToImageBuildJob === "function" && isTextToImageBuildJob(job);
     removeImagineJob(job.id, { skipRender: true });
     applyImagineDirectResult(job.result, { stayOnImagineMain, skipPaths: appliedT2iPaths });
+    if (typeof beginImagineGeneratedSavedSync === "function") {
+      beginImagineGeneratedSavedSync(job.result);
+    }
     if (typeof resultHasLucky === "function" && resultHasLucky(job.result)) showLuckyNotice();
     qApi("/api/imagine/dismiss", { id: job.id }).catch(() => {});
     return;
@@ -850,6 +853,10 @@ async function submitImagineComposer() {
   const prompt = normalizeNfcText(input?.value || "").trim();
   if (!prompt) {
     input?.focus();
+    return;
+  }
+  if (typeof imagineGeneratedSavedSyncInProgress === "function" && imagineGeneratedSavedSyncInProgress()) {
+    toast("이전 생성 결과의 Saved 목록 반영을 확인 중입니다.");
     return;
   }
   const movedToImagineMain = shouldShowImagineMainBeforeSubmit();
