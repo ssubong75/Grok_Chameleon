@@ -20466,7 +20466,14 @@ def download_file_name_from_url(value: str) -> str:
         media_path = query.get("path", [""])[0] if parsed.path == "/api/media" else ""
         if media_path:
             return safe_name(Path(unquote(media_path)).name, "")
-        return safe_name(Path(unquote(parsed.path)).name, "")
+        # Every generated asset is served as .../generated/<assetId>/image.jpg, so the file
+        # name is the same for all of them and a folder of downloads came out as image.jpg,
+        # image-1.jpg and so on. The id is the segment before it.
+        path = Path(unquote(parsed.path))
+        parent = path.parent.name
+        if parent and re.fullmatch(r"[0-9a-fA-F-]{32,36}", parent):
+            return safe_name(f"{parent}{path.suffix}" if path.suffix else parent, "")
+        return safe_name(path.name, "")
     except Exception:
         return safe_name(Path(raw.split("?", 1)[0]).name, "")
 
