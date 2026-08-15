@@ -535,7 +535,7 @@
 
 /* Mode Options */
 .composer_options {
-  --composer-tab-step: 64px;
+  --composer-tab-step: 62px;
   --composer-provider-gap: 12px;
   position: relative;
   z-index: 4;
@@ -602,14 +602,14 @@
   display: flex;
   min-width: 0;
   width: 100%;
-  gap: 11.2px;
+  gap: 10.6px;
   align-items: center;
   flex-wrap: wrap;
 }
 
 .composer_mode {
   display: flex;
-  gap: 24px;
+  gap: 22px;
   margin-left: 0;
   padding: 0;
   border: 0;
@@ -720,7 +720,7 @@
   justify-content: flex-end;
   flex: 1;
   min-width: 0;
-  gap: 9.8px;
+  gap: 9px;
   margin-left: auto;
   margin-right: var(--composer-tab-step);
   flex-wrap: wrap;
@@ -1003,8 +1003,8 @@
   }
 
   .composer_options {
-    --composer-tab-step: 61px;
-    --composer-provider-gap: 11px;
+    --composer-tab-step: 60px;
+    --composer-provider-gap: 10px;
     gap: var(--composer-provider-gap);
   }
 
@@ -1114,8 +1114,8 @@
   }
 
   .composer_options {
-    --composer-tab-step: 57px;
-    --composer-provider-gap: 11px;
+    --composer-tab-step: 56px;
+    --composer-provider-gap: 10px;
     gap: var(--composer-provider-gap);
     padding: 0 1px;
   }
@@ -1135,7 +1135,7 @@
   .composer_mode_controls,
   .composer_mode,
   .controls_grid {
-    gap: 18px;
+    gap: 16px;
   }
 
   .tab {
