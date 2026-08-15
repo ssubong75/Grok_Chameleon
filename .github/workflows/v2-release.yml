@@ -28,6 +28,7 @@ env:
   COMMON_COLLECTION_STYLE: common/app/web/styles/collection.css
   COMMON_MAIN_STYLE: common/app/web/styles/main.css
   COMMON_CARD_RENDER: common/app/web/scripts/card_render.js
+  COMMON_DETAIL_COMMON_ACTIONS: common/app/web/scripts/detail_common_actions.js
   COMMON_CARD_ACTIONS: common/app/web/scripts/card_actions.js
   COMMON_SCREEN_EVENTS: common/app/web/scripts/screen_events.js
   COMMON_SCREEN_ROUTER: common/app/web/scripts/screen_router.js
@@ -147,6 +148,7 @@ jobs:
             @{ Name = "collection_style"; Relative = "web\styles\collection.css"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_COLLECTION_STYLE) },
             @{ Name = "main_style"; Relative = "web\styles\main.css"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_MAIN_STYLE) },
             @{ Name = "card_render"; Relative = "web\scripts\card_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_CARD_RENDER) },
+            @{ Name = "detail_common_actions"; Relative = "web\scripts\detail_common_actions.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_COMMON_ACTIONS) },
             @{ Name = "card_actions"; Relative = "web\scripts\card_actions.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_CARD_ACTIONS) },
             @{ Name = "screen_events"; Relative = "web\scripts\screen_events.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_SCREEN_EVENTS) },
             @{ Name = "screen_router"; Relative = "web\scripts\screen_router.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_SCREEN_ROUTER) },
@@ -654,6 +656,7 @@ jobs:
             web/styles/collection.css
             web/styles/main.css
             web/scripts/card_render.js
+            web/scripts/detail_common_actions.js
             web/scripts/card_actions.js
             web/scripts/screen_events.js
             web/scripts/screen_router.js
@@ -983,6 +986,7 @@ jobs:
             web/styles/collection.css
             web/styles/main.css
             web/scripts/card_render.js
+            web/scripts/detail_common_actions.js
             web/scripts/card_actions.js
             web/scripts/screen_events.js
             web/scripts/screen_router.js
@@ -1412,6 +1416,7 @@ jobs:
             web/styles/collection.css
             web/styles/main.css
             web/scripts/card_render.js
+            web/scripts/detail_common_actions.js
             web/scripts/card_actions.js
             web/scripts/screen_events.js
             web/scripts/screen_router.js
