@@ -7405,25 +7405,33 @@ def list_imagine_liked(payload: dict) -> dict:
         if replacement_by_origin_id:
             swapped_items: list[dict] = []
             swapped_ids: set[str] = set()
-            for item in kept_items:
-                item_id = imagine_item_asset_id(item)
-                clone_id = replacement_by_origin_id.get(item_id)
-                source_items = (
-                    [
+            # The card a copy is pulled from can hold an original of its own, and that one
+            # has a copy waiting for it too. Swapping once left that second original sitting
+            # on the card -- a foreign asset the account cannot generate from, with its copy
+            # nowhere -- so walk the chain until what comes back owns itself.
+            pending_items = list(kept_items)
+            guard = 0
+            while pending_items and guard <= len(replacement_by_origin_id):
+                guard += 1
+                next_pending: list[dict] = []
+                for item in pending_items:
+                    item_id = imagine_item_asset_id(item)
+                    clone_id = replacement_by_origin_id.get(item_id)
+                    clone_items = [
                         clone_item
                         for clone_item in (items_by_clone_id.get(clone_id) or [])
                         if isinstance(clone_item, dict)
-                    ]
-                    if clone_id
-                    else [item]
-                ) or [item]
-                for source_item in source_items:
-                    source_id = imagine_item_asset_id(source_item)
+                    ] if clone_id else []
+                    if clone_items:
+                        next_pending.extend(clone_items)
+                        continue
+                    source_id = imagine_item_asset_id(item)
                     if source_id and source_id in swapped_ids:
                         continue
                     if source_id:
                         swapped_ids.add(source_id)
-                    swapped_items.append(source_item)
+                    swapped_items.append(item)
+                pending_items = next_pending
             kept_items = swapped_items
         if kept_items:
             post["items"] = kept_items
