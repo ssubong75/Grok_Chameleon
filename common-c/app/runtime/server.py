@@ -6418,7 +6418,32 @@ def list_imagine_saved(payload: dict) -> dict:
         else imagine_get_json("/rest/assets?" + urlencode(asset_query), account, timeout=20)
     )
     assets = asset_data.get("assets") if isinstance(asset_data.get("assets"), list) else []
-    grouped_asset_ids = hidden_bundle_asset_ids | {
+    # An asset already sitting on a card must not stand up a second one, and this is the set
+    # that stops it -- but it only ever saw the conversations of the page in hand. A sweep
+    # hands the conversations out on one page and the assets on another, so by the time the
+    # asset list arrives its parent card is pages behind and forgotten: the children come
+    # back as a card of their own, holding the same videos without the image they were made
+    # from. The cache is where the earlier pages went, so ask it what already has a card.
+    cached_grouped_asset_ids: set[str] = set()
+    try:
+        for cached_post in (
+            library_index.query_imagine_remote_posts(
+                root,
+                imagine_account_settings_key(account),
+                offset=0,
+                limit=5000,
+            ).get("posts")
+            or []
+        ):
+            if not isinstance(cached_post, dict):
+                continue
+            for item in cached_post.get("items") or []:
+                cached_item_id = imagine_item_asset_id(item)
+                if cached_item_id:
+                    cached_grouped_asset_ids.add(cached_item_id)
+    except Exception:
+        cached_grouped_asset_ids = set()
+    grouped_asset_ids = hidden_bundle_asset_ids | cached_grouped_asset_ids | {
         imagine_item_asset_id(item)
         for post in [*posts, *local_heart_posts]
         for item in post.get("items") or []
