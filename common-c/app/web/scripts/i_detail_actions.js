@@ -1411,6 +1411,52 @@ async function likeImagineSelectedDetailPost() {
     refreshImagineRemoteViews();
   }
   toast("Saved Imagine post.");
+  // The clone records the copy's own ids, which is the only way the caller can find the
+  // card the copy landed on once Liked has been read back.
+  return data;
+}
+
+// grok.com files a clone-batch copy in Liked, not in the card the heart was pressed on, so
+// the detail is left showing the link -- an asset this account does not own. Read Liked
+// back and hand the detail over to the copy. Two things ride on that reload: it is also
+// what rewrites the server-side Liked cache, so the copy survives a reload or an account
+// switch, and it puts the user on the copy rather than the link. Generating from the link
+// re-uploads its source under a fresh id and files the result on a card of its own; the
+// copy carries grok.com's own conversation, so generating from it stays on this card.
+async function imagineOpenClonedDetailAfterSave(result, pressedItem) {
+  const records = (result?.cloned_external || []).filter((record) => record?.asset_id);
+  if (!records.length || typeof loadImagineLikedCards !== "function") return;
+  try {
+    await loadImagineLikedCards({ force: true });
+  } catch (error) {
+    console.warn(error);
+    return;
+  }
+  const clonedIds = new Set(
+    records.map((record) => String(record.asset_id || "").trim()).filter(Boolean),
+  );
+  // Which card holds the copy is grok.com's call -- one clone-batch can fold into a single
+  // card -- so look for the copy among the items instead of guessing which id anchors it.
+  const card = (library_state.imagineLikedPosts || []).find((candidate) => (
+    (candidate?.items || []).some((item) => clonedIds.has(imagineLikeTargetForItem(item).id))
+  ));
+  if (!card) return;
+  const pressedId = pressedItem ? imagineLikeTargetForItem(pressedItem).id : "";
+  const pressedCloneId = String(
+    records.find((record) => String(record.source_asset_id || "").trim() === pressedId)?.asset_id || "",
+  ).trim();
+  library_state.iMainView = imagineViewValue("LIKED", "liked");
+  selectLibraryPost(card, {
+    identity: typeof libraryPostStableIdentity === "function" ? libraryPostStableIdentity(card) : "",
+  });
+  // Land on the copy of the thumbnail that was already open, not on whichever item the card
+  // happens to lead with.
+  const targetItem = pressedCloneId
+    ? (card.items || []).find((item) => imagineLikeTargetForItem(item).id === pressedCloneId)
+    : null;
+  if (targetItem) library_state.selectedDetailItemId = mediaItemKey(targetItem);
+  renderImagineSourceCards();
+  renderDetailViews();
 }
 
 function imagineUpscaleMediaUrlFromResult(data) {
@@ -2184,20 +2230,26 @@ function bindImagineDetailActions() {
         if (copying) heart.hidden = false;
         showErrorPanel(saved ? "Unsave failed" : "Save failed", error?.message || "Save failed.");
       })
-      .then(() => {
-        // Un-hearting takes the card out of Liked, so there is nothing left to show in the
-        // detail. Reload the list and go back to it, the way grok.com drops the card.
-        if (!saved) return;
-        if (typeof loadImagineLikedCards === "function") {
-          loadImagineLikedCards({ force: true }).catch((error) => console.warn(error));
+      .then(async (result) => {
+        if (saved) {
+          // Un-hearting takes the card out of Liked, so there is nothing left to show in the
+          // detail. Reload the list and go back to it, the way grok.com drops the card.
+          if (typeof loadImagineLikedCards === "function") {
+            loadImagineLikedCards({ force: true }).catch((error) => console.warn(error));
+          }
+          if (typeof openImagineMainView === "function"
+            && library_state.iMainView === "liked") {
+            // The Liked button toggles, so calling it while already on Liked would bounce to
+            // Imagine. Step off the view first so the call lands back on Liked.
+            library_state.iMainView = "imagine";
+            openImagineMainView("i_upload_image_btn");
+          }
+          return;
         }
-        if (typeof openImagineMainView === "function"
-          && library_state.iMainView === "liked") {
-          // The Liked button toggles, so calling it while already on Liked would bounce to
-          // Imagine. Step off the view first so the call lands back on Liked.
-          library_state.iMainView = "imagine";
-          openImagineMainView("i_upload_image_btn");
-        }
+        // Saving is the same move in the other direction: the copy is what belongs on Liked
+        // now, so the list has to be read back and the detail moved onto the copy. This ran
+        // only for un-hearting, which left a heart press looking like it had done nothing.
+        await imagineOpenClonedDetailAfterSave(result, item);
       })
       .finally(() => {
         heart.removeAttribute("aria-busy");

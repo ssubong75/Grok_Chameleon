@@ -1398,6 +1398,45 @@ async function likeImagineSelectedDetailPost() {
     refreshImagineRemoteViews();
   }
   toast("Saved Imagine post.");
+  // The ids that came back name what Liked now holds, which is the only way the caller
+  // can find the card the asset landed on once Liked has been read back.
+  return data;
+}
+
+// grok.com files a liked asset in Liked, not in the card the heart was pressed on, so the
+// detail is left showing where the press came from. Read Liked back and hand the detail
+// over to the card the asset landed on. That reload is also what rewrites the server-side
+// Liked cache, so the card survives a reload or an account switch.
+async function imagineOpenLikedDetailAfterSave(result, pressedItem) {
+  const likedIds = new Set(
+    (result?.ids || []).map((value) => String(value || "").trim()).filter(Boolean),
+  );
+  if (!likedIds.size || typeof loadImagineLikedCards !== "function") return;
+  try {
+    await loadImagineLikedCards({ force: true });
+  } catch (error) {
+    console.warn(error);
+    return;
+  }
+  // Which card holds the asset is grok.com's call -- one press can fold into a single
+  // card -- so look for it among the items instead of guessing which id anchors it.
+  const card = (library_state.imagineLikedPosts || []).find((candidate) => (
+    (candidate?.items || []).some((item) => likedIds.has(imagineLikeTargetForItem(item).id))
+  ));
+  if (!card) return;
+  const pressedId = pressedItem ? imagineLikeTargetForItem(pressedItem).id : "";
+  library_state.iMainView = imagineViewValue("LIKED", "liked");
+  selectLibraryPost(card, {
+    identity: typeof libraryPostStableIdentity === "function" ? libraryPostStableIdentity(card) : "",
+  });
+  // Land on the thumbnail that was already open, not on whichever item the card happens
+  // to lead with.
+  const targetItem = likedIds.has(pressedId)
+    ? (card.items || []).find((item) => imagineLikeTargetForItem(item).id === pressedId)
+    : null;
+  if (targetItem) library_state.selectedDetailItemId = mediaItemKey(targetItem);
+  renderImagineSourceCards();
+  renderDetailViews();
 }
 
 function imagineUpscaleMediaUrlFromResult(data) {
@@ -2166,20 +2205,27 @@ function bindImagineDetailActions() {
         console.warn(error);
         showErrorPanel(saved ? "Unsave failed" : "Save failed", error?.message || "Save failed.");
       })
-      .then(() => {
-        // Un-hearting takes the card out of Liked, so there is nothing left to show in the
-        // detail. Reload the list and go back to it, the way grok.com drops the card.
-        if (!saved) return;
-        if (typeof loadImagineLikedCards === "function") {
-          loadImagineLikedCards({ force: true }).catch((error) => console.warn(error));
+      .then(async (result) => {
+        if (saved) {
+          // Un-hearting takes the card out of Liked, so there is nothing left to show in the
+          // detail. Reload the list and go back to it, the way grok.com drops the card.
+          if (typeof loadImagineLikedCards === "function") {
+            loadImagineLikedCards({ force: true }).catch((error) => console.warn(error));
+          }
+          if (typeof openImagineMainView === "function"
+            && library_state.iMainView === "liked") {
+            // The Liked button toggles, so calling it while already on Liked would bounce to
+            // Imagine. Step off the view first so the call lands back on Liked.
+            library_state.iMainView = "imagine";
+            openImagineMainView("i_upload_image_btn");
+          }
+          return;
         }
-        if (typeof openImagineMainView === "function"
-          && library_state.iMainView === "liked") {
-          // The Liked button toggles, so calling it while already on Liked would bounce to
-          // Imagine. Step off the view first so the call lands back on Liked.
-          library_state.iMainView = "imagine";
-          openImagineMainView("i_upload_image_btn");
-        }
+        // Saving is the same move in the other direction: the asset is what belongs on
+        // Liked now, so the list has to be read back and the detail moved onto its card.
+        // This ran only for un-hearting, which left a heart press looking like it had
+        // done nothing.
+        await imagineOpenLikedDetailAfterSave(result, item);
       })
       .finally(() => {
         heart.removeAttribute("aria-busy");

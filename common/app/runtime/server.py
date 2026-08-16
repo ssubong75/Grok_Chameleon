@@ -7221,7 +7221,84 @@ def list_imagine_liked(payload: dict) -> dict:
     # after another put a card's worth of round trips — measured at ~2s — between the button
     # and every single card. The saved list has fetched its conversation details in parallel
     # for the same reason; do the same here so the wait stops growing with the collection.
-    wanted_entries = [entry for entry in entries if entry.get("asset_id")]
+    # Parallel only divided that cost; it still paid it for every entry on every open, so a
+    # collection of 60 took ~10s whether or not anything had changed, and the wait grew as
+    # it filled. A card already in the cache has not changed because the view was opened
+    # again -- what changes it is a heart, and that goes through this same function. So
+    # reuse the cached card and spend round trips only on entries the cache has never seen:
+    # right after a clone-batch that is the handful of ids it just added, not the whole
+    # collection. Fewer requests is also the point on its own; the collection listing is
+    # where 403s have shown up.
+    entry_order = {
+        str(entry.get("asset_id") or "").strip(): index
+        for index, entry in enumerate(entries)
+        if str(entry.get("asset_id") or "").strip()
+    }
+    ensure_imagine_state_migrated(root)
+    cached_relations = imagine_state.load_generated_relations(root)
+    reusable_posts: list[dict] = []
+    cached_entry_ids: set[str] = set()
+    try:
+        cached_rows = library_index.query_imagine_remote_posts(
+            root,
+            imagine_liked_cache_account_key(account),
+            offset=0,
+            limit=5000,
+        )
+    except Exception:
+        cached_rows = {"posts": []}
+    for cached_post in cached_rows.get("posts") or []:
+        if not isinstance(cached_post, dict):
+            continue
+        cached_metadata = (
+            cached_post.get("metadata") if isinstance(cached_post.get("metadata"), dict) else {}
+        )
+        # Which entries this one card answers for. The entry it was built from is recorded,
+        # but the entries that folded into it are not -- a folded copy leaves no card of its
+        # own, and its id survives only as an item here. Miss those and every folded entry
+        # is refetched on every open, which is most of the saving gone.
+        card_entry_ids = {
+            str(value).strip()
+            for value in (
+                *(cached_metadata.get("liked_membership_asset_ids") or []),
+                *(
+                    imagine_item_asset_id(item)
+                    for item in cached_post.get("items") or []
+                    if isinstance(item, dict)
+                ),
+            )
+            if str(value or "").strip()
+        } & collection_ids
+        if not card_entry_ids:
+            continue
+        reused = imagine_apply_generated_relations(cached_post, root, account, cached_relations)
+        reused["items"] = [
+            item
+            for item in reused.get("items") or []
+            if isinstance(item, dict) and imagine_item_asset_id(item) not in liked_hidden_ids
+        ]
+        if not reused["items"]:
+            continue
+        reused_representative = imagine_representative_item(reused["items"]) or reused["items"][-1]
+        reused["representative_item"] = reused_representative
+        reused["representative"] = (
+            reused_representative.get("url")
+            or reused_representative.get("remote_url")
+            or reused_representative.get("item_id")
+            or ""
+        )
+        for item in reused["items"]:
+            item_asset_id = imagine_item_asset_id(item)
+            if item_asset_id:
+                covered_asset_ids.add(item_asset_id)
+        covered_asset_ids.update(card_entry_ids)
+        cached_entry_ids.update(card_entry_ids)
+        reusable_posts.append(imagine_stamp_saved_identity(reused))
+    wanted_entries = [
+        entry
+        for entry in entries
+        if entry.get("asset_id") and str(entry.get("asset_id") or "").strip() not in cached_entry_ids
+    ]
 
     def fetch_liked_entry(entry: dict) -> dict:
         asset_id = entry.get("asset_id") or ""
@@ -7405,6 +7482,21 @@ def list_imagine_liked(payload: dict) -> dict:
             item["metadata"] = item_metadata
         covered_asset_ids.add(asset_id)
         posts.append(imagine_stamp_saved_identity(post))
+    # A card rebuilt this pass and a card reused from the cache are both collection entries;
+    # splitting them apart is how they were fetched, not how they are ordered. Put them back
+    # in the collection's own order, which is the order the entries arrived in.
+    posts.extend(reusable_posts)
+
+    def liked_entry_position(post: dict) -> int:
+        keys = imagine_post_liked_anchor_keys(post) | {
+            imagine_item_asset_id(item)
+            for item in post.get("items") or []
+            if isinstance(item, dict) and imagine_item_asset_id(item)
+        }
+        positions = [entry_order[key] for key in keys if key in entry_order]
+        return min(positions) if positions else len(entries)
+
+    posts.sort(key=liked_entry_position)
     # Copies grok.com files under /saved instead of the collection. Main hides them, so this
     # is the only place they can appear.
     posts.extend(imagine_foreign_origin_liked_cards(root, account, covered_asset_ids))
@@ -7417,6 +7509,8 @@ def list_imagine_liked(payload: dict) -> dict:
     imagine_debug_event("liked_collection_listed", {
         "account_id": str(account.get("id") or ""),
         "requested": len(entries),
+        "fetched": len(wanted_entries),
+        "reused": len(reusable_posts),
         "posts": len(posts),
         "errors": len(errors),
         "membership_complete": bool(membership.get("complete")),
