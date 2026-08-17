@@ -6449,6 +6449,63 @@ def imagine_missing_direct_upload_conversation_candidates(
     return candidates
 
 
+def imagine_missing_cached_direct_upload_conversation_candidates(
+    root: Path,
+    account: dict,
+    *,
+    skip_asset_ids: set[str] | None = None,
+    max_conversations: int = 8,
+) -> dict[str, dict]:
+    """Find incomplete cached cards that may be verified as direct uploads.
+
+    A previous Saved pass can retain a generated result before it has seen the
+    human-upload attachment.  Use the cached result only to find its exact
+    conversation and parent id; the caller still has to prove both against the
+    official conversation detail before showing a source image.
+    """
+    skipped = skip_asset_ids or set()
+    candidates: dict[str, dict] = {}
+    try:
+        cached_posts = library_index.query_imagine_remote_posts(
+            root,
+            imagine_account_settings_key(account),
+            offset=0,
+            limit=5000,
+        ).get("posts") or []
+    except Exception:
+        return candidates
+    for cached_post in cached_posts:
+        if not isinstance(cached_post, dict):
+            continue
+        items = [item for item in cached_post.get("items") or [] if isinstance(item, dict)]
+        # A card that already has the official upload source is complete.  Never replace
+        # it from a cache hint, even if one of its generated items is cross-conversation.
+        if any(imagine_item_is_upload_source(item) for item in items):
+            continue
+        for item in items:
+            if imagine_item_is_source(item):
+                continue
+            asset_id = imagine_item_asset_id(item)
+            conversation_id = imagine_relation_conversation_id(item)
+            source_ids = set(imagine_item_source_ids(item))
+            if (
+                not asset_id
+                or asset_id in skipped
+                or not conversation_id
+                or not source_ids
+            ):
+                continue
+            if conversation_id not in candidates and len(candidates) >= max(1, max_conversations):
+                continue
+            record = candidates.setdefault(conversation_id, {
+                "result_asset_ids": set(),
+                "source_asset_ids": set(),
+            })
+            record["result_asset_ids"].add(asset_id)
+            record["source_asset_ids"].update(source_ids)
+    return candidates
+
+
 def imagine_recover_missing_direct_upload_conversation_cards(
     candidates: dict[str, dict],
     account: dict,
@@ -6807,6 +6864,45 @@ def list_imagine_saved(payload: dict) -> dict:
     # overlay, so their items cannot prove that Grok's Saved list has caught up yet.
     official_asset_ids: set[str] = set()
     posts = []
+
+    def append_recovered_direct_upload_posts(recovered_posts: list[dict]) -> None:
+        for recovered_post in recovered_posts:
+            official_asset_ids.update({
+                imagine_item_asset_id(item)
+                for item in recovered_post.get("items") or []
+                if isinstance(item, dict) and imagine_item_asset_id(item)
+            })
+            if imagine_hidden_bundle_card(recovered_post, relations):
+                continue
+            recovered_post = imagine_apply_generated_relations(recovered_post, root, account, relations)
+            if imagine_post_liked_anchor_keys(recovered_post) & hidden_remote_ids:
+                continue
+            recovered_post["items"] = [
+                item
+                for item in recovered_post.get("items") or []
+                if imagine_item_asset_id(item) not in hidden_remote_ids
+            ]
+            if not recovered_post["items"]:
+                continue
+            representative = imagine_representative_item(recovered_post["items"]) or recovered_post["items"][-1]
+            recovered_post["representative_item"] = representative
+            recovered_post["representative"] = representative.get("url") or representative.get("item_id") or ""
+            posts.extend(imagine_saved_lineage_cards(recovered_post))
+
+    # Repair an incomplete cached direct-upload card on the first live Saved page instead
+    # of waiting until its result happens to reappear in a later /rest/assets page.
+    cached_missing_direct_upload_candidates = imagine_missing_cached_direct_upload_conversation_candidates(
+        root,
+        account,
+        skip_asset_ids=hidden_remote_ids,
+    )
+    append_recovered_direct_upload_posts(
+        imagine_recover_missing_direct_upload_conversation_cards(
+            cached_missing_direct_upload_candidates,
+            account,
+        )
+    )
+
     for official_order, conversation in conversation_entries:
         conversation_id = str(conversation.get("conversationId") or "")
         post = imagine_saved_post_from_conversation(conversation, details.get(conversation_id, {}), account)
@@ -6901,31 +6997,12 @@ def list_imagine_saved(payload: dict) -> dict:
             | cached_complete_upload_asset_ids
         ),
     )
-    for post in imagine_recover_missing_direct_upload_conversation_cards(
-        missing_direct_upload_candidates,
-        account,
-    ):
-        official_asset_ids.update({
-            imagine_item_asset_id(item)
-            for item in post.get("items") or []
-            if isinstance(item, dict) and imagine_item_asset_id(item)
-        })
-        if imagine_hidden_bundle_card(post, relations):
-            continue
-        post = imagine_apply_generated_relations(post, root, account, relations)
-        if imagine_post_liked_anchor_keys(post) & hidden_remote_ids:
-            continue
-        post["items"] = [
-            item
-            for item in post.get("items") or []
-            if imagine_item_asset_id(item) not in hidden_remote_ids
-        ]
-        if not post["items"]:
-            continue
-        representative = imagine_representative_item(post["items"]) or post["items"][-1]
-        post["representative_item"] = representative
-        post["representative"] = representative.get("url") or representative.get("item_id") or ""
-        posts.extend(imagine_saved_lineage_cards(post))
+    append_recovered_direct_upload_posts(
+        imagine_recover_missing_direct_upload_conversation_cards(
+            missing_direct_upload_candidates,
+            account,
+        )
+    )
 
     grouped_asset_ids = hidden_bundle_asset_ids | cached_grouped_asset_ids | {
         imagine_item_asset_id(item)
