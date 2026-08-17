@@ -815,6 +815,46 @@
     return "";
   }
 
+  // Store capture only says the page module exists.  A freshly opened or switched account
+  // can expose that module before Grok has populated its session fields.  Do not create
+  // source posts, alter a conversation, or patch the store here: wait for the page's own
+  // account state before any Imagine generation is allowed to call an official method.
+  function storeAccountReadiness(state) {
+    return {
+      loggedIn: state?.loggedIn === true,
+      currentUserId: String(state?.currentUserId || "").trim(),
+    };
+  }
+
+  async function waitForStoreAccountReady(record, requestId, action, timeoutMs = 12000) {
+    const startedAt = Date.now();
+    const deadline = startedAt + Math.max(1000, Number(timeoutMs) || 12000);
+    let state = record ? mediaStoreStateForRecord(record) : getMediaStoreState();
+    let readiness = storeAccountReadiness(state);
+    while (!readiness.loggedIn || !readiness.currentUserId) {
+      if (Date.now() >= deadline) {
+        pushStoreTrace("store_account_prepare_timeout", {
+          requestId,
+          action,
+          elapsedMs: Date.now() - startedAt,
+          loggedIn: readiness.loggedIn,
+          currentUserId: readiness.currentUserId,
+        });
+        throw new Error("Imagine media store is still preparing for the selected account.");
+      }
+      await sleep(250);
+      state = record ? mediaStoreStateForRecord(record) : getMediaStoreState();
+      readiness = storeAccountReadiness(state);
+    }
+    pushStoreTrace("store_account_ready", {
+      requestId,
+      action,
+      elapsedMs: Date.now() - startedAt,
+      currentUserId: readiness.currentUserId,
+    });
+    return state;
+  }
+
   function ensureStoreLoginState(state, record, requestId, reason, ids = []) {
     const beforeLoginChecked = loginCheckValue(state, reason);
     const alreadyReady = state?.loggedIn && state?.currentUserId && beforeLoginChecked === "true";
@@ -2685,7 +2725,7 @@
       directUpload,
     };
     const storeContext = preferredMediaStoreContext([conversationId, parentResponseId].concat(inputIds));
-    let state = storeContext.state;
+    let state = await waitForStoreAccountReady(storeContext.record, requestId, variant.kind);
     const events = [{ progress: 1, requestId, nativeStore: true, variant: variant.kind }];
     pushStoreTrace("store_generation_start", {
       requestId,
@@ -3644,6 +3684,8 @@
     },
     async runT2I({ wsUrl, requestId, resetPayload, createPayload, maxWaitMs, expectedCount }) {
       const startedAt = Date.now();
+      await waitForMediaStore(12000);
+      await waitForStoreAccountReady(null, requestId, "textToImage");
       const socket = await ensureImagineSocket(wsUrl);
       const state = { events: [], signalSeen: false };
       const listener = (raw) => collectEvent(raw, requestId, state);
