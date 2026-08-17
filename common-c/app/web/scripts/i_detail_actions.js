@@ -1023,9 +1023,52 @@ async function deleteImagineCardAssets(post, items) {
   return { deletedItems, failures };
 }
 
+async function deleteImagineCardConversation(post, items) {
+  const deletedItems = (items || []).filter(Boolean);
+  const representative = representativeItem(deletedItems, post) || deletedItems[0] || null;
+  const payload = imagineConversationDeletePayloadForPost({
+    ...post,
+    items: deletedItems,
+  });
+  if (!payload) {
+    throw new Error("This Imagine card has no deletion target.");
+  }
+  // A copied Liked card can carry an asset id in the old conversation-id slot.
+  // Resolve the copy's real conversation on the server before deleting the card.
+  if (isImagineLinkSourcePost(post, representative) && imagineLinkCardHasOwnedClone(post, deletedItems)) {
+    payload.conversation_id = "";
+  }
+  const data = await qApi("/api/imagine/conversation/delete", payload);
+  return {
+    deletedItems,
+    failures: [],
+    data,
+    action: "conversation-delete",
+  };
+}
+
+function imagineLinkCardHasOwnedClone(post, items = []) {
+  const candidates = [post, ...(items || [])].filter(Boolean);
+  return candidates.some((candidate) => {
+    const { metadata, imagine } = imaginePostActionMetadata(candidate);
+    return Boolean(
+      candidate?.official_asset_id
+      || metadata.official_asset_id
+      || metadata.official_clone_asset_id
+      || imagine.official_asset_id
+      || imagine.official_clone_asset_id
+      || metadata.cloned_copy
+      || imagine.cloned_copy
+    );
+  });
+}
+
 async function deleteImagineLinkCardBundle(post, items) {
   const bundleItems = (items || []).filter(Boolean);
-  const requestItems = bundleItems
+  // A link that has not been copied belongs to someone else. Its card can only be
+  // removed from this account's Liked collection; its original media is never deleted.
+  const registrationItems = imagineLinkRegistrationItems(post, bundleItems[0], true);
+  const requestItems = registrationItems
     .map(imagineLikeTargetForItem)
     .filter((target) => target.id);
   if (!requestItems.length) {
@@ -1034,8 +1077,7 @@ async function deleteImagineLinkCardBundle(post, items) {
   const linkPostId = imagineLinkPostIdForPost(post, bundleItems[0]);
   const data = await qApi("/api/imagine/post/unsave", {
     account_id: post?.account_id || iDetailAccountId(bundleItems[0], post),
-    operation: "delete",
-    scope: "bundle",
+    scope: "card",
     link_source: true,
     local_group_id: imagineSavedGroupIdForPost(post),
     link_post_id: linkPostId,
@@ -1046,7 +1088,7 @@ async function deleteImagineLinkCardBundle(post, items) {
     deletedItems: bundleItems,
     failures: [],
     data,
-    action: "link-bundle-delete",
+    action: "link-card-unsave",
   };
 }
 
@@ -1074,14 +1116,23 @@ async function deleteImagineRemoteCard(post) {
     return { deletedItems, failures };
   }
   if (isImagineLinkSourcePost(post, items[0])) {
+    if (imagineLinkCardHasOwnedClone(post, items)) {
+      return deleteImagineCardConversation(post, items);
+    }
     return deleteImagineLinkCardBundle(post, items);
+  }
+  try {
+    return await deleteImagineCardConversation(post, items);
+  } catch (error) {
+    // Some legacy standalone assets have no conversation to delete as a card.
+    if (!isImagineConversationDeleteFallbackError(error)) throw error;
   }
   const result = await deleteImagineCardAssets(post, items);
   return {
     ...result,
     data: {
       ok: result.failures.length === 0,
-      action: "asset-delete",
+      action: "asset-delete-fallback",
     },
   };
 }
