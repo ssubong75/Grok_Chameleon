@@ -157,6 +157,10 @@ IMAGINE_SAVE_ACTIVE_KEYS: set[str] = set()
 IMAGINE_SAVE_ACTIVE_LOCK = threading.Lock()
 IMAGINE_STATE_MIGRATION_LOCK = threading.Lock()
 IMAGINE_RELATION_STATE_LOCK = threading.Lock()
+# A Saved sweep can lag behind an individual asset detail.  Treat a cache miss as a
+# candidate only; two complete sweeps plus an exact 404 are required before pruning.
+IMAGINE_RELATION_MISSING_ASSET_CONFIRMATION_PASSES = 2
+IMAGINE_RELATION_DELETE_CONFIRM_MAX_PER_SYNC = 8
 IMAGINE_STATE_READY_ROOTS: set[str] = set()
 IMAGINE_BUNDLE_BACKGROUND_LOCK = threading.Lock()
 IMAGINE_BUNDLE_BACKGROUND_BATCHES: dict[str, dict] = {}
@@ -3227,51 +3231,179 @@ def imagine_missing_generated_relation_posts(
     return recovered
 
 
-def imagine_forget_relations_deleted_remotely(root: Path, account: dict) -> None:
-    """Drop relations whose generated assets are gone from a complete Saved snapshot.
-
-    A relation keeps a card alive while the Saved list is still catching up, so an asset
-    merely missing from the cache proves nothing -- a result generated seconds ago is
-    missing too. Once a sync has walked Saved to its end the cache is the site's full
-    contents, and an asset absent from it was deleted on grok.com. Deleting inside the app
-    already clears the relation; this covers deleting on the site, which the app never hears
-    about. Generating from the same source again writes a new relation and the card returns.
-    """
-    account_key = imagine_account_settings_key(account)
-    if not account_key:
-        return
-    ensure_imagine_state_migrated(root)
-    with IMAGINE_RELATION_STATE_LOCK:
-        relations = imagine_state.load_generated_relations(root)
-        if not isinstance(relations, dict) or not relations:
-            return
-        remaining = {
-            record_id: record
-            for record_id, record in relations.items()
-            if not imagine_relation_assets_deleted_remotely(root, record, account_key)
-        }
-        if len(remaining) == len(relations):
-            return
-        imagine_state.replace_generated_relations(root, remaining)
-    imagine_debug_event("generated_relations_pruned", {
-        "account_id": str(account.get("id") or ""),
-        "removed": sorted(set(relations) - set(remaining)),
-    })
-
-
-def imagine_relation_assets_deleted_remotely(root: Path, record: dict, account_key: str) -> bool:
+def imagine_relation_tracked_asset_ids(record: dict) -> set[str]:
     if not isinstance(record, dict):
-        return False
-    if str(record.get("account_key") or "").strip().lower() not in {"", account_key}:
-        return False
+        return set()
+    deleted_asset_ids = {
+        str(asset_id).strip()
+        for asset_id in (record.get("source_deleted_asset_ids") if isinstance(record.get("source_deleted_asset_ids"), list) else [])
+        if str(asset_id or "").strip()
+    }
     asset_ids = {
         imagine_relation_item_key(item)
         for item in (record.get("items") if isinstance(record.get("items"), list) else [])
         if isinstance(item, dict) and imagine_relation_item_key(item)
     }
-    if not asset_ids:
-        return False
-    return not library_index.imagine_remote_asset_account_keys(root, asset_ids)
+    # Normal relations are anchored to the source card's media asset.  Keep that identity
+    # too, so deleting the parent can promote its surviving descendants instead of erasing
+    # the whole chain. Upload bundles already track their source separately.
+    if record.get("upload_origin_bundle") is not True:
+        # source_item_id is the immediate parent for an extension; source_post_id is
+        # the lineage root.  Older records lack source_anchor_asset_id, so retain both
+        # identities while the cache catches up.
+        for source_asset_id in (
+            record.get("source_anchor_asset_id"),
+            record.get("source_item_id"),
+            record.get("source_post_id"),
+        ):
+            source_asset_id = str(source_asset_id or "").strip()
+            if source_asset_id:
+                asset_ids.add(source_asset_id)
+    return asset_ids - deleted_asset_ids
+
+
+def imagine_relation_asset_exists_officially(asset_id: str, account: dict) -> bool | None:
+    """Return False only for a definitive upstream asset deletion."""
+    try:
+        imagine_get_json(
+            f"/rest/assets/{quote(asset_id, safe='')}",
+            account,
+            timeout=5,
+            referer=imagine_detail_referer(asset_id),
+        )
+    except RuntimeError as exc:
+        message = str(exc).lower()
+        if "imagine http 404" in message or "imagine http 410" in message:
+            return False
+        return None
+    except Exception:
+        return None
+    return True
+
+
+def imagine_forget_relations_deleted_remotely(root: Path, account: dict) -> None:
+    """Prune only assets that the exact upstream asset endpoint confirms as deleted.
+
+    Grok's paged Saved response can omit a fresh cross-conversation child even though its
+    individual detail is already complete.  Cache absence therefore starts a confirmation
+    counter; it is never, by itself, a reason to delete a lineage edge.
+    """
+    account_key = imagine_account_settings_key(account)
+    if not account_key:
+        return
+    ensure_imagine_state_migrated(root)
+    try:
+        cached_posts = library_index.query_imagine_remote_posts(
+            root,
+            account_key,
+            offset=0,
+            limit=5000,
+        ).get("posts") or []
+    except Exception:
+        return
+    cached_asset_ids = {
+        imagine_item_asset_id(item)
+        for post in cached_posts
+        if isinstance(post, dict)
+        for item in post.get("items") or []
+        if isinstance(item, dict) and imagine_item_asset_id(item)
+    }
+    confirm_candidates: set[str] = set()
+    with IMAGINE_RELATION_STATE_LOCK:
+        relations = imagine_state.load_generated_relations(root)
+        if not isinstance(relations, dict) or not relations:
+            return
+        changed = False
+        next_relations: dict[str, dict] = {}
+        for record_id, raw_record in relations.items():
+            if not isinstance(raw_record, dict):
+                next_relations[record_id] = raw_record
+                continue
+            record = dict(raw_record)
+            if str(record.get("account_key") or "").strip().lower() not in {"", account_key}:
+                next_relations[record_id] = record
+                continue
+            prior_missing = record.get("remote_missing_asset_cycles")
+            missing_cycles: dict[str, int] = {}
+            for asset_id, cycles in (prior_missing.items() if isinstance(prior_missing, dict) else []):
+                normalized_id = str(asset_id or "").strip()
+                if not normalized_id:
+                    continue
+                try:
+                    missing_cycles[normalized_id] = max(0, int(cycles or 0))
+                except (TypeError, ValueError):
+                    missing_cycles[normalized_id] = 0
+            next_missing: dict[str, int] = {}
+            for asset_id in imagine_relation_tracked_asset_ids(record):
+                if asset_id in cached_asset_ids:
+                    continue
+                cycles = missing_cycles.get(asset_id, 0) + 1
+                next_missing[asset_id] = cycles
+                if cycles >= IMAGINE_RELATION_MISSING_ASSET_CONFIRMATION_PASSES:
+                    confirm_candidates.add(asset_id)
+            if next_missing:
+                record["remote_missing_asset_cycles"] = next_missing
+            else:
+                record.pop("remote_missing_asset_cycles", None)
+            if record != raw_record:
+                changed = True
+            next_relations[record_id] = record
+        if changed:
+            imagine_state.replace_generated_relations(root, next_relations)
+    if not confirm_candidates:
+        return
+    confirmed_deleted: set[str] = set()
+    confirmed_present: set[str] = set()
+    candidates = sorted(confirm_candidates)[:IMAGINE_RELATION_DELETE_CONFIRM_MAX_PER_SYNC]
+    with ThreadPoolExecutor(max_workers=min(4, len(candidates))) as executor:
+        futures = {
+            executor.submit(imagine_relation_asset_exists_officially, asset_id, account): asset_id
+            for asset_id in candidates
+        }
+        for future in as_completed(futures):
+            asset_id = futures[future]
+            try:
+                status = future.result()
+            except Exception:
+                status = None
+            if status is False:
+                confirmed_deleted.add(asset_id)
+            elif status is True:
+                confirmed_present.add(asset_id)
+    if confirmed_deleted:
+        remove_imagine_generated_relation_state(root, asset_ids=confirmed_deleted)
+        prune_imagine_remote_cache_assets(root, account, confirmed_deleted)
+        imagine_debug_event("generated_relation_assets_confirmed_deleted", {
+            "account_id": str(account.get("id") or ""),
+            "asset_ids": sorted(confirmed_deleted),
+        })
+    if not confirmed_present:
+        return
+    with IMAGINE_RELATION_STATE_LOCK:
+        relations = imagine_state.load_generated_relations(root)
+        changed = False
+        for record_id, raw_record in relations.items():
+            if not isinstance(raw_record, dict):
+                continue
+            missing_cycles = raw_record.get("remote_missing_asset_cycles")
+            if not isinstance(missing_cycles, dict):
+                continue
+            next_missing = {
+                str(asset_id).strip(): cycles
+                for asset_id, cycles in missing_cycles.items()
+                if str(asset_id).strip() not in confirmed_present
+            }
+            if next_missing == missing_cycles:
+                continue
+            record = dict(raw_record)
+            if next_missing:
+                record["remote_missing_asset_cycles"] = next_missing
+            else:
+                record.pop("remote_missing_asset_cycles", None)
+            relations[record_id] = record
+            changed = True
+        if changed:
+            imagine_state.replace_generated_relations(root, relations)
 
 
 def imagine_persist_generated_relation(
@@ -3334,6 +3466,14 @@ def imagine_persist_generated_relation(
             "account_key": imagine_account_settings_key(account or {}) if account else str(record.get("account_key") or ""),
             "source_post_id": record_id,
             "source_post_path": f"imagine_saved/{record_id}" if upload_source else str(source_post_path or ""),
+            # Keep the original source asset distinct from source_item_id.  The latter is
+            # the immediate parent after an extension, while this remains the root owner
+            # of the lineage when a parent is later deleted.
+            "source_anchor_asset_id": (
+                str(record.get("source_anchor_asset_id") or "")
+                if upload_source
+                else str(record.get("source_anchor_asset_id") or source_id or "")
+            ),
             "source_item_id": str(
                 imagine_item_asset_id(upload_source or {})
                 or record.get("source_item_id")
@@ -4520,7 +4660,17 @@ def imagine_apply_generated_relations(
     if not record:
         return post
     enriched_existing = imagine_restore_generated_relation_resolutions(post, root, relations)
-    existing_items = [dict(item) for item in post.get("items") or [] if isinstance(item, dict)]
+    deleted_relation_asset_ids = {
+        str(asset_id).strip()
+        for asset_id in (record.get("source_deleted_asset_ids") if isinstance(record.get("source_deleted_asset_ids"), list) else [])
+        if str(asset_id or "").strip()
+    }
+    existing_items = [
+        dict(item)
+        for item in post.get("items") or []
+        if isinstance(item, dict)
+        and not ({imagine_relation_item_key(item), imagine_item_asset_id(item)} & deleted_relation_asset_ids)
+    ]
     if record.get("upload_origin_bundle"):
         upload_source_id = str(record.get("upload_source_asset_id") or record.get("source_item_id") or "").strip()
         existing_items = [
@@ -4529,7 +4679,7 @@ def imagine_apply_generated_relations(
             if not imagine_item_is_upload_source(item)
             and (not upload_source_id or imagine_item_asset_id(item) != upload_source_id)
         ]
-        if not record.get("source_hidden_in_bundle"):
+        if not record.get("source_hidden_in_bundle") and upload_source_id not in deleted_relation_asset_ids:
             stored_source = record.get("upload_source_item") if isinstance(record.get("upload_source_item"), dict) else {}
             source_item = imagine_relation_materialized_item(stored_source, account, root)
             if source_item:
@@ -4541,6 +4691,8 @@ def imagine_apply_generated_relations(
     local_t2i_heart = imagine_post_is_local_t2i_heart(post)
     for stored in record.get("items") if isinstance(record.get("items"), list) else []:
         if not isinstance(stored, dict):
+            continue
+        if ({imagine_relation_item_key(stored), imagine_item_asset_id(stored)} & deleted_relation_asset_ids):
             continue
         stored_metadata = stored.get("metadata") if isinstance(stored, dict) and isinstance(stored.get("metadata"), dict) else {}
         stored_imagine = stored_metadata.get("imagine") if isinstance(stored_metadata.get("imagine"), dict) else {}
@@ -8893,15 +9045,23 @@ def remove_imagine_generated_relation_state(
                 changed = True
                 continue
             record = dict(raw_record)
-            record_keys = {
+            # A source/root or immediate parent is a lineage reference, not an item that
+            # owns every descendant.  Removing it must never erase the remaining branch.
+            source_asset_keys = {
                 str(source_id).strip(),
                 str(record.get("source_post_id") or "").strip(),
+                str(record.get("source_anchor_asset_id") or "").strip(),
                 str(record.get("source_item_id") or "").strip(),
-                Path(str(record.get("source_post_path") or "")).name,
             }
-            if record_keys & (remove_assets | remove_groups):
+            deleted_source_ids = (source_asset_keys & remove_assets) - {""}
+            if deleted_source_ids:
+                existing_deleted_source_ids = {
+                    str(value).strip()
+                    for value in (record.get("source_deleted_asset_ids") if isinstance(record.get("source_deleted_asset_ids"), list) else [])
+                    if str(value or "").strip()
+                }
+                record["source_deleted_asset_ids"] = sorted(existing_deleted_source_ids | deleted_source_ids)
                 changed = True
-                continue
             items: list[dict] = []
             for item in record.get("items") if isinstance(record.get("items"), list) else []:
                 if not isinstance(item, dict):
@@ -8928,7 +9088,8 @@ def remove_imagine_generated_relation_state(
             if not items and not record.get("upload_origin_bundle"):
                 changed = True
                 continue
-            record["items"] = items
+            if items != record.get("items"):
+                record["items"] = items
             next_relations[source_id] = record
         if changed:
             imagine_state.replace_generated_relations(root, next_relations)
