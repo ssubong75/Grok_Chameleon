@@ -3,9 +3,12 @@ function normalizeNfcText(value = "") {
   return String(value ?? "").normalize("NFC");
 }
 
-// Keep Windows-only typography adjustments out of the macOS renderer.
-const isWindowsRenderer = /Windows NT/i.test(String(navigator.userAgent || ""));
+// Mark the operating systems that have UI-specific typography adjustments.
+const rendererUserAgent = String(navigator.userAgent || "");
+const isWindowsRenderer = /Windows NT/i.test(rendererUserAgent);
+const isMacRenderer = /(?:Macintosh|Mac OS X)/i.test(rendererUserAgent);
 document.documentElement.classList.toggle("platform-windows", isWindowsRenderer);
+document.documentElement.classList.toggle("platform-macos", isMacRenderer);
 
     const screenIds = [
       "i_main",
