@@ -113,6 +113,22 @@ function writeBrowserHistory(screenId, activeButtonId = "", options = {}) {
   syncBrowserHistoryButtons();
 }
 
+// Folder selection happens inside one screen, so it must refresh the current history
+// entry rather than add a new stop. Otherwise returning from a folder's card list lands
+// on the empty Collections state that existed before the user selected the folders.
+function replaceCurrentBrowserHistoryState() {
+  if (
+    screen_state.historyRestoring
+    || !history.state?.grokStudioQ
+    || !window.history?.replaceState
+  ) return;
+  const screenId = screen_state.current_screen || history.state.screenId || "i_main";
+  const state = browserHistoryState(screenId, activeNavButtonId());
+  state.grokStudioQHistoryIndex = browserHistoryCursor;
+  history.replaceState(state, "", browserHistoryUrl(screenId));
+  syncBrowserHistoryButtons();
+}
+
 function restoreBrowserHistoryState(state) {
   if (!state?.grokStudioQ) return;
   const restoredIndex = Number(state.grokStudioQHistoryIndex);

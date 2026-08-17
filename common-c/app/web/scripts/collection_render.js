@@ -412,6 +412,7 @@
         library_state.collectionSort = nextPath ? collectionSortModeFor(nextPath) : "";
         library_state.collectionDraftLayout = null;
         library_state.collectionView = "2nd_folders";
+        replaceCurrentBrowserHistoryState();
         renderCollectionFolders();
       });
       card.addEventListener("dragstart", (event) => {
@@ -579,6 +580,7 @@
           card.addEventListener("click", () => {
             library_state.selectedCollectionPostPath = library_state.selectedCollectionPostPath === post.folder_path ? "" : post.folder_path;
             library_state.collectionActionLevel = "second";
+            replaceCurrentBrowserHistoryState();
             document.querySelector(".collection_title_btn")?.classList.remove("active");
             document.querySelector(".collection_item_title_btn")?.classList.add("active");
             for (const item of grid.querySelectorAll(".collection_2nd_card")) {
@@ -588,6 +590,7 @@
           card.addEventListener("dblclick", () => {
             library_state.selectedCollectionPostPath = post.folder_path;
             library_state.collectionActionLevel = "second";
+            replaceCurrentBrowserHistoryState();
             selectLibraryPost(post, { loadFull: false });
             renderSecondMain(post);
             openScreen("2nd_main", "b_collection_nav_btn");
@@ -598,6 +601,7 @@
             event.preventDefault();
             library_state.selectedCollectionPostPath = post.folder_path;
             library_state.collectionActionLevel = "second";
+            replaceCurrentBrowserHistoryState();
             selectLibraryPost(post, { loadFull: false });
             renderSecondMain(post);
             openScreen("2nd_main", "b_collection_nav_btn");

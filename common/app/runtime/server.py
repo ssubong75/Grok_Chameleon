@@ -5462,6 +5462,33 @@ def imagine_item_source_id(item: dict) -> str:
     return next(iter(imagine_item_source_ids(item)), "")
 
 
+def imagine_rebind_cloned_item_sources(item: dict, replacements: dict[str, str]) -> dict:
+    """Point a copied family's child at its local copy instead of the foreign original."""
+    if not isinstance(item, dict) or not replacements:
+        return item
+    rebound = dict(item)
+    holders: list[dict] = [rebound]
+    metadata = rebound.get("metadata") if isinstance(rebound.get("metadata"), dict) else {}
+    metadata = dict(metadata)
+    rebound["metadata"] = metadata
+    holders.append(metadata)
+    imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
+    imagine = dict(imagine)
+    metadata["imagine"] = imagine
+    holders.append(imagine)
+    for holder in holders:
+        for field in ("source_item_id", "parent_post_id", "original_post_id"):
+            source_id = str(holder.get(field) or "").strip()
+            replacement_id = replacements.get(source_id)
+            if not replacement_id:
+                continue
+            # Preserve the official id for provenance, but use the local copy for the
+            # displayed lineage. This is the only parent Liked can join after clone-batch.
+            holder.setdefault("cloned_source_asset_id", source_id)
+            holder[field] = replacement_id
+    return rebound
+
+
 def imagine_item_is_source(item: dict) -> bool:
     if not isinstance(item, dict):
         return False
@@ -6008,13 +6035,16 @@ def merge_imagine_liked_lineage_cards(cards: list[dict]) -> list[dict]:
         changed = False
         for index, card in enumerate(active):
             current_owner = owner_by_card.get(index)
-            owner = next((
-                owner_by_asset_id.get(source_id)
+            source_owners = [
+                owner_by_asset_id[source_id]
                 for item in card.get("items") or []
                 if isinstance(item, dict)
                 for source_id in imagine_item_source_ids(item)
                 if source_id in owner_by_asset_id
-            ), None)
+            ]
+            # A card can contain its own immediate source and that source's parent. Ignore
+            # the self match so a copied i2i -> i2v branch reaches its shared root.
+            owner = next((candidate for candidate in source_owners if candidate != current_owner), None)
             if not owner or owner == current_owner:
                 continue
             provenance, anchor = owner
@@ -7423,7 +7453,13 @@ def imagine_media_post_with_asset_prompt(post: dict, post_id: str, account: dict
 
 def imagine_get_media_post_direct(post_id: str, account: dict, timeout: int = 12) -> dict:
     errors: list[str] = []
-    for payload in ({"id": post_id}, {"ids": [post_id]}):
+    direct_payload = {"id": post_id}
+    request_user_id = str(account.get("id") or "").strip()
+    if request_user_id:
+        # Mirrors grok.com's media store.  Without the viewer id the response can omit the
+        # post container's child branches, leaving a sibling result out of a linked detail.
+        direct_payload["requestUserId"] = request_user_id
+    for payload in (direct_payload, {"ids": [post_id]}):
         path = "/rest/media/post/get" if "id" in payload else "/rest/media/post/bulk-get"
         try:
             data = imagine_post_json(path, payload, account, timeout=timeout)
@@ -7809,6 +7845,13 @@ def list_imagine_liked_cache(payload: dict) -> dict:
     for cached_post in cached.get("posts") or []:
         if not isinstance(cached_post, dict):
             continue
+        cached_metadata = (
+            cached_post.get("metadata") if isinstance(cached_post.get("metadata"), dict) else {}
+        )
+        # Do not paint the pre-normalization clone cache and then visibly split the card
+        # again before the live Liked refresh has a chance to repair it.
+        if cached_metadata.get("cloned_copy") and cached_metadata.get("clone_lineage_normalized") is not True:
+            continue
         post = imagine_apply_generated_relations(cached_post, root, account, relations)
         imagine_stamp_saved_identity(post)
         post["items"] = [
@@ -8019,6 +8062,10 @@ def list_imagine_liked(payload: dict) -> dict:
         cached_metadata = (
             cached_post.get("metadata") if isinstance(cached_post.get("metadata"), dict) else {}
         )
+        # Before clone lineage was normalized, the cache stored the copied result with the
+        # foreign parent id still attached. Reuse would preserve that split indefinitely.
+        if cached_metadata.get("cloned_copy") and cached_metadata.get("clone_lineage_normalized") is not True:
+            continue
         # Which entries this one card answers for. The entry it was built from is recorded,
         # but the entries that folded into it are not -- a folded copy leaves no card of its
         # own, and its id survives only as an item here. Miss those and every folded entry
@@ -8199,6 +8246,11 @@ def list_imagine_liked(payload: dict) -> dict:
                     swapped_items.append(item)
                 pending_items = next_pending
             kept_items = swapped_items
+        if replacement_by_origin_id:
+            kept_items = [
+                imagine_rebind_cloned_item_sources(item, replacement_by_origin_id)
+                for item in kept_items
+            ]
         if kept_items:
             post["items"] = kept_items
             representative = imagine_representative_item(kept_items) or kept_items[-1]
@@ -8223,6 +8275,7 @@ def list_imagine_liked(payload: dict) -> dict:
             "liked_membership_asset_ids": [asset_id],
         })
         if cloned_from_asset_id:
+            metadata["clone_lineage_normalized"] = True
             clone_batch_id = str(metadata.get("conversation_id") or "").strip()
             if clone_batch_id:
                 metadata["clone_batch_id"] = clone_batch_id
@@ -8308,6 +8361,90 @@ def list_imagine_liked(payload: dict) -> dict:
     }
 
 
+def imagine_link_post_with_cached_family(post: dict, root: Path, account: dict) -> dict:
+    """Complete a linked card from the Saved lineage index already held by the app."""
+    if not isinstance(post, dict):
+        return post
+    visible_items = [
+        dict(item)
+        for item in post.get("items") or []
+        if isinstance(item, dict) and imagine_item_asset_id(item)
+    ]
+    initial_ids = {imagine_item_asset_id(item) for item in visible_items}
+    if not initial_ids:
+        return post
+    try:
+        account_keys = library_index.imagine_remote_asset_account_keys(root, initial_ids)
+    except Exception:
+        return post
+    if not account_keys:
+        return post
+
+    cached_items: list[dict] = []
+    for account_key in sorted(account_keys):
+        try:
+            cached_posts = library_index.query_imagine_remote_posts(
+                root, account_key, offset=0, limit=5000,
+            ).get("posts") or []
+        except Exception:
+            continue
+        for cached_post in cached_posts:
+            if not isinstance(cached_post, dict):
+                continue
+            card_items = [
+                item for item in cached_post.get("items") or []
+                if isinstance(item, dict) and imagine_item_asset_id(item)
+            ]
+            if {imagine_item_asset_id(item) for item in card_items} & initial_ids:
+                cached_items.extend(card_items)
+    if not cached_items:
+        return post
+
+    items_by_id = {imagine_item_asset_id(item): item for item in visible_items}
+    for item in cached_items:
+        items_by_id.setdefault(imagine_item_asset_id(item), item)
+    family_ids = set(initial_ids)
+    changed = True
+    while changed:
+        changed = False
+        for item_id, item in items_by_id.items():
+            parent_id = imagine_item_source_id(item)
+            if item_id not in family_ids and parent_id in family_ids:
+                family_ids.add(item_id)
+                changed = True
+            if item_id in family_ids and parent_id in items_by_id and parent_id not in family_ids:
+                family_ids.add(parent_id)
+                changed = True
+
+    additional_ids = family_ids - initial_ids
+    if not additional_ids:
+        return post
+    active_account_id = str(account.get("id") or "")
+    additions: list[dict] = []
+    added_ids: set[str] = set()
+    for item in cached_items:
+        item_id = imagine_item_asset_id(item)
+        if item_id not in additional_ids or item_id in added_ids:
+            continue
+        copied = dict(item)
+        item_type = str(copied.get("type") or "").lower()
+        kind = "video" if item_type == "video" else "image"
+        media_url = str(copied.get("remote_url") or copied.get("url") or "")
+        metadata = copied.get("metadata") if isinstance(copied.get("metadata"), dict) else {}
+        thumbnail_url = str(metadata.get("thumbnail_url") or "")
+        if media_url:
+            copied["object_url"] = imagine_saved_proxy_url(media_url, kind, active_account_id)
+        if thumbnail_url:
+            copied["thumbnail_url"] = imagine_saved_proxy_url(thumbnail_url, "image", active_account_id)
+        additions.append(copied)
+        added_ids.add(item_id)
+    if not additions:
+        return post
+    merged = dict(post)
+    merged["items"] = [*visible_items, *additions]
+    return merged
+
+
 def load_imagine_remote_link_post(payload: dict) -> dict:
     root = library_root()
     if not root:
@@ -8329,6 +8466,7 @@ def load_imagine_remote_link_post(payload: dict) -> dict:
     post = imagine_saved_post_from_root(raw_post, account)
     if not post:
         raise RuntimeError("Could not load the linked Imagine post.")
+    post = imagine_link_post_with_cached_family(post, root, account)
     link_asset_ids = {
         imagine_item_asset_id(item)
         for item in post.get("items") or []
