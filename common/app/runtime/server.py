@@ -10677,7 +10677,7 @@ def delete_imagine_conversation(payload: dict) -> dict:
             root,
             account,
             {conversation_id},
-            allowed_provenances={"normal-saved"},
+            allowed_provenances={"normal-saved", "cloned-liked"},
         )
         invalidate_imagine_saved_media_keys_cache(account)
     return {"ok": True, "conversation_id": conversation_id, "result": result}
