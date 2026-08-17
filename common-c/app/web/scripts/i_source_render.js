@@ -206,7 +206,6 @@ function imagineSavedMetadataValue(source, key) {
 // into every card-level identity used by the client.
 function imagineSavedPostProvenance(post) {
   const explicit = String(imagineSavedMetadataValue(post, "saved_provenance") || "").trim().toLowerCase();
-  if (["normal-saved", "plain-liked", "cloned-liked"].includes(explicit)) return explicit;
   const remoteView = String(imagineSavedMetadataValue(post, "remote_view") || "").toLowerCase();
   const structurallyReferenced = Boolean(
     imagineSavedMetadataValue(post, "link_source")
@@ -228,7 +227,10 @@ function imagineSavedPostProvenance(post) {
     || imagineSavedMetadataValue(item, "official_clone_source_asset_id")
   ));
   if (topLevelCloned || itemCloned) return "cloned-liked";
-  return structurallyReferenced ? "plain-liked" : "normal-saved";
+  if (structurallyReferenced) return "plain-liked";
+  return ["normal-saved", "plain-liked", "cloned-liked"].includes(explicit)
+    ? explicit
+    : "normal-saved";
 }
 
 function imagineSavedScopedIdentity(post, value) {
@@ -1205,6 +1207,118 @@ function mergeImagineSavedLineageCards(cards) {
     return normalizeServerPost({
       ...anchor,
       items,
+      representative: representative?.file || representative?.url || representative?.item_id || "",
+      representative_item: representative,
+    });
+  });
+}
+
+function reconcileImagineLikedLineagePosts(posts) {
+  // Liked sources and their results can arrive from different endpoints. Group only through
+  // explicit source_item_id, parent_post_id, or original_post_id -- never a conversation.
+  const active = (posts || []).filter(Boolean).map((card) => normalizeServerPost({
+    ...card,
+    items: [...(card.items || [])],
+    metadata: { ...(card.metadata || {}) },
+  }));
+  active.forEach((card) => {
+    const provenance = imagineSavedPostProvenance(card);
+    const anchor = imagineSavedCardAnchor(card);
+    card.metadata = {
+      ...(card.metadata || {}),
+      saved_provenance: provenance,
+      ...(anchor ? { saved_anchor_id: anchor } : {}),
+    };
+  });
+  if (active.length < 2) return active;
+
+  const ownerByAssetId = new Map();
+  const ownerByCard = new Map();
+  const cardAssetIds = (card) => new Set([
+    card?.post_id,
+    card?.metadata?.lineage_root_asset_id,
+    ...(card?.items || []).map(imagineSavedItemAssetId),
+  ].map((value) => String(value || "").trim()).filter(Boolean));
+  const rememberOwner = (index, owner, { replaceAssets = false } = {}) => {
+    ownerByCard.set(index, owner);
+    for (const assetId of cardAssetIds(active[index])) {
+      if (replaceAssets || !ownerByAssetId.has(assetId)) ownerByAssetId.set(assetId, owner);
+    }
+  };
+
+  active.forEach((card, index) => {
+    const provenance = imagineSavedPostProvenance(card);
+    const anchor = imagineSavedCardAnchor(card);
+    if (["plain-liked", "cloned-liked"].includes(provenance) && anchor) {
+      rememberOwner(index, { provenance, anchor });
+    }
+  });
+  if (!ownerByCard.size) return active;
+
+  let changed = true;
+  while (changed) {
+    changed = false;
+    active.forEach((card, index) => {
+      const currentOwner = ownerByCard.get(index);
+      let owner;
+      for (const item of card.items || []) {
+        for (const sourceId of imagineSavedItemSourceIds(item)) {
+          owner = ownerByAssetId.get(sourceId);
+          if (owner) break;
+        }
+        if (owner) break;
+      }
+      if (!owner || (owner.provenance === currentOwner?.provenance && owner.anchor === currentOwner?.anchor)) return;
+      const metadata = card.metadata && typeof card.metadata === "object" ? card.metadata : {};
+      card.metadata = {
+        ...metadata,
+        saved_provenance: owner.provenance,
+        saved_anchor_id: owner.anchor,
+        liked_lineage_owner_anchor: owner.anchor,
+        liked: true,
+      };
+      card.liked = true;
+      card.favorite = true;
+      rememberOwner(index, owner, { replaceAssets: true });
+      changed = true;
+    });
+  }
+
+  const membersByOwner = new Map();
+  active.forEach((_, index) => {
+    const owner = ownerByCard.get(index);
+    const key = owner
+      ? `liked\u001f${owner.provenance}\u001f${owner.anchor}`
+      : `standalone\u001f${index}`;
+    if (!membersByOwner.has(key)) membersByOwner.set(key, []);
+    membersByOwner.get(key).push(index);
+  });
+  return Array.from(membersByOwner.values()).map((memberIndexes) => {
+    const anchor = active[memberIndexes[0]];
+    if (memberIndexes.length === 1) return anchor;
+    const knownItemIds = new Set();
+    const items = [];
+    for (const memberIndex of memberIndexes) {
+      for (const item of active[memberIndex].items || []) {
+        const itemId = imagineSavedItemAssetId(item);
+        if (itemId && knownItemIds.has(itemId)) continue;
+        items.push(item);
+        if (itemId) knownItemIds.add(itemId);
+      }
+    }
+    const owner = ownerByCard.get(memberIndexes[0]);
+    const aliases = memberIndexes
+      .map((index) => imagineSavedCardAnchor(active[index]))
+      .filter(Boolean);
+    const representative = representativeItem(items, { ...anchor, items }) || items[0];
+    return normalizeServerPost({
+      ...anchor,
+      items,
+      metadata: {
+        ...(anchor.metadata || {}),
+        ...(owner ? { saved_provenance: owner.provenance, saved_anchor_id: owner.anchor } : {}),
+        ...(aliases.length ? { saved_anchor_aliases: [...new Set(aliases)].sort() } : {}),
+      },
       representative: representative?.file || representative?.url || representative?.item_id || "",
       representative_item: representative,
     });
@@ -2229,10 +2343,12 @@ async function loadImagineLikedCards({ force = false } = {}) {
         applyImagineLikedExclusionSnapshot(cached, accountId);
         const cachedPosts = (Array.isArray(cached?.posts) ? cached.posts : []).map(normalizeServerPost);
         if (cachedPosts.length) {
-          library_state.imagineLikedPosts = mergeImagineSyncedPosts(
-            library_state.imagineLikedPosts || [],
-            cachedPosts,
-            { replacesList: false, preserveMatchedAnchors: true },
+          library_state.imagineLikedPosts = reconcileImagineLikedLineagePosts(
+            mergeImagineSyncedPosts(
+              library_state.imagineLikedPosts || [],
+              cachedPosts,
+              { replacesList: false, preserveMatchedAnchors: true },
+            ),
           );
           syncImagineRemotePostsIntoLibrary();
           renderImagineSourceCards();
@@ -2247,13 +2363,15 @@ async function loadImagineLikedCards({ force = false } = {}) {
     if (!imagineAccountResponseIsCurrent(accountId, requestEpoch, data)) return;
     applyImagineLikedExclusionSnapshot(data, accountId);
     const livePosts = (Array.isArray(data.posts) ? data.posts : []).map(normalizeServerPost);
-    library_state.imagineLikedPosts = mergeImagineSyncedPosts(
-      library_state.imagineLikedPosts || [],
-      livePosts,
-      {
-        replacesList: data.complete === true,
-        preserveMatchedAnchors: true,
-      },
+    library_state.imagineLikedPosts = reconcileImagineLikedLineagePosts(
+      mergeImagineSyncedPosts(
+        library_state.imagineLikedPosts || [],
+        livePosts,
+        {
+          replacesList: data.complete === true,
+          preserveMatchedAnchors: true,
+        },
+      ),
     );
     library_state.imagineLikedLoaded = true;
     syncImagineRemotePostsIntoLibrary();
