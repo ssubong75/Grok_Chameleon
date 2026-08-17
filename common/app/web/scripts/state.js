@@ -3,6 +3,10 @@ function normalizeNfcText(value = "") {
   return String(value ?? "").normalize("NFC");
 }
 
+// Keep Windows-only typography adjustments out of the macOS renderer.
+const isWindowsRenderer = /Windows NT/i.test(String(navigator.userAgent || ""));
+document.documentElement.classList.toggle("platform-windows", isWindowsRenderer);
+
     const screenIds = [
       "i_main",
       "b_main",
