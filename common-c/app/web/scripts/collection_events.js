@@ -9,6 +9,7 @@ document.getElementById("b_collection_nav_btn")?.addEventListener("click", () =>
 document.querySelector(".collection_title_btn")?.addEventListener("click", () => {
   library_state.collectionActionLevel = "first";
   library_state.selectedCollectionPostPath = "";
+  replaceCurrentBrowserHistoryState();
   renderCollectionFolders();
 });
 
@@ -18,6 +19,7 @@ document.querySelector(".collection_item_title_btn")?.addEventListener("click", 
     return;
   }
   library_state.collectionActionLevel = "second";
+  replaceCurrentBrowserHistoryState();
   renderCollectionFolders();
 });
 

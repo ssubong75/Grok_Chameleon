@@ -1267,14 +1267,19 @@ function reconcileImagineLikedLineagePosts(posts) {
     changed = false;
     active.forEach((card, index) => {
       const currentOwner = ownerByCard.get(index);
-      let owner;
+      const sourceOwners = [];
       for (const item of card.items || []) {
         for (const sourceId of imagineSavedItemSourceIds(item)) {
-          owner = ownerByAssetId.get(sourceId);
-          if (owner) break;
+          const owner = ownerByAssetId.get(sourceId);
+          if (owner) sourceOwners.push(owner);
         }
-        if (owner) break;
       }
+      // A copied i2i -> i2v card carries both its own immediate parent and that parent's
+      // shared ancestor. Ignore its own match so the common copied root joins the direct
+      // i2v branch as one Liked card.
+      const owner = sourceOwners.find((candidate) => (
+        candidate.provenance !== currentOwner?.provenance || candidate.anchor !== currentOwner?.anchor
+      ));
       if (!owner || (owner.provenance === currentOwner?.provenance && owner.anchor === currentOwner?.anchor)) return;
       const metadata = card.metadata && typeof card.metadata === "object" ? card.metadata : {};
       card.metadata = {
