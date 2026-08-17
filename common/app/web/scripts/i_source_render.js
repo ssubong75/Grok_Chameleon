@@ -1080,7 +1080,11 @@ function mergeImagineSavedLineageCards(cards) {
     provenances.push(provenance);
     lineageScopes.push(lineageScope);
     rootIds.push(rootId);
-    const scopedRootId = rootId ? `${lineageScope}\u001f${rootId}` : "";
+    // saved_anchor_id identifies the card row, not a boundary in the media lineage.
+    // A normal i2i → i2v chain can cross conversations, so the child row is anchored to
+    // its input image while the source row is anchored to an earlier root image.  Match
+    // parent assets by provenance + globally unique asset id; Liked has its own reconciler.
+    const scopedRootId = rootId ? `${provenance}\u001f${rootId}` : "";
     if (scopedRootId && !rootOwnerById.has(scopedRootId)) rootOwnerById.set(scopedRootId, index);
   });
 
@@ -1089,11 +1093,13 @@ function mergeImagineSavedLineageCards(cards) {
   const uploadBundleOwnerByItemId = new Map();
   active.forEach((card, index) => {
     const lineageScope = lineageScopes[index];
+    const provenance = provenances[index];
     for (const item of card.items || []) {
       const itemId = imagineSavedItemAssetId(item);
-      const scopedItemId = itemId ? `${lineageScope}\u001f${itemId}` : "";
-      if (card?.metadata?.upload_origin_bundle === true && scopedItemId && !uploadBundleOwnerByItemId.has(scopedItemId)) {
-        uploadBundleOwnerByItemId.set(scopedItemId, index);
+      const scopedUploadItemId = itemId ? `${lineageScope}\u001f${itemId}` : "";
+      const scopedItemId = itemId ? `${provenance}\u001f${itemId}` : "";
+      if (card?.metadata?.upload_origin_bundle === true && scopedUploadItemId && !uploadBundleOwnerByItemId.has(scopedUploadItemId)) {
+        uploadBundleOwnerByItemId.set(scopedUploadItemId, index);
       }
       if (imagineSavedItemIsSource(item)) {
         if (scopedItemId && !sourceOwnerById.has(scopedItemId)) sourceOwnerById.set(scopedItemId, index);
@@ -1106,8 +1112,9 @@ function mergeImagineSavedLineageCards(cards) {
   const parentIndexes = active.map((_, index) => index);
   active.forEach((candidate, index) => {
     const lineageScope = lineageScopes[index];
+    const provenance = provenances[index];
     const rootId = rootIds[index];
-    const duplicateOwner = rootId ? rootOwnerById.get(`${lineageScope}\u001f${rootId}`) : undefined;
+    const duplicateOwner = rootId ? rootOwnerById.get(`${provenance}\u001f${rootId}`) : undefined;
     if (duplicateOwner !== undefined && duplicateOwner !== index) {
       parentIndexes[index] = duplicateOwner;
       return;
@@ -1127,7 +1134,7 @@ function mergeImagineSavedLineageCards(cards) {
     const rootItem = (candidate.items || [])
       .find((item) => imagineSavedItemAssetId(item) === rootId);
     const parentId = imagineSavedItemSourceId(rootItem);
-    const scopedParentId = parentId ? `${lineageScope}\u001f${parentId}` : "";
+    const scopedParentId = parentId ? `${provenance}\u001f${parentId}` : "";
     const parentOwner = ownerByItemId.get(scopedParentId) ?? sourceOwnerById.get(scopedParentId);
     if (parentId && parentOwner !== undefined && parentOwner !== index) {
       parentIndexes[index] = parentOwner;
@@ -1140,7 +1147,7 @@ function mergeImagineSavedLineageCards(cards) {
     // merge_imagine_saved_lineage_cards on the server, which reruns the same grouping.
     if (parentId && parentOwner === undefined) {
       const generationRootId = String(candidate?.metadata?.root_generation_asset_id || "").trim();
-      const scopedGenerationRootId = generationRootId ? `${lineageScope}\u001f${generationRootId}` : "";
+      const scopedGenerationRootId = generationRootId ? `${provenance}\u001f${generationRootId}` : "";
       const generationOwner = ownerByItemId.get(scopedGenerationRootId)
         ?? sourceOwnerById.get(scopedGenerationRootId);
       if (generationRootId && generationOwner !== undefined && generationOwner !== index) {
@@ -1349,6 +1356,170 @@ let imagineGeneratedSavedSyncAccountId = "";
 const imagineGeneratedSavedSyncAssetIds = new Set();
 const imagineGeneratedSavedOfficialAssetIds = new Set();
 
+// A fresh `+` upload has no Saved-card path yet.  Grok knows the upload asset and the
+// generated result belong to one conversation, but its broad Saved list can expose the
+// result before the source attachment arrives.  Keep the just-created card intact until the
+// exact official conversation confirms both halves.
+// The official conversation detail is normally complete as the stream returns.  Ask for it
+// immediately, then retry only if Grok has not yet committed both the human upload and its
+// generated child.
+const IMAGINE_DIRECT_UPLOAD_SAVED_SYNC_DELAYS = [0, 1500, 4000, 10000, 30000];
+const imagineDirectUploadSavedSyncs = new Map();
+
+function imagineDirectUploadAssetId(item) {
+  const metadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
+  const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
+  return String(
+    item?.asset_id
+    || metadata.asset_id
+    || imagine.asset_id
+    || item?.item_id
+    || item?.post_id
+    || imagine.post_id
+    || "",
+  ).trim();
+}
+
+function imagineDirectUploadSourceItem(items) {
+  return (items || []).find((item) => {
+    const metadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
+    const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
+    // Do not infer an upload from an app relation. This is only the official source item
+    // created from the fresh `+` upload that the generation result already carries.
+    return item?.official_upload_source === true
+      || metadata.official_upload_source === true
+      || imagine.official_upload_source === true;
+  }) || null;
+}
+
+function imagineFreshDirectUploadSavedSyncInfo(result) {
+  const action = String(result?.action || "").toLowerCase();
+  if (!new Set(["i2i", "i2v"]).has(action) || String(result?.source_post_path || "").trim()) return null;
+  const post = result?.post && typeof result.post === "object" ? result.post : null;
+  const postItems = Array.isArray(post?.items) ? post.items : [];
+  const sourceItem = imagineDirectUploadSourceItem(postItems);
+  const sourceAssetId = imagineDirectUploadAssetId(sourceItem);
+  const generatedItems = Array.isArray(result?.items) && result.items.length
+    ? result.items
+    : [result?.item].filter(Boolean);
+  const resultAssetIds = [...new Set(generatedItems
+    .map(imagineDirectUploadAssetId)
+    .filter(Boolean))];
+  const metadata = post?.metadata && typeof post.metadata === "object" ? post.metadata : {};
+  const selectedItem = generatedItems[generatedItems.length - 1] || {};
+  const selectedMetadata = selectedItem?.metadata && typeof selectedItem.metadata === "object" ? selectedItem.metadata : {};
+  const selectedImagine = selectedMetadata.imagine && typeof selectedMetadata.imagine === "object"
+    ? selectedMetadata.imagine
+    : {};
+  const targetPath = String(result?.target_folder_path || post?.folder_path || "").trim();
+  const conversationId = String(
+    metadata.conversation_id
+    || selectedItem.conversation_id
+    || selectedMetadata.conversation_id
+    || selectedImagine.conversation_id
+    || selectedItem.root_post_id
+    || "",
+  ).trim();
+  if (!targetPath || !conversationId || !sourceAssetId || !resultAssetIds.length) return null;
+  return {
+    action,
+    targetPath,
+    conversationId,
+    sourceAssetIds: [sourceAssetId],
+    resultAssetIds,
+  };
+}
+
+function markImagineDirectUploadSavedPending(info) {
+  // The card is not a placeholder. Only the just-generated child is awaiting Saved; marking
+  // the whole card made a normal upload card look synthetic and let refresh remove it.
+  setImagineGeneratedSavedSyncItemState(new Set(info?.resultAssetIds || []), true);
+}
+
+function clearImagineDirectUploadSavedSync(key) {
+  const sync = imagineDirectUploadSavedSyncs.get(key);
+  if (!sync) return;
+  if (sync.timer) window.clearTimeout(sync.timer);
+  imagineDirectUploadSavedSyncs.delete(key);
+  setImagineGeneratedSavedSyncItemState(new Set(sync.info?.resultAssetIds || []), false);
+}
+
+function applyImagineDirectUploadOfficialPost(info, post) {
+  if (!post || typeof post !== "object") return;
+  if (typeof upsertImagineRemotePost === "function") {
+    upsertImagineRemotePost(post);
+  } else {
+    const current = Array.isArray(library_state.imagineRemotePosts) ? library_state.imagineRemotePosts : [];
+    const index = current.findIndex((candidate) => String(candidate?.folder_path || "") === info.targetPath);
+    library_state.imagineRemotePosts = index < 0
+      ? [post, ...current]
+      : current.map((candidate, candidateIndex) => (candidateIndex === index ? post : candidate));
+    if (typeof syncImagineRemotePostsIntoLibrary === "function") syncImagineRemotePostsIntoLibrary();
+  }
+  renderImagineSourceCards();
+  renderDetailViews();
+}
+
+function scheduleImagineDirectUploadSavedSync(key, delayOverride = null) {
+  const sync = imagineDirectUploadSavedSyncs.get(key);
+  if (!sync || sync.timer) return;
+  const delay = delayOverride === null
+    ? IMAGINE_DIRECT_UPLOAD_SAVED_SYNC_DELAYS[Math.min(
+      sync.attempt,
+      IMAGINE_DIRECT_UPLOAD_SAVED_SYNC_DELAYS.length - 1,
+    )]
+    : delayOverride;
+  sync.attempt += 1;
+  sync.timer = window.setTimeout(async () => {
+    sync.timer = 0;
+    const current = imagineDirectUploadSavedSyncs.get(key);
+    if (!current) return;
+    if (imaginePendingSavedAccountId() !== current.accountId) {
+      clearImagineDirectUploadSavedSync(key);
+      return;
+    }
+    try {
+      const data = await qApi("/api/imagine/saved/conversation", {
+        account_id: current.accountId,
+        conversation_id: current.info.conversationId,
+        source_asset_ids: current.info.sourceAssetIds,
+        result_asset_ids: current.info.resultAssetIds,
+      });
+      if (data?.ready && data.post) {
+        applyImagineDirectUploadOfficialPost(current.info, data.post);
+        clearImagineDirectUploadSavedSync(key);
+        toast("Saved 목록 반영 완료.");
+        return;
+      }
+    } catch (error) {
+      console.warn("Imagine direct-upload Saved synchronization failed", error);
+    }
+    if (!imagineDirectUploadSavedSyncs.has(key)) return;
+    if (current.attempt === IMAGINE_DIRECT_UPLOAD_SAVED_SYNC_DELAYS.length) {
+      toast("공홈 카드에 원본과 생성물이 함께 반영되는지 계속 확인 중입니다.");
+    }
+    scheduleImagineDirectUploadSavedSync(key);
+  }, delay);
+}
+
+function beginImagineDirectUploadSavedSync(result) {
+  const info = imagineFreshDirectUploadSavedSyncInfo(result);
+  const accountId = imaginePendingSavedAccountId();
+  if (!info || !accountId) return false;
+  markImagineDirectUploadSavedPending(info);
+  const key = `${accountId}:${info.conversationId}`;
+  clearImagineDirectUploadSavedSync(key);
+  imagineDirectUploadSavedSyncs.set(key, {
+    accountId,
+    info,
+    attempt: 0,
+    timer: 0,
+  });
+  toast("생성 완료. 공홈 카드의 원본과 생성물을 확인 중입니다.");
+  scheduleImagineDirectUploadSavedSync(key);
+  return true;
+}
+
 function imaginePendingSavedAccountId() {
   return String(activeImagineSavedAccount()?.id || account_state.imagine?.active_id || "").trim();
 }
@@ -1428,6 +1599,11 @@ function clearImagineGeneratedSavedSync() {
 }
 
 function resetImagineGeneratedSavedSyncForAccountChange(nextAccountId = "") {
+  for (const [key, sync] of imagineDirectUploadSavedSyncs) {
+    if (sync.accountId !== String(nextAccountId || "").trim()) {
+      clearImagineDirectUploadSavedSync(key);
+    }
+  }
   const previousAssetIds = new Set(imagineGeneratedSavedSyncAssetIds);
   if (imagineGeneratedSavedSyncTimer) window.clearTimeout(imagineGeneratedSavedSyncTimer);
   imagineGeneratedSavedSyncTimer = 0;
@@ -1502,6 +1678,7 @@ function restoreImagineGeneratedSavedSync() {
 }
 
 function beginImagineGeneratedSavedSync(result) {
+  if (beginImagineDirectUploadSavedSync(result)) return;
   const items = Array.isArray(result?.items) && result.items.length
     ? result.items
     : [result?.item].filter(Boolean);

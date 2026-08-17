@@ -5048,12 +5048,13 @@ def imagine_saved_post_from_conversation(conversation: dict, detail: dict, accou
         return None
     conversation_id = str(conversation.get("conversationId") or conversation.get("id") or "").strip()
     latest_asset = conversation.get("latestAssetMetadata") if isinstance(conversation.get("latestAssetMetadata"), dict) else {}
-    if not conversation_id or not latest_asset:
+    if not conversation_id:
         return None
-    remember_imagine_owner_user_id(
-        account,
-        imagine_asset_owner_user_id(latest_asset),
-    )
+    if latest_asset:
+        remember_imagine_owner_user_id(
+            account,
+            imagine_asset_owner_user_id(latest_asset),
+        )
 
     responses = detail.get("responses") if isinstance(detail, dict) and isinstance(detail.get("responses"), list) else []
     root_generation = imagine_conversation_root_generation(responses)
@@ -5088,6 +5089,8 @@ def imagine_saved_post_from_conversation(conversation: dict, detail: dict, accou
     items.sort(key=lambda item: str(item.get("created_at") or ""))
 
     latest_asset_id = str(latest_asset.get("assetId") or latest_asset.get("id") or "").strip()
+    if not latest_asset_id:
+        latest_asset_id = str(items[-1].get("item_id") or "").strip()
     representative = items_by_id.get(latest_asset_id) or items[-1]
     title = str(conversation.get("title") or representative.get("prompt") or "Imagine").strip().splitlines()[0][:80]
     prompt = str(representative.get("prompt") or conversation.get("title") or "").strip()
@@ -5104,7 +5107,7 @@ def imagine_saved_post_from_conversation(conversation: dict, detail: dict, accou
         "t2i_group_container": bool(root_generation.get("is_t2i_group_container")),
         "title": title or "Imagine",
         "prompt": prompt,
-        "created_at": imagine_post_time(conversation),
+        "created_at": imagine_post_time(conversation) or str(representative.get("created_at") or ""),
         "folder_path": f"imagine_saved/{conversation_id}",
         "folderName": title or conversation_id,
         "representative": representative.get("url") or representative.get("item_id") or "",
@@ -5129,6 +5132,91 @@ def imagine_saved_post_from_conversation(conversation: dict, detail: dict, accou
             "t2i_group_container": bool(root_generation.get("is_t2i_group_container")),
             "liked": True,
         },
+    }
+
+
+def load_imagine_saved_conversation(payload: dict) -> dict:
+    """Return one complete official Saved conversation for a fresh direct upload.
+
+    The browser stream and the broad Saved page can settle at different times.  The exact
+    conversation is the authoritative source: it contains the human upload attachment and
+    its ASSISTANT-generated child, so a result asset alone never proves the card is ready.
+    """
+    root = library_root()
+    if not root:
+        raise RuntimeError("Library path is not set.")
+    account = active_imagine_account(root, str((payload or {}).get("account_id") or ""))
+    if not account:
+        raise RuntimeError("Select or capture an Imagine account first.")
+    conversation_id = str((payload or {}).get("conversation_id") or "").strip()
+    if not conversation_id:
+        raise RuntimeError("Imagine conversation id is missing.")
+
+    def expected_ids(name: str) -> set[str]:
+        raw = (payload or {}).get(name)
+        values = raw if isinstance(raw, list) else [raw]
+        return {
+            str(value).strip()
+            for value in values[:20]
+            if str(value or "").strip()
+        }
+
+    expected_source_ids = expected_ids("source_asset_ids")
+    expected_result_ids = expected_ids("result_asset_ids")
+    detail = imagine_conversation_detail(conversation_id, account, timeout=20)
+    post = imagine_saved_post_from_conversation(
+        {"conversationId": conversation_id},
+        detail,
+        account,
+    )
+    if not post:
+        return {
+            "ok": True,
+            "ready": False,
+            "conversation_id": conversation_id,
+            "official_asset_ids": [],
+        }
+
+    items = [item for item in post.get("items") or [] if isinstance(item, dict)]
+    official_asset_ids = {
+        imagine_item_asset_id(item)
+        for item in items
+        if imagine_item_asset_id(item)
+    }
+    official_source_ids = {
+        imagine_item_asset_id(item)
+        for item in items
+        if imagine_item_is_upload_source(item) and imagine_item_asset_id(item)
+    }
+    ready = (
+        (not expected_source_ids or expected_source_ids <= official_source_ids)
+        and (not expected_result_ids or expected_result_ids <= official_asset_ids)
+    )
+    if not ready:
+        return {
+            "ok": True,
+            "ready": False,
+            "conversation_id": conversation_id,
+            "official_asset_ids": sorted(official_asset_ids),
+            "official_source_asset_ids": sorted(official_source_ids),
+        }
+
+    cards = imagine_saved_lineage_cards(post)
+    card = next((candidate for candidate in cards if isinstance(candidate, dict)), post)
+    try:
+        cache_imagine_remote_posts(root, account, [card])
+    except Exception as exc:
+        imagine_debug_event("direct_upload_conversation_cache_failed", {
+            "conversation_id": conversation_id,
+            "error": str(exc)[:400],
+        })
+    return {
+        "ok": True,
+        "ready": True,
+        "conversation_id": conversation_id,
+        "post": card,
+        "official_asset_ids": sorted(official_asset_ids),
+        "official_source_asset_ids": sorted(official_source_ids),
     }
 
 
@@ -6317,6 +6405,103 @@ def cache_imagine_remote_posts(
     )
 
 
+def imagine_missing_direct_upload_conversation_candidates(
+    assets: list[dict],
+    *,
+    skip_asset_ids: set[str] | None = None,
+    max_conversations: int = 8,
+) -> dict[str, dict]:
+    """Find generated assets whose official upload parent is absent from Saved cards.
+
+    Grok can list an older direct-upload result in /rest/assets while leaving its
+    conversation out of the paged conversation feed.  The asset records the exact
+    conversation and input asset ids, but it is not enough to draw a source card:
+    those ids must be verified against the official conversation response first.
+    """
+    skipped = skip_asset_ids or set()
+    candidates: dict[str, dict] = {}
+    for asset in assets:
+        if not isinstance(asset, dict) or imagine_asset_upload_only(asset):
+            continue
+        asset_id = str(asset.get("assetId") or asset.get("id") or "").strip()
+        conversation_id = str(
+            asset.get("sourceConversationId")
+            or asset.get("rootAssetSourceConversationId")
+            or asset.get("conversationId")
+            or ""
+        ).strip()
+        media_gen = imagine_conversation_media_gen(asset)
+        source_ids = {
+            str(value).strip()
+            for value in media_gen.get("input_assets") or []
+            if str(value or "").strip()
+        }
+        if not asset_id or asset_id in skipped or not conversation_id or not source_ids:
+            continue
+        if conversation_id not in candidates and len(candidates) >= max(1, max_conversations):
+            continue
+        record = candidates.setdefault(conversation_id, {
+            "result_asset_ids": set(),
+            "source_asset_ids": set(),
+        })
+        record["result_asset_ids"].add(asset_id)
+        record["source_asset_ids"].update(source_ids)
+    return candidates
+
+
+def imagine_recover_missing_direct_upload_conversation_cards(
+    candidates: dict[str, dict],
+    account: dict,
+) -> list[dict]:
+    """Recover complete cards only when the exact official detail proves the pairing."""
+    if not candidates:
+        return []
+    recovered: list[dict] = []
+    # The normal Saved pass already uses eight concurrent detail requests.  This is a
+    # fallback for the exceptional asset-only rows, not a second broad historical sweep.
+    with ThreadPoolExecutor(max_workers=min(8, len(candidates))) as executor:
+        futures = {
+            executor.submit(imagine_conversation_detail, conversation_id, account, 20): conversation_id
+            for conversation_id in candidates
+        }
+        for future in as_completed(futures):
+            conversation_id = futures[future]
+            expected = candidates[conversation_id]
+            try:
+                detail = future.result()
+            except Exception as exc:
+                imagine_debug_event("saved_asset_conversation_detail_failed", {
+                    "conversation_id": conversation_id,
+                    "error": str(exc)[:400],
+                })
+                continue
+            post = imagine_saved_post_from_conversation(
+                {"conversationId": conversation_id},
+                detail,
+                account,
+            )
+            if not post:
+                continue
+            items = [item for item in post.get("items") or [] if isinstance(item, dict)]
+            official_asset_ids = {
+                imagine_item_asset_id(item)
+                for item in items
+                if imagine_item_asset_id(item)
+            }
+            official_upload_source_ids = {
+                imagine_item_asset_id(item)
+                for item in items
+                if imagine_item_is_upload_source(item) and imagine_item_asset_id(item)
+            }
+            if not (
+                expected["result_asset_ids"] <= official_asset_ids
+                and expected["source_asset_ids"] <= official_upload_source_ids
+            ):
+                continue
+            recovered.append(post)
+    return recovered
+
+
 def remove_imagine_remote_cache_assets(
     root: Path | None,
     account: dict,
@@ -6671,6 +6856,7 @@ def list_imagine_saved(payload: dict) -> dict:
     # back as a card of their own, holding the same videos without the image they were made
     # from. The cache is where the earlier pages went, so ask it what already has a card.
     cached_grouped_asset_ids: set[str] = set()
+    cached_complete_upload_asset_ids: set[str] = set()
     try:
         for cached_post in (
             library_index.query_imagine_remote_posts(
@@ -6683,12 +6869,64 @@ def list_imagine_saved(payload: dict) -> dict:
         ):
             if not isinstance(cached_post, dict):
                 continue
-            for item in cached_post.get("items") or []:
-                cached_item_id = imagine_item_asset_id(item)
-                if cached_item_id:
-                    cached_grouped_asset_ids.add(cached_item_id)
+            cached_items = [item for item in cached_post.get("items") or [] if isinstance(item, dict)]
+            cached_item_ids = {
+                imagine_item_asset_id(item)
+                for item in cached_items
+                if imagine_item_asset_id(item)
+            }
+            cached_grouped_asset_ids.update(cached_item_ids)
+            if any(imagine_item_is_upload_source(item) for item in cached_items):
+                cached_complete_upload_asset_ids.update(cached_item_ids)
     except Exception:
         cached_grouped_asset_ids = set()
+        cached_complete_upload_asset_ids = set()
+
+    complete_upload_asset_ids = {
+        imagine_item_asset_id(item)
+        for post in posts
+        if any(
+            imagine_item_is_upload_source(candidate)
+            for candidate in post.get("items") or []
+            if isinstance(candidate, dict)
+        )
+        for item in post.get("items") or []
+        if isinstance(item, dict) and imagine_item_asset_id(item)
+    }
+    missing_direct_upload_candidates = imagine_missing_direct_upload_conversation_candidates(
+        assets,
+        skip_asset_ids=(
+            hidden_remote_ids
+            | complete_upload_asset_ids
+            | cached_complete_upload_asset_ids
+        ),
+    )
+    for post in imagine_recover_missing_direct_upload_conversation_cards(
+        missing_direct_upload_candidates,
+        account,
+    ):
+        official_asset_ids.update({
+            imagine_item_asset_id(item)
+            for item in post.get("items") or []
+            if isinstance(item, dict) and imagine_item_asset_id(item)
+        })
+        if imagine_hidden_bundle_card(post, relations):
+            continue
+        post = imagine_apply_generated_relations(post, root, account, relations)
+        if imagine_post_liked_anchor_keys(post) & hidden_remote_ids:
+            continue
+        post["items"] = [
+            item
+            for item in post.get("items") or []
+            if imagine_item_asset_id(item) not in hidden_remote_ids
+        ]
+        if not post["items"]:
+            continue
+        representative = imagine_representative_item(post["items"]) or post["items"][-1]
+        post["representative_item"] = representative
+        post["representative"] = representative.get("url") or representative.get("item_id") or ""
+        posts.extend(imagine_saved_lineage_cards(post))
+
     grouped_asset_ids = hidden_bundle_asset_ids | cached_grouped_asset_ids | {
         imagine_item_asset_id(item)
         for post in [*posts, *local_heart_posts]
@@ -6711,6 +6949,19 @@ def list_imagine_saved(payload: dict) -> dict:
             or ""
         ).strip()
     }
+    # A video can live in a different Imagine conversation from the image it was made
+    # from.  Grok's conversation feed may omit that child conversation altogether, while
+    # /rest/assets still returns the child with its exact input asset id.  Do not let the
+    # cache-only duplicate guard discard that official child: when its input is present in
+    # this normal Saved page, add the asset row and let the existing lineage merge attach it
+    # to the card.  This preserves the app's grouping rules and never invents a source or a
+    # result from cached data.
+    current_saved_item_ids = {
+        imagine_item_asset_id(item)
+        for post in posts
+        for item in post.get("items") or []
+        if isinstance(item, dict) and imagine_item_asset_id(item)
+    }
     # Two cards can carry the same folder_path: an image edit started from a T2I result opens
     # its own conversation but keeps the source asset as its root, so it collides with the
     # standalone card for that same source. Keying the dict on the path alone let one silently
@@ -6727,11 +6978,23 @@ def list_imagine_saved(payload: dict) -> dict:
             official_asset_ids.add(asset_id)
         if imagine_asset_upload_only(asset):
             continue
+        asset_input_ids = {
+            str(value).strip()
+            for value in imagine_conversation_media_gen(asset).get("input_assets") or []
+            if str(value or "").strip()
+        }
+        official_continuation_of_current_card = bool(
+            asset_id
+            and asset_id not in current_saved_item_ids
+            and asset_input_ids & current_saved_item_ids
+        )
         if (
             not asset_id
             or asset_id in hidden_remote_ids
-            or asset_id in grouped_asset_ids
-            or asset_id in grouped_source_ids
+            or (
+                not official_continuation_of_current_card
+                and (asset_id in grouped_asset_ids or asset_id in grouped_source_ids)
+            )
         ):
             continue
         owner_user_id = imagine_asset_owner_user_id(asset)
@@ -24731,6 +24994,7 @@ POST_JSON_ROUTES = {
         open_imagine_usage_page=open_imagine_usage_page,
         list_imagine_saved_cache=list_imagine_saved_cache,
         list_imagine_saved=list_imagine_saved,
+        load_imagine_saved_conversation=load_imagine_saved_conversation,
         list_imagine_discover_cache=list_imagine_discover_cache,
         list_imagine_discover=list_imagine_discover,
         start_imagine_bundle_background_cache=start_imagine_bundle_background_cache,
