@@ -10,7 +10,7 @@ const localCardPreviewObserver = typeof IntersectionObserver === "function"
     }
   }, { root: null, rootMargin: "1600px 0px", threshold: 0.01 })
   : null;
-const missingImagineCardPreviewChecks = new Map();
+const missingImagineRemoteMediaChecks = new Map();
 const persistentCardPreviewLookupCache = new Map();
 const cardPreviewDisposers = new WeakMap();
 const CARD_PREVIEW_NATIVE_MAX_ACTIVE = 4;
@@ -809,9 +809,10 @@ function imagineItemUsesPreviewUrl(item, url) {
   return candidates.some((candidate) => imaginePreviewUrlKey(candidate) === target);
 }
 
-function removeUnavailableImagineItem(postPath, url, host = null) {
+function removeUnavailableImagineItem(postPath, url, host = null, assetId = "") {
   const path = String(postPath || "").trim();
   if (!path || typeof library_state !== "object" || !library_state) return false;
+  const missingAssetId = String(assetId || "").trim();
   let changed = false;
   let keptPost = null;
   const removedSelectedPost = String(library_state.selectedPostPath || "") === path;
@@ -820,14 +821,19 @@ function removeUnavailableImagineItem(postPath, url, host = null) {
     "imagineDiscoverPosts",
     "imagineUnsavedPosts",
     "imagineSearchPosts",
+    "imagineUploadPosts",
+    "imagineLikedPosts",
+    "posts",
   ]) {
     if (!Array.isArray(library_state[stateKey])) continue;
     library_state[stateKey] = library_state[stateKey].flatMap((post) => {
       if (String(post?.folder_path || "") !== path) return [post];
       const items = Array.isArray(post?.items) ? post.items : [];
       const remaining = items.filter((item) => {
-        if (!imagineItemUsesPreviewUrl(item, url)) return true;
-        return false;
+        const itemAssetId = missingImagineAssetIdentity(item, "").assetId;
+        const matchesUrl = imagineItemUsesPreviewUrl(item, url);
+        const matchesAsset = Boolean(missingAssetId && itemAssetId === missingAssetId);
+        return !matchesUrl && !matchesAsset;
       });
       if (remaining.length === items.length) return [post];
       changed = true;
@@ -921,11 +927,11 @@ function missingImagineAssetIdentity(item, url) {
   return { assetId, accountId };
 }
 
-function handleUnavailableImagineCardPreview(host, item, url, postPath) {
+function handleUnavailableImagineRemoteMedia(host, item, url, postPath) {
   const key = String(url || "").trim();
   const path = String(postPath || "").trim();
   if (!path || !isImagineRemotePreviewUrl(key)) return Promise.resolve(false);
-  if (missingImagineCardPreviewChecks.has(key)) return missingImagineCardPreviewChecks.get(key);
+  if (missingImagineRemoteMediaChecks.has(key)) return missingImagineRemoteMediaChecks.get(key);
   const check = fetch(cardPreviewRetryUrl(key, `missing-${Date.now()}`), {
     method: "HEAD",
     cache: "no-store",
@@ -944,12 +950,16 @@ function handleUnavailableImagineCardPreview(host, item, url, postPath) {
         status,
       }).catch(() => null)
       : Promise.resolve(null);
-    return cleanup.then(() => removeUnavailableImagineItem(path, key, host));
+    return cleanup.then(() => removeUnavailableImagineItem(path, key, host, assetId));
   }).catch(() => false).finally(() => {
-    missingImagineCardPreviewChecks.delete(key);
+    missingImagineRemoteMediaChecks.delete(key);
   });
-  missingImagineCardPreviewChecks.set(key, check);
+  missingImagineRemoteMediaChecks.set(key, check);
   return check;
+}
+
+function handleUnavailableImagineCardPreview(host, item, url, postPath) {
+  return handleUnavailableImagineRemoteMedia(host, item, url, postPath);
 }
 
 function cardPreviewLoadOptions(host, item, url) {

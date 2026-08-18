@@ -6749,13 +6749,15 @@ def remove_imagine_remote_cache_assets(
     if not root or not asset_ids:
         return
     try:
-        # The same asset may be one item in several provenance-scoped cards. Remove that
-        # item from each cached card; prune deletes the card only when no items remain.
-        library_index.prune_imagine_remote_assets(
-            root,
+        # Saved and Liked are separate cache namespaces. The same asset may be one item
+        # in several provenance-scoped cards, so remove it from both; prune deletes a
+        # card only when no items remain.
+        for account_key in {
             imagine_account_settings_key(account),
-            asset_ids,
-        )
+            imagine_liked_cache_account_key(account),
+        }:
+            if account_key:
+                library_index.prune_imagine_remote_assets(root, account_key, asset_ids)
     except Exception as exc:
         imagine_debug_event("saved_cache_asset_delete_failed", {
             "account_id": str(account.get("id") or ""),
@@ -6771,11 +6773,16 @@ def prune_imagine_remote_cache_assets(
     if not root or not asset_ids:
         return
     try:
-        library_index.prune_imagine_remote_assets(
-            root,
+        # Liked keeps its own cache namespace because its cards are assembled from the
+        # collection rather than the Saved feed. Pruning only the Saved namespace left a
+        # deleted child media item inside a reused Liked card, which then kept requesting
+        # its now-dead media URL in detail.
+        for account_key in {
             imagine_account_settings_key(account),
-            asset_ids,
-        )
+            imagine_liked_cache_account_key(account),
+        }:
+            if account_key:
+                library_index.prune_imagine_remote_assets(root, account_key, asset_ids)
     except Exception as exc:
         imagine_debug_event("saved_cache_asset_prune_failed", {
             "account_id": str(account.get("id") or ""),
@@ -10879,9 +10886,9 @@ def _like_imagine_media_post(payload: dict) -> dict:
     # Hearting someone else's asset copies it into this account instead of filing the
     # original owner's id in the collection. The collection route leaves the entry owned by
     # whoever made it, so it disappears when they delete the asset and cannot be generated
-    # from as your own. clone-batch makes it yours, and the copy is then added to Liked so
-    # it lands where an ordinary heart would.
-    collection_result = {"added": [], "failed": []}
+    # from as your own. clone-batch makes it this account's own Saved asset. The clone-batch
+    # build then shows that copy in the app's Liked view without registering it in grok.com's
+    # Liked collection.
     if external_ids:
         # Copy the whole card, source image included. Taking only the asset the heart was
         # pressed on left the image belonging to whoever posted it, so deleting the copied
@@ -10931,19 +10938,13 @@ def _like_imagine_media_post(payload: dict) -> dict:
             # Keeping a copy out of Imagine main is imagine_liked_card_asset_ids' job, worked
             # out where main is built. It must not go in the local exclusion list: Liked reads
             # that list to drop what has been deleted, and a copy sitting in it would take the
-            # card down with it.
-            collection_result = imagine_collection_add_assets(account, cloned_ids)
-            if collection_result.get("failed"):
-                raise RuntimeError(
-                    collection_result.get("error")
-                    or f"Grok did not add {len(collection_result['failed'])} copied asset(s) to Liked."
-                )
+            # card down with it. Do not add cloned ids to grok.com's Liked collection here.
         imagine_debug_event("external_asset_heart_cloned", {
             "account_id": str(account.get("id") or ""),
             "pressed_id": primary_id,
             "cloned": sorted(cloned_ids),
             "cloned_sources": sorted(cloned_sources),
-            "collection_added": collection_result.get("added") or [],
+            "official_liked_registration": False,
             "clone_records": clone_result.get("cloned") or [],
         })
     released_exclusions = local_post_asset_ids & imagine_local_exclusion_ids(root, account)

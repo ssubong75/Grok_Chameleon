@@ -1583,13 +1583,12 @@ async function likeImagineSelectedDetailPost(preparedContext = null) {
   return data;
 }
 
-// grok.com files a clone-batch copy in Liked, not in the card the heart was pressed on, so
-// the detail is left showing the link -- an asset this account does not own. Read Liked
-// back and hand the detail over to the copy. Two things ride on that reload: it is also
-// what rewrites the server-side Liked cache, so the copy survives a reload or an account
-// switch, and it puts the user on the copy rather than the link. Generating from the link
-// re-uploads its source under a fresh id and files the result on a card of its own; the
-// copy carries grok.com's own conversation, so generating from it stays on this card.
+// A clone-batch copy lands in this account's Saved feed, while this app derives its Liked
+// card locally from the clone record. Read that app Liked view back and hand the detail over
+// to the copy, rather than leave it on the external link. The reload also refreshes the local
+// Liked cache so the copy survives a reload or account switch. Generating from the link
+// re-uploads its source under a fresh id and files the result on a card of its own; the copy
+// carries grok.com's own conversation, so generating from it stays on this card.
 async function imagineOpenClonedDetailAfterSave(result, pressedItem) {
   const records = (result?.cloned_external || []).filter((record) => record?.asset_id);
   if (!records.length || typeof loadImagineLikedCards !== "function") return;
