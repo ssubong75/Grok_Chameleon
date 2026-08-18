@@ -220,6 +220,39 @@ function detailCanSaveImaginePost(post, item) {
 function syncImagineDetailHeartState(post, item) {
   const button = document.querySelector(".i_detail_heart");
   if (!button) return;
+  if (detailIsImagineLinkSource(post, item)) {
+    const postMeta = detailImagineMetadataFrom(post);
+    const itemMeta = detailImagineMetadataFrom(item);
+    const postId = String(
+      postMeta.metadata.link_post_id
+      || postMeta.imagine.link_post_id
+      || itemMeta.metadata.link_post_id
+      || itemMeta.imagine.link_post_id
+      || post?.post_id
+      || "",
+    ).trim();
+    const itemId = String(
+      item?.asset_id
+      || itemMeta.metadata.asset_id
+      || itemMeta.imagine.asset_id
+      || item?.item_id
+      || item?.post_id
+      || "",
+    ).trim();
+    const accountId = String(
+      post?.account_id
+      || itemMeta.imagine.account_id
+      || itemMeta.metadata.account_id
+      || "",
+    ).trim();
+    if (postId) button.dataset.imagineHeartPostId = postId;
+    if (itemId) button.dataset.imagineHeartItemId = itemId;
+    if (accountId) button.dataset.imagineHeartAccountId = accountId;
+  } else {
+    delete button.dataset.imagineHeartPostId;
+    delete button.dataset.imagineHeartItemId;
+    delete button.dataset.imagineHeartAccountId;
+  }
   if (button.getAttribute("aria-busy") === "true") {
     button.hidden = false;
     button.classList.add("saved");
@@ -592,6 +625,9 @@ function renderDetailView(prefix, post) {
     icon.src = `./assets/icons/${type === "video" ? "video" : "image"}.svg`;
     icon.alt = "";
     media.append(icon);
+  }
+  if (prefix === "i" && typeof renderImagineDetailHeartPreparationOverlay === "function") {
+    renderImagineDetailHeartPreparationOverlay(media);
   }
   if (meta) {
     meta.textContent = detailPromptFor(post, selectedItem) || "Prompt";

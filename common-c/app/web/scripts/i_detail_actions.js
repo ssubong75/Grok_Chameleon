@@ -1407,24 +1407,128 @@ async function unsaveImagineSelectedDetailPost() {
   return unsaveImaginePost(post, { item });
 }
 
-async function likeImagineSelectedDetailPost() {
-  const post = selectedLibraryPost();
-  const item = selectedDetailItem(post) || post?.representative_item || post?.items?.[0];
+const IMAGINE_DETAIL_HEART_PREPARE_DELAYS = [0, 350, 900, 1800];
+let imagineDetailHeartPreparationPhase = "";
+
+function renderImagineDetailHeartPreparationOverlay(media = document.querySelector(".i_detail_media")) {
+  if (!media) return;
+  media.querySelector(".i_detail_heart_preparation")?.remove();
+  if (!imagineDetailHeartPreparationPhase) return;
+  const overlay = document.createElement("div");
+  overlay.className = "detail_generation_status i_detail_heart_preparation";
+  overlay.setAttribute("aria-live", "polite");
+  overlay.textContent = imagineDetailHeartPreparationPhase;
+  media.append(overlay);
+}
+
+function setImagineDetailHeartPreparation(phase = "") {
+  imagineDetailHeartPreparationPhase = String(phase || "");
+  renderImagineDetailHeartPreparationOverlay();
+}
+
+function imagineDetailHeartLinkPostId(post, item = null, fallback = "") {
+  return String(
+    imagineLinkPostIdForPost(post, item)
+    || fallback
+    || String(library_state?.selectedPostPath || "").split("/").filter(Boolean).pop()
+    || "",
+  ).trim();
+}
+
+function imagineDetailHeartThumbsReady(items) {
+  const expected = new Set((items || []).map((item) => String(mediaItemKey(item) || "")).filter(Boolean));
+  if (!expected.size) return false;
+  const rendered = new Set(Array.from(document.querySelectorAll(".i_detail_thumb[data-library-item-id]"))
+    .map((thumb) => String(thumb.dataset.libraryItemId || ""))
+    .filter(Boolean));
+  return Array.from(expected).every((key) => rendered.has(key));
+}
+
+function imagineDetailHeartReadyContext(post, item = null) {
+  const selectedItem = item || selectedDetailItem(post) || post?.representative_item || post?.items?.[0] || null;
+  const postId = imagineActionPostIdForPost(post);
+  const unsavedPost = Boolean(
+    post
+    && typeof isImagineUnsavedPost === "function"
+    && isImagineUnsavedPost(post, selectedItem),
+  );
+  if (!post || !selectedItem || (!postId && !unsavedPost)) return null;
+  const linkSource = isImagineLinkSourcePost(post, selectedItem);
+  const localItems = linkSource ? imagineLinkBundleItems(post, [selectedItem]) : [selectedItem];
+  const registrationItem = linkSource ? imagineLinkRegistrationItem(post, selectedItem) : selectedItem;
+  const registrationItems = linkSource ? localItems : [registrationItem];
+  const targets = registrationItems.map(imagineLikeTargetForItem).filter((target) => target.id);
+  const targetIds = new Set(targets.map((target) => target.id));
+  if (!localItems.length || targets.length !== registrationItems.length || targetIds.size !== targets.length) return null;
+  return {
+    post,
+    item: selectedItem,
+    linkSource,
+    postId,
+    localItems,
+    registrationItem,
+    registrationItems,
+    thumbsReady: !linkSource || imagineDetailHeartThumbsReady(localItems),
+  };
+}
+
+async function prepareImagineDetailHeartCopy(post, item, heart) {
+  const immediate = imagineDetailHeartReadyContext(post, item);
+  if (immediate && immediate.thumbsReady) return { context: immediate, prepared: false };
+  const postId = imagineDetailHeartLinkPostId(post, item, heart?.dataset?.imagineHeartPostId);
+  if (!postId) throw new Error("Imagine card is not ready.");
+  const accountId = String(
+    post?.account_id
+    || heart?.dataset?.imagineHeartAccountId
+    || iDetailAccountId(item, post)
+    || "",
+  ).trim();
+  setImagineDetailHeartPreparation("Preparing");
+  for (const delay of IMAGINE_DETAIL_HEART_PREPARE_DELAYS) {
+    if (delay) await new Promise((resolve) => window.setTimeout(resolve, delay));
+    try {
+      const data = await qApi("/api/imagine/remote/link", {
+        post_id: postId,
+        account_id: accountId,
+      });
+      const refreshedPost = data?.post || (Array.isArray(data?.posts) ? data.posts[0] : null);
+      const preferredId = String(
+        heart?.dataset?.imagineHeartItemId
+        || imagineLikeTargetForItem(item || {}).id
+        || "",
+      ).trim();
+      const refreshedItem = (refreshedPost?.items || []).find((candidate) => (
+        imagineLikeTargetForItem(candidate).id === preferredId
+      )) || imagineLinkRegistrationItem(refreshedPost) || refreshedPost?.representative_item || refreshedPost?.items?.[0] || null;
+      const context = imagineDetailHeartReadyContext(refreshedPost, refreshedItem);
+      if (context) return { context, prepared: true };
+    } catch (error) {
+      if (delay === IMAGINE_DETAIL_HEART_PREPARE_DELAYS.at(-1)) throw error;
+    }
+  }
+  throw new Error("Imagine card is not ready.");
+}
+
+async function likeImagineSelectedDetailPost(preparedContext = null) {
+  const post = preparedContext?.post || selectedLibraryPost();
+  const item = preparedContext?.item || selectedDetailItem(post) || post?.representative_item || post?.items?.[0];
   const postId = imagineActionPostIdForPost(post);
   const unsavedPost = Boolean(post && typeof isImagineUnsavedPost === "function" && isImagineUnsavedPost(post, item));
   if (!post || !item || (!postId && !unsavedPost)) {
-    showErrorPanel("Save unavailable", "This Imagine post has no post id.");
-    return;
+    throw new Error("Imagine post is not ready.");
   }
   const t2iPost = typeof isImagineT2iPost === "function" && isImagineT2iPost(post);
   const linkSource = isImagineLinkSourcePost(post, item);
-  const localItems = linkSource ? imagineLinkBundleItems(post, [item]) : [item];
-  const registrationItem = linkSource ? imagineLinkRegistrationItem(post, item) : item;
+  const localItems = preparedContext?.localItems || (linkSource ? imagineLinkBundleItems(post, [item]) : [item]);
+  const registrationItem = preparedContext?.registrationItem || (linkSource ? imagineLinkRegistrationItem(post, item) : item);
   const payload = { account_id: post.account_id || iDetailAccountId(registrationItem, post) };
-  const registrationItems = linkSource ? localItems : [registrationItem];
+  const registrationItems = preparedContext?.registrationItems || (linkSource ? localItems : [registrationItem]);
   payload.items = registrationItems
     .map(imagineLikeTargetForItem)
     .filter((target) => target.id);
+  if (!payload.items.length || payload.items.length !== registrationItems.length) {
+    throw new Error("Imagine card is not ready.");
+  }
   payload.local_group_id = imagineSavedGroupIdForPost(post);
   payload.local_post = imagineLocalHeartSnapshot(post, localItems);
   if (post.__imagineSavePending) return;
@@ -1473,7 +1577,7 @@ async function likeImagineSelectedDetailPost() {
     if (movedFromUnsaved) returnToImagineUnsavedMain();
     refreshImagineRemoteViews();
   }
-  toast("Saved Imagine post.");
+  if (!preparedContext) toast("Saved Imagine post.");
   // The clone records the copy's own ids, which is the only way the caller can find the
   // card the copy landed on once Liked has been read back.
   return data;
@@ -2273,7 +2377,8 @@ function bindImagineDetailActions() {
       && detailCanSaveImaginePost(post, item);
     const saved = typeof imaginePostLiked === "function"
       && (imaginePostLiked(post, item) || imaginePostLiked(post));
-    if (!canSave) {
+    const canPrepareMissingLink = !saved && Boolean(heart.dataset.imagineHeartPostId);
+    if (!canSave && !canPrepareMissingLink) {
       syncImagineDetailHeartState(post, item);
       return;
     }
@@ -2281,19 +2386,8 @@ function bindImagineDetailActions() {
     heart.setAttribute("aria-pressed", "true");
     heart.setAttribute("aria-label", saved ? "Unsaving" : "Saving");
     heart.setAttribute("aria-busy", "true");
-    // Copying runs two round trips to grok.com — the clone, then filing it in Liked — and
-    // waiting for both before redrawing left the heart sitting there for seconds after the
-    // press. It has already done the only thing it can do, so take it off screen now and
-    // put it back only if the copy fails.
-    const copying = !saved;
-    if (copying) heart.hidden = true;
-    (saved ? unsaveImagineSelectedDetailPost() : likeImagineSelectedDetailPost())
-      .catch((error) => {
-        console.warn(error);
-        if (copying) heart.hidden = false;
-        showErrorPanel(saved ? "Unsave failed" : "Save failed", error?.message || "Save failed.");
-      })
-      .then(async (result) => {
+    void (async () => {
+      try {
         if (saved) {
           // Un-hearting takes the card out of Liked, so there is nothing left to show in the
           // detail. Reload the list and go back to it, the way grok.com drops the card.
@@ -2309,16 +2403,30 @@ function bindImagineDetailActions() {
           }
           return;
         }
+        const prepared = await prepareImagineDetailHeartCopy(post, item, heart);
+        if (prepared.prepared) setImagineDetailHeartPreparation("Copying");
+        const result = await likeImagineSelectedDetailPost(prepared.context);
         // Saving is the same move in the other direction: the copy is what belongs on Liked
         // now, so the list has to be read back and the detail moved onto the copy. This ran
         // only for un-hearting, which left a heart press looking like it had done nothing.
         await imagineOpenClonedDetailAfterSave(result, item);
-      })
-      .finally(() => {
+        setImagineDetailHeartPreparation("OK");
+        await new Promise((resolve) => window.setTimeout(resolve, 900));
+      } catch (error) {
+        console.warn(error);
+        if (saved) {
+          showErrorPanel("Unsave failed", error?.message || "Unsave failed.");
+        } else {
+          setImagineDetailHeartPreparation("Failed");
+          await new Promise((resolve) => window.setTimeout(resolve, 1300));
+        }
+      } finally {
+        setImagineDetailHeartPreparation("");
         heart.removeAttribute("aria-busy");
         const currentPost = selectedLibraryPost();
         syncImagineDetailHeartState(currentPost, selectedDetailItem(currentPost));
-      });
+      }
+    })();
   });
   document.querySelector(".i_detail_copy_url")?.addEventListener("click", () => {
     copyImagineSelectedDetailMediaAddress().catch((error) => {
