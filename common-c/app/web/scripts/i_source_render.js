@@ -156,6 +156,10 @@ async function openImagineLinkPost(value) {
     const targetPost = normalized[0];
     if (!targetPost) throw new Error("Could not load the linked Imagine post.");
     const targetItem = preferredImagineLinkItem(targetPost, postId);
+    // Clear the submitted value before changing screens. The input is shared with the
+    // main header, so relying on the later collapsed-input cleanup could leave an old
+    // link visible when the user returns from the detail page.
+    if (input) input.value = "";
     setImagineTab("i_link_btn");
     library_state.iMainView = imagineViewValue("LINK", "link");
     screen_state.detail_back.imagine = {
@@ -165,7 +169,7 @@ async function openImagineLinkPost(value) {
     selectLibraryPost(targetPost);
     if (targetItem) library_state.selectedDetailItemId = mediaItemKey(targetItem);
     openScreen("i_detail", screen_state.current_i_nav_btn || "i_imagine_nav_btn");
-    setImagineLinkInputOpen(false);
+    setImagineLinkInputOpen(false, { clear: false });
   } catch (error) {
     showErrorPanel("Link failed", error?.message || "Could not open the linked Imagine post.");
   } finally {
