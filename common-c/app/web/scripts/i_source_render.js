@@ -963,7 +963,14 @@ function imagineSavedLineageCards(post) {
   // and the site shows it as one grouped card, so leave it whole instead of splitting the
   // parent chain. Everything else, T2I batches included, still fans out below.
   const linkSourced = Boolean(metadata.link_source || post.link_source || metadata.remote_view === "link");
-  if (linkSourced) return [post];
+  // Clone-batch is app-only Liked: its owned source and descendants have already been
+  // assembled into one card by the server.  Do not run the Saved root fan-out over that
+  // card again, or a complete clone family is rendered as one card per root asset.
+  const privateCloneLiked = (
+    imagineSavedPostProvenance(post) === "cloned-liked"
+    && metadata.liked_scope === "foreign-origin"
+  );
+  if (linkSourced || privateCloneLiked) return [post];
 
   const itemsById = new Map(items.map((item) => [imagineSavedItemAssetId(item), item]));
   const resultItems = items.filter((item) => !imagineSavedItemIsSource(item));

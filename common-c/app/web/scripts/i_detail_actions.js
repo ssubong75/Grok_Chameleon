@@ -1541,11 +1541,15 @@ async function likeImagineSelectedDetailPost(preparedContext = null) {
   }
   applyImagineOfficialCloneRecords(post, data, localItems);
   const savedItemPost = savedImagineSingleItemPost(post, registrationItem, data, localItems);
+  const clonedExternal = Array.isArray(data?.cloned_external) && data.cloned_external.length > 0;
   if (t2iPost) applyImagineLikeResultPostId(savedItemPost, registrationItem, data);
   if (linkSource) markImaginePostLiked(post, true);
   else markImagineItemLiked(registrationItem, true);
   if (typeof forgetHiddenImaginePost === "function") forgetHiddenImaginePost(post);
-  addImaginePostToSavedView(savedItemPost);
+  // The local snapshot still holds the external source ids. A clone-batch result is instead
+  // hydrated as its own owned card by the server and inserted directly into app Liked below;
+  // do not briefly seed the source card into Imagine main.
+  if (!clonedExternal) addImaginePostToSavedView(savedItemPost);
   const movedFromT2i = moveImagineT2iPostOutOfSessionView(post);
   const movedFromUnsaved = unsavedPost;
   if (movedFromUnsaved) {
@@ -1589,23 +1593,71 @@ async function likeImagineSelectedDetailPost(preparedContext = null) {
 // Liked cache so the copy survives a reload or account switch. Generating from the link
 // re-uploads its source under a fresh id and files the result on a card of its own; the copy
 // carries grok.com's own conversation, so generating from it stays on this card.
+function isImagineCloneSourceCard(post, sourceIds) {
+  if (!sourceIds?.size || !isImagineLinkSourcePost(post)) return false;
+  const metadata = post?.metadata && typeof post.metadata === "object" ? post.metadata : {};
+  const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
+  const cloned = metadata.cloned_copy
+    || imagine.cloned_copy
+    || (post?.items || []).some((item) => {
+      const itemMeta = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
+      const itemImagine = itemMeta.imagine && typeof itemMeta.imagine === "object" ? itemMeta.imagine : {};
+      return itemMeta.cloned_copy || itemImagine.cloned_copy;
+    });
+  if (cloned) return false;
+  return (post?.items || []).some((item) => sourceIds.has(imagineLikeTargetForItem(item).id));
+}
+
 async function imagineOpenClonedDetailAfterSave(result, pressedItem) {
   const records = (result?.cloned_external || []).filter((record) => record?.asset_id);
   if (!records.length || typeof loadImagineLikedCards !== "function") return;
-  try {
-    await loadImagineLikedCards({ force: true });
-  } catch (error) {
-    console.warn(error);
-    return;
-  }
   const clonedIds = new Set(
     records.map((record) => String(record.asset_id || "").trim()).filter(Boolean),
   );
-  // Which card holds the copy is grok.com's call -- one clone-batch can fold into a single
-  // card -- so look for the copy among the items instead of guessing which id anchors it.
-  const card = (library_state.imagineLikedPosts || []).find((candidate) => (
-    (candidate?.items || []).some((item) => clonedIds.has(imagineLikeTargetForItem(item).id))
-  ));
+  const sourceIds = new Set(
+    records.map((record) => String(record.source_asset_id || "").trim()).filter(Boolean),
+  );
+  const hydratedPosts = (Array.isArray(result?.cloned_liked_posts) ? result.cloned_liked_posts : [])
+    .filter((post) => post && typeof post === "object")
+    .map(normalizeServerPost);
+  let card = null;
+  if (hydratedPosts.length) {
+    // Do not leave the external source card in app Liked beside its owned replacement.
+    // Imagine main retains the source; this only changes the Liked in-memory expression.
+    const retainedLikedPosts = (library_state.imagineLikedPosts || []).filter((candidate) => (
+      !isImagineCloneSourceCard(candidate, sourceIds)
+    ));
+    const merged = typeof mergeImagineSyncedPosts === "function"
+      ? mergeImagineSyncedPosts(
+        retainedLikedPosts,
+        hydratedPosts,
+        { replacesList: false, preserveMatchedAnchors: true },
+      )
+      : [...hydratedPosts, ...retainedLikedPosts];
+    library_state.imagineLikedPosts = typeof reconcileImagineLikedLineagePosts === "function"
+      ? reconcileImagineLikedLineagePosts(merged)
+      : merged;
+    library_state.imagineLikedLoaded = true;
+    if (typeof syncImagineRemotePostsIntoLibrary === "function") syncImagineRemotePostsIntoLibrary();
+    card = (library_state.imagineLikedPosts || []).find((candidate) => (
+      (candidate?.items || []).some((item) => clonedIds.has(imagineLikeTargetForItem(item).id))
+    )) || null;
+  }
+  if (!card) {
+    try {
+      await loadImagineLikedCards({ force: true });
+    } catch (error) {
+      console.warn(error);
+      return;
+    }
+  }
+  // One clone-batch can fold into one app Liked card, so find the copied item instead of
+  // guessing which clone id anchors that card.
+  if (!card) {
+    card = (library_state.imagineLikedPosts || []).find((candidate) => (
+      (candidate?.items || []).some((item) => clonedIds.has(imagineLikeTargetForItem(item).id))
+    )) || null;
+  }
   if (!card) return;
   const pressedId = pressedItem ? imagineLikeTargetForItem(pressedItem).id : "";
   const pressedCloneId = String(
