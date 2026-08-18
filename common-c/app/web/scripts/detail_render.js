@@ -598,7 +598,7 @@ function renderDetailView(prefix, post) {
     media.append(hiddenMediaPreviewElement());
   } else if (hasDetailMedia) {
     if (type === "video") {
-      const player = createDetailVideoPlayer(prefix, renderItem);
+      const player = createDetailVideoPlayer(prefix, renderItem, post);
       media.append(player);
       playDetailVideoIfCurrent(prefix, player.querySelector("video"));
     } else {
