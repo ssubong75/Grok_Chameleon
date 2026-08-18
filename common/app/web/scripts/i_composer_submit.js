@@ -855,10 +855,6 @@ async function submitImagineComposer() {
     input?.focus();
     return;
   }
-  if (typeof imagineGeneratedSavedSyncInProgress === "function" && imagineGeneratedSavedSyncInProgress()) {
-    toast("이전 생성 결과의 Saved 목록 반영을 확인 중입니다.");
-    return;
-  }
   const movedToImagineMain = shouldShowImagineMainBeforeSubmit();
   const submissionAccountId = activeImagineAccountId();
   if (movedToImagineMain) showImagineMainNow();
