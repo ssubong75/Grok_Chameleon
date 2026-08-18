@@ -974,6 +974,9 @@ async function deleteImagineRemoteItem(post, item) {
     ? "/api/imagine/asset-metadata/delete"
     : "/api/imagine/asset/delete";
   const data = await qApi(endpoint, deletePayload);
+  if (typeof releaseImagineGeneratedSavedSyncForDeletedItems === "function") {
+    releaseImagineGeneratedSavedSyncForDeletedItems([item, deletePayload]);
+  }
   return {
     deletedItems: [item],
     failures: [],
@@ -1020,6 +1023,9 @@ async function deleteImagineCardAssets(post, items) {
       failures.push(error);
     }
   }
+  if (deletedItems.length && typeof releaseImagineGeneratedSavedSyncForDeletedItems === "function") {
+    releaseImagineGeneratedSavedSyncForDeletedItems(deletedItems);
+  }
   return { deletedItems, failures };
 }
 
@@ -1039,6 +1045,9 @@ async function deleteImagineCardConversation(post, items) {
     payload.conversation_id = "";
   }
   const data = await qApi("/api/imagine/conversation/delete", payload);
+  if (typeof releaseImagineGeneratedSavedSyncForDeletedItems === "function") {
+    releaseImagineGeneratedSavedSyncForDeletedItems(deletedItems);
+  }
   return {
     deletedItems,
     failures: [],
@@ -1112,6 +1121,9 @@ async function deleteImagineRemoteCard(post) {
       const result = results[index];
       if (result.status === "fulfilled") deletedItems.push(items[index]);
       else failures.push(result.reason);
+    }
+    if (deletedItems.length && typeof releaseImagineGeneratedSavedSyncForDeletedItems === "function") {
+      releaseImagineGeneratedSavedSyncForDeletedItems(deletedItems);
     }
     return { deletedItems, failures };
   }

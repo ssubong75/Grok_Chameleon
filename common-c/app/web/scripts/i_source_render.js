@@ -1353,7 +1353,11 @@ let imaginePendingSavedRefreshAttempt = 0;
 // Generated media reaches the browser stream before it necessarily reaches Grok's Saved
 // endpoints.  Keep that acknowledgement separate from the app's card grouping: a group
 // remains exactly as the app presents it, while only its new child item is pending.
-const IMAGINE_GENERATED_SAVED_SYNC_STORAGE_PREFIX = "grok-chameleon:imagine-generated-saved-sync:";
+// v1 persisted every just-generated asset indefinitely. If the user deleted one before
+// Saved finished catching up, it could never be confirmed and blocked later generations
+// even after an app restart. Start v2 with a clean acknowledgement set; successful
+// in-app deletes below also release their own ids immediately.
+const IMAGINE_GENERATED_SAVED_SYNC_STORAGE_PREFIX = "grok-chameleon:imagine-generated-saved-sync:v2:";
 const IMAGINE_GENERATED_SAVED_SYNC_DELAYS = [1500, 4000, 10000, 30000];
 let imagineGeneratedSavedSyncTimer = 0;
 let imagineGeneratedSavedSyncAttempt = 0;
@@ -1559,6 +1563,48 @@ function persistImagineGeneratedSavedSync() {
   } catch {
     // The current session can still reconcile if browser storage is unavailable.
   }
+}
+
+function releaseImagineGeneratedSavedSyncForDeletedItems(items = []) {
+  if (!imagineGeneratedSavedSyncAssetIds.size) return false;
+  const deletedIds = new Set();
+  for (const candidate of (Array.isArray(items) ? items : [items])) {
+    if (typeof candidate === "string") {
+      const value = candidate.trim();
+      if (value) deletedIds.add(value);
+      continue;
+    }
+    if (!candidate || typeof candidate !== "object") continue;
+    const metadata = candidate.metadata && typeof candidate.metadata === "object" ? candidate.metadata : {};
+    const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
+    for (const value of [
+      ...imaginePostIdKeysForItem(candidate),
+      candidate.official_asset_id,
+      metadata.official_asset_id,
+      metadata.official_clone_asset_id,
+      imagine.official_asset_id,
+      imagine.official_clone_asset_id,
+      candidate.id,
+    ]) {
+      const id = String(value || "").trim();
+      if (id) deletedIds.add(id);
+    }
+  }
+  const released = new Set(
+    [...imagineGeneratedSavedSyncAssetIds].filter((assetId) => deletedIds.has(assetId)),
+  );
+  if (!released.size) return false;
+  for (const assetId of released) {
+    imagineGeneratedSavedSyncAssetIds.delete(assetId);
+    imagineGeneratedSavedOfficialAssetIds.delete(assetId);
+  }
+  setImagineGeneratedSavedSyncItemState(released, false);
+  if (!imagineGeneratedSavedSyncAssetIds.size) {
+    clearImagineGeneratedSavedSync();
+  } else {
+    persistImagineGeneratedSavedSync();
+  }
+  return true;
 }
 
 function imagineItemMatchesGeneratedSavedSync(item, assetIds) {
