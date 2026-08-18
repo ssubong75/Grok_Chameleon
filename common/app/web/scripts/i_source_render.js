@@ -1751,12 +1751,17 @@ function beginImagineGeneratedSavedSync(result) {
   if (!assetIds.size) return;
   const accountId = imaginePendingSavedAccountId();
   if (!accountId) return;
+  if (
+    imagineGeneratedSavedSyncAccountId
+    && imagineGeneratedSavedSyncAccountId !== accountId
+  ) {
+    resetImagineGeneratedSavedSyncForAccountChange(accountId);
+  }
   if (imagineGeneratedSavedSyncTimer) window.clearTimeout(imagineGeneratedSavedSyncTimer);
   imagineGeneratedSavedSyncTimer = 0;
   imagineGeneratedSavedSyncAttempt = 0;
   imagineGeneratedSavedSyncAccountId = accountId;
   imagineGeneratedSavedOfficialAssetIds.clear();
-  imagineGeneratedSavedSyncAssetIds.clear();
   for (const assetId of assetIds) imagineGeneratedSavedSyncAssetIds.add(assetId);
   setImagineGeneratedSavedSyncItemState(assetIds, true);
   persistImagineGeneratedSavedSync();
