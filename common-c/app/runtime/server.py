@@ -7741,6 +7741,9 @@ def imagine_store_liked_cache(
 ) -> None:
     if not root:
         return
+    # Direct clone hydration used to leave one temporary cache row per copied asset.  Normalize
+    # those rows before assigning a cache key as well as before rendering them.
+    posts = imagine_group_external_clone_batch_cards(posts)
     records = imagine_remote_cache_records(posts)
     account_key = imagine_liked_cache_account_key(account)
     try:
@@ -7828,6 +7831,68 @@ def remove_imagine_liked_cache_assets(
         })
 
 
+def remove_imagine_liked_cache_clone_source_cards(
+    root: Path | None,
+    account: dict,
+    entries: object,
+) -> None:
+    """Remove only the external source expression after clone-batch replaces it locally."""
+    if not root:
+        return
+    source_ids = {
+        str(record.get("source_asset_id") or "").strip()
+        for record in imagine_normalize_external_clone_records(entries)
+        if str(record.get("source_asset_id") or "").strip()
+    }
+    if not source_ids:
+        return
+    try:
+        cached = library_index.query_imagine_remote_posts(
+            root, imagine_liked_cache_account_key(account), offset=0, limit=5000,
+        )
+        stale_keys: set[str] = set()
+        for post in cached.get("posts") or []:
+            if not isinstance(post, dict) or not imagine_post_is_link_source(post):
+                continue
+            metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+            imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
+            # Older owned-copy rows can also look like link cards.  Never remove them.
+            if (
+                metadata.get("cloned_copy")
+                or imagine.get("cloned_copy")
+                or imagine_post_clone_source_id(post)
+            ):
+                continue
+            item_ids = {
+                imagine_item_asset_id(item)
+                for item in post.get("items") or []
+                if isinstance(item, dict) and imagine_item_asset_id(item)
+            }
+            if not item_ids & source_ids:
+                continue
+            for key in (
+                imagine_remote_cache_post_key(post),
+                imagine_remote_cache_legacy_post_key(post),
+            ):
+                if key:
+                    stale_keys.add(key)
+        if stale_keys:
+            library_index.delete_imagine_remote_post_keys(
+                root, imagine_liked_cache_account_key(account), stale_keys,
+            )
+            imagine_debug_event("liked_clone_source_cards_removed", {
+                "account_id": str(account.get("id") or ""),
+                "source_ids": sorted(source_ids),
+                "cache_keys": sorted(stale_keys),
+            })
+    except Exception as exc:  # noqa: BLE001
+        imagine_debug_event("liked_clone_source_cache_cleanup_failed", {
+            "account_id": str(account.get("id") or ""),
+            "source_ids": sorted(source_ids),
+            "error": str(exc)[:300],
+        })
+
+
 def list_imagine_liked_cache(payload: dict) -> dict:
     root = library_root()
     if not root:
@@ -7855,9 +7920,21 @@ def list_imagine_liked_cache(payload: dict) -> dict:
         cached_metadata = (
             cached_post.get("metadata") if isinstance(cached_post.get("metadata"), dict) else {}
         )
-        # Do not paint the pre-normalization clone cache and then visibly split the card
-        # again before the live Liked refresh has a chance to repair it.
-        if cached_metadata.get("cloned_copy") and cached_metadata.get("clone_lineage_normalized") is not True:
+        # Older app-only clone cards were already folded when they were written, but they
+        # predate ``clone_lineage_normalized``.  Hiding those rows makes the live refresh
+        # rebuild every owned asset from /saved as a separate card.  Accept that legacy
+        # private-Liked shape by its provenance, never by a card or conversation id.
+        legacy_private_clone = (
+            cached_metadata.get("cloned_copy")
+            and cached_metadata.get("clone_lineage_normalized") is not True
+            and cached_metadata.get("saved_provenance") == "cloned-liked"
+            and cached_metadata.get("liked_scope") == "foreign-origin"
+        )
+        if (
+            cached_metadata.get("cloned_copy")
+            and cached_metadata.get("clone_lineage_normalized") is not True
+            and not legacy_private_clone
+        ):
             continue
         post = imagine_apply_generated_relations(cached_post, root, account, relations)
         imagine_stamp_saved_identity(post)
@@ -7874,6 +7951,9 @@ def list_imagine_liked_cache(payload: dict) -> dict:
             representative.get("url") or representative.get("remote_url") or representative.get("item_id") or ""
         )
         posts.append(post)
+    # Cache-first paint runs before the live Liked response.  Apply the same clone-batch fold
+    # here so an older per-asset cache cannot flash three cards after an app restart.
+    posts = imagine_group_external_clone_batch_cards(posts)
     posts = merge_imagine_liked_lineage_with_saved_cache(
         root, account, posts, hidden_ids=hidden,
     )
@@ -7915,7 +7995,9 @@ def imagine_foreign_origin_liked_cards(
     if not foreign_ids:
         return []
     cards = merge_imagine_saved_lineage_cards(
-        imagine_hidden_scope_posts(cached_posts, foreign_ids)
+        imagine_group_external_clone_batch_cards(
+            imagine_hidden_scope_posts(cached_posts, foreign_ids)
+        )
     )
     derived: list[dict] = []
     for card in cards:
@@ -8320,6 +8402,38 @@ def list_imagine_liked(payload: dict) -> dict:
     # splitting them apart is how they were fetched, not how they are ordered. Put them back
     # in the collection's own order, which is the order the entries arrived in.
     posts.extend(reusable_posts)
+
+    # clone-batch copies deliberately stay out of grok.com's Liked collection.  Older
+    # private-Liked rows already contain their complete source/child bundle, so make those
+    # rows authoritative before deriving anything from Saved.  Otherwise an empty official
+    # collection causes every owned asset to be rediscovered as a separate card on each
+    # refresh.  This is scoped by app-owned Liked provenance, not by a card id, account
+    # history, or shared conversation.
+    private_liked_cache = list_imagine_liked_cache({
+        "account_id": str(account.get("id") or ""),
+        "limit": 5000,
+    })
+    for private_card in private_liked_cache.get("posts") or []:
+        if not isinstance(private_card, dict):
+            continue
+        private_metadata = (
+            private_card.get("metadata")
+            if isinstance(private_card.get("metadata"), dict) else {}
+        )
+        if (
+            private_metadata.get("saved_provenance") != "cloned-liked"
+            or private_metadata.get("liked_scope") != "foreign-origin"
+        ):
+            continue
+        private_item_ids = {
+            imagine_item_asset_id(item)
+            for item in private_card.get("items") or []
+            if isinstance(item, dict) and imagine_item_asset_id(item)
+        }
+        if not private_item_ids or private_item_ids & covered_asset_ids:
+            continue
+        covered_asset_ids.update(private_item_ids)
+        posts.append(private_card)
 
     def liked_entry_position(post: dict) -> int:
         keys = imagine_post_liked_anchor_keys(post) | {
@@ -10883,6 +10997,7 @@ def _like_imagine_media_post(payload: dict) -> dict:
     }
     clone_result = {"cloned": [], "failed": []}
     cloned_sources: set[str] = set()
+    cloned_liked_posts: list[dict] = []
     # Hearting someone else's asset copies it into this account instead of filing the
     # original owner's id in the collection. The collection route leaves the entry owned by
     # whoever made it, so it disappears when they delete the asset and cannot be generated
@@ -10935,16 +11050,29 @@ def _like_imagine_media_post(payload: dict) -> dict:
                 account,
                 add=cloned_ids,
             )
+            # The original remains in Imagine main and on grok.com.  Only its transient app
+            # Liked expression must leave before the owned replacement card is inserted.
+            remove_imagine_liked_cache_clone_source_cards(
+                root,
+                account,
+                clone_result.get("cloned") or [],
+            )
             # Keeping a copy out of Imagine main is imagine_liked_card_asset_ids' job, worked
             # out where main is built. It must not go in the local exclusion list: Liked reads
             # that list to drop what has been deleted, and a copy sitting in it would take the
             # card down with it. Do not add cloned ids to grok.com's Liked collection here.
+            cloned_liked_posts = imagine_hydrate_external_clone_liked_cards(
+                root,
+                account,
+                clone_result.get("cloned") or [],
+            )
         imagine_debug_event("external_asset_heart_cloned", {
             "account_id": str(account.get("id") or ""),
             "pressed_id": primary_id,
             "cloned": sorted(cloned_ids),
             "cloned_sources": sorted(cloned_sources),
             "official_liked_registration": False,
+            "app_liked_cards": len(cloned_liked_posts),
             "clone_records": clone_result.get("cloned") or [],
         })
     released_exclusions = local_post_asset_ids & imagine_local_exclusion_ids(root, account)
@@ -10954,10 +11082,8 @@ def _like_imagine_media_post(payload: dict) -> dict:
             imagine_account_settings_key(account),
             released_exclusions,
         )
-    # grok.com keeps no second copy of a hearted asset: the collection holds the id and the
-    # Liked view reads it back. The local record here was the app's own invention, and it
-    # outlived un-hearting and the owner deleting the asset, so it is gone. Hearted assets
-    # now show in Liked only, exactly as they do on the site.
+    # A regular heart is represented by Grok's collection. A clone-batch copy is represented
+    # by the private cached Liked card above; keep neither as an old local-heart record.
     invalidate_imagine_saved_media_keys_cache(account)
     registration_ids = requested_ids - cloned_sources
     registration_visits = [
@@ -10993,6 +11119,7 @@ def _like_imagine_media_post(payload: dict) -> dict:
         "official_verified_ids": [],
         "cloned_external": clone_result.get("cloned") or [],
         "clone_failed_external": clone_result.get("failed") or [],
+        "cloned_liked_posts": cloned_liked_posts,
         "result": {},
         "results": [],
     }
@@ -11325,6 +11452,410 @@ def imagine_normalize_external_clone_records(entries: object) -> list[dict]:
             "media_type": str(entry.get("media_type") or entry.get("mimeType") or "").strip(),
         })
     return records
+
+
+def imagine_group_external_clone_batch_cards(cards: list[dict]) -> list[dict]:
+    """Fold only the copies returned by one clone-batch into its one Liked card.
+
+    ``clone-batch`` gives every returned asset the conversation it opened for that one copy
+    operation.  The direct asset endpoint, however, returns a separate root post per asset.
+    Those are transport records, not separate cards.  Keep this rule strictly scoped to the
+    clone-batch records saved with the post; normal Saved cards never enter this function.
+    """
+    grouped: dict[str, dict] = {}
+    passthrough: list[tuple[int, dict]] = []
+    for index, candidate in enumerate(cards or []):
+        if not isinstance(candidate, dict):
+            continue
+        metadata = candidate.get("metadata") if isinstance(candidate.get("metadata"), dict) else {}
+        records = imagine_normalize_external_clone_records(metadata.get("official_clone_assets"))
+        if not records:
+            passthrough.append((index, candidate))
+            continue
+        records_by_batch: dict[str, list[dict]] = {}
+        for record in records:
+            # clone-batch normally supplies one shared conversation.  A missing value still
+            # belongs only to this one recorded batch, never to a broad conversation group.
+            batch_id = str(record.get("conversation_id") or "").strip()
+            if not batch_id:
+                batch_id = "assets:" + ",".join(sorted(
+                    str(value.get("asset_id") or "").strip() for value in records
+                ))
+            records_by_batch.setdefault(batch_id, []).append(record)
+        for batch_id, batch_records in records_by_batch.items():
+            record_by_asset_id = {
+                str(record.get("asset_id") or "").strip(): record
+                for record in batch_records
+                if str(record.get("asset_id") or "").strip()
+            }
+            batch_asset_ids = set(record_by_asset_id)
+            matching_items = [
+                item
+                for item in candidate.get("items") or []
+                if isinstance(item, dict) and imagine_item_asset_id(item) in batch_asset_ids
+            ]
+            if not matching_items:
+                continue
+            group_key = f"clone-batch\x1f{batch_id}"
+            group = grouped.setdefault(group_key, {
+                "index": index,
+                "batch_id": batch_id,
+                "anchor": dict(candidate),
+                "records": {},
+                "items": [],
+                "item_ids": set(),
+            })
+            group["index"] = min(group["index"], index)
+            for record in batch_records:
+                asset_id = str(record.get("asset_id") or "").strip()
+                if asset_id:
+                    group["records"][asset_id] = record
+            for item in matching_items:
+                item_id = imagine_item_asset_id(item)
+                if not item_id or item_id in group["item_ids"]:
+                    continue
+                group["item_ids"].add(item_id)
+                group["items"].append(dict(item))
+
+    output = list(passthrough)
+    for group in grouped.values():
+        items = group["items"]
+        if not items:
+            continue
+        card = dict(group["anchor"])
+        card_metadata = (
+            dict(card.get("metadata") or {})
+            if isinstance(card.get("metadata"), dict) else {}
+        )
+        ordered_records = [
+            group["records"][asset_id]
+            for asset_id in group["records"]
+        ]
+        card_metadata.update({
+            "cloned_copy": True,
+            "clone_lineage_normalized": True,
+            "liked_scope": "foreign-origin",
+            "official_clone_assets": ordered_records,
+            "clone_batch_id": group["batch_id"],
+            "saved_provenance": "cloned-liked",
+            "saved_anchor_id": group["batch_id"],
+        })
+        card["metadata"] = card_metadata
+        card["items"] = items
+        card["liked"] = True
+        card["favorite"] = True
+        for item in card["items"]:
+            item_id = imagine_item_asset_id(item)
+            record = group["records"].get(item_id, {})
+            item_metadata = (
+                dict(item.get("metadata") or {})
+                if isinstance(item.get("metadata"), dict) else {}
+            )
+            item_imagine = (
+                dict(item_metadata.get("imagine") or {})
+                if isinstance(item_metadata.get("imagine"), dict) else {}
+            )
+            stamps = {
+                "cloned_copy": True,
+                "cloned_from_asset_id": str(record.get("source_asset_id") or "").strip(),
+                "liked": True,
+            }
+            item_metadata.update(stamps)
+            item_imagine.update(stamps)
+            item_metadata["imagine"] = item_imagine
+            item["metadata"] = item_metadata
+            item["liked"] = True
+            item["favorite"] = True
+        representative = imagine_representative_item(card["items"]) or card["items"][-1]
+        card["representative_item"] = representative
+        card["representative"] = (
+            representative.get("url")
+            or representative.get("remote_url")
+            or representative.get("item_id")
+            or ""
+        )
+        output.append((group["index"], imagine_stamp_saved_identity(card)))
+    return [card for _, card in sorted(output, key=lambda entry: entry[0])]
+
+
+def imagine_fold_external_clone_batch_cards(
+    root: Path,
+    account: dict,
+    entries: object,
+    fetched: list[dict],
+) -> list[dict]:
+    """Apply the former official-Liked clone replacement rule without collection writes.
+
+    Each direct response still contains the external original beside its copied descendant.
+    Replace that original with the corresponding clone, discard the standalone replacement
+    card, and then merge descendants under the resulting copied root.  This is deliberately
+    the same source-id replacement algorithm the official Liked importer used, not a
+    conversation-id grouping shortcut.
+    """
+    records = imagine_normalize_external_clone_records(entries)
+    records_by_clone_id = {record["asset_id"]: record for record in records}
+    if not records_by_clone_id:
+        return []
+    hidden_ids = imagine_pending_delete_ids(root, account) | imagine_local_exclusion_ids(root, account)
+    built: list[dict] = []
+    seen_fetched_ids: set[str] = set()
+    for fetched_record in fetched:
+        if not isinstance(fetched_record, dict):
+            continue
+        asset_id = str(fetched_record.get("asset_id") or "").strip()
+        source_post = fetched_record.get("post")
+        if not asset_id or asset_id in seen_fetched_ids or not isinstance(source_post, dict):
+            continue
+        seen_fetched_ids.add(asset_id)
+        post = dict(source_post)
+        post["metadata"] = dict(source_post.get("metadata") or {}) if isinstance(source_post.get("metadata"), dict) else {}
+        post["items"] = [
+            dict(item) for item in source_post.get("items") or [] if isinstance(item, dict)
+        ]
+        post = imagine_apply_generated_relations(post, root, account)
+        post["items"] = [
+            item for item in post.get("items") or []
+            if isinstance(item, dict) and imagine_item_asset_id(item) not in hidden_ids
+        ]
+        if post["items"]:
+            built.append({
+                "asset_id": asset_id,
+                "raw_post": fetched_record.get("raw_post") or {},
+                "post": post,
+            })
+    if not built:
+        return []
+
+    item_ids_by_asset_id = {
+        record["asset_id"]: {
+            imagine_item_asset_id(item)
+            for item in record["post"].get("items") or []
+            if isinstance(item, dict) and imagine_item_asset_id(item)
+        }
+        for record in built
+    }
+    # clone-batch itself is the authoritative original -> copy mapping.  Direct detail has
+    # historically exposed the same relation through auxKeys, but it is not needed here.
+    origin_by_clone_id = {
+        asset_id: clone_record["source_asset_id"]
+        for asset_id, clone_record in records_by_clone_id.items()
+        if clone_record.get("source_asset_id")
+    }
+    items_by_clone_id = {
+        record["asset_id"]: [
+            item for item in record["post"].get("items") or [] if isinstance(item, dict)
+        ]
+        for record in built
+    }
+    replacement_by_origin_id: dict[str, str] = {}
+    folded_asset_ids: set[str] = set()
+    for clone_id, origin_id in origin_by_clone_id.items():
+        for host_id, host_items in item_ids_by_asset_id.items():
+            if host_id == clone_id or host_id not in origin_by_clone_id:
+                continue
+            if origin_id in host_items:
+                replacement_by_origin_id[origin_id] = clone_id
+                folded_asset_ids.add(clone_id)
+                break
+
+    materialized: list[dict] = []
+    for record in built:
+        asset_id = record["asset_id"]
+        if asset_id in folded_asset_ids:
+            continue
+        post = record["post"]
+        kept_items = [item for item in post.get("items") or [] if isinstance(item, dict)]
+        if replacement_by_origin_id:
+            swapped_items: list[dict] = []
+            swapped_ids: set[str] = set()
+            pending_items = list(kept_items)
+            guard = 0
+            while pending_items and guard <= len(replacement_by_origin_id):
+                guard += 1
+                next_pending: list[dict] = []
+                for item in pending_items:
+                    item_id = imagine_item_asset_id(item)
+                    replacement_id = replacement_by_origin_id.get(item_id)
+                    replacement_items = items_by_clone_id.get(replacement_id, []) if replacement_id else []
+                    if replacement_items:
+                        next_pending.extend(replacement_items)
+                        continue
+                    if item_id and item_id in swapped_ids:
+                        continue
+                    if item_id:
+                        swapped_ids.add(item_id)
+                    swapped_items.append(item)
+                pending_items = next_pending
+            kept_items = swapped_items
+            kept_items = [
+                imagine_rebind_cloned_item_sources(item, replacement_by_origin_id)
+                for item in kept_items
+            ]
+        if not kept_items:
+            continue
+        clone_record = records_by_clone_id.get(asset_id, {})
+        batch_id = str(clone_record.get("conversation_id") or "").strip()
+        metadata = dict(post.get("metadata") or {}) if isinstance(post.get("metadata"), dict) else {}
+        metadata.update({
+            "remote_view": "link",
+            "link_source": True,
+            "link_post_id": asset_id,
+            "liked": True,
+            "liked_scope": "foreign-origin",
+            "cloned_copy": True,
+            "cloned_from_asset_id": str(clone_record.get("source_asset_id") or "").strip(),
+            "clone_lineage_normalized": True,
+            "official_clone_assets": records,
+        })
+        if batch_id:
+            metadata["clone_batch_id"] = batch_id
+            metadata["saved_anchor_id"] = batch_id
+        post["metadata"] = metadata
+        post["items"] = kept_items
+        post["mode"] = "link"
+        post["liked"] = True
+        post["favorite"] = True
+        for item in post["items"]:
+            item_id = imagine_item_asset_id(item)
+            item_clone_record = records_by_clone_id.get(item_id, {})
+            item_metadata = dict(item.get("metadata") or {}) if isinstance(item.get("metadata"), dict) else {}
+            item_imagine = dict(item_metadata.get("imagine") or {}) if isinstance(item_metadata.get("imagine"), dict) else {}
+            stamps = {"liked": True}
+            if item_clone_record:
+                stamps.update({
+                    "cloned_copy": True,
+                    "cloned_from_asset_id": str(item_clone_record.get("source_asset_id") or "").strip(),
+                })
+            item_metadata.update(stamps)
+            item_imagine.update(stamps)
+            item_metadata["imagine"] = item_imagine
+            item["metadata"] = item_metadata
+            item["liked"] = True
+            item["favorite"] = True
+        representative = imagine_representative_item(kept_items) or kept_items[-1]
+        post["representative_item"] = representative
+        post["representative"] = (
+            representative.get("url")
+            or representative.get("remote_url")
+            or representative.get("item_id")
+            or ""
+        )
+        materialized.append(imagine_stamp_saved_identity(post))
+    return merge_imagine_liked_lineage_cards(materialized)
+
+
+def imagine_hydrate_external_clone_liked_cards(
+    root: Path | None,
+    account: dict,
+    entries: object,
+) -> list[dict]:
+    """Read a fresh clone directly into the app's private Liked view.
+
+    clone-batch creates an owned Saved asset, but deliberately does not put it in grok.com's
+    Liked collection. The regular Saved scan can take several minutes to reach that new asset.
+    Hydrate its authoritative media post now, cache the owned copy, and derive the app-only
+    Liked card from that cache before the heart request returns.
+    """
+    if not root:
+        return []
+    records = imagine_normalize_external_clone_records(entries)
+    clone_ids = {record["asset_id"] for record in records if record.get("asset_id")}
+    if not clone_ids:
+        return []
+
+    fetched_records: list[dict] = []
+    covered_ids: set[str] = set()
+    errors: dict[str, str] = {}
+    # clone-batch normally makes the media post readable immediately. A short retry only
+    # covers the small gap in which Grok has returned the clone ids but not indexed them yet.
+    for delay in (0.0, 0.35, 0.9, 1.8):
+        if delay:
+            time.sleep(delay)
+        pending_ids = sorted(clone_ids - covered_ids)
+        if not pending_ids:
+            break
+
+        def fetch_clone_post(asset_id: str) -> tuple[str, dict | None, dict | None, str]:
+            try:
+                raw_post = imagine_get_media_post_direct(asset_id, account, timeout=12)
+                post = imagine_saved_post_from_root(raw_post, account)
+                if not post:
+                    return asset_id, raw_post, None, "Clone media post contained no usable assets."
+                return asset_id, raw_post, post, ""
+            except Exception as exc:  # noqa: BLE001
+                return asset_id, None, None, str(exc)[:300]
+
+        with ThreadPoolExecutor(max_workers=min(4, len(pending_ids))) as executor:
+            futures = {
+                executor.submit(fetch_clone_post, asset_id): asset_id
+                for asset_id in pending_ids
+            }
+            for future in as_completed(futures):
+                asset_id, raw_post, post, error = future.result()
+                if error:
+                    errors[asset_id] = error
+                    continue
+                if not post:
+                    continue
+                item_ids = {
+                    imagine_item_asset_id(item)
+                    for item in post.get("items") or []
+                    if isinstance(item, dict) and imagine_item_asset_id(item)
+                }
+                clone_item_ids = item_ids & clone_ids
+                if not clone_item_ids:
+                    errors[asset_id] = "Clone detail did not contain the requested asset."
+                    continue
+                fetched_records.append({
+                    "asset_id": asset_id,
+                    "raw_post": raw_post or {},
+                    "post": post,
+                })
+                covered_ids.update(clone_item_ids)
+        if covered_ids >= clone_ids:
+            break
+
+    # Direct asset lookups are deliberately one-per-copy.  Do not turn those transport
+    # replies into cards.  Reapply the original Liked importer rule: swap each external
+    # parent for its clone and suppress the clone's former standalone card.
+    scoped_cards = imagine_fold_external_clone_batch_cards(
+        root,
+        account,
+        records,
+        fetched_records,
+    )
+
+    if not scoped_cards:
+        imagine_debug_event("external_asset_clone_hydration_failed", {
+            "account_id": str(account.get("id") or ""),
+            "clone_ids": sorted(clone_ids),
+            "covered_ids": sorted(covered_ids),
+            "errors": errors,
+        })
+        return []
+
+    cache_imagine_remote_posts(root, account, scoped_cards)
+    # This is the same app-only derivation used after Saved has eventually synced. Running it
+    # now makes the source-independent clone card available without touching Grok's collection.
+    derived_cards = imagine_foreign_origin_liked_cards(root, account, set())
+    current_cards = [
+        card for card in derived_cards
+        if {
+            imagine_item_asset_id(item)
+            for item in card.get("items") or []
+            if isinstance(item, dict) and imagine_item_asset_id(item)
+        } & clone_ids
+    ]
+    if current_cards:
+        imagine_store_liked_cache(root, account, current_cards, prune=False)
+    imagine_debug_event("external_asset_clone_hydrated", {
+        "account_id": str(account.get("id") or ""),
+        "clone_ids": sorted(clone_ids),
+        "covered_ids": sorted(covered_ids),
+        "cards": len(current_cards),
+        "errors": errors,
+    })
+    return current_cards
 
 
 def imagine_attach_external_clone_records(post: dict, entries: object) -> dict:
