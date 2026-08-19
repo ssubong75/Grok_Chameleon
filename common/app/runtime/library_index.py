@@ -744,6 +744,15 @@ def replace_collections(root: Path, collections: list[dict]) -> None:
                 if not path:
                     continue
                 path_key = _path_key(path)
+                # Keep the filesystem path verbatim, but make its NFC key the collection's
+                # identity. A library opened on macOS can retain an NFD spelling that is
+                # equivalent to the NFC spelling later reported by Windows. `path` is the
+                # primary key, so remove an older equivalent row before this upsert rather
+                # than allowing both spellings to appear in the collection list.
+                connection.execute(
+                    "DELETE FROM library_collections WHERE path_key = ? AND path != ?",
+                    (path_key, path),
+                )
                 row = connection.execute(
                     "SELECT COUNT(*) AS count FROM library_posts WHERE path_key = ? OR path_key LIKE ?",
                     (path_key, f"{path_key}/%"),
