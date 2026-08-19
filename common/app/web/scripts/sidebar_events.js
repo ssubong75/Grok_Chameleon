@@ -21,8 +21,11 @@ function clearSidebarSearchQuery() {
   return true;
 }
 
-function refreshImagineSavedMain() {
+async function refreshImagineSavedMain() {
   if (typeof loadImagineSavedCards === "function" && typeof canLoadImagineSavedList === "function" && canLoadImagineSavedList()) {
+    // A title click is an explicit refresh: replace any older request immediately and
+    // start the fresh Saved read now. loadImagineSavedCards({ force: true }) owns that
+    // cancellation and replacement.
     library_state.imagineRemoteCursor = "";
     return loadImagineSavedCards({ force: true });
   }
@@ -131,8 +134,17 @@ async function refreshCurrentMainView() {
   renderLibrary();
 }
 
-document.getElementById("titleImagineBtn")?.addEventListener("click", () => {
-  refreshCurrentMainView().catch((error) => setLibraryMessage(error.message || "Refresh failed."));
+let titleRefreshInProgress = false;
+document.getElementById("titleImagineBtn")?.addEventListener("click", async () => {
+  if (titleRefreshInProgress) return;
+  titleRefreshInProgress = true;
+  try {
+    await refreshCurrentMainView();
+  } catch (error) {
+    setLibraryMessage(error.message || "Refresh failed.");
+  } finally {
+    titleRefreshInProgress = false;
+  }
 });
 
 let brandImagineReloading = false;

@@ -8,7 +8,7 @@
 
 
   function buildJobPreparing(job) {
-    return Boolean(job?.pending_client_job && String(job?.context?.phase || "") === "preparing");
+    return String(job?.context?.phase || "") === "preparing";
   }
 
 

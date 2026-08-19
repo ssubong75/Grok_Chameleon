@@ -4529,6 +4529,34 @@ def imagine_saved_display_group_id(post: dict) -> str:
     if metadata.get("flat_only") is True:
         items = [item for item in post.get("items") or [] if isinstance(item, dict)]
         item_ids = [imagine_item_asset_id(item) for item in items if imagine_item_asset_id(item)]
+        items_by_id = {
+            imagine_item_asset_id(item): item
+            for item in items
+            if imagine_item_asset_id(item)
+        }
+
+        def lineage_root(item_id: str) -> str:
+            current_id = str(item_id or "").strip()
+            seen: set[str] = set()
+            while current_id and current_id not in seen:
+                seen.add(current_id)
+                parent_id = imagine_item_source_id(items_by_id.get(current_id) or {})
+                if not parent_id:
+                    return current_id
+                if parent_id not in items_by_id:
+                    # The original source is not present in this Saved response.  It is
+                    # still the stable common root for all of its image/video children.
+                    return parent_id
+                current_id = parent_id
+            return ""
+
+        lineage_roots = {
+            root_id
+            for item_id in item_ids
+            if (root_id := lineage_root(item_id))
+        }
+        if len(lineage_roots) == 1:
+            return f"asset:{next(iter(lineage_roots))}"
         referenced_ids = [imagine_item_source_id(item) for item in items if imagine_item_source_id(item)]
         root_id = next((item_id for item_id in item_ids if item_id in referenced_ids), "")
         if not root_id and len(items) == 1:
@@ -7160,9 +7188,20 @@ def list_imagine_saved(payload: dict) -> dict:
                 for item in cached_items
                 if imagine_item_asset_id(item)
             }
-            cached_grouped_asset_ids.update(cached_item_ids)
             if any(imagine_item_is_upload_source(item) for item in cached_items):
                 cached_complete_upload_asset_ids.update(cached_item_ids)
+            cached_metadata = (
+                cached_post.get("metadata")
+                if isinstance(cached_post.get("metadata"), dict)
+                else {}
+            )
+            # An asset-only fallback has no verified conversation card.  Suppressing it
+            # because a previous refresh cached the same lone asset makes it disappear on
+            # this sync, then reappear on the next one after finalization clears the cache.
+            # Keep only confirmed/grouped cards in the cross-page duplicate guard.
+            if cached_metadata.get("flat_only") is True:
+                continue
+            cached_grouped_asset_ids.update(cached_item_ids)
     except Exception:
         cached_grouped_asset_ids = set()
         cached_complete_upload_asset_ids = set()
@@ -7308,7 +7347,9 @@ def list_imagine_saved(payload: dict) -> dict:
     posts = imagine_filter_liked_scope_posts(list(saved_groups.values()), hidden_remote_ids)
     posts = merge_imagine_saved_lineage_cards(posts)
     posts = imagine_filter_liked_scope_posts(posts, hidden_remote_ids)
-    imagine_sort_saved_by_official_order(posts)
+    # Keep the public Saved-page order intact here.  The renderer first collects every
+    # page, then calculates each card's latest activity and sorts the complete snapshot
+    # once; sorting this fragment would make the upstream order meaningless before that.
     try:
         # Cache both halves. Returning only the visible ones is right -- this is the main
         # list -- but caching only those would let finalize_imagine_remote_sync delete the
@@ -16425,6 +16466,10 @@ def imagine_aspect_ratio_request(payload: dict, request_id: str, account: dict) 
         },
         "disableMemory": False,
         "forceSideBySide": False,
+        # This is consumed only by preload-bridge.js.  The official aspect request has no
+        # mediaGenInput, but preflight still needs the real source post to hydrate it
+        # without creating a replacement media card from the URL.
+        "grokChameleonBridgeInputAssetIds": [parent_post_id],
     }
     if conversation_id:
         request["grokChameleonConversationId"] = conversation_id
@@ -17188,6 +17233,12 @@ def imagine_native_bridge_generate(
     root = library_root()
     if not root:
         raise RuntimeError("Library path is not set.")
+    if action in {"i2i", "aspect", "i2v", "extend"}:
+        if progress_callback:
+            progress_callback(2, "running", {"action": action, "request_id": request_id, "phase": "preparing"})
+        native_bridge_prepare_generation(root, account, request_payload, request_id, referer)
+        if cancel_checker and cancel_checker():
+            raise JobCancelled("Job cancelled.")
     video_deadline = job_started_at + max_wait if expected_type == "video" else None
     video_wait_policy = imagine_i2v_wait_policy(payload, action) if expected_type == "video" else {}
     long_i2v_wait = video_wait_policy.get("tier") == "long"
@@ -17815,6 +17866,8 @@ def start_imagine_job(payload: dict) -> dict:
                 context["mode"] = data.get("action")
             if data.get("request_id"):
                 context["request_id"] = data.get("request_id")
+            if data.get("phase"):
+                context["phase"] = data.get("phase")
             for key in ("candidate_count", "completed_count", "expected_count", "receive_limit"):
                 if key in data:
                     context[key] = data.get(key)
@@ -20321,6 +20374,34 @@ def ensure_imagine_bridge_target(root: Path, account: dict, referer: str) -> tup
     raise RuntimeError("Imagine Chrome bridge needs login. Sign in to the opened Grok Chrome profile, then try again.")
 
 
+def native_bridge_prepare_generation(
+    root: Path,
+    account: dict,
+    request_payload: dict,
+    request_id: str,
+    referer: str,
+) -> None:
+    if not native_bridge_wait_available(timeout_seconds=8, max_age_seconds=60):
+        raise RuntimeError("Native WebView bridge is not running. Launch Grok Chameleon.app.")
+    value = native_bridge_account_command(
+        root,
+        account,
+        "prepare_generation",
+        {
+            "request_id": request_id,
+            "referer": referer,
+            "url": referer if referer and referer.startswith(IMAGINE_BASE) else IMAGINE_BASE + "/imagine",
+            "request_payload": request_payload,
+            "max_wait_seconds": 45,
+        },
+        timeout_seconds=max(75, IMAGINE_BRIDGE_LOGIN_WAIT_SECONDS + 45),
+    )
+    status_code = int(value.get("status") or 0)
+    if status_code >= 400 or not bool(value.get("ready")):
+        detail = str(value.get("text") or "Imagine source preparation did not complete.")[:500]
+        raise RuntimeError(f"Imagine source preparation failed: {detail}")
+
+
 def native_bridge_fetch_events(
     root: Path,
     account: dict,
@@ -20334,7 +20415,7 @@ def native_bridge_fetch_events(
     if not native_bridge_wait_available(timeout_seconds=8, max_age_seconds=60):
         raise RuntimeError("Native WebView bridge is not running. Launch Grok Chameleon.app.")
     if progress_callback:
-        progress_callback(6, "running", {"action": "native_bridge", "request_id": request_id})
+        progress_callback(6, "running", {"action": "native_bridge", "request_id": request_id, "phase": "generating"})
     value = native_bridge_account_command(
         root,
         account,
@@ -20372,7 +20453,21 @@ def native_bridge_fetch_events(
             continue
         for key in ("containerPostId", "rootPostId", "parentPostId", "originalPostId"):
             add_bridge_id(bridge_parent_ids, event.get(key))
-    store_trace = value.get("storeTrace") if isinstance(value.get("storeTrace"), list) else []
+    raw_store_trace = value.get("storeTrace") if isinstance(value.get("storeTrace"), list) else []
+
+    # The preload bridge keeps a rolling, account-wide trace. Only retain entries
+    # explicitly tagged with this request so a preceding generation cannot masquerade
+    # as evidence for the current result (especially its moderation state).
+    def store_trace_for_request(entry) -> bool:
+        if not isinstance(entry, dict):
+            return False
+        data = entry.get("data")
+        if not isinstance(data, dict):
+            return False
+        entry_request_id = str(data.get("requestId") or data.get("request_id") or "").strip()
+        return bool(entry_request_id and entry_request_id == str(request_id or "").strip())
+
+    store_trace = [entry for entry in raw_store_trace if store_trace_for_request(entry)]
     bridge_status = value.get("bridgeStatus") if isinstance(value.get("bridgeStatus"), dict) else {}
     imagine_debug_event("native_bridge_stream_done", {
         "request_id": request_id,
@@ -20406,6 +20501,8 @@ def native_bridge_fetch_events(
                 "store_generation_moderation_grace_complete",
                 "store_generation_image_moderation_fast_path_start",
                 "store_generation_image_moderation_fast_path_complete",
+                "store_generation_image_response_moderation_start",
+                "store_generation_image_response_moderation_complete",
                 "store_generation_candidate_still_in_progress",
                 "store_generation_candidate_stable",
                 "store_generation_poll_timeout",
