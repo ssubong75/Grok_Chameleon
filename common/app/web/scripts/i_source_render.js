@@ -2,8 +2,7 @@
 const IMAGINE_VIRTUAL_LIST_KEY = "imagine-main";
 const IMAGINE_DISCOVER_VIRTUAL_LIST_KEY = "imagine-discover";
 const IMAGINE_UNSAVED_VIRTUAL_LIST_KEY = "imagine-unsaved";
-const IMAGINE_SAVED_BACKGROUND_SYNC_DELAY_MS = 900;
-const IMAGINE_SAVED_REFRESH_PAGE_LIMIT = 40;
+const IMAGINE_SAVED_PAGE_SIZE = 40;
 let imagineSavedDisplayPostsMemoSource = null;
 let imagineSavedDisplayPostsMemoResult = [];
 let imagineSavedVisiblePostsMemoResult = [];
@@ -357,20 +356,54 @@ function isSessionImagineT2iPost(post) {
   return isImagineT2iPost(post) && library_state.sessionImagineT2iPaths?.has(post.folder_path || "");
 }
 
-function mergeImagineRemotePosts(existingPosts, nextPosts) {
-  const merged = new Map();
-  for (const post of existingPosts || []) {
-    const key = imagineSavedCardPathKey(post);
-    if (key) merged.set(key, post);
+// The same generated result can be reported twice by Saved: once as an asset-only
+// fallback and once on its conversation card with the input image.  Their display
+// groups can differ, so preserve the group as the primary identity but also keep a
+// provenance-scoped key for every non-source result asset.  A shared input image is
+// deliberately excluded: separate edits may legitimately use that same source.
+function imagineSavedExactResultKeys(post) {
+  const keys = new Set();
+  for (const item of post?.items || []) {
+    if (!item || imagineSavedItemIsSource(item)) continue;
+    const assetId = imagineSavedItemAssetId(item);
+    const key = imagineSavedScopedIdentity(post, assetId ? `result:${assetId}` : "");
+    if (key) keys.add(key);
   }
-  for (const post of nextPosts || []) {
+  return keys;
+}
+
+function mergeImagineRemotePosts(existingPosts, nextPosts) {
+  const merged = [];
+  const indexByKey = new Map();
+
+  const rememberCard = (post, index) => {
+    const pathKey = imagineSavedCardPathKey(post);
+    if (pathKey) indexByKey.set(pathKey, index);
+    for (const resultKey of imagineSavedExactResultKeys(post)) {
+      if (!indexByKey.has(resultKey)) indexByKey.set(resultKey, index);
+    }
+  };
+
+  const findExistingIndex = (post) => {
+    const pathKey = imagineSavedCardPathKey(post);
+    if (pathKey && indexByKey.has(pathKey)) return indexByKey.get(pathKey);
+    for (const resultKey of imagineSavedExactResultKeys(post)) {
+      if (indexByKey.has(resultKey)) return indexByKey.get(resultKey);
+    }
+    return -1;
+  };
+
+  for (const post of existingPosts || []) {
     if (!post?.folder_path) continue;
-    const key = imagineSavedCardPathKey(post);
-    const existing = merged.get(key);
-    if (!existing) {
-      merged.set(key, post);
+    const index = findExistingIndex(post);
+    if (index < 0) {
+      merged.push(post);
+      rememberCard(post, merged.length - 1);
       continue;
     }
+    // Existing callers normally pass reconciled cards, but retaining the same folding
+    // path here makes an exact-asset duplicate safe even before reconciliation runs.
+    const existing = merged[index];
     const existingFlat = existing?.metadata?.flat_only === true;
     const nextFlat = post?.metadata?.flat_only === true;
     const primary = existingFlat && !nextFlat ? post : existing;
@@ -384,7 +417,7 @@ function mergeImagineRemotePosts(existingPosts, nextPosts) {
       for (const key of keys) known.add(key);
     }
     const representative = representativeItem(items, { ...primary, items }) || items[0];
-    merged.set(key, normalizeServerPost({
+    const combined = normalizeServerPost({
       ...primary,
       items,
       representative: representative?.file || representative?.url || representative?.item_id || "",
@@ -393,9 +426,46 @@ function mergeImagineRemotePosts(existingPosts, nextPosts) {
         ...(primary.metadata || {}),
         flat_only: existingFlat && nextFlat,
       },
-    }));
+    });
+    merged[index] = combined;
+    rememberCard(combined, index);
   }
-  return Array.from(merged.values());
+  for (const post of nextPosts || []) {
+    if (!post?.folder_path) continue;
+    const index = findExistingIndex(post);
+    if (index < 0) {
+      merged.push(post);
+      rememberCard(post, merged.length - 1);
+      continue;
+    }
+    const existing = merged[index];
+    const existingFlat = existing?.metadata?.flat_only === true;
+    const nextFlat = post?.metadata?.flat_only === true;
+    const primary = existingFlat && !nextFlat ? post : existing;
+    const secondary = primary === existing ? post : existing;
+    const known = new Set((primary.items || []).flatMap(imaginePostIdKeysForItem));
+    const items = [...(primary.items || [])];
+    for (const item of secondary.items || []) {
+      const keys = imaginePostIdKeysForItem(item);
+      if (keys.some((key) => known.has(key))) continue;
+      items.push(item);
+      for (const key of keys) known.add(key);
+    }
+    const representative = representativeItem(items, { ...primary, items }) || items[0];
+    const combined = normalizeServerPost({
+      ...primary,
+      items,
+      representative: representative?.file || representative?.url || representative?.item_id || "",
+      representative_item: representative,
+      metadata: {
+        ...(primary.metadata || {}),
+        flat_only: existingFlat && nextFlat,
+      },
+    });
+    merged[index] = combined;
+    rememberCard(combined, index);
+  }
+  return merged;
 }
 
 function imagineSavedPostMatchIndex(posts) {
@@ -567,21 +637,29 @@ function mergeImagineRefreshedPosts(existingPosts, refreshedPosts) {
 function mergeImagineSyncedPosts(
   existingPosts,
   refreshedPosts,
-  { replacesList = false, preserveMatchedAnchors = !replacesList } = {},
+  {
+    replacesList = false,
+    preserveMatchedAnchors = !replacesList,
+    sortByRecentActivity = true,
+  } = {},
 ) {
+  const finish = (posts) => (
+    sortByRecentActivity ? sortPostsIfNeeded(posts, comparePostsByRecentActivity) : posts
+  );
   const existing = reconcileImagineSavedDisplayPosts(existingPosts || []);
   const refreshed = reconcileImagineSavedDisplayPosts(refreshedPosts || []);
-  if (!existing.length) return sortPostsIfNeeded([...refreshed], comparePostsByRecentActivity);
+  if (!existing.length) return finish([...refreshed]);
   if (!refreshed.length) {
     // A full reload that comes back empty means the account has nothing saved any more.
     if (replacesList) return [];
-    return sortPostsIfNeeded([...existing], comparePostsByRecentActivity);
+    return finish([...existing]);
   }
 
   const existingIndex = imagineSavedPostMatchIndex(existing);
   const matchedExistingIndexes = new Set();
   const refreshedForExistingIndex = new Map();
   const newPosts = [];
+  const refreshedInReceivedOrder = [];
 
   for (const post of refreshed) {
     const matchedIndex = takeImagineSavedPostMatch(
@@ -591,15 +669,15 @@ function mergeImagineSyncedPosts(
     );
     if (matchedIndex < 0) {
       newPosts.push(post);
+      refreshedInReceivedOrder.push(post);
       continue;
     }
     matchedExistingIndexes.add(matchedIndex);
-    refreshedForExistingIndex.set(
-      matchedIndex,
-      preserveMatchedAnchors
-        ? mergeImagineIncrementalSavedPost(existing[matchedIndex], post)
-        : mergeImaginePreservedGeneratedRelations(existing[matchedIndex], post),
-    );
+    const merged = preserveMatchedAnchors
+      ? mergeImagineIncrementalSavedPost(existing[matchedIndex], post)
+      : mergeImaginePreservedGeneratedRelations(existing[matchedIndex], post);
+    refreshedForExistingIndex.set(matchedIndex, merged);
+    refreshedInReceivedOrder.push(merged);
   }
 
   // A paged response is only a fragment of Saved. Keep the existing card as the
@@ -607,11 +685,15 @@ function mergeImagineSyncedPosts(
   // folder_path changes to the child id for one render and the virtual list flashes.
   // Reconciliation below can still fold newly returned children into that anchor.
   if (!replacesList) {
-    return sortPostsIfNeeded([
+    return finish([
       ...existing.map((post, index) => refreshedForExistingIndex.get(index) || post),
       ...newPosts,
-    ], comparePostsByRecentActivity);
+    ]);
   }
+
+  // The first public page replaces an earlier screen snapshot.  When Saved is rendered
+  // page-by-page, retain the order Grok returned rather than the old screen's order.
+  if (!sortByRecentActivity) return refreshedInReceivedOrder;
 
   // An unmatched card was not in this response. On a reload that starts from an empty cursor
   // the response is the authoritative head of the list, so the card is gone upstream — from a
@@ -634,7 +716,7 @@ function mergeImagineSyncedPosts(
   };
   const keepUnmatched = (post) => (replacesList ? false : !existingWasAbsorbed(post));
 
-  return sortPostsIfNeeded([
+  return finish([
     ...newPosts,
     ...existing
       .map((post, index) => (
@@ -642,7 +724,7 @@ function mergeImagineSyncedPosts(
         || (keepUnmatched(post) ? post : null)
       ))
       .filter(Boolean),
-  ], comparePostsByRecentActivity);
+  ]);
 }
 
 function mergeImagineIncrementalSavedPost(existingPost, refreshedPost) {
@@ -963,7 +1045,14 @@ function imagineSavedLineageCards(post) {
   // and the site shows it as one grouped card, so leave it whole instead of splitting the
   // parent chain. Everything else, T2I batches included, still fans out below.
   const linkSourced = Boolean(metadata.link_source || post.link_source || metadata.remote_view === "link");
-  if (linkSourced) return [post];
+  // Clone-batch is app-only Liked: its owned source and descendants have already been
+  // assembled into one card by the server.  Do not run the Saved root fan-out over that
+  // card again, or a complete clone family is rendered as one card per root asset.
+  const privateCloneLiked = (
+    imagineSavedPostProvenance(post) === "cloned-liked"
+    && metadata.liked_scope === "foreign-origin"
+  );
+  if (linkSourced || privateCloneLiked) return [post];
 
   const itemsById = new Map(items.map((item) => [imagineSavedItemAssetId(item), item]));
   const resultItems = items.filter((item) => !imagineSavedItemIsSource(item));
@@ -1818,9 +1907,16 @@ function imagineSavedPostMatchKeys(post) {
   const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
   const provenance = imagineSavedPostProvenance(post);
   const displayGroup = imagineSavedDisplayGroup(post);
-  if (displayGroup) return new Set([imagineSavedScopedIdentity(post, displayGroup)]);
+  const keys = new Set(imagineSavedExactResultKeys(post));
+  if (displayGroup) {
+    keys.add(imagineSavedScopedIdentity(post, displayGroup));
+    return keys;
+  }
   const savedAnchor = imagineSavedCardAnchor(post);
-  if (savedAnchor) return new Set([imagineSavedScopedIdentity(post, savedAnchor)]);
+  if (savedAnchor) {
+    keys.add(imagineSavedScopedIdentity(post, savedAnchor));
+    return keys;
+  }
   const exactAnchors = provenance === "cloned-liked"
     ? [post?.folder_path, metadata.link_post_id, imagine.link_post_id]
     : [post?.folder_path, post?.post_id, metadata.imagine_root_post_id];
@@ -1831,9 +1927,10 @@ function imagineSavedPostMatchKeys(post) {
     metadata.link_post_id,
     imagine.link_post_id,
   ];
-  const keys = new Set([...exactAnchors, ...compatibleAnchors]
-    .map((value) => imagineSavedScopedIdentity(post, value))
-    .filter(Boolean));
+  for (const value of [...exactAnchors, ...compatibleAnchors]) {
+    const key = imagineSavedScopedIdentity(post, value);
+    if (key) keys.add(key);
+  }
   return keys;
 }
 
@@ -2012,156 +2109,85 @@ function finishImagineSavedRequest(context) {
   }
 }
 
-function applyImagineSavedRemotePage(data, { updatePosts = true, replacesList = false } = {}) {
-  const exclusionChanged = applyImagineLikedExclusionSnapshot(
-    data,
-    imaginePendingSavedAccountId(),
-  );
-  if (updatePosts) {
-    const normalized = normalizeImagineRemotePosts(
-      Array.isArray(data.posts) ? data.posts : [],
-    );
-    const pending = [
-      ...restoreImaginePendingSavedPosts(),
-      ...imaginePendingSavedPosts(),
-    ];
-    const currentPosts = (library_state.imagineRemotePosts || [])
-      .filter((post) => !imagineSavedPostIsPending(post));
-    library_state.imagineRemotePosts = filterImagineMainLikedScopePosts(reconcileImagineSavedDisplayPosts(
-      reconcileImaginePendingSavedPosts(
-        mergeImagineSyncedPosts(currentPosts, normalized, { replacesList }),
-        pending,
-      ),
-    ));
-    if (imagineGeneratedSavedSyncInProgress()) {
-      setImagineGeneratedSavedSyncItemState(imagineGeneratedSavedSyncAssetIds, true);
-    }
+function collectImagineSavedOfficialAssetIds(data, accountId) {
+  if (
+    !imagineGeneratedSavedSyncInProgress()
+    || imagineGeneratedSavedSyncAccountId !== accountId
+  ) return;
+  for (const assetId of Array.isArray(data?.official_asset_ids) ? data.official_asset_ids : []) {
+    const value = String(assetId || "").trim();
+    if (value) imagineGeneratedSavedOfficialAssetIds.add(value);
   }
+}
+
+function applyImagineSavedOfficialPage(data, { replacesList = false } = {}) {
+  applyImagineLikedExclusionSnapshot(data, imaginePendingSavedAccountId());
+  collectImagineSavedOfficialAssetIds(data, imaginePendingSavedAccountId());
+  const remotePosts = normalizeImagineRemotePosts(
+    Array.isArray(data.posts) ? data.posts : [],
+  );
+  const currentPosts = (library_state.imagineRemotePosts || [])
+    .filter((post) => !imagineSavedPostIsPending(post));
+  const pending = [
+    ...restoreImaginePendingSavedPosts(),
+    ...imaginePendingSavedPosts(),
+  ];
+  // Render every public page as it arrives. Existing cards retain their place, and new
+  // cards append in Grok's response order; no page performs a latest-activity re-sort.
+  library_state.imagineRemotePosts = filterImagineMainLikedScopePosts(reconcileImagineSavedDisplayPosts(
+    reconcileImaginePendingSavedPosts(
+      mergeImagineSyncedPosts(currentPosts, remotePosts, {
+        replacesList,
+        preserveMatchedAnchors: !replacesList,
+        sortByRecentActivity: false,
+      }),
+      pending,
+    ),
+  ));
   library_state.imagineRemoteCursor = String(data.next_cursor || "");
   library_state.imagineRemoteSyncToken = String(
     data.sync_token || library_state.imagineRemoteSyncToken || "",
   );
-  // A pending card is a local placeholder waiting for Saved to confirm it, and
-  // reconcileImaginePendingSavedPosts keeps every unconfirmed one on the list. Nothing ever
-  // gave up on one, so a card deleted on grok.com is never confirmed and its placeholder
-  // survives storage, refreshes and restarts -- a card and a thumbnail with no media behind
-  // them. Once a sync reaches the end of Saved the response is the site's full contents, so
-  // anything still unconfirmed is not coming back.
+  library_state.imagineRemoteHasMore = Boolean(
+    data.has_more && library_state.imagineRemoteCursor,
+  );
+  // The last page proves the complete Saved set. Any still-unconfirmed local placeholder
+  // is absent upstream and must not survive as an empty card.
   if (data.has_more === false) dropUnconfirmedImaginePendingSavedPosts();
-  if (exclusionChanged) {
-    syncImagineRemotePostsIntoLibrary();
-    if (!updatePosts) renderImagineSourceCards();
+  if (imagineGeneratedSavedSyncInProgress()) {
+    setImagineGeneratedSavedSyncItemState(imagineGeneratedSavedSyncAssetIds, true);
   }
+  syncImagineRemotePostsIntoLibrary();
+  renderImagineSourceCards();
 }
 
-async function syncImagineSavedCards(
-  context,
-  {
-    append = false,
-    force = false,
-    showLoading = false,
-    updatePosts = true,
-  } = {},
-) {
-  if (!imagineSavedRequestIsCurrent(context) || !canLoadImagineSavedList()) return;
-  library_state.imagineRemoteSyncing = true;
-  if (showLoading) library_state.imagineRemoteLoading = true;
-  try {
-    if (!append || force || !library_state.imagineRemoteSyncToken) {
-      library_state.imagineRemoteSyncToken = newImagineSavedSyncToken();
-    }
+async function streamImagineSavedPages(context) {
+  const seenCursors = new Set();
+  let cursor = "";
+  let replacesList = true;
+  library_state.imagineRemoteCursor = "";
+  library_state.imagineRemoteSyncToken = newImagineSavedSyncToken();
+
+  while (imagineSavedRequestIsCurrent(context) && canLoadImagineSavedList()) {
     const data = await qApi("/api/imagine/saved", {
       account_id: context.accountId,
-      limit: 20,
-      cursor: force ? "" : (append ? (library_state.imagineRemoteCursor || "") : ""),
+      limit: IMAGINE_SAVED_PAGE_SIZE,
+      cursor,
       sync_token: library_state.imagineRemoteSyncToken,
     }, { signal: context.controller.signal });
-    if (!imagineSavedResponseMatches(context, data)) return;
-    if (
-      imagineGeneratedSavedSyncInProgress()
-      && imagineGeneratedSavedSyncAccountId === context.accountId
-    ) {
-      for (const assetId of Array.isArray(data.official_asset_ids) ? data.official_asset_ids : []) {
-        const value = String(assetId || "").trim();
-        if (value) imagineGeneratedSavedOfficialAssetIds.add(value);
-      }
-    }
-    // A refresh response is always an incremental page. Only a separately assembled,
-    // explicitly complete snapshot may remove unmatched cached cards.
-    applyImagineSavedRemotePage(data, { updatePosts, replacesList: false });
-    library_state.imagineRemoteError = "";
-  } catch (error) {
-    if (!imagineSavedRequestCancelled(error, context) && !library_state.imagineRemotePosts.length) {
-      library_state.imagineRemoteError = error?.message || "Imagine saved list failed.";
-    }
-  } finally {
-    if (imagineSavedRequestIsCurrent(context)) {
-      library_state.imagineRemoteSyncing = false;
-      library_state.imagineRemoteLoading = false;
-      library_state.imagineRemoteLoaded = true;
-      library_state.imagineRemoteHasMore = Boolean(
-        library_state.imagineRemoteCacheHasMore
-        || library_state.imagineRemoteCursor,
-      );
-      persistImaginePendingSavedPosts();
-      if (imaginePendingSavedPosts().length) scheduleImaginePendingSavedRefresh();
-      else imaginePendingSavedRefreshAttempt = 0;
-      library_state.imagineRemoteSyncPromise = null;
-      if (updatePosts) renderImagineSourceCards();
-    }
-    finishImagineSavedRequest(context);
-  }
-}
+    if (!imagineSavedResponseMatches(context, data)) return false;
 
-function scheduleImagineSavedSync(context) {
-  cancelScheduledImagineSavedSync();
-  library_state.imagineRemoteSyncing = true;
-  const syncPromise = new Promise((resolve) => {
-    library_state.imagineRemoteSyncTimerResolve = resolve;
-    library_state.imagineRemoteSyncTimer = window.setTimeout(() => {
-      library_state.imagineRemoteSyncTimer = 0;
-      library_state.imagineRemoteSyncTimerResolve = null;
-      if (!imagineSavedRequestIsCurrent(context) || !canLoadImagineSavedList()) {
-        library_state.imagineRemoteSyncing = false;
-        finishImagineSavedRequest(context);
-        resolve();
-        return;
-      }
-      Promise.resolve((async () => {
-        await syncImagineSavedCards(context, {
-          append: false,
-          force: false,
-          showLoading: false,
-          // The cache is only a startup paint. Merge the live response into the existing
-          // app-specific groups so a restart does not leave stale cards or thumbnails.
-          updatePosts: true,
-        });
-        // A restart used to refresh only the first Saved page in the background. Complete
-        // the same snapshot here, otherwise a valid child can remain absent until the user
-        // manually refreshes or scrolls far enough to trigger another request.
-        let pages = 0;
-        while (
-          library_state.imagineRemoteCursor
-          && pages < IMAGINE_SAVED_REFRESH_PAGE_LIMIT
-          && canLoadImagineSavedList()
-        ) {
-          pages += 1;
-          const cursorBefore = library_state.imagineRemoteCursor;
-          const pageContext = beginImagineSavedRequest();
-          if (!pageContext) break;
-          await syncImagineSavedCards(pageContext, {
-            append: true,
-            force: false,
-            showLoading: false,
-            updatePosts: true,
-          });
-          if (library_state.imagineRemoteCursor === cursorBefore) break;
-        }
-      })()).then(resolve, resolve);
-    }, IMAGINE_SAVED_BACKGROUND_SYNC_DELAY_MS);
-  });
-  library_state.imagineRemoteSyncPromise = syncPromise;
-  return syncPromise;
+    applyImagineSavedOfficialPage(data, { replacesList });
+    if (data.has_more === false) return true;
+    const nextCursor = library_state.imagineRemoteCursor;
+    if (!nextCursor || seenCursors.has(nextCursor)) {
+      throw new Error("Imagine Saved pagination did not complete.");
+    }
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
+    replacesList = false;
+  }
+  return false;
 }
 
 async function loadImagineSavedCards({ force = false, append = false } = {}) {
@@ -2176,132 +2202,45 @@ async function loadImagineSavedCards({ force = false, append = false } = {}) {
     return library_state.imagineRemoteSyncPromise || undefined;
   }
   if (!force && !append && library_state.imagineRemoteLoaded) return;
-  if (
-    append
-    && !library_state.imagineRemoteCacheHasMore
-    && !library_state.imagineRemoteCursor
-  ) return;
-  if (!canLoadImagineSavedCache()) return;
+  // Saved is read only from Grok. Each official page is shown as it arrives; cache and
+  // scroll-driven appends are intentionally excluded from the main Saved card list.
+  if (append || !canLoadImagineSavedList()) return;
+
   restoreImagineGeneratedSavedSync();
   const context = beginImagineSavedRequest({ supersede: force });
   if (!context) return;
-  const restoredPending = restoreImaginePendingSavedPosts();
-  if (restoredPending.length) {
-    library_state.imagineRemotePosts = mergeImagineRemotePosts(
-      restoredPending,
-      (library_state.imagineRemotePosts || []).filter((post) => !imagineSavedPostIsPending(post)),
-    );
-  }
   library_state.imagineRemoteLoading = true;
+  library_state.imagineRemoteSyncing = true;
   library_state.imagineRemoteError = "";
-  renderImagineSourceCards();
-  let loadError = null;
-  let loadedCachePage = false;
-  let cachedPostCount = 0;
+  library_state.imagineRemoteHasMore = false;
+  let completed = false;
+  const syncPromise = streamImagineSavedPages(context);
+  library_state.imagineRemoteSyncPromise = syncPromise;
   try {
-    const shouldLoadCache = (
-      (append && library_state.imagineRemoteCacheHasMore)
-      || (!append && !force && !library_state.imagineRemoteCacheLoaded)
-    );
-    if (shouldLoadCache) {
-      try {
-        const cacheData = await qApi("/api/imagine/saved/cache", {
-          account_id: context.accountId,
-          limit: 5000,
-          offset: append ? library_state.imagineRemoteCacheOffset : 0,
-        }, { signal: context.controller.signal });
-        if (!imagineSavedResponseMatches(context, cacheData)) return;
-        applyImagineLikedExclusionSnapshot(cacheData, context.accountId);
-        const cachedPosts = normalizeImagineRemotePosts(
-          Array.isArray(cacheData.posts) ? cacheData.posts : [],
-        );
-        cachedPostCount = cachedPosts.length;
-        const currentPosts = (library_state.imagineRemotePosts || [])
-          .filter((post) => !imagineSavedPostIsPending(post));
-        const pending = [
-          ...restoreImaginePendingSavedPosts(),
-          ...imaginePendingSavedPosts(),
-        ];
-        library_state.imagineRemotePosts = filterImagineMainLikedScopePosts(reconcileImagineSavedDisplayPosts(
-          reconcileImaginePendingSavedPosts(
-            mergeImagineSyncedPosts(currentPosts, cachedPosts),
-            pending,
-          ),
-        ));
-        library_state.imagineRemoteCacheLoaded = true;
-        library_state.imagineRemoteCacheOffset = Number(
-          cacheData.next_offset || cachedPosts.length,
-        );
-        library_state.imagineRemoteCacheHasMore = Boolean(cacheData.has_more);
-        loadedCachePage = true;
-      } catch (error) {
-        if (imagineSavedRequestCancelled(error, context)) return;
-        loadError = error;
-        library_state.imagineRemoteCacheLoaded = true;
-        library_state.imagineRemoteCacheHasMore = false;
-      }
-    }
-
-    library_state.imagineRemoteHasMore = Boolean(
-      library_state.imagineRemoteCacheHasMore
-      || library_state.imagineRemoteCursor,
-    );
+    completed = await syncPromise;
+    if (!completed || !imagineSavedRequestIsCurrent(context)) return;
+    library_state.imagineRemoteCacheLoaded = true;
+    library_state.imagineRemoteCacheHasMore = false;
+    library_state.imagineRemoteCacheOffset = 0;
     library_state.imagineRemoteLoaded = true;
-    const cachePageCompletedAppend = append && loadedCachePage && cachedPostCount > 0;
-    if (cachePageCompletedAppend || !canLoadImagineSavedList()) {
-      library_state.imagineRemoteLoading = false;
-      if (loadError && !library_state.imagineRemotePosts.length) {
-        library_state.imagineRemoteError = loadError?.message || "Imagine saved list failed.";
-      }
-      persistImaginePendingSavedPosts();
-      finishImagineSavedRequest(context);
-      renderImagineSourceCards();
-      return;
-    }
-
-    const hasCachedCards = library_state.imagineRemotePosts.some(
-      (post) => !imagineSavedPostIsPending(post),
-    );
-    const backgroundSync = !force && !append && hasCachedCards;
-    if (backgroundSync) {
-      library_state.imagineRemoteLoading = false;
-      renderImagineSourceCards();
-      const syncPromise = scheduleImagineSavedSync(context);
-      syncPromise.catch(() => {});
-      return;
-    }
-
-    await syncImagineSavedCards(context, { append, force, showLoading: true });
-
-    // A refresh only counts as a finished sync once the last page lands: the server drops
-    // rows missing the current sync token in finalize_imagine_remote_sync, and that runs
-    // only when has_more goes false. Stopping at page one left cards deleted on grok.com
-    // sitting in the cache forever, and the cache is what paints the list first.
-    if (force) {
-      let pages = 0;
-      while (
-        library_state.imagineRemoteCursor
-        && pages < IMAGINE_SAVED_REFRESH_PAGE_LIMIT
-        && canLoadImagineSavedList()
-      ) {
-        pages += 1;
-        const cursorBefore = library_state.imagineRemoteCursor;
-        // syncImagineSavedCards closes the request context on its way out, so reusing the
-        // first page's context would make every later page look like a stale request and
-        // return before asking for anything.
-        const pageContext = beginImagineSavedRequest();
-        if (!pageContext) break;
-        await syncImagineSavedCards(pageContext, { append: true, force: false, showLoading: true });
-        if (library_state.imagineRemoteCursor === cursorBefore) break;
-      }
+    library_state.imagineRemoteCursor = "";
+    library_state.imagineRemoteError = "";
+    completed = true;
+  } catch (error) {
+    if (!imagineSavedRequestCancelled(error, context) && !library_state.imagineRemotePosts.length) {
+      library_state.imagineRemoteError = error?.message || "Imagine saved list failed.";
     }
   } finally {
-    if (
-      imagineSavedRequestIsCurrent(context)
-      && !library_state.imagineRemoteSyncing
-      && library_state.imagineRemoteRequestController === context.controller
-    ) {
+    if (imagineSavedRequestIsCurrent(context)) {
       library_state.imagineRemoteLoading = false;
+      library_state.imagineRemoteSyncing = false;
+      library_state.imagineRemoteHasMore = false;
+      if (completed) {
+        persistImaginePendingSavedPosts();
+        if (imaginePendingSavedPosts().length) scheduleImaginePendingSavedRefresh();
+        else imaginePendingSavedRefreshAttempt = 0;
+      }
+      library_state.imagineRemoteSyncPromise = null;
       finishImagineSavedRequest(context);
       renderImagineSourceCards();
     }

@@ -1588,7 +1588,7 @@ function closeInactiveAccountWindows(command) {
   // total past the ceiling, and booting grok.com on a machine already at the ceiling is
   // what produced the two 30s prepare timeouts measured across 13 accounts. Clear room
   // for the newcomer first when this account has nothing open yet.
-  const createsBridgeWindow = ["prepare", "fetch_stream", "crop_image", "t2i_ws"].includes(String(command?.type || ""));
+  const createsBridgeWindow = ["prepare", "prepare_generation", "fetch_stream", "crop_image", "t2i_ws"].includes(String(command?.type || ""));
   const targetKey = bridgeWindowKey(command);
   const willCreate = createsBridgeWindow && !entries.some(([key]) => key === targetKey);
   const headroom = willCreate ? perWindow : 0;
@@ -3151,11 +3151,11 @@ async function waitForBridgeStoreReady(win, command, options = {}) {
 
 async function prepareBridgeWindow(win, command, prepareGeneration = 0) {
   const prepareStartedAt = Date.now();
-  const storePageCommand = ["prepare", "fetch_stream"].includes(command.type);
+  const storePageCommand = ["prepare", "prepare_generation", "fetch_stream"].includes(command.type);
   // Generation commands reuse the account-scoped media store prepared at app startup.
   // Source post/conversation context is carried in the command payload and hydrated by
   // the preload bridge; navigating to the request referer would discard the warm store.
-  const targetUrl = ["t2i_ws", "prepare", "fetch_stream"].includes(command.type)
+  const targetUrl = ["t2i_ws", "prepare", "prepare_generation", "fetch_stream"].includes(command.type)
     ? "https://grok.com/imagine/saved"
     : (command.url || "https://grok.com/imagine");
   const cookiesChanged = await applyBridgeCookies(win, command);
@@ -3193,7 +3193,7 @@ async function prepareBridgeWindow(win, command, prepareGeneration = 0) {
   }
 
   await waitForLoad(win, targetUrl, {
-    forceTarget: ["t2i_ws", "prepare", "fetch_stream", "crop_image", "open_page"].includes(command.type),
+    forceTarget: ["t2i_ws", "prepare", "prepare_generation", "fetch_stream", "crop_image", "open_page"].includes(command.type),
     timeoutMs: storePageCommand ? IMAGINE_BRIDGE_PAGE_TIMEOUT_MS : undefined,
     attempts: storePageCommand ? 1 : undefined,
   });
@@ -3235,7 +3235,7 @@ async function prepareBridgeWindow(win, command, prepareGeneration = 0) {
 
 async function ensureBridgeReady(command, existingWindow = null) {
   const win = existingWindow || bridgeWindow(command);
-  const storePageCommand = ["prepare", "fetch_stream"].includes(command.type);
+  const storePageCommand = ["prepare", "prepare_generation", "fetch_stream"].includes(command.type);
   if (!storePageCommand) return prepareBridgeWindow(win, command);
   if (win.__grokPreparePromise) {
     const sharedPromise = win.__grokPreparePromise;
@@ -3331,16 +3331,18 @@ async function runFetchStream(win, command) {
   const requestId = String(command.request_id || "");
   const requestPayload = command.request_payload || {};
   const maxWaitMs = Math.max(1, Number(command.max_wait_seconds || 90)) * 1000;
+  const prepareOnly = command.type === "prepare_generation";
   const script = `
     (async () => {
       const requestId = ${JSON.stringify(requestId)};
       const requestPayload = ${JSON.stringify(requestPayload)};
       const maxWaitMs = ${Math.floor(maxWaitMs)};
+      const prepareOnly = ${JSON.stringify(prepareOnly)};
       const bridge = window.__grokChameleonImagineBridge;
       if (!bridge || typeof bridge.runStoreGeneration !== 'function') {
         throw new Error('Official Imagine store bridge hook is missing url=' + location.href);
       }
-      return await bridge.runStoreGeneration({ requestId, requestPayload, maxWaitMs });
+      return await bridge.runStoreGeneration({ requestId, requestPayload, maxWaitMs, prepareOnly });
     })()
   `;
   return win.webContents.executeJavaScript(script, true);
@@ -3470,7 +3472,7 @@ async function handleBridgeCommand(command) {
     // With speculative preparation removed, real work is the only point where a
     // missing account tab may be created. Sweep idle tabs here so the browser-style
     // cache stays bounded; selected and busy tabs are protected by the sweep itself.
-    if (["prepare", "fetch_stream", "crop_image", "t2i_ws"].includes(command.type)) {
+    if (["prepare", "prepare_generation", "fetch_stream", "crop_image", "t2i_ws"].includes(command.type)) {
       closeInactiveAccountWindows(command);
     }
     win = bridgeWindow(command);
@@ -3480,7 +3482,7 @@ async function handleBridgeCommand(command) {
     win = await ensureBridgeReady(command, win);
     if (command.type === "prepare") {
       await sendBridgeResult(id, true, { ok: true, status: "ready" });
-    } else if (command.type === "fetch_stream") {
+    } else if (command.type === "prepare_generation" || command.type === "fetch_stream") {
       const value = await runFetchStream(win, command);
       await sendBridgeResult(id, true, value || {});
     } else if (command.type === "crop_image") {

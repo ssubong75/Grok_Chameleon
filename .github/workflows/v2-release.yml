@@ -44,6 +44,7 @@ env:
   COMMON_LIBRARY_SCAN: common/app/web/scripts/library_scan.js
   COMMON_DETAIL_STATE: common/app/web/scripts/detail_state.js
   COMMON_DETAIL_MEDIA: common/app/web/scripts/detail_media.js
+  COMMON_DETAIL_VIDEO_PLAYER: common/app/web/scripts/detail_video_player.js
   COMMON_DETAIL_EVENTS: common/app/web/scripts/detail_events.js
   COMMON_DETAIL_NAVIGATION: common/app/web/scripts/detail_navigation.js
   COMMON_DETAIL_RENDER: common/app/web/scripts/detail_render.js
@@ -165,6 +166,7 @@ jobs:
             @{ Name = "library_scan"; Relative = "web\scripts\library_scan.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_LIBRARY_SCAN) },
             @{ Name = "detail_state"; Relative = "web\scripts\detail_state.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_STATE) },
             @{ Name = "detail_media"; Relative = "web\scripts\detail_media.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_MEDIA) },
+            @{ Name = "detail_video_player"; Relative = "web\scripts\detail_video_player.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_VIDEO_PLAYER) },
             @{ Name = "detail_events"; Relative = "web\scripts\detail_events.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_EVENTS) },
             @{ Name = "detail_navigation"; Relative = "web\scripts\detail_navigation.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_NAVIGATION) },
             @{ Name = "detail_render"; Relative = "web\scripts\detail_render.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_DETAIL_RENDER) },
@@ -673,6 +675,7 @@ jobs:
             web/scripts/library_scan.js
             web/scripts/detail_state.js
             web/scripts/detail_media.js
+            web/scripts/detail_video_player.js
             web/scripts/detail_events.js
             web/scripts/detail_navigation.js
             web/scripts/detail_render.js
@@ -1003,6 +1006,7 @@ jobs:
             web/scripts/library_scan.js
             web/scripts/detail_state.js
             web/scripts/detail_media.js
+            web/scripts/detail_video_player.js
             web/scripts/detail_events.js
             web/scripts/detail_navigation.js
             web/scripts/detail_render.js
@@ -1433,6 +1437,7 @@ jobs:
             web/scripts/library_scan.js
             web/scripts/detail_state.js
             web/scripts/detail_media.js
+            web/scripts/detail_video_player.js
             web/scripts/detail_events.js
             web/scripts/detail_navigation.js
             web/scripts/detail_render.js
