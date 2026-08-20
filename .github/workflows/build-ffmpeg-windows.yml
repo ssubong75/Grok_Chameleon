@@ -70,7 +70,7 @@ jobs:
         run: |
           set -e
           cd src
-          make -j"$(nproc)" ffmpeg
+          make -j"$(nproc)"
 
       - name: Verify the binary
         run: |
