@@ -16,6 +16,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unicodedata
@@ -22277,13 +22278,16 @@ def build_image_request(payload: dict, options: dict, prompt: str, image_attachm
     count = option_count(options.get("count"))
     if count:
         body["n"] = count
+    aspect = clean_option(options.get("aspect_ratio") or options.get("aspect"), "auto").lower()
     if image_attachments:
         if len(image_attachments) > 3:
             raise RuntimeError("Image editing supports 1 to 3 input images.")
         images = [attachment_source(attachment, "image_url") for attachment in image_attachments]
         body["image" if len(images) == 1 else "images"] = images[0] if len(images) == 1 else images
+        # Editing defaults to the first input image ratio; only send an explicit override.
+        if aspect in IMAGE_ASPECT_RATIOS and aspect != "auto":
+            body["aspect_ratio"] = aspect
         return "/images/edits", body, "i2i"
-    aspect = clean_option(options.get("aspect_ratio") or options.get("aspect"), "auto").lower()
     if aspect in IMAGE_ASPECT_RATIOS:
         body["aspect_ratio"] = aspect
     return "/images/generations", body, "t2i"
@@ -22300,6 +22304,76 @@ def video_model_from_option(value: str, fallback: str) -> str:
     if normalized == "1.5":
         return DEFAULT_IMAGE_TO_VIDEO_MODEL
     return fallback
+
+
+def resolve_ffmpeg_binary() -> str:
+    """Bundled ffmpeg first, then a system install.  Empty string when unavailable."""
+    binary_name = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+    bundled = Path(__file__).resolve().parent.parent / "vendor" / "ffmpeg" / binary_name
+    candidates = [bundled]
+    if os.name != "nt":
+        candidates += [Path("/opt/homebrew/bin/ffmpeg"), Path("/usr/local/bin/ffmpeg"), Path("/usr/bin/ffmpeg")]
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return shutil.which("ffmpeg") or ""
+
+
+def attachment_local_media_path(attachment: dict) -> Path | None:
+    """Resolve an attachment back to its file on disk, when it lives in the library."""
+    root = library_root()
+    if not root:
+        return None
+    for key in ("url", "source_url", "object_url", "raw_url", "remote_url", "media_url", "mediaUrl"):
+        value = str(attachment.get(key) or "").strip()
+        if not value or value.startswith("data:"):
+            continue
+        candidate = local_media_source_from_url(root, imagine_unwrap_remote_proxy(value))
+        if candidate is None and value.startswith("/api/media"):
+            candidate = local_media_source_from_url(root, value)
+        if candidate and candidate.is_file():
+            return candidate
+    return None
+
+
+def trim_video_attachment(attachment: dict, trim_end: float | None) -> Path | None:
+    """Cut the source video down to trim_end seconds.
+
+    The extensions endpoint always continues from the end of whatever video it
+    receives, so an in-video start point only works by shortening the source
+    first.  Stream copy keeps this lossless and instant.  Returns a temp file
+    the caller must delete, or None when trimming is not possible.
+    """
+    if trim_end is None or trim_end <= 0:
+        return None
+    source_path = attachment_local_media_path(attachment)
+    if source_path is None:
+        return None
+    ffmpeg_binary = resolve_ffmpeg_binary()
+    if not ffmpeg_binary:
+        return None
+    workdir = Path(tempfile.mkdtemp(prefix="gc_trim_"))
+    target = workdir / "source.mp4"
+    command = [
+        ffmpeg_binary,
+        "-hide_banner",
+        "-loglevel", "error",
+        "-y",
+        "-i", str(source_path),
+        "-t", f"{trim_end:.3f}",
+        "-c", "copy",
+        "-movflags", "+faststart",
+        str(target),
+    ]
+    try:
+        subprocess.run(command, check=True, capture_output=True, timeout=180)
+    except Exception:
+        shutil.rmtree(workdir, ignore_errors=True)
+        return None
+    if not target.is_file() or target.stat().st_size <= 0:
+        shutil.rmtree(workdir, ignore_errors=True)
+        return None
+    return target
 
 
 def build_video_request(payload: dict, options: dict, prompt: str, image_attachments: list[dict], video_attachment: dict | None) -> tuple[str, dict, str]:
@@ -22326,16 +22400,24 @@ def build_video_request(payload: dict, options: dict, prompt: str, image_attachm
         if source_ext != "mp4" and source_type != "video/mp4":
             raise RuntimeError("Extend source video must be .mp4.")
         duration = option_seconds(options.get("duration"), 6, 2, 10)
+        # The API has no start-point parameter; it always continues from the end
+        # of the supplied video.  Shorten the source instead so the extension
+        # begins where the user placed the playhead.
+        source_trim_end = option_float(options.get("source_trim_end"), None, 0, None)
+        trimmed_source = trim_video_attachment(video_attachment, source_trim_end)
+        if trimmed_source is not None:
+            try:
+                video_source = {"url": file_to_data_url(trimmed_source, "video/mp4")}
+            finally:
+                shutil.rmtree(trimmed_source.parent, ignore_errors=True)
+        else:
+            video_source = attachment_source(video_attachment)
         body = {
             "model": DEFAULT_VIDEO_MODEL,
             "prompt": prompt,
             "duration": duration,
-            "video": attachment_source(video_attachment),
+            "video": video_source,
         }
-        source_trim_end = option_float(options.get("source_trim_end"), None, 0, None)
-        if source_trim_end is not None:
-            body["source_trim_end"] = round(source_trim_end, 3)
-            body["source_trim_quality"] = clean_option(options.get("source_trim_quality"), "high") or "high"
         return "/videos/extensions", body, "extend"
 
     if video_attachment and not image_attachments:
