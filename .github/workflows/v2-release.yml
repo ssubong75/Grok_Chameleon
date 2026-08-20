@@ -68,6 +68,8 @@ env:
   COMMON_IMAGINE_ROUTES: common/app/runtime/imagine_routes.py
   COMMON_PROMPT_ACCOUNT: common/app/web/scripts/prompt_account.js
   COMMON_ACCOUNT_CORE: common/app/web/scripts/account_core.js
+  COMMON_FFMPEG_WIN: common/app/vendor/ffmpeg/ffmpeg.exe
+  COMMON_FFMPEG_LICENSE: common/app/vendor/ffmpeg/COPYING.LGPLv2.1
 
 jobs:
   build-windows:
@@ -182,7 +184,9 @@ jobs:
             @{ Name = "account_core"; Relative = "web\scripts\account_core.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_ACCOUNT_CORE) },
             @{ Name = "ui_feedback"; Relative = "web\scripts\ui_feedback.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_UI_FEEDBACK) },
             @{ Name = "account_style"; Relative = "web\styles\account.css"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_ACCOUNT_STYLE) },
-            @{ Name = "composer_style"; Relative = "web\styles\composer.css"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_COMPOSER_STYLE) }
+            @{ Name = "composer_style"; Relative = "web\styles\composer.css"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_COMPOSER_STYLE) },
+            @{ Name = "ffmpeg"; Relative = "vendor\ffmpeg\ffmpeg.exe"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_FFMPEG_WIN) },
+            @{ Name = "ffmpeg_license"; Relative = "vendor\ffmpeg\COPYING.LGPLv2.1"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_FFMPEG_LICENSE) }
           )
           # The COMMON_* variables name the plain tree. The clone-batch variant keeps its own
           # full copy of the same relative paths, so only the root directory differs.
@@ -250,6 +254,10 @@ jobs:
           }
           $sharedHashes = @{}
           foreach ($shared in $sharedSources) {
+            $sharedDir = Split-Path -Parent $shared.Target
+            if (-not (Test-Path -LiteralPath $sharedDir)) {
+              New-Item -ItemType Directory -Force -Path $sharedDir | Out-Null
+            }
             Copy-Item -Force -LiteralPath $shared.Source -Destination $shared.Target
             $sharedHashes[$shared.Name] = (Get-FileHash -Algorithm SHA256 -LiteralPath $shared.Source).Hash
             if ((Get-FileHash -Algorithm SHA256 -LiteralPath $shared.Target).Hash -ne $sharedHashes[$shared.Name]) {
@@ -692,6 +700,8 @@ jobs:
             web/scripts/ui_feedback.js
             web/styles/account.css
             web/styles/composer.css
+            vendor/ffmpeg/ffmpeg
+            vendor/ffmpeg/COPYING.LGPLv2.1
           )
           target="$app_root/web/scripts/composer_options.js"
           main_js="$app_root/electron/main.js"
@@ -751,6 +761,9 @@ jobs:
               node --check "$app_root/$relative"
             fi
           done
+          # git stores the bundled ffmpeg without the executable bit.
+          chmod +x "$app_root/vendor/ffmpeg/ffmpeg"
+          test -x "$app_root/vendor/ffmpeg/ffmpeg"
           python3 - "$server_py" <<'PY'
           import ast
           import pathlib
@@ -1023,6 +1036,8 @@ jobs:
             web/scripts/ui_feedback.js
             web/styles/account.css
             web/styles/composer.css
+            vendor/ffmpeg/ffmpeg
+            vendor/ffmpeg/COPYING.LGPLv2.1
           )
           if find "$root" -type d -name '__pycache__' -print | grep -q .; then
             echo 'Python cache found before Mac packaging.' >&2
@@ -1454,6 +1469,8 @@ jobs:
             web/scripts/ui_feedback.js
             web/styles/account.css
             web/styles/composer.css
+            vendor/ffmpeg/ffmpeg
+            vendor/ffmpeg/COPYING.LGPLv2.1
           )
 
           test -d "$root"
