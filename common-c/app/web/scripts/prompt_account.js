@@ -422,12 +422,6 @@
     library_state.imagineRemoteRequestController?.abort?.();
     library_state.imagineRemoteRequestEpoch = Number(library_state.imagineRemoteRequestEpoch || 0) + 1;
     library_state.imagineRemoteRequestController = null;
-    if (library_state.imagineRemoteSyncTimer) {
-      clearTimeout(library_state.imagineRemoteSyncTimer);
-      library_state.imagineRemoteSyncTimer = 0;
-    }
-    library_state.imagineRemoteSyncTimerResolve?.();
-    library_state.imagineRemoteSyncTimerResolve = null;
     library_state.imagineRemoteSyncPromise = null;
     library_state.imagineRemoteAccountId = String(nextAccountId || "");
     library_state.imagineRemotePosts = [];
@@ -438,6 +432,7 @@
     library_state.imagineRemoteCursor = "";
     library_state.imagineRemoteHasMore = false;
     library_state.imagineRemoteCacheLoaded = false;
+    library_state.imagineRemoteCacheLoading = false;
     library_state.imagineRemoteCacheOffset = 0;
     library_state.imagineRemoteCacheHasMore = false;
     library_state.imagineRemoteSyncToken = "";

@@ -15,6 +15,9 @@ const persistentCardPreviewLookupCache = new Map();
 const cardPreviewDisposers = new WeakMap();
 const CARD_PREVIEW_NATIVE_MAX_ACTIVE = 4;
 const CARD_PREVIEW_LIST_MAX_ACTIVE = 2;
+// Builds created before the persistent Build thumbnail fix may have a generic native
+// icon cached at this same URL. Advance only when the persisted preview contract changes.
+const BUILD_PREVIEW_CACHE_REVISION = "2";
 // Queue order alone could not get the opened detail served first. Sorting only reorders
 // what is still waiting, and a started task keeps its slot until the native call returns —
 // cancelling it does nothing (see the cancel() in queueCardPreviewWork). So a thumbnail the
@@ -1021,8 +1024,8 @@ async function lookupPersistentCardPreview(rawUrl, kind = "card", cacheIdentity 
     const size = BigInt(`0x${match[2]}`).toString(10);
     const key = await sha256Text(`${mediaPath}\0${modifiedNs}\0${size}`);
     if (!key) return "";
-    const previewUrl = `/api/build-preview?kind=${previewKind}&key=${key}`;
-    const response = await fetch(previewUrl, { method: "HEAD", cache: "force-cache" });
+    const previewUrl = buildPersistentPreviewUrl(previewKind, key);
+    const response = await fetch(previewUrl, { method: "HEAD", cache: "no-cache" });
     return response.ok ? previewUrl : "";
   } catch (_) {
     return "";
@@ -1052,6 +1055,10 @@ function isImagineRemoteCardPreview(url) {
   } catch (_) {
     return false;
   }
+}
+
+function buildPersistentPreviewUrl(kind, key) {
+  return `/api/build-preview?kind=${kind}&key=${key}&rev=${BUILD_PREVIEW_CACHE_REVISION}`;
 }
 
 function resolveLocalCardPreview(url, kind = "card", cacheIdentity = "") {

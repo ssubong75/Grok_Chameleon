@@ -12,6 +12,8 @@ def imagine_post_routes(
     *,
     start_imagine_login: JsonHandler,
     open_imagine_usage_page: JsonHandler,
+    list_imagine_saved_display_cache: JsonHandler,
+    save_imagine_saved_display_cache: JsonHandler,
     list_imagine_saved_cache: JsonHandler,
     list_imagine_saved: JsonHandler,
     load_imagine_saved_conversation: JsonHandler,
@@ -48,6 +50,8 @@ def imagine_post_routes(
     return {
         "/api/imagine/login/start": start_imagine_login,
         "/api/imagine/usage-page": open_imagine_usage_page,
+        "/api/imagine/saved/display-cache": list_imagine_saved_display_cache,
+        "/api/imagine/saved/display-cache/save": save_imagine_saved_display_cache,
         "/api/imagine/saved/cache": list_imagine_saved_cache,
         "/api/imagine/saved": list_imagine_saved,
         "/api/imagine/saved/conversation": load_imagine_saved_conversation,

@@ -199,6 +199,7 @@ document.documentElement.classList.toggle("platform-macos", isMacRenderer);
       imagineRemoteCursor: "",
       imagineRemoteHasMore: false,
       imagineRemoteCacheLoaded: false,
+      imagineRemoteCacheLoading: false,
       imagineRemoteCacheOffset: 0,
       imagineRemoteCacheHasMore: false,
       imagineRemoteSyncToken: "",
@@ -206,8 +207,6 @@ document.documentElement.classList.toggle("platform-macos", isMacRenderer);
       imagineRemoteRequestEpoch: 0,
       imagineRemoteRequestController: null,
       imagineRemoteSyncPromise: null,
-      imagineRemoteSyncTimer: 0,
-      imagineRemoteSyncTimerResolve: null,
       imagineDiscoverPosts: [],
       imagineDiscoverCacheLoaded: false,
       imagineDiscoverCacheLoading: false,
@@ -599,6 +598,7 @@ document.documentElement.classList.toggle("platform-macos", isMacRenderer);
     const indexed = Boolean(data.library_index?.enabled);
     if (indexed) {
       const previouslyIndexed = library_state.libraryIndexEnabled;
+      const deletedPaths = Array.isArray(data.deleted_paths) ? data.deleted_paths : [];
       library_state.libraryIndexEnabled = true;
       library_state.libraryIndexCounts = {
         ...library_state.libraryIndexCounts,
@@ -609,7 +609,10 @@ document.documentElement.classList.toggle("platform-macos", isMacRenderer);
           ? library_state.libraryIndexCounts.build_main_with_collections
           : library_state.libraryIndexCounts.build_main,
       ) || 0;
-      if (data.index_rebuilt) {
+      // A deletion response is authoritative for its paths. Any indexed page that
+      // began before it can still arrive afterwards with the deleted card, so give
+      // it a new epoch and let the in-flight request discard itself.
+      if (data.index_rebuilt || deletedPaths.length) {
         library_state.libraryIndexEpoch = Number(library_state.libraryIndexEpoch || 0) + 1;
       }
       if (!previouslyIndexed) {
@@ -673,7 +676,6 @@ document.documentElement.classList.toggle("platform-macos", isMacRenderer);
           };
         })
         : library_state.collections;
-      const deletedPaths = Array.isArray(data.deleted_paths) ? data.deleted_paths : [];
       if (deletedPaths.length) {
         const deleted = (path) => deletedPaths.some((prefix) => (
           String(path || "") === String(prefix || "")

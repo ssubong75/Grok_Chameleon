@@ -266,7 +266,11 @@ function compareImagineSavedOfficialOrder(left, right) {
     if (rightOrder === null) return -1;
     if (leftOrder !== rightOrder) return leftOrder - rightOrder;
   }
-  return comparePostsByRecentActivity(left, right);
+  // Main Saved is an ordered Grok feed. Asset-only fallbacks and temporary relation
+  // cards do not have an official position, and their activity timestamps can vary
+  // between equivalent refreshes. Returning zero keeps the stable input order instead
+  // of letting a background Saved check reshuffle cards the user is already viewing.
+  return 0;
 }
 
 function imagineSavedCardPathKey(post) {
@@ -1440,8 +1444,6 @@ function reconcileImagineSavedDisplayPosts(posts) {
 }
 
 const IMAGINE_PENDING_SAVED_STORAGE_PREFIX = "grok-chameleon:imagine-pending-saved:";
-let imaginePendingSavedRefreshTimer = 0;
-let imaginePendingSavedRefreshAttempt = 0;
 
 // Generated media reaches the browser stream before it necessarily reaches Grok's Saved
 // endpoints.  Keep that acknowledgement separate from the app's card grouping: a group
@@ -1451,176 +1453,11 @@ let imaginePendingSavedRefreshAttempt = 0;
 // even after an app restart. Start v2 with a clean acknowledgement set; successful
 // in-app deletes below also release their own ids immediately.
 const IMAGINE_GENERATED_SAVED_SYNC_STORAGE_PREFIX = "grok-chameleon:imagine-generated-saved-sync:v2:";
-const IMAGINE_GENERATED_SAVED_SYNC_DELAYS = [1500, 4000, 10000, 30000];
-let imagineGeneratedSavedSyncTimer = 0;
-let imagineGeneratedSavedSyncAttempt = 0;
 let imagineGeneratedSavedSyncAccountId = "";
 const imagineGeneratedSavedSyncAssetIds = new Set();
 const imagineGeneratedSavedOfficialAssetIds = new Set();
-
-// A fresh `+` upload has no Saved-card path yet.  Grok knows the upload asset and the
-// generated result belong to one conversation, but its broad Saved list can expose the
-// result before the source attachment arrives.  Keep the just-created card intact until the
-// exact official conversation confirms both halves.
-// The official conversation detail is normally complete as the stream returns.  Ask for it
-// immediately, then retry only if Grok has not yet committed both the human upload and its
-// generated child.
-const IMAGINE_DIRECT_UPLOAD_SAVED_SYNC_DELAYS = [0, 1500, 4000, 10000, 30000];
-const imagineDirectUploadSavedSyncs = new Map();
-
-function imagineDirectUploadAssetId(item) {
-  const metadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
-  const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
-  return String(
-    item?.asset_id
-    || metadata.asset_id
-    || imagine.asset_id
-    || item?.item_id
-    || item?.post_id
-    || imagine.post_id
-    || "",
-  ).trim();
-}
-
-function imagineDirectUploadSourceItem(items) {
-  return (items || []).find((item) => {
-    const metadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
-    const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
-    // Do not infer an upload from an app relation. This is only the official source item
-    // created from the fresh `+` upload that the generation result already carries.
-    return item?.official_upload_source === true
-      || metadata.official_upload_source === true
-      || imagine.official_upload_source === true;
-  }) || null;
-}
-
-function imagineFreshDirectUploadSavedSyncInfo(result) {
-  const action = String(result?.action || "").toLowerCase();
-  if (!new Set(["i2i", "i2v"]).has(action) || String(result?.source_post_path || "").trim()) return null;
-  const post = result?.post && typeof result.post === "object" ? result.post : null;
-  const postItems = Array.isArray(post?.items) ? post.items : [];
-  const sourceItem = imagineDirectUploadSourceItem(postItems);
-  const sourceAssetId = imagineDirectUploadAssetId(sourceItem);
-  const generatedItems = Array.isArray(result?.items) && result.items.length
-    ? result.items
-    : [result?.item].filter(Boolean);
-  const resultAssetIds = [...new Set(generatedItems
-    .map(imagineDirectUploadAssetId)
-    .filter(Boolean))];
-  const metadata = post?.metadata && typeof post.metadata === "object" ? post.metadata : {};
-  const selectedItem = generatedItems[generatedItems.length - 1] || {};
-  const selectedMetadata = selectedItem?.metadata && typeof selectedItem.metadata === "object" ? selectedItem.metadata : {};
-  const selectedImagine = selectedMetadata.imagine && typeof selectedMetadata.imagine === "object"
-    ? selectedMetadata.imagine
-    : {};
-  const targetPath = String(result?.target_folder_path || post?.folder_path || "").trim();
-  const conversationId = String(
-    metadata.conversation_id
-    || selectedItem.conversation_id
-    || selectedMetadata.conversation_id
-    || selectedImagine.conversation_id
-    || selectedItem.root_post_id
-    || "",
-  ).trim();
-  if (!targetPath || !conversationId || !sourceAssetId || !resultAssetIds.length) return null;
-  return {
-    action,
-    targetPath,
-    conversationId,
-    sourceAssetIds: [sourceAssetId],
-    resultAssetIds,
-  };
-}
-
-function markImagineDirectUploadSavedPending(info) {
-  // The card is not a placeholder. Only the just-generated child is awaiting Saved; marking
-  // the whole card made a normal upload card look synthetic and let refresh remove it.
-  setImagineGeneratedSavedSyncItemState(new Set(info?.resultAssetIds || []), true);
-}
-
-function clearImagineDirectUploadSavedSync(key) {
-  const sync = imagineDirectUploadSavedSyncs.get(key);
-  if (!sync) return;
-  if (sync.timer) window.clearTimeout(sync.timer);
-  imagineDirectUploadSavedSyncs.delete(key);
-  setImagineGeneratedSavedSyncItemState(new Set(sync.info?.resultAssetIds || []), false);
-}
-
-function applyImagineDirectUploadOfficialPost(info, post) {
-  if (!post || typeof post !== "object") return;
-  if (typeof upsertImagineRemotePost === "function") {
-    upsertImagineRemotePost(post);
-  } else {
-    const current = Array.isArray(library_state.imagineRemotePosts) ? library_state.imagineRemotePosts : [];
-    const index = current.findIndex((candidate) => String(candidate?.folder_path || "") === info.targetPath);
-    library_state.imagineRemotePosts = index < 0
-      ? [post, ...current]
-      : current.map((candidate, candidateIndex) => (candidateIndex === index ? post : candidate));
-    if (typeof syncImagineRemotePostsIntoLibrary === "function") syncImagineRemotePostsIntoLibrary();
-  }
-  renderImagineSourceCards();
-  renderDetailViews();
-}
-
-function scheduleImagineDirectUploadSavedSync(key, delayOverride = null) {
-  const sync = imagineDirectUploadSavedSyncs.get(key);
-  if (!sync || sync.timer) return;
-  const delay = delayOverride === null
-    ? IMAGINE_DIRECT_UPLOAD_SAVED_SYNC_DELAYS[Math.min(
-      sync.attempt,
-      IMAGINE_DIRECT_UPLOAD_SAVED_SYNC_DELAYS.length - 1,
-    )]
-    : delayOverride;
-  sync.attempt += 1;
-  sync.timer = window.setTimeout(async () => {
-    sync.timer = 0;
-    const current = imagineDirectUploadSavedSyncs.get(key);
-    if (!current) return;
-    if (imaginePendingSavedAccountId() !== current.accountId) {
-      clearImagineDirectUploadSavedSync(key);
-      return;
-    }
-    try {
-      const data = await qApi("/api/imagine/saved/conversation", {
-        account_id: current.accountId,
-        conversation_id: current.info.conversationId,
-        source_asset_ids: current.info.sourceAssetIds,
-        result_asset_ids: current.info.resultAssetIds,
-      });
-      if (data?.ready && data.post) {
-        applyImagineDirectUploadOfficialPost(current.info, data.post);
-        clearImagineDirectUploadSavedSync(key);
-        toast("Saved 목록 반영 완료.");
-        return;
-      }
-    } catch (error) {
-      console.warn("Imagine direct-upload Saved synchronization failed", error);
-    }
-    if (!imagineDirectUploadSavedSyncs.has(key)) return;
-    if (current.attempt === IMAGINE_DIRECT_UPLOAD_SAVED_SYNC_DELAYS.length) {
-      toast("공홈 카드에 원본과 생성물이 함께 반영되는지 계속 확인 중입니다.");
-    }
-    scheduleImagineDirectUploadSavedSync(key);
-  }, delay);
-}
-
-function beginImagineDirectUploadSavedSync(result) {
-  const info = imagineFreshDirectUploadSavedSyncInfo(result);
-  const accountId = imaginePendingSavedAccountId();
-  if (!info || !accountId) return false;
-  markImagineDirectUploadSavedPending(info);
-  const key = `${accountId}:${info.conversationId}`;
-  clearImagineDirectUploadSavedSync(key);
-  imagineDirectUploadSavedSyncs.set(key, {
-    accountId,
-    info,
-    attempt: 0,
-    timer: 0,
-  });
-  toast("생성 완료. 공홈 카드의 원본과 생성물을 확인 중입니다.");
-  scheduleImagineDirectUploadSavedSync(key);
-  return true;
-}
+let imagineSavedDisplayCacheWrite = Promise.resolve();
+let imagineSavedDisplayCacheWriteRevision = 0;
 
 function imaginePendingSavedAccountId() {
   return String(activeImagineSavedAccount()?.id || account_state.imagine?.active_id || "").trim();
@@ -1656,6 +1493,29 @@ function persistImagineGeneratedSavedSync() {
   } catch {
     // The current session can still reconcile if browser storage is unavailable.
   }
+}
+
+function saveImagineSavedDisplayCache() {
+  const accountId = imaginePendingSavedAccountId();
+  if (!accountId) return;
+  const posts = (library_state.imagineRemotePosts || [])
+    .filter((post) => (
+      imagineSavedPostProvenance(post) === "normal-saved"
+      && !imagineSavedPostIsPending(post)
+    ));
+  const revision = ++imagineSavedDisplayCacheWriteRevision;
+  const snapshot = JSON.parse(JSON.stringify(posts));
+  // Serialize writes. A slower, older refresh must never overwrite a newer completed view.
+  imagineSavedDisplayCacheWrite = imagineSavedDisplayCacheWrite
+    .catch(() => {})
+    .then(async () => {
+      if (revision !== imagineSavedDisplayCacheWriteRevision) return;
+      await qApi("/api/imagine/saved/display-cache/save", {
+        account_id: accountId,
+        posts: snapshot,
+      });
+    })
+    .catch((error) => console.warn("Imagine display cache save failed", error));
 }
 
 function releaseImagineGeneratedSavedSyncForDeletedItems(items = []) {
@@ -1718,10 +1578,16 @@ function setImagineGeneratedSavedSyncItemState(assetIds, pending) {
       return { ...item, metadata };
     });
     if (!changed) return post;
+    const postMetadata = post?.metadata && typeof post.metadata === "object"
+      ? { ...post.metadata }
+      : {};
+    const hasPendingItem = items.some((item) => item?.metadata?.saved_sync_pending === true);
+    if (pending) postMetadata.saved_sync_pending = true;
+    else if (!hasPendingItem) delete postMetadata.saved_sync_pending;
     const representative = imagineItemMatchesGeneratedSavedSync(post?.representative_item, assetIds)
       ? (items.find((item) => imagineItemMatchesGeneratedSavedSync(item, assetIds)) || post.representative_item)
       : post.representative_item;
-    return { ...post, items, representative_item: representative };
+    return { ...post, items, representative_item: representative, metadata: postMetadata };
   });
   library_state.imagineRemotePosts = updatePosts(library_state.imagineRemotePosts);
   library_state.imagineLikedPosts = updatePosts(library_state.imagineLikedPosts);
@@ -1730,9 +1596,6 @@ function setImagineGeneratedSavedSyncItemState(assetIds, pending) {
 
 function clearImagineGeneratedSavedSync() {
   const settled = new Set(imagineGeneratedSavedSyncAssetIds);
-  if (imagineGeneratedSavedSyncTimer) window.clearTimeout(imagineGeneratedSavedSyncTimer);
-  imagineGeneratedSavedSyncTimer = 0;
-  imagineGeneratedSavedSyncAttempt = 0;
   imagineGeneratedSavedOfficialAssetIds.clear();
   imagineGeneratedSavedSyncAssetIds.clear();
   setImagineGeneratedSavedSyncItemState(settled, false);
@@ -1743,19 +1606,11 @@ function clearImagineGeneratedSavedSync() {
 }
 
 function resetImagineGeneratedSavedSyncForAccountChange(nextAccountId = "") {
-  for (const [key, sync] of imagineDirectUploadSavedSyncs) {
-    if (sync.accountId !== String(nextAccountId || "").trim()) {
-      clearImagineDirectUploadSavedSync(key);
-    }
-  }
   const previousAssetIds = new Set(imagineGeneratedSavedSyncAssetIds);
-  if (imagineGeneratedSavedSyncTimer) window.clearTimeout(imagineGeneratedSavedSyncTimer);
-  imagineGeneratedSavedSyncTimer = 0;
   // Preserve the old account's pending acknowledgement so it can be reconciled if that
   // account is selected again, but never let it affect the newly selected account's cards.
   persistImagineGeneratedSavedSync();
   setImagineGeneratedSavedSyncItemState(previousAssetIds, false);
-  imagineGeneratedSavedSyncAttempt = 0;
   imagineGeneratedSavedOfficialAssetIds.clear();
   imagineGeneratedSavedSyncAssetIds.clear();
   imagineGeneratedSavedSyncAccountId = String(nextAccountId || "").trim();
@@ -1771,45 +1626,8 @@ function resetImagineGeneratedSavedSyncForAccountChange(nextAccountId = "") {
   } catch {
     // Ignore malformed old session data.
   }
-  if (imagineGeneratedSavedSyncAssetIds.size) scheduleImagineGeneratedSavedSync();
-}
-
-function scheduleImagineGeneratedSavedSync(delayOverride = null) {
-  if (!imagineGeneratedSavedSyncInProgress() || imagineGeneratedSavedSyncTimer) return;
-  const delay = delayOverride === null
-    ? IMAGINE_GENERATED_SAVED_SYNC_DELAYS[Math.min(
-      imagineGeneratedSavedSyncAttempt,
-      IMAGINE_GENERATED_SAVED_SYNC_DELAYS.length - 1,
-    )]
-    : delayOverride;
-  imagineGeneratedSavedSyncAttempt += 1;
-  imagineGeneratedSavedSyncTimer = window.setTimeout(async () => {
-    imagineGeneratedSavedSyncTimer = 0;
-    if (!imagineGeneratedSavedSyncInProgress()) return;
-    if (library_state.imagineRemoteLoading || library_state.imagineRemoteSyncing) {
-      scheduleImagineGeneratedSavedSync(1000);
-      return;
-    }
-    imagineGeneratedSavedOfficialAssetIds.clear();
-    try {
-      await loadImagineSavedCards({ force: true });
-    } catch (error) {
-      console.warn("Imagine Saved synchronization failed", error);
-    }
-    if (!imagineGeneratedSavedSyncInProgress()) return;
-    const confirmed = [...imagineGeneratedSavedSyncAssetIds].every((assetId) => (
-      imagineGeneratedSavedOfficialAssetIds.has(assetId)
-    ));
-    if (confirmed) {
-      clearImagineGeneratedSavedSync();
-      toast("Saved 목록 반영 완료.");
-      return;
-    }
-    if (imagineGeneratedSavedSyncAttempt === IMAGINE_GENERATED_SAVED_SYNC_DELAYS.length) {
-      toast("Saved 목록 반영을 계속 확인 중입니다.");
-    }
-    scheduleImagineGeneratedSavedSync();
-  }, delay);
+  // This is only a local marker. It keeps a just-finished card visible if a manual
+  // refresh reaches Grok before Saved has committed that result; it never starts polling.
 }
 
 function restoreImagineGeneratedSavedSync() {
@@ -1822,7 +1640,6 @@ function restoreImagineGeneratedSavedSync() {
 }
 
 function beginImagineGeneratedSavedSync(result) {
-  if (beginImagineDirectUploadSavedSync(result)) return;
   const items = Array.isArray(result?.items) && result.items.length
     ? result.items
     : [result?.item].filter(Boolean);
@@ -1850,16 +1667,13 @@ function beginImagineGeneratedSavedSync(result) {
   ) {
     resetImagineGeneratedSavedSyncForAccountChange(accountId);
   }
-  if (imagineGeneratedSavedSyncTimer) window.clearTimeout(imagineGeneratedSavedSyncTimer);
-  imagineGeneratedSavedSyncTimer = 0;
-  imagineGeneratedSavedSyncAttempt = 0;
   imagineGeneratedSavedSyncAccountId = accountId;
   imagineGeneratedSavedOfficialAssetIds.clear();
   for (const assetId of assetIds) imagineGeneratedSavedSyncAssetIds.add(assetId);
+  // applyImagineDirectResult() has already placed this result in the main view. Mark it
+  // as pending so an early manual refresh cannot remove it, but do not request Saved here.
   setImagineGeneratedSavedSyncItemState(assetIds, true);
   persistImagineGeneratedSavedSync();
-  toast("생성 완료. Saved 목록 반영을 확인 중입니다.");
-  scheduleImagineGeneratedSavedSync();
 }
 
 function imagineSavedPostIsPending(post) {
@@ -1880,15 +1694,6 @@ function persistImaginePendingSavedPosts() {
   } catch {
     // Pending cards remain available in memory when storage is unavailable.
   }
-}
-
-function dropUnconfirmedImaginePendingSavedPosts() {
-  const before = library_state.imagineRemotePosts || [];
-  const remaining = before.filter((post) => !imagineSavedPostIsPending(post));
-  if (remaining.length === before.length) return;
-  library_state.imagineRemotePosts = remaining;
-  persistImaginePendingSavedPosts();
-  imaginePendingSavedRefreshAttempt = 0;
 }
 
 function restoreImaginePendingSavedPosts() {
@@ -1946,10 +1751,18 @@ function imaginePendingSavedConfirmationKeys(post) {
 
 function imaginePendingSavedExpectedKeys(post) {
   const entries = Array.isArray(post?.metadata?.saved_sync_items) ? post.metadata.saved_sync_items : [];
-  return entries.map((entry) => new Set([
+  const expected = entries.map((entry) => new Set([
     entry?.liked_id,
     entry?.media_url,
   ].map((value) => String(value || "").trim()).filter(Boolean)));
+  // A direct generation does not always have a Saved-specific URL yet, but its result
+  // asset id is enough to recognise the same card when Grok later returns it.
+  for (const item of post?.items || []) {
+    if (item?.metadata?.saved_sync_pending !== true) continue;
+    const assetId = imagineSavedItemAssetId(item);
+    if (assetId) expected.push(new Set([assetId]));
+  }
+  return expected.filter((keys) => keys.size > 0);
 }
 
 function reconcileImaginePendingSavedPosts(remotePosts, memoryPending = []) {
@@ -1993,48 +1806,9 @@ function reconcileImaginePendingSavedPosts(remotePosts, memoryPending = []) {
   return [...unresolved, ...withoutPartialDuplicates];
 }
 
-function scheduleImaginePendingSavedRefresh() {
-  if (imaginePendingSavedRefreshTimer || !imaginePendingSavedPosts().length) return;
-  const delays = [1500, 4000, 10000, 30000];
-  // Every attempt is a forced refresh that reads Saved to its end, so a card still
-  // unconfirmed after the last one is not on grok.com -- deleted there, most often. Giving
-  // up used to mean leaving it on the list forever, which is how a card and a thumbnail
-  // with no media behind them survived refreshes and restarts.
-  if (imaginePendingSavedRefreshAttempt >= delays.length) {
-    dropUnconfirmedImaginePendingSavedPosts();
-    renderImagineSourceCards();
-    return;
-  }
-  const delay = delays[imaginePendingSavedRefreshAttempt];
-  imaginePendingSavedRefreshAttempt += 1;
-  imaginePendingSavedRefreshTimer = window.setTimeout(() => {
-    imaginePendingSavedRefreshTimer = 0;
-    loadImagineSavedCards({ force: true }).catch(() => {});
-  }, delay);
-}
-
-function beginImaginePendingSavedRefresh() {
-  if (imaginePendingSavedRefreshTimer) {
-    window.clearTimeout(imaginePendingSavedRefreshTimer);
-    imaginePendingSavedRefreshTimer = 0;
-  }
-  imaginePendingSavedRefreshAttempt = 0;
-}
-
 function newImagineSavedSyncToken() {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
   return `saved-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}
-
-function cancelScheduledImagineSavedSync() {
-  const hadTimer = Boolean(library_state.imagineRemoteSyncTimer);
-  if (hadTimer) {
-    window.clearTimeout(library_state.imagineRemoteSyncTimer);
-    library_state.imagineRemoteSyncTimer = 0;
-  }
-  library_state.imagineRemoteSyncTimerResolve?.();
-  library_state.imagineRemoteSyncTimerResolve = null;
-  if (hadTimer) library_state.imagineRemoteSyncing = false;
 }
 
 function invalidateImagineSavedRequestsForDelete() {
@@ -2046,7 +1820,6 @@ function invalidateImagineSavedRequestsForDelete() {
   if (library_state.imagineRemoteRequestController === controller) {
     library_state.imagineRemoteRequestController = null;
   }
-  cancelScheduledImagineSavedSync();
   library_state.imagineRemoteLoading = false;
   library_state.imagineRemoteSyncing = false;
   library_state.imagineRemoteSyncPromise = null;
@@ -2055,7 +1828,6 @@ function invalidateImagineSavedRequestsForDelete() {
 function beginImagineSavedRequest({ supersede = false } = {}) {
   if (supersede) {
     library_state.imagineRemoteRequestController?.abort?.();
-    cancelScheduledImagineSavedSync();
     library_state.imagineRemoteLoading = false;
     library_state.imagineRemoteSyncing = false;
     library_state.imagineRemoteSyncPromise = null;
@@ -2132,14 +1904,14 @@ function applyImagineSavedOfficialPage(data, { replacesList = false } = {}) {
     ...restoreImaginePendingSavedPosts(),
     ...imaginePendingSavedPosts(),
   ];
-  // Render every public page as it arrives. Existing cards retain their place, and new
-  // cards append in Grok's response order; no page performs a latest-activity re-sort.
+  // Saved follows the same visual rule as Liked: keep matched cards anchored, merge the
+  // refreshed snapshot, then put the cards in latest-activity order.
   library_state.imagineRemotePosts = filterImagineMainLikedScopePosts(reconcileImagineSavedDisplayPosts(
     reconcileImaginePendingSavedPosts(
       mergeImagineSyncedPosts(currentPosts, remotePosts, {
         replacesList,
-        preserveMatchedAnchors: !replacesList,
-        sortByRecentActivity: false,
+        preserveMatchedAnchors: true,
+        sortByRecentActivity: true,
       }),
       pending,
     ),
@@ -2151,18 +1923,44 @@ function applyImagineSavedOfficialPage(data, { replacesList = false } = {}) {
   library_state.imagineRemoteHasMore = Boolean(
     data.has_more && library_state.imagineRemoteCursor,
   );
-  // The last page proves the complete Saved set. Any still-unconfirmed local placeholder
-  // is absent upstream and must not survive as an empty card.
-  if (data.has_more === false) dropUnconfirmedImaginePendingSavedPosts();
-  if (imagineGeneratedSavedSyncInProgress()) {
-    setImagineGeneratedSavedSyncItemState(imagineGeneratedSavedSyncAssetIds, true);
+  // A complete initial or user-triggered refresh settles only the results Grok now
+  // confirms. Unconfirmed generated cards remain in place; no background retry is
+  // started and a later explicit refresh can settle them.
+  if (data.has_more === false && imagineGeneratedSavedSyncInProgress()) {
+    const confirmed = [...imagineGeneratedSavedSyncAssetIds].every((assetId) => (
+      imagineGeneratedSavedOfficialAssetIds.has(assetId)
+    ));
+    if (confirmed) clearImagineGeneratedSavedSync();
+    else setImagineGeneratedSavedSyncItemState(imagineGeneratedSavedSyncAssetIds, true);
   }
+  if (data.has_more === false) saveImagineSavedDisplayCache();
   syncImagineRemotePostsIntoLibrary();
   renderImagineSourceCards();
 }
 
-async function streamImagineSavedPages(context) {
+function combineImagineSavedOfficialPages(pages) {
+  const completedPage = pages.at(-1) || {};
+  const officialAssetIds = new Set();
+  const posts = [];
+  for (const page of pages || []) {
+    for (const post of Array.isArray(page?.posts) ? page.posts : []) posts.push(post);
+    for (const assetId of Array.isArray(page?.official_asset_ids) ? page.official_asset_ids : []) {
+      const value = String(assetId || "").trim();
+      if (value) officialAssetIds.add(value);
+    }
+  }
+  return {
+    ...completedPage,
+    posts,
+    official_asset_ids: [...officialAssetIds],
+    next_cursor: "",
+    has_more: false,
+  };
+}
+
+async function streamImagineSavedPages(context, { stage = false } = {}) {
   const seenCursors = new Set();
+  const stagedPages = [];
   let cursor = "";
   let replacesList = true;
   library_state.imagineRemoteCursor = "";
@@ -2177,9 +1975,21 @@ async function streamImagineSavedPages(context) {
     }, { signal: context.controller.signal });
     if (!imagineSavedResponseMatches(context, data)) return false;
 
-    applyImagineSavedOfficialPage(data, { replacesList });
-    if (data.has_more === false) return true;
-    const nextCursor = library_state.imagineRemoteCursor;
+    if (stage) stagedPages.push(data);
+    else applyImagineSavedOfficialPage(data, { replacesList });
+    if (data.has_more === false) {
+      // Background confirmation requests used to replace the visible list with page one,
+      // then append every later page. Keep the last complete Grok feed on screen and make
+      // a single authoritative replacement only after this refresh has finished.
+      if (stage) {
+        applyImagineSavedOfficialPage(
+          combineImagineSavedOfficialPages(stagedPages),
+          { replacesList: true },
+        );
+      }
+      return true;
+    }
+    const nextCursor = String(data.next_cursor || "");
     if (!nextCursor || seenCursors.has(nextCursor)) {
       throw new Error("Imagine Saved pagination did not complete.");
     }
@@ -2193,7 +2003,6 @@ async function streamImagineSavedPages(context) {
 async function loadImagineSavedCards({ force = false, append = false } = {}) {
   if (force && (library_state.imagineRemoteLoading || library_state.imagineRemoteSyncing)) {
     library_state.imagineRemoteRequestController?.abort?.();
-    cancelScheduledImagineSavedSync();
     library_state.imagineRemoteLoading = false;
     library_state.imagineRemoteSyncing = false;
     library_state.imagineRemoteSyncPromise = null;
@@ -2202,8 +2011,8 @@ async function loadImagineSavedCards({ force = false, append = false } = {}) {
     return library_state.imagineRemoteSyncPromise || undefined;
   }
   if (!force && !append && library_state.imagineRemoteLoaded) return;
-  // Saved is read only from Grok. Each official page is shown as it arrives; cache and
-  // scroll-driven appends are intentionally excluded from the main Saved card list.
+  // The cache is painted first. Keep it visible until the complete live Saved feed has
+  // arrived, then merge it once using Liked's latest-activity ordering.
   if (append || !canLoadImagineSavedList()) return;
 
   restoreImagineGeneratedSavedSync();
@@ -2214,7 +2023,10 @@ async function loadImagineSavedCards({ force = false, append = false } = {}) {
   library_state.imagineRemoteError = "";
   library_state.imagineRemoteHasMore = false;
   let completed = false;
-  const syncPromise = streamImagineSavedPages(context);
+  // Saved is paged whereas Liked arrives as one response. Stage every Saved read so its
+  // ordering changes only once, after the complete live snapshot has arrived.
+  const stageRefresh = true;
+  const syncPromise = streamImagineSavedPages(context, { stage: stageRefresh });
   library_state.imagineRemoteSyncPromise = syncPromise;
   try {
     completed = await syncPromise;
@@ -2237,8 +2049,6 @@ async function loadImagineSavedCards({ force = false, append = false } = {}) {
       library_state.imagineRemoteHasMore = false;
       if (completed) {
         persistImaginePendingSavedPosts();
-        if (imaginePendingSavedPosts().length) scheduleImaginePendingSavedRefresh();
-        else imaginePendingSavedRefreshAttempt = 0;
       }
       library_state.imagineRemoteSyncPromise = null;
       finishImagineSavedRequest(context);
@@ -2563,6 +2373,58 @@ async function loadImagineLikedCards({ force = false } = {}) {
   }
 }
 
+async function loadImagineSavedCacheCards() {
+  if (library_state.imagineRemoteCacheLoaded || library_state.imagineRemoteCacheLoading) return;
+  if (!canLoadImagineSavedCache()) return;
+  const accountId = imaginePendingSavedAccountId();
+  const requestEpoch = Number(library_state.imagineRemoteRequestEpoch || 0);
+  if (!accountId) return;
+  library_state.imagineRemoteCacheLoading = true;
+  renderImagineSourceCards();
+  try {
+    let data = await qApi("/api/imagine/saved/display-cache", { account_id: accountId });
+    if (!imagineAccountResponseIsCurrent(accountId, requestEpoch, data)) return;
+    let cachedPosts = normalizeImagineRemotePosts(Array.isArray(data?.posts) ? data.posts : []);
+    // The display cache is the previous complete, reconciled screen. If it is not available
+    // yet, migrate once from the legacy page-fragment cache and let the live read create it.
+    if (data?.found !== true) {
+      data = await qApi("/api/imagine/saved/cache", { account_id: accountId, limit: 5000 });
+      if (!imagineAccountResponseIsCurrent(accountId, requestEpoch, data)) return;
+      applyImagineLikedExclusionSnapshot(data, accountId);
+      cachedPosts = normalizeImagineRemotePosts(Array.isArray(data?.posts) ? data.posts : []);
+    }
+    if (cachedPosts.length) {
+      const pending = [
+        ...restoreImaginePendingSavedPosts(),
+        ...imaginePendingSavedPosts(),
+      ];
+      library_state.imagineRemotePosts = filterImagineMainLikedScopePosts(reconcileImagineSavedDisplayPosts(
+        reconcileImaginePendingSavedPosts(
+          mergeImagineSyncedPosts(library_state.imagineRemotePosts || [], cachedPosts, {
+            replacesList: false,
+            preserveMatchedAnchors: true,
+            sortByRecentActivity: true,
+          }),
+          pending,
+        ),
+      ));
+      syncImagineRemotePostsIntoLibrary();
+    }
+    library_state.imagineRemoteCacheOffset = data?.found === true ? 0 : Number(data?.next_offset || 0);
+    library_state.imagineRemoteCacheHasMore = Boolean(
+      data?.found !== true && data?.has_more && library_state.imagineRemoteCacheOffset,
+    );
+  } catch (_) {
+    // An unavailable cache simply falls through to the live Saved read.
+  } finally {
+    if (imagineAccountResponseIsCurrent(accountId, requestEpoch)) {
+      library_state.imagineRemoteCacheLoaded = true;
+      library_state.imagineRemoteCacheLoading = false;
+      renderImagineSourceCards();
+    }
+  }
+}
+
 function imagineSourcePosts() {
   if (library_state.iMainView === imagineViewValue("LIKED", "liked")) {
     return library_state.imagineLikedPosts || [];
@@ -2594,7 +2456,7 @@ function imagineSourcePosts() {
       imagineSavedDisplayPostsMemoSource = sourcePosts;
       imagineSavedDisplayPostsMemoResult = reconcileImagineSavedDisplayPosts(sourcePosts)
         .filter((post) => imagineSavedPostProvenance(post) === "normal-saved")
-        .sort(compareImagineSavedOfficialOrder);
+        .sort(comparePostsByRecentActivity);
       imagineSavedVisiblePostsMemoResult = imagineSavedDisplayPostsMemoResult.filter((post) => (
         !isImagineT2iGroupContainer(post)
       ));
@@ -2637,6 +2499,15 @@ function renderImagineSourceCards() {
   }
   if (
     library_state.iMainView === imagineViewValue("IMAGINE", "imagine")
+    && !library_state.imagineRemoteCacheLoaded
+    && !library_state.imagineRemoteCacheLoading
+    && canLoadImagineSavedCache()
+  ) {
+    loadImagineSavedCacheCards().catch(() => {});
+  }
+  if (
+    library_state.iMainView === imagineViewValue("IMAGINE", "imagine")
+    && library_state.imagineRemoteCacheLoaded
     && !library_state.imagineRemoteLoaded
     && !library_state.imagineRemoteLoading
     && !library_state.imagineRemoteError
@@ -2688,7 +2559,7 @@ function renderImagineSourceCards() {
     } else if (library_state.imagineUploadError && !posts.length && uploadView) {
       disableVirtualCardList(IMAGINE_VIRTUAL_LIST_KEY, list);
       list.replaceChildren(emptyLibraryNode(library_state.imagineUploadError));
-    } else if (library_state.imagineRemoteLoading && !posts.length && !visibleJobs.length && library_state.iMainView === imagineViewValue("IMAGINE", "imagine")) {
+    } else if ((library_state.imagineRemoteCacheLoading || library_state.imagineRemoteLoading) && !posts.length && !visibleJobs.length && library_state.iMainView === imagineViewValue("IMAGINE", "imagine")) {
       disableVirtualCardList(IMAGINE_VIRTUAL_LIST_KEY, list);
       list.replaceChildren(emptyLibraryNode("Loading . . ."));
     } else if (library_state.imagineRemoteError && !posts.length && !visibleJobs.length && library_state.iMainView === imagineViewValue("IMAGINE", "imagine")) {
@@ -2712,7 +2583,9 @@ function renderImagineSourceCards() {
       ), {
         loading: likedView
           ? library_state.imagineLikedLoading
-          : (uploadView ? library_state.imagineUploadLoading : library_state.imagineRemoteLoading),
+          : (uploadView
+            ? library_state.imagineUploadLoading
+            : (library_state.imagineRemoteCacheLoading || library_state.imagineRemoteLoading)),
         remoteMedia: true,
       });
     } else {
