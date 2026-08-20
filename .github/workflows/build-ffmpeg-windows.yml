@@ -1,0 +1,90 @@
+name: Build ffmpeg (Windows, LGPL)
+
+# Produces the static LGPL ffmpeg.exe bundled at app/vendor/ffmpeg/.
+# Run manually; the binary is committed to the repo, not rebuilt per release.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ffmpeg_version:
+        description: FFmpeg release to build
+        required: false
+        default: "8.1.1"
+
+jobs:
+  build:
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Set up MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            base-devel
+            mingw-w64-ucrt-x86_64-toolchain
+            make
+            diffutils
+            tar
+            xz
+
+      - name: Fetch source
+        run: |
+          set -e
+          curl -fsSL -o ffmpeg.tar.xz "https://ffmpeg.org/releases/ffmpeg-${{ inputs.ffmpeg_version }}.tar.xz"
+          tar xf ffmpeg.tar.xz
+          mv "ffmpeg-${{ inputs.ffmpeg_version }}" src
+
+      - name: Configure (LGPL, static, mp4 stream copy only)
+        run: |
+          set -e
+          cd src
+          ./configure \
+            --disable-autodetect \
+            --disable-everything \
+            --disable-doc --disable-network --disable-debug \
+            --disable-ffplay --disable-ffprobe \
+            --disable-shared --enable-static \
+            --enable-protocol=file \
+            --enable-demuxer=mov --enable-muxer=mp4 \
+            --enable-bsf=aac_adtstoasc,h264_mp4toannexb,hevc_mp4toannexb,extract_extradata \
+            --enable-small \
+            --extra-ldflags="-static -static-libgcc" \
+            | tee configure.out
+
+      - name: Fail if the build is not LGPL
+        run: |
+          set -e
+          cd src
+          grep -q "License: LGPL version 2.1 or later" configure.out
+          if grep -qi "enable-gpl\|nonfree" configure.out; then
+            echo "GPL or non-free component detected" >&2
+            exit 1
+          fi
+
+      - name: Build
+        run: |
+          set -e
+          cd src
+          make -j"$(nproc)" ffmpeg
+
+      - name: Verify the binary
+        run: |
+          set -e
+          cd src
+          ./ffmpeg.exe -hide_banner -version | head -3
+          ./ffmpeg.exe -hide_banner -muxers  | grep -q " mp4 "
+          ./ffmpeg.exe -hide_banner -demuxers | grep -q " mov,"
+          ls -l ffmpeg.exe
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-windows-lgpl
+          path: |
+            src/ffmpeg.exe
+            src/COPYING.LGPLv2.1
+          if-no-files-found: error
