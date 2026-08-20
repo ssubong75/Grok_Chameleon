@@ -6888,6 +6888,92 @@ def remove_imagine_remote_cache_post_keys(
         })
 
 
+IMAGINE_SAVED_DISPLAY_CACHE_VERSION = 1
+
+
+def imagine_saved_display_cache_path(root: Path, account: dict) -> Path:
+    account_key = imagine_account_settings_key(account)
+    if not account_key:
+        raise RuntimeError("Select or capture an Imagine account first.")
+    cache_root = (library_runtime_dir(root) / "imagine_saved_display").resolve()
+    if cache_root.parent != library_runtime_dir(root):
+        raise RuntimeError("Refusing unsafe Imagine display cache path.")
+    cache_root.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(account_key.encode("utf-8")).hexdigest()
+    path = (cache_root / f"{digest}.json").resolve()
+    if path.parent != cache_root:
+        raise RuntimeError("Refusing unsafe Imagine display cache file path.")
+    return path
+
+
+def list_imagine_saved_display_cache(payload: dict) -> dict:
+    root = library_root()
+    if not root:
+        raise RuntimeError("Library path is not set.")
+    account = active_imagine_account(root, str((payload or {}).get("account_id") or ""))
+    if not account:
+        raise RuntimeError("Select or capture an Imagine account first.")
+    data = read_json(imagine_saved_display_cache_path(root, account), {})
+    if not isinstance(data, dict) or int(data.get("version") or 0) != IMAGINE_SAVED_DISPLAY_CACHE_VERSION:
+        return {
+            "ok": True,
+            "source": "saved_display_cache",
+            "found": False,
+            "posts": [],
+            "imagine": {
+                "id": account.get("id") or "",
+                "email": account.get("email") or "",
+                "label": account.get("label") or "",
+                "tier": account.get("tier") or "",
+            },
+        }
+    posts = [post for post in data.get("posts") or [] if isinstance(post, dict)]
+    return {
+        "ok": True,
+        "source": "saved_display_cache",
+        "found": True,
+        "posts": normalize_json_unicode(posts),
+        "updated_at": str(data.get("updated_at") or ""),
+        "imagine": {
+            "id": account.get("id") or "",
+            "email": account.get("email") or "",
+            "label": account.get("label") or "",
+            "tier": account.get("tier") or "",
+        },
+    }
+
+
+def save_imagine_saved_display_cache(payload: dict) -> dict:
+    root = library_root()
+    if not root:
+        raise RuntimeError("Library path is not set.")
+    account = active_imagine_account(root, str((payload or {}).get("account_id") or ""))
+    if not account:
+        raise RuntimeError("Select or capture an Imagine account first.")
+    supplied_posts = (payload or {}).get("posts")
+    if not isinstance(supplied_posts, list):
+        raise RuntimeError("Imagine display cache posts are required.")
+    if len(supplied_posts) > 5000:
+        raise RuntimeError("Imagine display cache is too large.")
+    posts = [post for post in supplied_posts if isinstance(post, dict)]
+    write_json(imagine_saved_display_cache_path(root, account), {
+        "version": IMAGINE_SAVED_DISPLAY_CACHE_VERSION,
+        "updated_at": now_iso(),
+        "posts": posts,
+    })
+    return {
+        "ok": True,
+        "source": "saved_display_cache",
+        "count": len(posts),
+        "imagine": {
+            "id": account.get("id") or "",
+            "email": account.get("email") or "",
+            "label": account.get("label") or "",
+            "tier": account.get("tier") or "",
+        },
+    }
+
+
 def list_imagine_saved_cache(payload: dict) -> dict:
     root = library_root()
     if not root:
@@ -25997,6 +26083,8 @@ POST_JSON_ROUTES = {
     **imagine_post_routes(
         start_imagine_login=start_imagine_login,
         open_imagine_usage_page=open_imagine_usage_page,
+        list_imagine_saved_display_cache=list_imagine_saved_display_cache,
+        save_imagine_saved_display_cache=save_imagine_saved_display_cache,
         list_imagine_saved_cache=list_imagine_saved_cache,
         list_imagine_saved=list_imagine_saved,
         load_imagine_saved_conversation=load_imagine_saved_conversation,
@@ -26374,7 +26462,7 @@ class Handler(SimpleHTTPRequestHandler):
                 if not target or not target.is_file():
                     self.send_error(HTTPStatus.NOT_FOUND)
                     return
-                self.send_local_file(target, "image/jpeg", cache_control="private, max-age=31536000, immutable")
+                self.send_local_file(target, "image/jpeg", cache_control="private, no-cache, max-age=0, must-revalidate")
                 return
             if parsed.path == "/api/imagine/remote/media":
                 self.send_imagine_remote_media(parsed)
@@ -26429,7 +26517,7 @@ class Handler(SimpleHTTPRequestHandler):
                     target,
                     "image/jpeg",
                     head_only=True,
-                    cache_control="private, max-age=31536000, immutable",
+                    cache_control="private, no-cache, max-age=0, must-revalidate",
                 )
                 return
             if parsed.path == "/api/imagine/remote/media":

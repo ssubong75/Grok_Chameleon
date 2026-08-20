@@ -534,6 +534,11 @@ async function waitForCardPreviewTasks(timeoutMs = 2000) {
   return completed;
 }
 
+// Build previews can be regenerated while their source media retains the same
+// fingerprint. Keep this revision in the URL so an old Chromium disk-cache entry
+// cannot keep serving a replaced preview file.
+const BUILD_PREVIEW_CACHE_REVISION = "2";
+
 function cardPreviewResult(key, storage = "cache", kind = "card") {
   const normalizedKind = normalizedPreviewKind(kind);
   return {
@@ -541,7 +546,7 @@ function cardPreviewResult(key, storage = "cache", kind = "card") {
     storage,
     kind: normalizedKind,
     url: storage === "build"
-      ? `/api/build-preview?kind=${normalizedKind}&key=${key}`
+      ? `/api/build-preview?kind=${normalizedKind}&key=${key}&rev=${BUILD_PREVIEW_CACHE_REVISION}`
       : `/api/card-preview?key=${key}`,
   };
 }
