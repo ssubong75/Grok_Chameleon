@@ -22153,6 +22153,75 @@ def ensure_existing_source_items(existing_items: list[dict], source_attachments:
     return items
 
 
+def build_result_source_item_id(
+    action: str,
+    source_attachments: list[dict],
+    saved_input_items: list[dict],
+    existing_items: list[dict],
+    target_folder_path: str,
+) -> str:
+    """Return the local source item a generated video must point to for its card poster."""
+    target_type = ""
+    if action == "i2v":
+        image_sources = [
+            attachment for attachment in source_attachments
+            if attachment_media_type_for_save(attachment, "") == "image"
+        ]
+        # Reference-to-video has no single start image.  Do not invent one.
+        if len(image_sources) != 1:
+            return ""
+        source_attachment = image_sources[0]
+        target_type = "image"
+    elif action in {"extend", "video_edit"}:
+        source_attachment = next((
+            attachment for attachment in source_attachments
+            if attachment_media_type_for_save(attachment, "") == "video"
+        ), None)
+        target_type = "video"
+        if not source_attachment:
+            return ""
+    else:
+        return ""
+
+    source_post_path = str(
+        source_attachment.get("detail_post_path")
+        or source_attachment.get("upload_post_path")
+        or ""
+    ).strip()
+    source_item_id = str(
+        source_attachment.get("detail_item_id")
+        or source_attachment.get("upload_item_id")
+        or ""
+    ).strip()
+    source_file = Path(str(source_attachment.get("name") or "")).name
+
+    def matches_original_source(item: dict) -> bool:
+        if str(item.get("type") or "").lower() != target_type:
+            return False
+        if source_item_id and str(item.get("item_id") or "") == source_item_id:
+            return True
+        if source_file and str(item.get("file") or "") == source_file:
+            return True
+        return False
+
+    # Appending to the source post retains its original media item, so point at it directly.
+    if source_post_path == target_folder_path:
+        matched = next((item for item in existing_items if matches_original_source(item)), None)
+        if matched:
+            return str(matched.get("item_id") or "").strip()
+
+    # A source copied into a newly created post has a new local item id.  Its provenance
+    # still carries the original source id, which makes this match unambiguous.
+    for item in saved_input_items:
+        if str(item.get("type") or "").lower() != target_type:
+            continue
+        if source_item_id and str(item.get("source_item_id") or "") == source_item_id:
+            return str(item.get("item_id") or "").strip()
+        if not source_item_id and source_file and str(item.get("file") or "").endswith(source_file):
+            return str(item.get("item_id") or "").strip()
+    return ""
+
+
 def source_video_display_model(action: str, existing_post: dict, source_attachments: list[dict], target_folder_path: str) -> str:
     if action not in {"extend", "video_edit"} or not isinstance(existing_post, dict):
         return ""
@@ -23277,6 +23346,18 @@ def build_generate(payload: dict, progress_callback=None, cancel_checker=None) -
         existing_items = existing_post.get("items") if isinstance(existing_post.get("items"), list) else []
         if append_target:
             existing_items = ensure_existing_source_items(existing_items, source_attachments, folder_path)
+        result_source_item_id = build_result_source_item_id(
+            action,
+            source_attachments,
+            saved_input_items,
+            existing_items,
+            folder_path,
+        )
+        for item in saved_result_items:
+            if item.get("type") != "video" or not result_source_item_id:
+                continue
+            item["source_item_id"] = result_source_item_id
+            item["source_post_path"] = folder_path
         saved_items = existing_items + saved_input_items + saved_result_items if append_target else saved_input_items + saved_result_items
 
         post_id = existing_post.get("post_id") or Path(folder_path).name
