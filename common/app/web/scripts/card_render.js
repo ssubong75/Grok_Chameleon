@@ -27,11 +27,61 @@ function cardUsesImagineDetail(post, className = "") {
     || post?.area === "imagine_upload_remote";
 }
 
-function buildCardVideoPosterUrl(post, item) {
-  if (item?.thumbnail_url || item?.poster_url) return item.thumbnail_url || item.poster_url;
-  const image = (post?.items || []).find((candidate) => detailItemType(candidate) === "image");
-  if (!image) return "";
-  return bDetailPreviewUrl(image) || bDetailMediaUrl(image) || mediaPreviewUrl(image);
+function buildCardSourceReferenceValues(item) {
+  const metadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
+  const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
+  return [
+    item?.source_item_id,
+    item?.parent_item_id,
+    item?.original_item_id,
+    item?.root_item_id,
+    metadata.source_item_id,
+    metadata.parent_item_id,
+    metadata.original_item_id,
+    metadata.root_item_id,
+    imagine.source_item_id,
+    imagine.parent_item_id,
+    imagine.original_item_id,
+    imagine.root_item_id,
+  ].map((value) => String(value || "").trim()).filter(Boolean);
+}
+
+function buildCardItemIdentityValues(item) {
+  return [
+    item?.item_id,
+    item?.file,
+    item?.url,
+    item?.object_url,
+    item?.asset_id,
+  ].map((value) => String(value || "").trim()).filter(Boolean);
+}
+
+function buildCardSourceItem(post, item) {
+  const sourceKeys = new Set(buildCardSourceReferenceValues(item));
+  if (!sourceKeys.size) return null;
+  return (post?.items || []).find((candidate) => (
+    candidate
+    && candidate !== item
+    && buildCardItemIdentityValues(candidate).some((value) => sourceKeys.has(value))
+  )) || null;
+}
+
+function buildCardVideoPosterUrl(post, item, visited = new Set()) {
+  const directPoster = item?.thumbnail_url || item?.poster_url || "";
+  if (directPoster) return directPoster;
+
+  const identity = buildCardItemIdentityValues(item)[0] || "";
+  if (identity && visited.has(identity)) return "";
+  if (identity) visited.add(identity);
+
+  const source = buildCardSourceItem(post, item);
+  if (!source) return "";
+  if (detailItemType(source) === "image") {
+    return bDetailPreviewUrl(source) || bDetailMediaUrl(source) || mediaPreviewUrl(source);
+  }
+  return detailItemType(source) === "video"
+    ? buildCardVideoPosterUrl(post, source, visited)
+    : "";
 }
 
 function cardDisplayItemForContext(post, item, className = "") {
@@ -55,7 +105,7 @@ function cardDisplayItemForContext(post, item, className = "") {
     card_preview_retries: 2,
   };
   if (detailItemType(cardItem) !== "video") return cardItem;
-  const posterUrl = buildCardVideoPosterUrl(post, cardItem) || bDetailVideoPreviewUrl(cardItem);
+  const posterUrl = buildCardVideoPosterUrl(post, cardItem);
   if (!posterUrl) return cardItem;
   return {
     ...cardItem,
