@@ -1456,6 +1456,8 @@ const IMAGINE_GENERATED_SAVED_SYNC_STORAGE_PREFIX = "grok-chameleon:imagine-gene
 let imagineGeneratedSavedSyncAccountId = "";
 const imagineGeneratedSavedSyncAssetIds = new Set();
 const imagineGeneratedSavedOfficialAssetIds = new Set();
+let imagineGeneratedSavedSyncRefreshTimer = 0;
+let imagineGeneratedSavedSyncRefreshAttempt = 0;
 let imagineSavedDisplayCacheWrite = Promise.resolve();
 let imagineSavedDisplayCacheWriteRevision = 0;
 
@@ -1594,10 +1596,31 @@ function setImagineGeneratedSavedSyncItemState(assetIds, pending) {
   if (typeof syncImagineRemotePostsIntoLibrary === "function") syncImagineRemotePostsIntoLibrary();
 }
 
+function cancelImagineGeneratedSavedSyncRefresh() {
+  if (imagineGeneratedSavedSyncRefreshTimer) {
+    window.clearTimeout(imagineGeneratedSavedSyncRefreshTimer);
+    imagineGeneratedSavedSyncRefreshTimer = 0;
+  }
+  imagineGeneratedSavedSyncRefreshAttempt = 0;
+}
+
+function scheduleImagineGeneratedSavedSyncRefresh() {
+  if (imagineGeneratedSavedSyncRefreshTimer || !imagineGeneratedSavedSyncInProgress()) return;
+  const delays = [2000, 4000, 8000, 12000];
+  if (imagineGeneratedSavedSyncRefreshAttempt >= delays.length) return;
+  const delay = delays[imagineGeneratedSavedSyncRefreshAttempt];
+  imagineGeneratedSavedSyncRefreshAttempt += 1;
+  imagineGeneratedSavedSyncRefreshTimer = window.setTimeout(() => {
+    imagineGeneratedSavedSyncRefreshTimer = 0;
+    loadImagineSavedCards({ force: true }).catch(() => {});
+  }, delay);
+}
+
 function clearImagineGeneratedSavedSync() {
   const settled = new Set(imagineGeneratedSavedSyncAssetIds);
   imagineGeneratedSavedOfficialAssetIds.clear();
   imagineGeneratedSavedSyncAssetIds.clear();
+  cancelImagineGeneratedSavedSyncRefresh();
   setImagineGeneratedSavedSyncItemState(settled, false);
   persistImagineGeneratedSavedSync();
   renderImagineSourceCards();
@@ -1674,6 +1697,7 @@ function beginImagineGeneratedSavedSync(result) {
   // as pending so an early manual refresh cannot remove it, but do not request Saved here.
   setImagineGeneratedSavedSyncItemState(assetIds, true);
   persistImagineGeneratedSavedSync();
+  cancelImagineGeneratedSavedSyncRefresh();
 }
 
 function imagineSavedPostIsPending(post) {
@@ -1924,14 +1948,18 @@ function applyImagineSavedOfficialPage(data, { replacesList = false } = {}) {
     data.has_more && library_state.imagineRemoteCursor,
   );
   // A complete initial or user-triggered refresh settles only the results Grok now
-  // confirms. Unconfirmed generated cards remain in place; no background retry is
-  // started and a later explicit refresh can settle them.
+  // confirms. Unconfirmed generated cards remain in place, and a short background
+  // retry (scheduleImagineGeneratedSavedSyncRefresh) gives Saved a few more chances
+  // to catch up before leaving it to the next explicit refresh.
   if (data.has_more === false && imagineGeneratedSavedSyncInProgress()) {
     const confirmed = [...imagineGeneratedSavedSyncAssetIds].every((assetId) => (
       imagineGeneratedSavedOfficialAssetIds.has(assetId)
     ));
     if (confirmed) clearImagineGeneratedSavedSync();
-    else setImagineGeneratedSavedSyncItemState(imagineGeneratedSavedSyncAssetIds, true);
+    else {
+      setImagineGeneratedSavedSyncItemState(imagineGeneratedSavedSyncAssetIds, true);
+      scheduleImagineGeneratedSavedSyncRefresh();
+    }
   }
   if (data.has_more === false) saveImagineSavedDisplayCache();
   syncImagineRemotePostsIntoLibrary();
