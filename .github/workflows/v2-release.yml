@@ -13,63 +13,63 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  COMMON_MAIN: common/app/electron/main.js
-  COMMON_INDEX: common/app/web/index.html
-  COMMON_APP_STYLE: common/app/web/styles/app.css
-  COMMON_STATE: common/app/web/scripts/state.js
-  COMMON_BUILD_MAIN: common/app/web/scripts/build_main.js
-  COMMON_B_SUBMIT: common/app/web/scripts/b_composer_submit.js
-  COMMON_B_SOURCE: common/app/web/scripts/b_source_render.js
-  COMMON_B_DETAIL_ACTIONS: common/app/web/scripts/b_detail_actions.js
-  COMMON_SIDEBAR_EVENTS: common/app/web/scripts/sidebar_events.js
-  COMMON_SIDEBAR_STYLE: common/app/web/styles/sidebar.css
-  COMMON_COLLECTION_EVENTS: common/app/web/scripts/collection_events.js
-  COMMON_COLLECTION_RENDER: common/app/web/scripts/collection_render.js
-  COMMON_COLLECTION_STYLE: common/app/web/styles/collection.css
-  COMMON_MAIN_STYLE: common/app/web/styles/main.css
-  COMMON_CARD_RENDER: common/app/web/scripts/card_render.js
-  COMMON_DETAIL_COMMON_ACTIONS: common/app/web/scripts/detail_common_actions.js
-  COMMON_CARD_ACTIONS: common/app/web/scripts/card_actions.js
-  COMMON_SCREEN_EVENTS: common/app/web/scripts/screen_events.js
-  COMMON_SCREEN_ROUTER: common/app/web/scripts/screen_router.js
-  COMMON_NAVIGATION_HISTORY: common/app/web/scripts/navigation_history.js
-  COMMON_I_DETAIL_ACTIONS: common/app/web/scripts/i_detail_actions.js
-  COMMON_COMPOSER_EVENTS: common/app/web/scripts/composer_events.js
-  COMMON_COMPOSER_PROVIDER: common/app/web/scripts/composer_provider.js
-  COMMON_CARDS_PROMPT_STYLE: common/app/web/styles/cards_prompt.css
-  COMMON_COMPOSER: common/app/web/scripts/composer_options.js
-  COMMON_ATTACHMENTS: common/app/web/scripts/composer_attachments.js
-  COMMON_I_SUBMIT: common/app/web/scripts/i_composer_submit.js
-  COMMON_LIBRARY_CORE: common/app/web/scripts/library_core.js
-  COMMON_LIBRARY_SCAN: common/app/web/scripts/library_scan.js
-  COMMON_DETAIL_STATE: common/app/web/scripts/detail_state.js
-  COMMON_DETAIL_MEDIA: common/app/web/scripts/detail_media.js
-  COMMON_DETAIL_VIDEO_PLAYER: common/app/web/scripts/detail_video_player.js
-  COMMON_DETAIL_EVENTS: common/app/web/scripts/detail_events.js
-  COMMON_DETAIL_NAVIGATION: common/app/web/scripts/detail_navigation.js
-  COMMON_DETAIL_RENDER: common/app/web/scripts/detail_render.js
-  COMMON_DETAIL_STYLE: common/app/web/styles/detail.css
-  COMMON_I_SOURCE: common/app/web/scripts/i_source_render.js
-  COMMON_IMAGINE_MAIN: common/app/web/scripts/imagine_main.js
-  COMMON_RENDER: common/app/web/scripts/render.js
-  COMMON_COLLECTION_ACTIONS: common/app/web/scripts/collection_actions.js
-  COMMON_IMAGE_EDITOR_FLOW: common/app/web/scripts/image_editor_flow.js
-  COMMON_SEARCH_RENDER: common/app/web/scripts/search_render.js
-  COMMON_PROMPT_TRANSLATE: common/app/web/scripts/prompt_translate.js
-  COMMON_PROMPT_EVENTS: common/app/web/scripts/prompt_events.js
-  COMMON_UI_FEEDBACK: common/app/web/scripts/ui_feedback.js
-  COMMON_ACCOUNT_STYLE: common/app/web/styles/account.css
-  COMMON_COMPOSER_STYLE: common/app/web/styles/composer.css
-  COMMON_PRELOAD: common/app/electron/preload-bridge.js
-  COMMON_SERVER: common/app/runtime/server.py
-  COMMON_LIBRARY_INDEX: common/app/runtime/library_index.py
-  COMMON_IMAGINE_STATE: common/app/runtime/imagine_state.py
-  COMMON_IMAGINE_ACCOUNTS: common/app/runtime/imagine_accounts.py
-  COMMON_IMAGINE_ROUTES: common/app/runtime/imagine_routes.py
-  COMMON_PROMPT_ACCOUNT: common/app/web/scripts/prompt_account.js
-  COMMON_ACCOUNT_CORE: common/app/web/scripts/account_core.js
-  COMMON_FFMPEG_WIN: common/app/vendor/ffmpeg/ffmpeg.exe
-  COMMON_FFMPEG_LICENSE: common/app/vendor/ffmpeg/COPYING.LGPLv2.1
+  COMMON_MAIN: common-c/app/electron/main.js
+  COMMON_INDEX: common-c/app/web/index.html
+  COMMON_APP_STYLE: common-c/app/web/styles/app.css
+  COMMON_STATE: common-c/app/web/scripts/state.js
+  COMMON_BUILD_MAIN: common-c/app/web/scripts/build_main.js
+  COMMON_B_SUBMIT: common-c/app/web/scripts/b_composer_submit.js
+  COMMON_B_SOURCE: common-c/app/web/scripts/b_source_render.js
+  COMMON_B_DETAIL_ACTIONS: common-c/app/web/scripts/b_detail_actions.js
+  COMMON_SIDEBAR_EVENTS: common-c/app/web/scripts/sidebar_events.js
+  COMMON_SIDEBAR_STYLE: common-c/app/web/styles/sidebar.css
+  COMMON_COLLECTION_EVENTS: common-c/app/web/scripts/collection_events.js
+  COMMON_COLLECTION_RENDER: common-c/app/web/scripts/collection_render.js
+  COMMON_COLLECTION_STYLE: common-c/app/web/styles/collection.css
+  COMMON_MAIN_STYLE: common-c/app/web/styles/main.css
+  COMMON_CARD_RENDER: common-c/app/web/scripts/card_render.js
+  COMMON_DETAIL_COMMON_ACTIONS: common-c/app/web/scripts/detail_common_actions.js
+  COMMON_CARD_ACTIONS: common-c/app/web/scripts/card_actions.js
+  COMMON_SCREEN_EVENTS: common-c/app/web/scripts/screen_events.js
+  COMMON_SCREEN_ROUTER: common-c/app/web/scripts/screen_router.js
+  COMMON_NAVIGATION_HISTORY: common-c/app/web/scripts/navigation_history.js
+  COMMON_I_DETAIL_ACTIONS: common-c/app/web/scripts/i_detail_actions.js
+  COMMON_COMPOSER_EVENTS: common-c/app/web/scripts/composer_events.js
+  COMMON_COMPOSER_PROVIDER: common-c/app/web/scripts/composer_provider.js
+  COMMON_CARDS_PROMPT_STYLE: common-c/app/web/styles/cards_prompt.css
+  COMMON_COMPOSER: common-c/app/web/scripts/composer_options.js
+  COMMON_ATTACHMENTS: common-c/app/web/scripts/composer_attachments.js
+  COMMON_I_SUBMIT: common-c/app/web/scripts/i_composer_submit.js
+  COMMON_LIBRARY_CORE: common-c/app/web/scripts/library_core.js
+  COMMON_LIBRARY_SCAN: common-c/app/web/scripts/library_scan.js
+  COMMON_DETAIL_STATE: common-c/app/web/scripts/detail_state.js
+  COMMON_DETAIL_MEDIA: common-c/app/web/scripts/detail_media.js
+  COMMON_DETAIL_VIDEO_PLAYER: common-c/app/web/scripts/detail_video_player.js
+  COMMON_DETAIL_EVENTS: common-c/app/web/scripts/detail_events.js
+  COMMON_DETAIL_NAVIGATION: common-c/app/web/scripts/detail_navigation.js
+  COMMON_DETAIL_RENDER: common-c/app/web/scripts/detail_render.js
+  COMMON_DETAIL_STYLE: common-c/app/web/styles/detail.css
+  COMMON_I_SOURCE: common-c/app/web/scripts/i_source_render.js
+  COMMON_IMAGINE_MAIN: common-c/app/web/scripts/imagine_main.js
+  COMMON_RENDER: common-c/app/web/scripts/render.js
+  COMMON_COLLECTION_ACTIONS: common-c/app/web/scripts/collection_actions.js
+  COMMON_IMAGE_EDITOR_FLOW: common-c/app/web/scripts/image_editor_flow.js
+  COMMON_SEARCH_RENDER: common-c/app/web/scripts/search_render.js
+  COMMON_PROMPT_TRANSLATE: common-c/app/web/scripts/prompt_translate.js
+  COMMON_PROMPT_EVENTS: common-c/app/web/scripts/prompt_events.js
+  COMMON_UI_FEEDBACK: common-c/app/web/scripts/ui_feedback.js
+  COMMON_ACCOUNT_STYLE: common-c/app/web/styles/account.css
+  COMMON_COMPOSER_STYLE: common-c/app/web/styles/composer.css
+  COMMON_PRELOAD: common-c/app/electron/preload-bridge.js
+  COMMON_SERVER: common-c/app/runtime/server.py
+  COMMON_LIBRARY_INDEX: common-c/app/runtime/library_index.py
+  COMMON_IMAGINE_STATE: common-c/app/runtime/imagine_state.py
+  COMMON_IMAGINE_ACCOUNTS: common-c/app/runtime/imagine_accounts.py
+  COMMON_IMAGINE_ROUTES: common-c/app/runtime/imagine_routes.py
+  COMMON_PROMPT_ACCOUNT: common-c/app/web/scripts/prompt_account.js
+  COMMON_ACCOUNT_CORE: common-c/app/web/scripts/account_core.js
+  COMMON_FFMPEG_WIN: common-c/app/vendor/ffmpeg/ffmpeg.exe
+  COMMON_FFMPEG_LICENSE: common-c/app/vendor/ffmpeg/COPYING.LGPLv2.1
 
 jobs:
   build-windows:
@@ -81,17 +81,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - variant: plain
-            common_dir: common
-            output_zip: Win_Grok_Chameleon_v2.0.zip
-            artifact: windows-common-source-build
           - variant: clone-batch
             common_dir: common-c
             output_zip: Win_Grok_Chameleon_C_v2.0.zip
             artifact: windows-common-source-build-c
     env:
       RELEASE_TAG: v2.0.0
-      INPUT_ZIP: Win_Grok_Chameleon_v2.0.zip
+      INPUT_ZIP: Win_Grok_Chameleon_C_v2.0.zip
       OUTPUT_ZIP: ${{ matrix.output_zip }}
       VARIANT_COMMON_DIR: ${{ matrix.common_dir }}
 
@@ -188,8 +184,8 @@ jobs:
             @{ Name = "ffmpeg"; Relative = "vendor\ffmpeg\ffmpeg.exe"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_FFMPEG_WIN) },
             @{ Name = "ffmpeg_license"; Relative = "vendor\ffmpeg\COPYING.LGPLv2.1"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_FFMPEG_LICENSE) }
           )
-          # The COMMON_* variables name the plain tree. The clone-batch variant keeps its own
-          # full copy of the same relative paths, so only the root directory differs.
+          # The COMMON_* variables already name common-c; VARIANT_COMMON_DIR is redundant with
+          # a single variant but kept so a future variant only needs a new matrix entry.
           $variantRoot = Join-Path $env:GITHUB_WORKSPACE $env:VARIANT_COMMON_DIR
           foreach ($shared in $sharedSources) {
             $shared.Target = Join-Path $appRoot $shared.Relative
@@ -597,17 +593,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - variant: plain
-            common_dir: common
-            output_zip: Mac_Grok_Chameleon_v2.0.zip
-            artifact: mac-common-source-build
           - variant: clone-batch
             common_dir: common-c
             output_zip: Mac_Grok_Chameleon_C_v2.0.zip
             artifact: mac-common-source-build-c
     env:
       RELEASE_TAG: v2.0.0
-      INPUT_ZIP: Mac_Grok_Chameleon_v2.0.zip
+      INPUT_ZIP: Mac_Grok_Chameleon_C_v2.0.zip
       OUTPUT_ZIP: ${{ matrix.output_zip }}
       VARIANT_COMMON_DIR: ${{ matrix.common_dir }}
 
@@ -1238,115 +1230,68 @@ jobs:
       - name: Download the verified Windows build
         uses: actions/download-artifact@v4
         with:
-          name: windows-common-source-build
-          path: release/windows
-
-      - name: Download the verified Windows clone-batch build
-        uses: actions/download-artifact@v4
-        with:
           name: windows-common-source-build-c
           path: release/windows-c
 
       - name: Download the verified Mac build
         uses: actions/download-artifact@v4
         with:
-          name: mac-common-source-build
-          path: release/macos
-
-      - name: Download the verified Mac clone-batch build
-        uses: actions/download-artifact@v4
-        with:
           name: mac-common-source-build-c
           path: release/macos-c
 
-      - name: Publish the four verified v2 release assets
+      - name: Publish the two verified v2 release assets
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: v2.0.0
-          WIN_ZIP: Win_Grok_Chameleon_v2.0.zip
-          MAC_ZIP: Mac_Grok_Chameleon_v2.0.zip
           WIN_C_ZIP: Win_Grok_Chameleon_C_v2.0.zip
           MAC_C_ZIP: Mac_Grok_Chameleon_C_v2.0.zip
           WIN_INPUT_SHA256: ${{ needs.build-windows.outputs.input_sha256 }}
           MAC_INPUT_SHA256: ${{ needs.build-macos.outputs.input_sha256 }}
         run: |
           set -euo pipefail
-          mkdir -p current/win current/mac current/win-c current/mac-c
+          mkdir -p current/win-c current/mac-c
           release_existed=false
-          win_c_existed=false
-          mac_c_existed=false
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             release_existed=true
-            gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$WIN_ZIP" --dir current/win
-            gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$MAC_ZIP" --dir current/mac
-            test "$(sha256sum "current/win/$WIN_ZIP" | awk '{print $1}')" = "$WIN_INPUT_SHA256"
-            test "$(sha256sum "current/mac/$MAC_ZIP" | awk '{print $1}')" = "$MAC_INPUT_SHA256"
-            existing_assets="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
-            if printf '%s\n' "$existing_assets" | grep -Fxq "$WIN_C_ZIP"; then
-              win_c_existed=true
-              gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$WIN_C_ZIP" --dir current/win-c
-            fi
-            if printf '%s\n' "$existing_assets" | grep -Fxq "$MAC_C_ZIP"; then
-              mac_c_existed=true
-              gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$MAC_C_ZIP" --dir current/mac-c
-            fi
+            gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$WIN_C_ZIP" --dir current/win-c
+            gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$MAC_C_ZIP" --dir current/mac-c
+            test "$(sha256sum "current/win-c/$WIN_C_ZIP" | awk '{print $1}')" = "$WIN_INPUT_SHA256"
+            test "$(sha256sum "current/mac-c/$MAC_C_ZIP" | awk '{print $1}')" = "$MAC_INPUT_SHA256"
           else
             gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Grok Chameleon v2.0.0" --latest
           fi
 
-          restore_or_drop() {
-            local existed="$1" dir="$2" name="$3"
-            if [[ "$existed" == true ]]; then
-              gh release upload "$RELEASE_TAG" "$dir/$name" --repo "$GITHUB_REPOSITORY" --clobber || true
-            else
-              gh release delete-asset "$RELEASE_TAG" "$name" --repo "$GITHUB_REPOSITORY" --yes || true
-            fi
-          }
           rollback() {
             echo 'Rolling back the v2 release assets.' >&2
             if [[ "$release_existed" == true ]]; then
-              gh release upload "$RELEASE_TAG" "current/win/$WIN_ZIP" --repo "$GITHUB_REPOSITORY" --clobber || true
-              gh release upload "$RELEASE_TAG" "current/mac/$MAC_ZIP" --repo "$GITHUB_REPOSITORY" --clobber || true
-              restore_or_drop "$win_c_existed" current/win-c "$WIN_C_ZIP"
-              restore_or_drop "$mac_c_existed" current/mac-c "$MAC_C_ZIP"
+              gh release upload "$RELEASE_TAG" "current/win-c/$WIN_C_ZIP" --repo "$GITHUB_REPOSITORY" --clobber || true
+              gh release upload "$RELEASE_TAG" "current/mac-c/$MAC_C_ZIP" --repo "$GITHUB_REPOSITORY" --clobber || true
             else
               gh release delete "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
             fi
           }
           trap rollback ERR
-          gh release upload "$RELEASE_TAG" "release/windows/$WIN_ZIP" --repo "$GITHUB_REPOSITORY" --clobber
-          gh release upload "$RELEASE_TAG" "release/macos/$MAC_ZIP" --repo "$GITHUB_REPOSITORY" --clobber
           gh release upload "$RELEASE_TAG" "release/windows-c/$WIN_C_ZIP" --repo "$GITHUB_REPOSITORY" --clobber
           gh release upload "$RELEASE_TAG" "release/macos-c/$MAC_C_ZIP" --repo "$GITHUB_REPOSITORY" --clobber
           remote_digest() {
             gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[] | select(.name == "'"$1"'") | .digest'
           }
-          win_local="sha256:$(sha256sum "release/windows/$WIN_ZIP" | awk '{print $1}')"
-          mac_local="sha256:$(sha256sum "release/macos/$MAC_ZIP" | awk '{print $1}')"
           win_c_local="sha256:$(sha256sum "release/windows-c/$WIN_C_ZIP" | awk '{print $1}')"
           mac_c_local="sha256:$(sha256sum "release/macos-c/$MAC_C_ZIP" | awk '{print $1}')"
-          win_remote="$(remote_digest "$WIN_ZIP")"
-          mac_remote="$(remote_digest "$MAC_ZIP")"
           win_c_remote="$(remote_digest "$WIN_C_ZIP")"
           mac_c_remote="$(remote_digest "$MAC_C_ZIP")"
-          test "$win_local" = "$win_remote"
-          test "$mac_local" = "$mac_remote"
           test "$win_c_local" = "$win_c_remote"
           test "$mac_c_local" = "$mac_c_remote"
           asset_names="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
-          test "$(printf '%s\n' "$asset_names" | grep -Fxc "$WIN_ZIP")" -eq 1
-          test "$(printf '%s\n' "$asset_names" | grep -Fxc "$MAC_ZIP")" -eq 1
           test "$(printf '%s\n' "$asset_names" | grep -Fxc "$WIN_C_ZIP")" -eq 1
           test "$(printf '%s\n' "$asset_names" | grep -Fxc "$MAC_C_ZIP")" -eq 1
-          test "$(printf '%s\n' "$asset_names" | sed '/^$/d' | wc -l | tr -d ' ')" -eq 4
+          test "$(printf '%s\n' "$asset_names" | sed '/^$/d' | wc -l | tr -d ' ')" -eq 2
           if printf '%s\n' "$asset_names" | grep -Eq '(^|_)u\.zip$'; then
             echo 'Unexpected U release asset found in v2.' >&2
             exit 1
           fi
           trap - ERR
-          echo "windows-production-digest=$win_remote"
-          echo "mac-production-digest=$mac_remote"
           echo "windows-clone-batch-digest=$win_c_remote"
           echo "mac-clone-batch-digest=$mac_c_remote"
 
@@ -1361,9 +1306,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - variant: plain
-            common_dir: common
-            mac_zip: Mac_Grok_Chameleon_v2.0.zip
           - variant: clone-batch
             common_dir: common-c
             mac_zip: Mac_Grok_Chameleon_C_v2.0.zip
