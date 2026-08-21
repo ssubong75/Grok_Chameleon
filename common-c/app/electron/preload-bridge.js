@@ -2807,7 +2807,19 @@
         );
       }
     }
-    throw new Error("Imagine source is still preparing. Please try again in a moment.");
+    // A source that never hydrates within the retry window is not necessarily missing --
+    // starting a new conversation (T2I, every I2V, an upload's first edit) routes through
+    // here just as often as a stale reference does, and grok.com's own store can still be
+    // mid-fetch. Failing the whole generation on that timing alone blocked routine i2i/i2v.
+    // Proceed with whatever state is on hand and let the official request itself be the
+    // final word on whether the source exists.
+    pushStoreTrace("store_generation_source_hydration_unconfirmed", {
+      requestId,
+      variant,
+      sourceId: source,
+      rootSourceId: root,
+    });
+    return preparedState;
   }
 
   async function ensureContainerFromInput(
