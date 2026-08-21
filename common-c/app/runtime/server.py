@@ -3015,6 +3015,14 @@ def imagine_relation_stored_item(item: dict) -> dict:
         if imagine.get(key) not in (None, "")
     }
     stored_imagine["media_url"] = raw_url
+    # A relation-anchor card is reassembled straight from this stored copy. Drop the owner id
+    # here and every foreign-origin test downstream loses the only signal it has, so a
+    # clone-batch source silently keeps showing on main instead of Liked only.
+    owner_user_id = str(
+        item.get("owner_user_id") or metadata.get("owner_user_id") or imagine.get("owner_user_id") or "",
+    ).strip()
+    if owner_user_id:
+        stored_imagine["owner_user_id"] = owner_user_id
     stored_metadata = {
         "remote_url": raw_url,
         "media_url": raw_url,
@@ -3028,6 +3036,8 @@ def imagine_relation_stored_item(item: dict) -> dict:
         ),
         "imagine": stored_imagine,
     }
+    if owner_user_id:
+        stored_metadata["owner_user_id"] = owner_user_id
     if metadata.get("aspect_ratio"):
         stored_metadata["aspect_ratio"] = metadata.get("aspect_ratio")
     return {
@@ -3820,12 +3830,25 @@ def imagine_item_is_public_sample(item: dict) -> bool:
     )
 
 
+IMAGINE_ASSET_URL_OWNER_RE = re.compile(r"assets\.grok\.com/users/([0-9a-fA-F-]{36})/")
+
+
 def imagine_item_owner_user_id(item: dict) -> str:
     if not isinstance(item, dict):
         return ""
     metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
     imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
-    return str(metadata.get("owner_user_id") or imagine.get("owner_user_id") or "").strip()
+    declared = str(metadata.get("owner_user_id") or imagine.get("owner_user_id") or "").strip()
+    if declared:
+        return declared
+    # A relation-anchor source item can lose its owner id field entirely (the stored-item
+    # whitelist that fed it never carried one) while the asset url still names the real
+    # owner. Fall back to that url rather than treat a missing field as "mine".
+    for candidate_url in (item.get("url"), item.get("remote_url"), metadata.get("remote_url"), metadata.get("media_url"), imagine.get("media_url")):
+        match = IMAGINE_ASSET_URL_OWNER_RE.search(str(candidate_url or ""))
+        if match:
+            return match.group(1)
+    return ""
 
 
 def imagine_foreign_origin_asset_ids(
@@ -3891,6 +3914,20 @@ def imagine_foreign_origin_asset_ids(
             if parent_id in foreign and asset_id not in foreign:
                 foreign.add(asset_id)
                 changed = True
+    # A bundle groups one upload source with everything made from it, but a member's own
+    # parent id can point at an intermediate result this response never included, breaking
+    # the chain above before it reaches that member. If any item in the card is foreign,
+    # treat the whole card as foreign instead of trusting the per-item chain alone.
+    for post in posts or []:
+        if not isinstance(post, dict):
+            continue
+        post_asset_ids = {
+            imagine_item_asset_id(item)
+            for item in post.get("items") or []
+            if isinstance(item, dict) and imagine_item_asset_id(item) and not imagine_item_is_public_sample(item)
+        }
+        if post_asset_ids & foreign:
+            foreign.update(post_asset_ids)
     return foreign
 
 
@@ -4213,7 +4250,9 @@ def imagine_ensure_upload_bundle_record(
     generated_items = [
         item
         for item in post.get("items") or []
-        if isinstance(item, dict) and not imagine_item_is_upload_source(item)
+        if isinstance(item, dict)
+        and not imagine_item_is_upload_source(item)
+        and imagine_relation_conversation_id(item)
     ]
     current = relations.get(post_id) if isinstance(relations.get(post_id), dict) else {}
     if not post_id or not source_item or not generated_items:
@@ -7013,6 +7052,16 @@ def list_imagine_saved_cache(payload: dict) -> dict:
         [post for post in cached.get("posts") or [] if isinstance(post, dict)],
         remember_imagine_owner_user_id(account),
     )
+    # A card the live list already judged foreign-origin stays marked that way on this cache
+    # row after re-sync. Trust that mark outright here -- unlike the ownership test above, it
+    # does not depend on the owner id cache, which can still be empty this early.
+    hidden_remote_ids = hidden_remote_ids | {
+        imagine_item_asset_id(item)
+        for post in cached.get("posts") or []
+        if isinstance(post, dict) and (post.get("metadata") or {}).get("liked_scope") == "foreign-origin"
+        for item in post.get("items") or []
+        if isinstance(item, dict) and imagine_item_asset_id(item)
+    }
     posts: list[dict] = []
     for raw_post in cached.get("posts") or []:
         if not isinstance(raw_post, dict):
