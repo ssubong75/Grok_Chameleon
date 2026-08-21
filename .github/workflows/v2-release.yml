@@ -1246,6 +1246,8 @@ jobs:
           RELEASE_TAG: v2.0.0
           WIN_C_ZIP: Win_Grok_Chameleon_C_v2.0.zip
           MAC_C_ZIP: Mac_Grok_Chameleon_C_v2.0.zip
+          WIN_ZIP: Win_Grok_Chameleon_v2.0.zip
+          MAC_ZIP: Mac_Grok_Chameleon_v2.0.zip
           WIN_INPUT_SHA256: ${{ needs.build-windows.outputs.input_sha256 }}
           MAC_INPUT_SHA256: ${{ needs.build-macos.outputs.input_sha256 }}
         run: |
@@ -1283,6 +1285,14 @@ jobs:
           mac_c_remote="$(remote_digest "$MAC_C_ZIP")"
           test "$win_c_local" = "$win_c_remote"
           test "$mac_c_local" = "$mac_c_remote"
+          # The plain build stopped publishing after this pipeline moved to common-c only,
+          # but a release created before that switch can still be carrying its old assets.
+          # Drop them now that the clone-batch replacement upload above is verified good.
+          for stale in "$WIN_ZIP" "$MAC_ZIP"; do
+            if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -Fxq "$stale"; then
+              gh release delete-asset "$RELEASE_TAG" "$stale" --repo "$GITHUB_REPOSITORY" --yes
+            fi
+          done
           asset_names="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
           test "$(printf '%s\n' "$asset_names" | grep -Fxc "$WIN_C_ZIP")" -eq 1
           test "$(printf '%s\n' "$asset_names" | grep -Fxc "$MAC_C_ZIP")" -eq 1
