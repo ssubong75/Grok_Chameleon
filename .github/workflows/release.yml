@@ -88,8 +88,6 @@ jobs:
     env:
       RELEASE_TAG: Grok_Chameleon
       INPUT_ZIP: Win_Grok_Chameleon.zip
-      SEED_TAG: v2.0.0
-      SEED_ZIP: Win_Grok_Chameleon_C_v2.0.zip
       OUTPUT_ZIP: ${{ matrix.output_zip }}
       VARIANT_COMMON_DIR: ${{ matrix.common_dir }}
 
@@ -105,16 +103,9 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force input | Out-Null
-          $inputZip = Join-Path $env:GITHUB_WORKSPACE "input\$env:INPUT_ZIP"
-          # Normal run: the current release already carries the package to rebuild from.
           gh release download $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --pattern $env:INPUT_ZIP --dir input
-          if ($LASTEXITCODE -ne 0) {
-            # First run after the rename: seed from the retired release instead.
-            Write-Host "Seeding the Windows package from $env:SEED_TAG/$env:SEED_ZIP."
-            gh release download $env:SEED_TAG --repo $env:GITHUB_REPOSITORY --pattern $env:SEED_ZIP --dir input
-            if ($LASTEXITCODE -ne 0) { throw "Windows release download failed." }
-            Move-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE "input\$env:SEED_ZIP") -Destination $inputZip
-          }
+          if ($LASTEXITCODE -ne 0) { throw "Windows release download failed." }
+          $inputZip = Join-Path $env:GITHUB_WORKSPACE "input\$env:INPUT_ZIP"
           $inputHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $inputZip).Hash.ToLowerInvariant()
           Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "sha256=$inputHash" -Encoding utf8
 
@@ -609,8 +600,6 @@ jobs:
     env:
       RELEASE_TAG: Grok_Chameleon
       INPUT_ZIP: Mac_Grok_Chameleon.zip
-      SEED_TAG: v2.0.0
-      SEED_ZIP: Mac_Grok_Chameleon_C_v2.0.zip
       OUTPUT_ZIP: ${{ matrix.output_zip }}
       VARIANT_COMMON_DIR: ${{ matrix.common_dir }}
 
@@ -626,13 +615,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p input
-          # Normal run: the current release already carries the package to rebuild from.
-          if ! gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$INPUT_ZIP" --dir input; then
-            # First run after the rename: seed from the retired release instead.
-            echo "Seeding the Mac package from $SEED_TAG/$SEED_ZIP."
-            gh release download "$SEED_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$SEED_ZIP" --dir input
-            mv "input/$SEED_ZIP" "input/$INPUT_ZIP"
-          fi
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$INPUT_ZIP" --dir input
           actual="$(shasum -a 256 "input/$INPUT_ZIP" | awk '{print $1}')"
           echo "sha256=$actual" >> "$GITHUB_OUTPUT"
 
