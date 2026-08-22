@@ -1,7 +1,5 @@
 # Grok Chameleon
 
-Current release line: **v2**
-
 Grok Chameleon is a desktop app designed to make Grok Imagine and Build more convenient to use—all in one place.
 
 **From creation to management, a more convenient way to experience Grok's imagination.**
