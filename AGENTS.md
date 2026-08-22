@@ -72,12 +72,12 @@
 
 ## GitHub 배포
 
-- 기존 `v2` 브랜치와 기존 `Grok Chameleon` 워크플로(`.github/workflows/release.yml`)만 사용합니다.
+- 기존 `main` 브랜치와 기존 `Grok Chameleon` 워크플로(`.github/workflows/release.yml`)만 사용합니다.
 - 새 브랜치, 새 YAML 파일, 새 태그 또는 새 릴리스를 만들지 않습니다.
 - 빌드 잡은 Windows와 Mac을 각각 한 번씩 돌립니다. 두 잡은 완전히 같은 조립·검사·포장 단계를 지나며 대상 운영체제만 다릅니다.
 - 기존 `Grok_Chameleon` 릴리스의 자산 두 개만 갱신합니다. `Win_Grok_Chameleon.zip`과 `Mac_Grok_Chameleon.zip`을 `common/app` 트리에서 만듭니다.
 - 두 잡 모두 릴리스에 게시된 같은 이름의 ZIP을 입력으로 내려받아 조립하므로 실행끼리 결과가 누적되지 않습니다.
-- 배포 시작 전 로컬 HEAD와 `origin/v2`가 일치하는지, 작업 트리가 승인된 변경만 포함하는지 확인합니다.
+- 배포 시작 전 로컬 HEAD와 `origin/main`가 일치하는지, 작업 트리가 승인된 변경만 포함하는지 확인합니다.
 - Windows와 Mac은 반드시 같은 Git 커밋의 공통 소스를 사용해야 합니다.
 - 플랫폼 전용 파일이나 워크플로 자체를 변경해야 한다면 변경 전에 정확한 필요성과 대상 파일을 사용자에게 알립니다.
 - 문서나 지침만 변경하여 앱 공통 소스가 바뀌지 않은 커밋은 불필요한 배포를 실행하지 않습니다.
