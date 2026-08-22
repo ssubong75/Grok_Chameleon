@@ -3,7 +3,7 @@ name: Grok Chameleon
 on:
   push:
     branches:
-      - v2
+      - main
 
 permissions:
   contents: write
