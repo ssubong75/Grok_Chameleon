@@ -147,7 +147,28 @@ window.addEventListener("popstate", (event) => {
   restoreBrowserHistoryState(event.state);
 });
 
-openScreen(screen_state.current_main, "i_imagine_nav_btn", { replaceHistory: true });
+// The image editor is a separate page reached via location.replace(), so returning from
+// it reloads this page from scratch — the same boot path as a fresh launch, whose default
+// (Imagine main) would otherwise flash before consumeImageEditorReturn() below corrects it
+// asynchronously. Read the pending return target up front so the very first paint already
+// lands on the right screen.
+function initialScreenTargetForImageEditorReturn() {
+  const returnPostPath = sessionStorage.getItem(IMAGE_EDITOR_RETURN_POST_KEY) || "";
+  if (!returnPostPath) return null;
+  const returnProvider = sessionStorage.getItem(IMAGE_EDITOR_RETURN_PROVIDER_KEY) || "";
+  const detailType = returnProvider === "imagine" ? "imagine" : "build";
+  return {
+    screenId: detailType === "imagine" ? "i_detail" : "b_detail",
+    activeButtonId: detailType === "imagine" ? "i_imagine_nav_btn" : "b_build_btn",
+  };
+}
+
+const editorReturnBootTarget = initialScreenTargetForImageEditorReturn();
+openScreen(
+  editorReturnBootTarget?.screenId || screen_state.current_main,
+  editorReturnBootTarget?.activeButtonId || "i_imagine_nav_btn",
+  { replaceHistory: true },
+);
 scheduleSidebarTogglePosition();
 restoreLibraryRoot().then(() => {
   restoreUiReloadState(pendingUiReloadState);
