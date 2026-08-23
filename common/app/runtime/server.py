@@ -169,6 +169,8 @@ IMAGINE_BUNDLE_BACKGROUND_TASK_KEYS: set[str] = set()
 IMAGINE_BUNDLE_BACKGROUND_QUEUE: queue.Queue = queue.Queue(maxsize=512)
 IMAGINE_BUNDLE_BACKGROUND_WORKERS_STARTED = False
 IMAGINE_BUNDLE_BACKGROUND_WORKER_COUNT = 1
+IMAGINE_CLONE_MAP_PREPARE_LOCK = threading.Lock()
+IMAGINE_CLONE_MAP_PREPARE_KEYS: set[str] = set()
 LIBRARY_SCAN_LOCK = threading.Lock()
 LIBRARY_STATE_CACHE_VERSION = 1
 LIBRARY_INDEX_CHANGE_STATE = threading.local()
@@ -10714,6 +10716,7 @@ def delete_imagine_media_post(payload: dict) -> dict:
             asset_ids={value for value in deleted_ids if value},
             group_ids={value for value in deleted_ids if value},
         )
+        remove_imagine_clone_asset_map_clone_ids(root, account, deleted_ids)
     return result
 
 
@@ -10842,6 +10845,7 @@ def delete_imagine_asset(payload: dict) -> dict:
             account,
             remove={asset_id},
         )
+        remove_imagine_clone_asset_map_clone_ids(root, account, {asset_id})
         if bundle_source_only:
             prune_imagine_remote_cache_assets(root, account, {asset_id})
         else:
@@ -10912,6 +10916,7 @@ def discard_missing_imagine_asset(payload: dict) -> dict:
         account,
         remove={asset_id},
     )
+    remove_imagine_clone_asset_map_clone_ids(root, account, {asset_id})
     remove_imagine_generated_relation_state(root, asset_ids={asset_id})
     prune_imagine_remote_cache_assets(root, account, {asset_id})
     invalidate_imagine_saved_media_keys_cache(account)
@@ -11227,6 +11232,14 @@ def _like_imagine_media_post(payload: dict) -> dict:
                 account,
                 add=cloned_ids,
             )
+            # clone-batch already tells us both sides of the copy. Keep that authoritative
+            # relationship now so a later i2i/i2v request never has to scan every old clone
+            # through /rest/assets/<id> just to rediscover it.
+            update_imagine_clone_asset_map(
+                root,
+                account,
+                clone_result.get("cloned") or [],
+            )
             # The original remains in Imagine main and on grok.com.  Only its transient app
             # Liked expression must leave before the owned replacement card is inserted.
             remove_imagine_liked_cache_clone_source_cards(
@@ -11243,6 +11256,10 @@ def _like_imagine_media_post(payload: dict) -> dict:
                 account,
                 clone_result.get("cloned") or [],
             )
+            # Hydration has the final media URLs when clone-batch returned ids only.
+            # Refreshing from that local cache remains local and keeps the new copy usable
+            # immediately without putting an asset-detail scan back on the generation path.
+            imagine_restore_clone_asset_map_from_liked_cache(root, account)
         imagine_debug_event("external_asset_heart_cloned", {
             "account_id": str(account.get("id") or ""),
             "pressed_id": primary_id,
@@ -11592,6 +11609,7 @@ def imagine_clone_external_assets(account: dict, asset_ids: set[str]) -> dict:
             "conversation_id": str(asset.get("sourceConversationId") or ""),
             "response_id": str(asset.get("responseId") or ""),
             "media_type": str(asset.get("mimeType") or ""),
+            "media_url": imagine_asset_primary_media_url(asset) or "",
         })
     imagine_debug_event("external_asset_cloned", {
         "account_id": str(account.get("id") or ""),
@@ -11627,8 +11645,260 @@ def imagine_normalize_external_clone_records(entries: object) -> list[dict]:
             "conversation_id": str(entry.get("conversation_id") or entry.get("conversationId") or "").strip(),
             "response_id": str(entry.get("response_id") or entry.get("responseId") or "").strip(),
             "media_type": str(entry.get("media_type") or entry.get("mimeType") or "").strip(),
+            "media_url": str(
+                entry.get("media_url")
+                or entry.get("mediaUrl")
+                or entry.get("url")
+                or ""
+            ).strip(),
         })
     return records
+
+
+def imagine_clone_asset_map_key(value: object) -> str:
+    return str(value or "").strip().lower()
+
+
+def imagine_clone_asset_map(root: Path | None, account: dict) -> dict[str, dict]:
+    """Return the account-local original-id -> owned-copy record map.
+
+    This is deliberately a plain library.json setting instead of a network-backed cache:
+    substitution runs in the generate-button path and must be an immediate local lookup.
+    """
+    if not root:
+        return {}
+    library = merge_library_json(read_json(root / "library.json", {}))
+    settings = library.get("settings") if isinstance(library.get("settings"), dict) else {}
+    by_account = settings.get("imagine_clone_asset_map") if isinstance(settings.get("imagine_clone_asset_map"), dict) else {}
+    raw_map = by_account.get(imagine_account_settings_key(account))
+    if not isinstance(raw_map, dict):
+        return {}
+    mapping: dict[str, dict] = {}
+    for raw_origin, raw_record in raw_map.items():
+        if not isinstance(raw_record, dict):
+            continue
+        origin_id = imagine_clone_asset_map_key(
+            raw_record.get("source_asset_id") or raw_record.get("sourceAssetId") or raw_origin
+        )
+        clone_id = str(raw_record.get("asset_id") or raw_record.get("assetId") or "").strip()
+        if not origin_id or not clone_id:
+            continue
+        mapping[origin_id] = {
+            "asset_id": clone_id,
+            "source_asset_id": str(raw_record.get("source_asset_id") or raw_record.get("sourceAssetId") or raw_origin).strip(),
+            "conversation_id": str(raw_record.get("conversation_id") or raw_record.get("conversationId") or "").strip(),
+            "response_id": str(raw_record.get("response_id") or raw_record.get("responseId") or "").strip(),
+            "media_type": str(raw_record.get("media_type") or raw_record.get("mimeType") or "").strip(),
+            "media_url": str(raw_record.get("media_url") or raw_record.get("mediaUrl") or raw_record.get("url") or "").strip(),
+        }
+    return mapping
+
+
+def update_imagine_clone_asset_map(root: Path, account: dict, entries: object) -> dict[str, dict]:
+    """Merge clone-batch records into the persistent local substitution map."""
+    records = imagine_normalize_external_clone_records(entries)
+    if not records:
+        return imagine_clone_asset_map(root, account)
+    ensure_library_root(root)
+    library_path = root / "library.json"
+    library = merge_library_json(read_json(library_path, {}))
+    settings = library.setdefault("settings", {})
+    by_account = settings.get("imagine_clone_asset_map") if isinstance(settings.get("imagine_clone_asset_map"), dict) else {}
+    account_key = imagine_account_settings_key(account)
+    raw_map = by_account.get(account_key) if isinstance(by_account.get(account_key), dict) else {}
+    next_map = dict(raw_map)
+    for record in records:
+        origin_key = imagine_clone_asset_map_key(record.get("source_asset_id"))
+        if not origin_key:
+            continue
+        current = next_map.get(origin_key) if isinstance(next_map.get(origin_key), dict) else {}
+        next_map[origin_key] = {
+            "asset_id": str(record.get("asset_id") or current.get("asset_id") or "").strip(),
+            "source_asset_id": str(record.get("source_asset_id") or current.get("source_asset_id") or "").strip(),
+            "conversation_id": str(record.get("conversation_id") or current.get("conversation_id") or "").strip(),
+            "response_id": str(record.get("response_id") or current.get("response_id") or "").strip(),
+            "media_type": str(record.get("media_type") or current.get("media_type") or "").strip(),
+            "media_url": str(record.get("media_url") or current.get("media_url") or "").strip(),
+            "updated_at": now_iso(),
+        }
+    by_account[account_key] = next_map
+    settings["imagine_clone_asset_map"] = by_account
+    library["updated_at"] = now_iso()
+    write_json(library_path, library)
+    return imagine_clone_asset_map(root, account)
+
+
+def remove_imagine_clone_asset_map_clone_ids(
+    root: Path | None,
+    account: dict,
+    clone_ids: set[str],
+) -> set[str]:
+    """Remove deleted owned copies from both clone settings."""
+    if not root:
+        return set()
+    wanted = {str(value or "").strip() for value in clone_ids if str(value or "").strip()}
+    if not wanted:
+        return set()
+    mapping = imagine_clone_asset_map(root, account)
+    removed = {
+        str(record.get("asset_id") or "").strip()
+        for record in mapping.values()
+        if str(record.get("asset_id") or "").strip() in wanted
+    }
+    if not removed:
+        return set()
+    library_path = root / "library.json"
+    library = merge_library_json(read_json(library_path, {}))
+    settings = library.setdefault("settings", {})
+    by_account = settings.get("imagine_clone_asset_map") if isinstance(settings.get("imagine_clone_asset_map"), dict) else {}
+    account_key = imagine_account_settings_key(account)
+    raw_map = by_account.get(account_key) if isinstance(by_account.get(account_key), dict) else {}
+    by_account[account_key] = {
+        origin: record
+        for origin, record in raw_map.items()
+        if not isinstance(record, dict) or str(record.get("asset_id") or record.get("assetId") or "").strip() not in removed
+    }
+    settings["imagine_clone_asset_map"] = by_account
+    library["updated_at"] = now_iso()
+    write_json(library_path, library)
+    update_imagine_account_setting_ids(root, "imagine_cloned_asset_ids", account, remove=removed)
+    return removed
+
+
+def imagine_restore_clone_asset_map_from_liked_cache(root: Path, account: dict) -> dict[str, dict]:
+    """Use already-cached Liked clone records before considering any remote recovery."""
+    try:
+        cached = library_index.query_imagine_remote_posts(
+            root, imagine_liked_cache_account_key(account), offset=0, limit=5000,
+        )
+    except Exception as exc:  # noqa: BLE001
+        imagine_debug_event("clone_asset_map_liked_cache_read_failed", {
+            "account_id": str(account.get("id") or ""),
+            "error": str(exc)[:300],
+        })
+        return imagine_clone_asset_map(root, account)
+    records: list[dict] = []
+    for post in cached.get("posts") or []:
+        if not isinstance(post, dict):
+            continue
+        metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+        post_records = imagine_normalize_external_clone_records(metadata.get("official_clone_assets"))
+        if not post_records:
+            continue
+        item_urls = {
+            imagine_item_asset_id(item): imagine_attachment_raw_url(item)
+            for item in post.get("items") or []
+            if isinstance(item, dict) and imagine_item_asset_id(item)
+        }
+        for record in post_records:
+            restored = dict(record)
+            if not restored.get("media_url"):
+                restored["media_url"] = item_urls.get(restored.get("asset_id") or "", "")
+            records.append(restored)
+    if records:
+        return update_imagine_clone_asset_map(root, account, records)
+    return imagine_clone_asset_map(root, account)
+
+
+def imagine_complete_clone_asset_map_in_background(
+    root: Path,
+    account: dict,
+    clone_ids: set[str],
+    task_key: str,
+) -> None:
+    """Fill only legacy map gaps outside the generation request path."""
+    def fetch_clone_record(clone_id: str) -> dict | None:
+        try:
+            data = imagine_get_json(
+                f"/rest/assets/{quote(clone_id, safe='')}",
+                account,
+                timeout=10,
+                referer=IMAGINE_BASE + "/imagine/saved",
+            )
+        except Exception:
+            return None
+        asset = data.get("asset") if isinstance(data.get("asset"), dict) else data
+        origin_id = imagine_asset_duplicated_from_id(asset)
+        if not origin_id:
+            return None
+        return {
+            "asset_id": str(asset.get("assetId") or clone_id).strip(),
+            "source_asset_id": origin_id,
+            "conversation_id": str(asset.get("sourceConversationId") or "").strip(),
+            "response_id": str(asset.get("responseId") or "").strip(),
+            "media_type": str(asset.get("mimeType") or "").strip(),
+            "media_url": imagine_asset_primary_media_url(asset) or "",
+        }
+
+    recovered: list[dict] = []
+    try:
+        # A legacy account can have hundreds of old copies. This runs only while the
+        # account is preparing, but bounded parallelism prevents that one-time recovery
+        # from lingering for the ~37 seconds the former sequential generation scan took.
+        with ThreadPoolExecutor(max_workers=min(6, max(1, len(clone_ids)))) as executor:
+            futures = [executor.submit(fetch_clone_record, clone_id) for clone_id in sorted(clone_ids)]
+            for future in as_completed(futures):
+                record = future.result()
+                if record:
+                    recovered.append(record)
+        if recovered:
+            update_imagine_clone_asset_map(root, account, recovered)
+        imagine_debug_event("clone_asset_map_background_complete", {
+            "account_id": str(account.get("id") or ""),
+            "requested_clone_ids": len(clone_ids),
+            "recovered": len(recovered),
+        })
+    finally:
+        with IMAGINE_CLONE_MAP_PREPARE_LOCK:
+            IMAGINE_CLONE_MAP_PREPARE_KEYS.discard(task_key)
+
+
+def prepare_imagine_clone_asset_map(payload: dict) -> dict:
+    """Restore clone substitution locally and schedule one-time legacy recovery."""
+    root = library_root()
+    if not root:
+        raise RuntimeError("Library path is not set.")
+    account = active_imagine_account(root, str((payload or {}).get("account_id") or ""))
+    if not account:
+        return {"ok": True, "status": "no_account"}
+    clone_ids = imagine_account_setting_ids(root, "imagine_cloned_asset_ids", account)
+    if not clone_ids:
+        return {"ok": True, "status": "ready", "account_id": account.get("id") or "", "mapped": 0}
+    mapping = imagine_clone_asset_map(root, account)
+    mapped_clone_ids = {
+        str(record.get("asset_id") or "").strip()
+        for record in mapping.values()
+        if str(record.get("media_url") or "").strip()
+    }
+    missing_clone_ids = clone_ids - mapped_clone_ids
+    if missing_clone_ids:
+        mapping = imagine_restore_clone_asset_map_from_liked_cache(root, account)
+        mapped_clone_ids = {
+            str(record.get("asset_id") or "").strip()
+            for record in mapping.values()
+            if str(record.get("media_url") or "").strip()
+        }
+        missing_clone_ids = clone_ids - mapped_clone_ids
+    task_key = f"{root.resolve()}:{imagine_account_settings_key(account)}"
+    started = False
+    if missing_clone_ids:
+        with IMAGINE_CLONE_MAP_PREPARE_LOCK:
+            if task_key not in IMAGINE_CLONE_MAP_PREPARE_KEYS:
+                IMAGINE_CLONE_MAP_PREPARE_KEYS.add(task_key)
+                threading.Thread(
+                    target=imagine_complete_clone_asset_map_in_background,
+                    args=(root, dict(account), set(missing_clone_ids), task_key),
+                    daemon=True,
+                ).start()
+                started = True
+    return {
+        "ok": True,
+        "status": "recovering" if missing_clone_ids else "ready",
+        "account_id": account.get("id") or "",
+        "mapped": len(mapping),
+        "missing": len(missing_clone_ids),
+        "background_started": started,
+    }
 
 
 def imagine_group_external_clone_batch_cards(cards: list[dict]) -> list[dict]:
@@ -12137,6 +12407,7 @@ def imagine_find_external_asset_clones(
                 "conversation_id": str(asset.get("sourceConversationId") or "").strip(),
                 "response_id": str(asset.get("responseId") or "").strip(),
                 "media_type": str(asset.get("mimeType") or "").strip(),
+                "media_url": imagine_asset_primary_media_url(asset) or "",
             })
         next_cursor = str(data.get("nextPageToken") or data.get("nextCursor") or "").strip()
         if not next_cursor or next_cursor in seen_cursors:
@@ -13201,34 +13472,6 @@ def imagine_mark_external_lineage_fresh_source(payload: dict, attachments: list[
 
 # A Liked card shows the asset it was copied from, not the copy: the copy's references
 # still name the original owner's media, so that is what the detail hands the composer.
-# Generating straight from it asks grok.com to continue someone else's conversation, which
-# it answers with "Request rejected by anti-bot rules." Swap in the copy this account owns
-# and drop the foreign lineage, so the request is an ordinary one against its own asset.
-def imagine_clone_id_by_origin(root: Path | None, account: dict) -> dict[str, dict]:
-    cloned_ids = imagine_account_setting_ids(root, "imagine_cloned_asset_ids", account)
-    if not cloned_ids:
-        return {}
-    mapping: dict[str, dict] = {}
-    for clone_id in cloned_ids:
-        try:
-            data = imagine_get_json(
-                f"/rest/assets/{quote(clone_id, safe='')}",
-                account,
-                timeout=10,
-                referer=IMAGINE_BASE + "/imagine/saved",
-            )
-        except Exception:
-            continue
-        asset = data.get("asset") if isinstance(data.get("asset"), dict) else data
-        origin_id = imagine_asset_duplicated_from_id(asset)
-        if origin_id:
-            mapping[origin_id] = {
-                "asset_id": clone_id,
-                "media_url": imagine_asset_primary_media_url(asset) or "",
-            }
-    return mapping
-
-
 def imagine_substitute_cloned_source(
     attachments: list[dict],
     account: dict,
@@ -13254,7 +13497,9 @@ def imagine_substitute_cloned_source(
     if not cloned_ids or candidates & cloned_ids:
         # Nothing to do when the attachment is already the copy.
         return
-    mapping = imagine_clone_id_by_origin(root, account)
+    # This must stay local: the previous implementation fetched every historical clone
+    # one-by-one here, delaying each i2i/i2v request by tens of seconds.
+    mapping = imagine_clone_asset_map(root, account)
     if not mapping:
         return
     for attachment in attachments:
@@ -13264,11 +13509,11 @@ def imagine_substitute_cloned_source(
             (
                 str(attachment.get(key) or "").strip()
                 for key in ("asset_id", "post_id", "source_item_id", "item_id", "parent_post_id")
-                if str(attachment.get(key) or "").strip() in mapping
+                if imagine_clone_asset_map_key(attachment.get(key)) in mapping
             ),
             "",
         )
-        record = mapping.get(origin_id) or {}
+        record = mapping.get(imagine_clone_asset_map_key(origin_id)) or {}
         clone_id = str(record.get("asset_id") or "")
         clone_url = str(record.get("media_url") or "")
         if not clone_id:
@@ -13863,6 +14108,10 @@ def imagine_direct_job_context(payload: dict) -> dict:
         "provider": "imagine",
         "generation_provider": "imagine",
         "mode": action,
+        # The client receives this job before the worker emits its first bridge
+        # callback.  Mark it as preparing from the outset so the card never
+        # flashes "Creating 1%" before the actual preparation state arrives.
+        "phase": "preparing",
         "preview_url": str(payload.get("preview_url") or ""),
         "preview_type": str(payload.get("preview_type") or imagine_direct_job_kind(payload)),
         "source_post_path": str(payload.get("source_post_path") or ""),
@@ -16899,8 +17148,6 @@ def imagine_video_request(payload: dict, prompt: str, request_id: str, action: s
         request["grokChameleonDirectUpload"] = True
         request["grokChameleonUploadAssetIds"] = input_asset_ids
         request["grokChameleonUploadUrls"] = direct_upload_urls
-    elif action != "extend" and direct_upload_urls:
-        request["grokChameleonFallbackSourceUrls"] = direct_upload_urls[:1]
     if start_new_conversation:
         request["grokChameleonStartNewConversation"] = True
     if conversation_id:
@@ -17369,7 +17616,7 @@ def imagine_native_bridge_generate(
     root = library_root()
     if not root:
         raise RuntimeError("Library path is not set.")
-    if action in {"i2i", "aspect", "i2v", "extend"}:
+    if action in {"i2i", "aspect", "t2v", "i2v", "extend"}:
         if progress_callback:
             progress_callback(2, "running", {"action": action, "request_id": request_id, "phase": "preparing"})
         native_bridge_prepare_generation(root, account, request_payload, request_id, referer)
@@ -17846,6 +18093,10 @@ def imagine_direct_generate(payload: dict, progress_callback=None, cancel_checke
     if progress_callback:
         progress_callback(1, "running", {"action": action, "request_id": request_id})
     if action == "t2i":
+        # T2I does not hydrate a source post, but its official WebSocket request
+        # is still the boundary between the short preparing state and creation.
+        if progress_callback:
+            progress_callback(6, "running", {"action": action, "request_id": request_id, "phase": "generating"})
         items = imagine_t2i_direct_items(
             payload,
             account,
@@ -26314,6 +26565,7 @@ POST_JSON_ROUTES = {
     "/api/native-bridge/next": native_bridge_next_command,
     "/api/native-bridge/result": native_bridge_result,
     "/api/imagine/bridge/prepare": prepare_imagine_bridge_session,
+    "/api/imagine/clone-map/prepare": prepare_imagine_clone_asset_map,
     **imagine_post_routes(
         start_imagine_login=start_imagine_login,
         open_imagine_usage_page=open_imagine_usage_page,

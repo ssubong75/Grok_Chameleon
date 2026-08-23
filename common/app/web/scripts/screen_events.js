@@ -172,6 +172,24 @@ openScreen(
 scheduleSidebarTogglePosition();
 restoreLibraryRoot().then(() => {
   restoreUiReloadState(pendingUiReloadState);
+  // Start the selected account's Saved/media-store preparation only after the
+  // restored UI has chosen its final active account.  A first generation then
+  // joins this work instead of competing with it.
+  const activeImagineId = String(account_state.imagine?.active_id || "");
+  const activeImagineAccount = (account_state.imagine?.accounts || []).find(
+    (account) => String(account?.id || "") === activeImagineId,
+  );
+  if (activeImagineAccount && window.grokChameleonNative?.activateImagineAccount) {
+    window.grokChameleonNative.activateImagineAccount({
+      account_id: activeImagineAccount.id,
+      account_email: activeImagineAccount.email || "",
+      store_id: activeImagineAccount.store_id || "",
+      cookies: validImagineCookies(activeImagineAccount),
+    }).catch(() => {});
+  }
+  if (activeImagineAccount && library_state.apiReady) {
+    qApi("/api/imagine/clone-map/prepare", { account_id: activeImagineAccount.id }).catch(() => {});
+  }
   consumeImageEditorReturn().catch((error) => showErrorPanel("Edit failed", error?.message || "Edit failed."));
   if (typeof refreshBuildJobs === "function") refreshBuildJobs();
   if (
