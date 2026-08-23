@@ -168,6 +168,10 @@ function openDetailImageEditor(provider = "build") {
     searchQuery: library_state.searchQuery || "",
   }));
   sessionStorage.setItem(IMAGE_EDITOR_INTERNAL_NAVIGATION_KEY, "editor");
+  if (typeof browserHistoryCursor === "number") {
+    sessionStorage.setItem(IMAGE_EDITOR_HISTORY_CURSOR_KEY, String(browserHistoryCursor));
+    sessionStorage.setItem(IMAGE_EDITOR_HISTORY_TAIL_KEY, String(browserHistoryTail));
+  }
   window.location.replace(url.toString());
 }
 

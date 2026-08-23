@@ -18922,7 +18922,11 @@ def media_items_in_folder(root: Path, folder: Path, rel_folder: str, meta: dict 
         stat = entry.stat()
         mime_type = mimetypes.guess_type(entry.name)[0] or f"{media_type}/{extension_for(entry.name)}"
         item = {
-            "item_id": claim_unique_media_item_id(file_stem(entry.name), used_item_ids),
+            # Normalize to NFC: macOS reports accented/Hangul file names as NFD, but
+            # everything saved through write_json() (post.json) is NFC. An item_id built
+            # from the raw filesystem name would silently mismatch the id the client and
+            # post.json agree on whenever no meta record is present to correct it.
+            "item_id": claim_unique_media_item_id(_nfc(file_stem(entry.name)), used_item_ids),
             "type": media_type,
             "file": entry.name,
             "mime_type": mime_type,
@@ -19045,17 +19049,35 @@ def media_item_is_lucky(item: dict | None) -> bool:
     return bool(item.get("lucky") or item.get("lucky_recovery") or metadata.get("lucky") or imagine.get("lucky"))
 
 
+def _nfc(value) -> str:
+    return unicodedata.normalize("NFC", str(value or ""))
+
+
 def merge_media_items(media_items: list[dict], meta_items: list[dict]) -> list[dict]:
     if not media_items or not meta_items:
         return media_items
     merged = []
     used_item_ids: set[str] = set()
     for media_item in media_items:
-        meta_item = next((item for item in meta_items if item.get("file") and item.get("file") == media_item.get("file")), None)
+        # A folder rescan reads file names straight from the filesystem. macOS stores
+        # accented/Hangul names as NFD, while everything written through write_json()
+        # (post.json, and therefore meta_items) is normalized to NFC. Comparing the raw
+        # strings makes an otherwise-identical file fail to match its meta record, so the
+        # merge falls through to the filesystem's NFD item_id instead of the stored NFC one.
+        meta_item = next((
+            item for item in meta_items
+            if item.get("file") and _nfc(item.get("file")) == _nfc(media_item.get("file"))
+        ), None)
         if not meta_item:
-            meta_item = next((item for item in meta_items if item.get("url") and item.get("url") == media_item.get("url")), None)
+            meta_item = next((
+                item for item in meta_items
+                if item.get("url") and _nfc(item.get("url")) == _nfc(media_item.get("url"))
+            ), None)
         if not meta_item:
-            meta_item = next((item for item in meta_items if item.get("item_id") and item.get("item_id") == media_item.get("item_id")), None)
+            meta_item = next((
+                item for item in meta_items
+                if item.get("item_id") and _nfc(item.get("item_id")) == _nfc(media_item.get("item_id"))
+            ), None)
         if meta_item:
             merged_item = {
                 **meta_item,
@@ -19066,13 +19088,13 @@ def merge_media_items(media_items: list[dict], meta_items: list[dict]) -> list[d
                 "title": meta_item.get("title") or media_item.get("title") or "",
             }
             merged_item["item_id"] = claim_unique_media_item_id(
-                meta_item.get("item_id") or media_item.get("item_id") or file_stem(merged_item.get("file") or ""),
+                _nfc(meta_item.get("item_id") or media_item.get("item_id") or file_stem(merged_item.get("file") or "")),
                 used_item_ids,
             )
             merged.append(merged_item)
         else:
             media_item["item_id"] = claim_unique_media_item_id(
-                media_item.get("item_id") or file_stem(media_item.get("file") or ""),
+                _nfc(media_item.get("item_id") or file_stem(media_item.get("file") or "")),
                 used_item_ids,
             )
             merged.append(media_item)
@@ -25868,7 +25890,7 @@ def save_image_editor_upload_result(payload: dict, mime_type: str, image_data: s
         folder_path, item_id = existing
         unhide_saved_upload_refs(root, [(folder_path, item_id)])
         refresh_library_index_paths(root, [folder_path])
-        return {
+        return normalize_json_unicode({
             "ok": True,
             "item": {
                 "id": f"{folder_path}::{item_id}",
@@ -25876,7 +25898,7 @@ def save_image_editor_upload_result(payload: dict, mime_type: str, image_data: s
                 "item_id": item_id,
                 "metadata": {"editor_save_target": "upload"},
             },
-        }
+        })
     source_name = str(payload.get("name") or "").strip()
     ext = extension_from_mime_type(mime_type, "png")
     now = now_iso()
@@ -25925,7 +25947,7 @@ def save_image_editor_upload_result(payload: dict, mime_type: str, image_data: s
     # told about, and the save ends on "Library post was not found." even though every
     # file is on disk.
     refresh_library_index_paths(root, [folder_path])
-    return {
+    return normalize_json_unicode({
         "ok": True,
         "item": {
             "id": f"{folder_path}::{item_id}" if folder_path and item_id else "",
@@ -25933,7 +25955,7 @@ def save_image_editor_upload_result(payload: dict, mime_type: str, image_data: s
             "item_id": item_id,
             "metadata": {"editor_save_target": "upload"},
         },
-    }
+    })
 
 
 def save_image_editor_result(payload: dict) -> dict:
@@ -26021,7 +26043,7 @@ def save_image_editor_result(payload: dict) -> dict:
             "upload_copy_folder_path": upload_folder_path,
         },
     }
-    return data
+    return normalize_json_unicode(data)
 
 
 def upload_media_extension(name: str, mime_type: str, media_type: str) -> str:

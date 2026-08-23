@@ -1,10 +1,34 @@
 // Browser history state for screen navigation
 
+const IMAGE_EDITOR_HISTORY_CURSOR_KEY = "grokStudioImageEditorHistoryCursor";
+const IMAGE_EDITOR_HISTORY_TAIL_KEY = "grokStudioImageEditorHistoryTail";
+
+function imageEditorRoundTripHistoryState() {
+  // The image editor is a separate page reached via location.replace(): the underlying
+  // browser history stack survives the round trip untouched, but window.history.state does
+  // not, so the cursor below would otherwise reset to 0 and the topbar back/forward buttons
+  // would go dead after every editor visit. Restore the cursor this page had just before it
+  // navigated away, then drop the stash so a normal reload never picks it up by accident.
+  const savedCursor = sessionStorage.getItem(IMAGE_EDITOR_HISTORY_CURSOR_KEY);
+  const savedTail = sessionStorage.getItem(IMAGE_EDITOR_HISTORY_TAIL_KEY);
+  sessionStorage.removeItem(IMAGE_EDITOR_HISTORY_CURSOR_KEY);
+  sessionStorage.removeItem(IMAGE_EDITOR_HISTORY_TAIL_KEY);
+  const cursor = Number(savedCursor);
+  if (!Number.isFinite(cursor)) return null;
+  const tail = Number(savedTail);
+  return { cursor: Math.max(0, cursor), tail: Math.max(0, Number.isFinite(tail) ? tail : cursor) };
+}
+
 const initialBrowserHistoryIndex = Number(window.history?.state?.grokStudioQHistoryIndex);
+const editorRoundTripHistory = Number.isFinite(initialBrowserHistoryIndex)
+  ? null
+  : imageEditorRoundTripHistoryState();
 let browserHistoryCursor = Number.isFinite(initialBrowserHistoryIndex)
   ? Math.max(0, initialBrowserHistoryIndex)
-  : 0;
-let browserHistoryTail = browserHistoryCursor;
+  : (editorRoundTripHistory ? editorRoundTripHistory.cursor : 0);
+let browserHistoryTail = editorRoundTripHistory
+  ? Math.max(editorRoundTripHistory.tail, browserHistoryCursor)
+  : browserHistoryCursor;
 let detailReturnTopSyncFrame = 0;
 
 function syncDetailReturnTopFromMainHistory() {
