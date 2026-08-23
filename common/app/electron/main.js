@@ -1663,8 +1663,26 @@ function activateImagineAccountTab(command = {}) {
       sleepBridgeWindow(win);
     }
   }
-  appendLog(`imagine account tab activated account=${accountId} found=${found ? "yes" : "no"}`);
-  return { ok: true, status: found ? "activated" : "deferred", found };
+  // Account selection is the application-level preflight.  Start the selected
+  // account's Saved/media-store tab now, rather than making the first generate
+  // command pay for page boot and store discovery.  ensureBridgeReady keeps this
+  // promise on the account window, so a generation that arrives while it is
+  // loading joins the same preparation instead of opening a second tab.
+  const prepareCommand = {
+    ...command,
+    type: "prepare",
+    url: "https://grok.com/imagine/saved",
+    force_refresh: false,
+  };
+  supersedeOtherAccountPreparations(prepareCommand);
+  closeInactiveAccountWindows(prepareCommand);
+  const preparedWindow = bridgeWindow(prepareCommand);
+  void ensureBridgeReady(prepareCommand, preparedWindow).then(
+    () => appendLog(`imagine account preparation ready account=${accountId}`),
+    (error) => appendLog(`imagine account preparation failed account=${accountId} error=${error?.message || String(error)}`),
+  );
+  appendLog(`imagine account tab activated account=${accountId} found=${found ? "yes" : "no"} preparation=started`);
+  return { ok: true, status: "preparing", found };
 }
 
 function uuidV5Url(name) {

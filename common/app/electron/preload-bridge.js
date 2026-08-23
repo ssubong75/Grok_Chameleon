@@ -93,7 +93,6 @@
         "fileAttachments", "resolvedImageReferences", "videoGenModelConfig",
         "imageEditModelConfig", "mediaGenInput", "params", "url", "mimeType",
         "filename", "fileName", "grokChameleonDirectUpload", "grokChameleonUploadAssetIds", "grokChameleonUploadUrls",
-        "grokChameleonFallbackSourceUrls",
         "activeContainerIds", "canonicalContainerId", "discoverNewContainers", "startNewConversation",
         "moderationDetectedAtMs", "moderationElapsedMs",
       ]) {
@@ -2683,14 +2682,19 @@
   function generationSourceReady(state, sourceId, rootSourceId = "") {
     const value = resolvedMediaId(state, sourceId);
     if (!value) return false;
-    if (!state?.byId?.[value]) return false;
+    const sourceLoaded = Boolean(state?.byId?.[value]);
     const rootId = resolvedMediaId(state, rootSourceId);
     if (rootId) {
-      if (value === rootId && state?.byId?.[rootId]) return true;
-      return hasChildItem(state?.imageByMediaId?.[rootId], value)
+      if (value === rootId) return sourceLoaded;
+      // fetchMediaPost(root) can populate a root's image/video collection before
+      // it materializes a separate byId entry for every child.  That collection is
+      // the official store's positive evidence that this source is ready; requiring
+      // both representations made valid card sources look absent.
+      return sourceLoaded
+        || hasChildItem(state?.imageByMediaId?.[rootId], value)
         || hasChildItem(state?.videoByMediaId?.[rootId], value);
     }
-    if (state?.byId?.[value]) return true;
+    if (sourceLoaded) return true;
     for (const collection of [state?.imageByMediaId, state?.videoByMediaId]) {
       for (const items of Object.values(collection || {})) {
         if (Array.isArray(items) && items.some((item) => storeItemId(item) === value)) return true;
@@ -2781,6 +2785,7 @@
     requestId,
     variant,
     directUpload = false,
+    strict = false,
   }) {
     const source = String(sourceId || "").trim();
     const root = String(rootSourceId || "").trim();
@@ -2788,37 +2793,41 @@
     if (directUpload) return state;
 
     let preparedState = state;
+    // An initially cold store often knows only the selected child id.  Resolving
+    // that child can reveal its real root container, so carry the discovered root
+    // into the next hydration/readiness pass instead of continuing to test the
+    // child against itself as a root.
+    let readyRoot = root;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       preparedState = await hydrateGenerationSource(
         storeContext,
         source,
         requestId,
         variant,
-        root,
+        readyRoot,
       );
-      if (generationSourceReady(preparedState, source, root)) return preparedState;
+      if (generationSourceReady(preparedState, source, readyRoot)) return preparedState;
       if (attempt === 0) {
         preparedState = await reResolveGenerationSource(
           storeContext,
           preparedState,
-          root,
+          readyRoot,
           requestId,
           variant,
         );
+        readyRoot = containerPostIdFor(preparedState, source) || readyRoot;
       }
     }
-    // A source that never hydrates within the retry window is not necessarily missing --
-    // starting a new conversation (T2I, every I2V, an upload's first edit) routes through
-    // here just as often as a stale reference does, and grok.com's own store can still be
-    // mid-fetch. Failing the whole generation on that timing alone blocked routine i2i/i2v.
-    // Proceed with whatever state is on hand and let the official request itself be the
-    // final word on whether the source exists.
     pushStoreTrace("store_generation_source_hydration_unconfirmed", {
       requestId,
       variant,
       sourceId: source,
-      rootSourceId: root,
+      rootSourceId: readyRoot,
+      strict,
     });
+    if (strict) {
+      throw new Error("Imagine selected source is not ready in the official media store.");
+    }
     return preparedState;
   }
 
@@ -2869,9 +2878,6 @@
       : [];
     const inputIds = (rawInputAssets.length > 0 ? rawInputAssets : bridgeInputAssets).map(String);
     const urls = imageReferenceUrls(payload);
-    const fallbackSourceUrls = Array.isArray(payload.grokChameleonFallbackSourceUrls)
-      ? payload.grokChameleonFallbackSourceUrls.map((value) => String(value || "").trim()).filter(Boolean)
-      : [];
     const conversationId = String(payload.grokChameleonConversationId || "").trim();
     const parentResponseId = String(payload.grokChameleonParentResponseId || "").trim();
     const directUpload = Boolean(payload.grokChameleonDirectUpload);
@@ -2988,6 +2994,7 @@
         requestId,
         variant: variant.kind,
         directUpload,
+        strict: true,
       });
       if (!startNewConversation) {
         syncCurrentRootContainer(state, requestId, variant.kind, containerId);
@@ -3167,6 +3174,19 @@
       const resolutionName = String(params.resolutionName || videoConfig.resolutionName || "").trim().toLowerCase();
       const durationSeconds = Number(duration || videoConfig.videoLength || 0) || 0;
       const useOfficialUiAction = false;
+      // T2V has no source container to create or hydrate.  Its preflight only
+      // establishes the selected account's official Saved/media store; creating a
+      // placeholder video post here would be a write before generation.
+      if (prepareOnly && variant.kind === "textToVideo") {
+        return {
+          ok: true,
+          status: 200,
+          ready: true,
+          preflight: true,
+          variant: variant.kind,
+          elapsedMs: Date.now() - startedAt,
+        };
+      }
       const longI2vWait = ["imageToVideo", "referenceToVideo", "videoExtension"].includes(variant.kind)
         && ["720p", "1080p"].includes(resolutionName)
         && durationSeconds >= 10;
@@ -3302,88 +3322,35 @@
       if (!containerId) throw new Error("Official video container could not be resolved.");
       const generationSourceId = () => videoInputAsset || parentPostId || extendPostId || containerId;
       const generationRootId = () => rootContainerId || containerId;
-      const needsSourceReadiness = ["imageToVideo", "referenceToVideo", "videoExtension"].includes(variant.kind);
-      state = await hydrateGenerationSource(
-        storeContext,
-        generationSourceId(),
-        requestId,
-        variant.kind,
-        generationRootId(),
+      // I2V intentionally starts a new output conversation.  That must not hide
+      // the selected source's existing conversation from the read-only source
+      // preflight; use it only for hydration, not as the output container.
+      const sourceHydrationRootId = () => (
+        rootContainerId || explicitRootSeedId || rootSeedId || containerId
       );
+      const needsSourceReadiness = ["imageToVideo", "referenceToVideo", "videoExtension"].includes(variant.kind);
+      if (needsSourceReadiness && !directUpload) {
+        state = await hydrateGenerationSource(
+          storeContext,
+          generationSourceId(),
+          requestId,
+          variant.kind,
+          sourceHydrationRootId(),
+        );
+      }
       let sourceReady = !needsSourceReadiness || (directUpload
         ? Boolean(generationSourceId() && generationRootId())
-        : generationSourceReady(state, generationSourceId(), generationRootId()));
-      if (
-        !sourceReady
-        && ["imageToVideo", "referenceToVideo"].includes(variant.kind)
-        && fallbackSourceUrls.length > 0
-      ) {
-        pushStoreTrace("store_generation_source_fallback_start", {
-          requestId,
-          variant: variant.kind,
-          sourceId: videoInputAsset || parentPostId || containerId,
-          conversationId,
-          parentResponseId,
-          fallbackUrl: fallbackSourceUrls[0],
-        });
-        const fallbackPostId = await ensureContainerFromInput(
-          state,
-          "image",
-          prompt,
-          [],
-          fallbackSourceUrls,
-          "image/jpeg",
-          { allowCreate: !prepareOnly },
-        );
-        if (!fallbackPostId) {
-          throw new Error(
-            prepareOnly
-              ? "Imagine fallback source is still preparing. Please try again in a moment."
-              : "Official fallback source post could not be created.",
-          );
-        }
-        state = storeContext.record ? mediaStoreStateForRecord(storeContext.record) : getMediaStoreState();
-        state = await requireGenerationSourceReady({
-          storeContext,
-          state,
-          sourceId: fallbackPostId,
-          rootSourceId: fallbackPostId,
-          requestId,
-          variant: `${variant.kind}Fallback`,
-        });
-        containerId = fallbackPostId;
-        videoInputAsset = fallbackPostId;
-        parentPostId = undefined;
-        rootContainerId = fallbackPostId;
-        videoConversationId = "";
-        videoParentResponseId = "";
-        startNewConversation = true;
-        continueExistingConversation = false;
-        videoRequestInputIds = [fallbackPostId];
-        videoRequestMediaGenInput = {
-          ...(payload.mediaGenInput || {}),
-          [variant.kind]: {
-            ...params,
-            inputAssets: [fallbackPostId],
-          },
-        };
-        sourceReady = true;
-        pushStoreTrace("store_generation_source_fallback_ready", {
-          requestId,
-          variant: variant.kind,
-          fallbackPostId,
-          startNewConversation,
-        });
-      }
+        : generationSourceReady(state, generationSourceId(), sourceHydrationRootId()));
       if (!sourceReady) {
         state = await requireGenerationSourceReady({
           storeContext,
           state,
           sourceId: generationSourceId(),
-          rootSourceId: generationRootId(),
+          rootSourceId: sourceHydrationRootId(),
           requestId,
           variant: variant.kind,
           directUpload,
+          strict: true,
         });
         sourceReady = true;
       }

@@ -154,6 +154,11 @@
       cookies: validImagineCookies(account),
     } : {};
     activate(payload).catch(() => {});
+    if (account && library_state.apiReady) {
+      // Legacy clone maps are recovered in the background. Generation itself only reads
+      // the local mapping, so account switching never adds a network scan to a button click.
+      qApi("/api/imagine/clone-map/prepare", { account_id: account.id }).catch(() => {});
+    }
   }
 
   async function refreshAccounts() {

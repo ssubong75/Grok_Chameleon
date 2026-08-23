@@ -61,6 +61,7 @@ env:
   COMMON_ACCOUNT_STYLE: common/app/web/styles/account.css
   COMMON_COMPOSER_STYLE: common/app/web/styles/composer.css
   COMMON_PRELOAD: common/app/electron/preload-bridge.js
+  COMMON_PRELOAD_MAIN: common/app/electron/preload-main.js
   COMMON_SERVER: common/app/runtime/server.py
   COMMON_LIBRARY_INDEX: common/app/runtime/library_index.py
   COMMON_IMAGINE_STATE: common/app/runtime/imagine_state.py
@@ -128,6 +129,7 @@ jobs:
           $sharedSources = @(
             @{ Name = "main"; Relative = "electron\main.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_MAIN) },
             @{ Name = "preload"; Relative = "electron\preload-bridge.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_PRELOAD) },
+            @{ Name = "preload_main"; Relative = "electron\preload-main.js"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_PRELOAD_MAIN) },
             @{ Name = "server"; Relative = "runtime\server.py"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_SERVER) },
             @{ Name = "library_index"; Relative = "runtime\library_index.py"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_LIBRARY_INDEX) },
             @{ Name = "imagine_state"; Relative = "runtime\imagine_state.py"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_IMAGINE_STATE) },
@@ -639,6 +641,7 @@ jobs:
           shared_relatives=(
             electron/main.js
             electron/preload-bridge.js
+            electron/preload-main.js
             runtime/server.py
             runtime/library_index.py
             runtime/imagine_state.py
@@ -975,6 +978,7 @@ jobs:
           shared_relatives=(
             electron/main.js
             electron/preload-bridge.js
+            electron/preload-main.js
             runtime/server.py
             runtime/library_index.py
             runtime/imagine_state.py
@@ -1379,6 +1383,7 @@ jobs:
           shared_relatives=(
             electron/main.js
             electron/preload-bridge.js
+            electron/preload-main.js
             runtime/server.py
             runtime/library_index.py
             runtime/imagine_state.py
