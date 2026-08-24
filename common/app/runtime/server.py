@@ -5686,6 +5686,48 @@ def imagine_upload_origin_bundle_card(post: dict, items: list[dict]) -> dict | N
     return imagine_stamp_saved_identity(card)
 
 
+def imagine_saved_t2i_batch_needs_asset_fanout(post: dict, items: list[dict]) -> bool:
+    if imagine_post_saved_identity(post)[0] != "normal-saved":
+        return False
+    metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+
+    def normalized_action(value) -> str:
+        return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+
+    def is_t2i_action(value) -> bool:
+        return normalized_action(value) in {"t2i", "texttoimage"}
+
+    explicit_batch = bool(
+        post.get("t2i_group_container")
+        or metadata.get("t2i_group_container")
+        or is_t2i_action(post.get("mode"))
+        or is_t2i_action(metadata.get("root_generation_action"))
+    )
+    t2i_root_count = 0
+    root_result_count = 0
+    for item in items:
+        if imagine_item_is_source(item) or imagine_item_source_id(item):
+            continue
+        root_result_count += 1
+        item_metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        item_imagine = item_metadata.get("imagine") if isinstance(item_metadata.get("imagine"), dict) else {}
+        if is_t2i_action(
+            item.get("generated_action")
+            or item.get("relation")
+            or item_metadata.get("generated_action")
+            or item_imagine.get("generated_action")
+        ):
+            t2i_root_count += 1
+    declared_count = max(
+        safe_int(metadata.get("root_generation_asset_count"), 0),
+        safe_int(metadata.get("root_generation_requested_count"), 0),
+    )
+    return (
+        max(declared_count, t2i_root_count, root_result_count if explicit_batch else 0) > 1
+        and (explicit_batch or t2i_root_count > 1)
+    )
+
+
 def imagine_saved_lineage_cards(post: dict) -> list[dict]:
     if not isinstance(post, dict):
         return []
@@ -5698,14 +5740,19 @@ def imagine_saved_lineage_cards(post: dict) -> list[dict]:
     ]
     if not items:
         return [post]
+    # A multi-result T2I conversation is an official transport container, not an Imagine
+    # main card. Fan its A/B/C/D assets out and let explicit source ids attach descendants
+    # only to the selected asset. Applying this before the exceptions also repairs old
+    # cached conversation containers without deleting any media.
+    force_t2i_asset_fanout = imagine_saved_t2i_batch_needs_asset_fanout(post, items)
     upload_bundle = imagine_upload_origin_bundle_card(post, items)
-    if upload_bundle:
+    if upload_bundle and not force_t2i_asset_fanout:
         return [upload_bundle]
     # A post already arrives as one grok.com conversation, which is exactly what the site's
     # grouped view shows as one card. Splitting it by parent chain is what turned an i2v and
     # an i2i off the same linked image into two cards; grok.com keeps them together. Only
     # link-sourced posts skip the split, so a T2I batch still fans out into its own cards.
-    if imagine_post_is_link_source(post):
+    if imagine_post_is_link_source(post) and not force_t2i_asset_fanout:
         return [post]
 
     items_by_id = {imagine_item_asset_id(item): item for item in items}
@@ -5793,6 +5840,9 @@ def imagine_saved_lineage_cards(post: dict) -> list[dict]:
             "lineage_source_post_id": str(post.get("post_id") or ""),
             "saved_provenance": source_provenance,
             "saved_anchor_id": root_id,
+            # Each flattened asset root is a display card. Inheriting the conversation's
+            # display group makes the later dedupe pass join independent T2I roots again.
+            "saved_display_group_id": root_id,
         })
         representative = imagine_representative_item(card_items) or root_item
         title = str(

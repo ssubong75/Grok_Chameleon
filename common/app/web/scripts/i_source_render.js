@@ -1038,13 +1038,54 @@ function imagineUploadOriginBundleCard(post, items) {
   });
 }
 
+function imagineSavedT2iBatchNeedsAssetFanout(post, items) {
+  if (imagineSavedPostProvenance(post) !== "normal-saved") return false;
+  const metadata = post?.metadata && typeof post.metadata === "object" ? post.metadata : {};
+  const normalizedAction = (value) => String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  const isT2iAction = (value) => ["t2i", "texttoimage"].includes(normalizedAction(value));
+  const explicitBatch = (
+    isImagineT2iGroupContainer(post)
+    || isT2iAction(post?.mode)
+    || isT2iAction(metadata.root_generation_action)
+  );
+  let t2iRootCount = 0;
+  let rootResultCount = 0;
+  for (const item of items || []) {
+    if (imagineSavedItemIsSource(item) || imagineSavedItemSourceId(item)) continue;
+    rootResultCount += 1;
+    const itemMetadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
+    const itemImagine = itemMetadata.imagine && typeof itemMetadata.imagine === "object"
+      ? itemMetadata.imagine
+      : {};
+    if (isT2iAction(
+      item?.generated_action
+      || item?.relation
+      || itemMetadata.generated_action
+      || itemImagine.generated_action
+    )) {
+      t2iRootCount += 1;
+    }
+  }
+  const declaredCount = Math.max(
+    Number(metadata.root_generation_asset_count) || 0,
+    Number(metadata.root_generation_requested_count) || 0,
+  );
+  return Math.max(declaredCount, t2iRootCount, explicitBatch ? rootResultCount : 0) > 1
+    && (explicitBatch || t2iRootCount > 1);
+}
+
 function imagineSavedLineageCards(post) {
   if (!post) return [];
   const metadata = post?.metadata && typeof post.metadata === "object" ? post.metadata : {};
   const items = (post.items || []).filter((item) => imagineSavedItemAssetId(item));
   if (!items.length) return [post];
+  // The official conversation row for a multi-result T2I request is only a transport
+  // container.  The Imagine main view is asset-rooted: fan A/B/C/D out, then attach an
+  // i2i/i2v/extend child only to the selected asset's card.  This must also repair an old
+  // cached conversation container that already contains descendants.
+  const forceT2iAssetFanout = imagineSavedT2iBatchNeedsAssetFanout(post, items);
   const uploadBundle = imagineUploadOriginBundleCard(post, items);
-  if (uploadBundle) return [uploadBundle];
+  if (uploadBundle && !forceT2iAssetFanout) return [uploadBundle];
   // Mirrors imagine_saved_lineage_cards: a link-sourced post is one grok.com conversation
   // and the site shows it as one grouped card, so leave it whole instead of splitting the
   // parent chain. Everything else, T2I batches included, still fans out below.
@@ -1056,7 +1097,7 @@ function imagineSavedLineageCards(post) {
     imagineSavedPostProvenance(post) === "cloned-liked"
     && metadata.liked_scope === "foreign-origin"
   );
-  if (linkSourced || privateCloneLiked) return [post];
+  if (!forceT2iAssetFanout && (linkSourced || privateCloneLiked)) return [post];
 
   const itemsById = new Map(items.map((item) => [imagineSavedItemAssetId(item), item]));
   const resultItems = items.filter((item) => !imagineSavedItemIsSource(item));
@@ -1147,6 +1188,9 @@ function imagineSavedLineageCards(post) {
         lineage_root_asset_id: rootId,
         lineage_source_post_id: String(post.post_id || ""),
         saved_anchor_id: rootId,
+        // A flattened root is its own display card. Keeping the conversation-level display
+        // group here makes mergeImagineRemotePosts immediately fold A/B/C/D back together.
+        saved_display_group_id: rootId,
         saved_provenance: imagineSavedPostProvenance(post),
       },
     });

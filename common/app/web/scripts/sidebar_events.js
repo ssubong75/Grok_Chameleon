@@ -58,15 +58,36 @@ function cardListForRefreshScreen(screenId) {
 }
 
 function showMainRefreshLoading(screenId) {
+  if (screenId === "i_main") {
+    const list = cardListForRefreshScreen(screenId);
+    if (!list || list.querySelector(":scope > .imagine_title_refresh_loading")) return;
+    // Keep the keyed cards intact while making an explicit title refresh visible.
+    const loading = emptyLibraryNode("Loading...");
+    loading.classList.add(
+      "discover_loading_more",
+      "virtual_card_loading",
+      "imagine_title_refresh_loading",
+    );
+    loading.setAttribute("role", "status");
+    loading.setAttribute("aria-live", "polite");
+    list.append(loading);
+    return;
+  }
   // These screens own keyed or virtual lists. Replacing their DOM from outside the
   // renderer breaks the stable-card cache and causes the exact flash refresh is avoiding.
-  if (["i_main", "i_discover_main", "b_main", "collection_main", "2nd_main"].includes(screenId)) {
+  if (["i_discover_main", "b_main", "collection_main", "2nd_main"].includes(screenId)) {
     return;
   }
   const list = cardListForRefreshScreen(screenId);
   if (list && typeof emptyLibraryNode === "function") {
     list.replaceChildren(emptyLibraryNode("Loading . . ."));
   }
+}
+
+function hideMainRefreshLoading(screenId) {
+  cardListForRefreshScreen(screenId)
+    ?.querySelector(":scope > .imagine_title_refresh_loading")
+    ?.remove();
 }
 
 async function refreshLocalLibrarySnapshot() {
@@ -138,12 +159,14 @@ let titleRefreshInProgress = false;
 document.getElementById("titleImagineBtn")?.addEventListener("click", async () => {
   if (titleRefreshInProgress) return;
   titleRefreshInProgress = true;
+  const screenId = screen_state.account_visible ? "account" : screen_state.current_screen;
   try {
-    const screenId = screen_state.account_visible ? "account" : screen_state.current_screen;
     const savedIsCurrentView = Boolean(
       screenId === "i_main"
       && library_state.iMainView === imagineViewValue("IMAGINE", "imagine")
     );
+    showMainRefreshLoading(screenId);
+    await waitForRefreshPaint();
     // The title is the global Grok Imagine refresh control. Always reconcile the
     // selected account's complete official Saved feed first, even when the user is
     // currently looking at detail, search, Liked, Upload, or another screen.
@@ -152,6 +175,7 @@ document.getElementById("titleImagineBtn")?.addEventListener("click", async () =
   } catch (error) {
     setLibraryMessage(error.message || "Refresh failed.");
   } finally {
+    hideMainRefreshLoading(screenId);
     titleRefreshInProgress = false;
   }
 });
