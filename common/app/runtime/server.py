@@ -19509,16 +19509,21 @@ def post_field(meta, key: str):
     return ""
 
 
+def media_source_version(source_path: Path) -> str:
+    stat = source_path.stat()
+    return f"{stat.st_mtime_ns:x}-{stat.st_size:x}"
+
+
 def media_url(rel_path: str, source_path: Path | None = None) -> str:
     rel_path = normalize_unicode_text(rel_path)
     url = f"/api/media?path={quote(rel_path)}"
     if not source_path:
         return url
     try:
-        stat = source_path.stat()
+        version = media_source_version(source_path)
     except OSError:
         return url
-    return f"{url}&v={stat.st_mtime_ns:x}-{stat.st_size:x}"
+    return f"{url}&v={version}"
 
 
 def library_media_object_url(rel_path: str, source_path: Path | None = None) -> str:
@@ -19560,6 +19565,7 @@ BUILD_PREVIEW_KINDS = {
     "card": "cards",
     "thumbnail": "thumbnails",
 }
+BUILD_VIDEO_PREVIEW_KEY_REVISION = "ffmpeg-first-frame-v1"
 
 
 def normalize_build_preview_kind(value: str) -> str:
@@ -19596,6 +19602,24 @@ def build_preview_path(kind: str, key: str, root: Path | None = None) -> Path | 
     return build_preview_dir(kind, root) / f"{value}.jpg"
 
 
+def build_preview_path_for_source_query(root: Path, query: dict) -> Path | None:
+    source = safe_join(root, query.get("path", [""])[0])
+    if not source.is_file() or not build_preview_source(root, source):
+        return None
+    requested_version = str(query.get("v", [""])[0]).strip().lower()
+    try:
+        current_version = media_source_version(source)
+    except OSError:
+        return None
+    if requested_version and requested_version != current_version:
+        return None
+    try:
+        key = preview_key_for_source(root, source)
+    except (OSError, ValueError):
+        return None
+    return build_preview_path(query.get("kind", ["card"])[0], key, root)
+
+
 def build_preview_source(root: Path, source: Path) -> bool:
     try:
         rel = source.resolve().relative_to(root.resolve())
@@ -19604,12 +19628,21 @@ def build_preview_source(root: Path, source: Path) -> bool:
     return bool(rel.parts and rel.parts[0] in {"created", "collection"})
 
 
-def preview_key_for_source(root: Path, source: Path) -> str:
+def preview_key_for_source(
+    root: Path,
+    source: Path,
+    *,
+    legacy_video: bool = False,
+    video_revision: str = "",
+) -> str:
     resolved_root = root.resolve()
     resolved_source = source.resolve()
     rel = normalize_unicode_text(resolved_source.relative_to(resolved_root).as_posix())
     stat = resolved_source.stat()
     raw = f"{rel}\0{stat.st_mtime_ns}\0{stat.st_size}".encode("utf-8")
+    if not legacy_video and resolved_source.suffix.lower() in {".m4v", ".mov", ".mp4", ".webm"}:
+        revision = video_revision or BUILD_VIDEO_PREVIEW_KEY_REVISION
+        raw = revision.encode("utf-8") + b"\0" + raw
     return hashlib.sha256(raw).hexdigest()
 
 
@@ -19624,17 +19657,21 @@ def remove_build_previews_for_source(root: Path, source: Path) -> None:
     if not source.is_file() or not build_preview_source(root, source):
         return
     try:
-        key = preview_key_for_source(root, source)
+        keys = {preview_key_for_source(root, source)}
+        if source.suffix.lower() in {".m4v", ".mov", ".mp4", ".webm"}:
+            keys.add(preview_key_for_source(root, source, legacy_video=True))
+            keys.add(preview_key_for_source(root, source, video_revision="ffmpeg-frame-v1"))
     except (OSError, ValueError):
         return
     for kind in BUILD_PREVIEW_KINDS:
-        target = build_preview_path(kind, key, root)
-        if not target:
-            continue
-        try:
-            target.unlink()
-        except FileNotFoundError:
-            pass
+        for key in keys:
+            target = build_preview_path(kind, key, root)
+            if not target:
+                continue
+            try:
+                target.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def remove_build_previews_for_items(root: Path, folder: Path, items: list[dict]) -> None:
@@ -27494,6 +27531,16 @@ class Handler(SimpleHTTPRequestHandler):
                 if not source.is_file():
                     self.send_error(HTTPStatus.NOT_FOUND)
                     return
+                requested_version = str(query.get("v", [""])[0]).strip().lower()
+                if requested_version:
+                    try:
+                        current_version = media_source_version(source)
+                    except OSError:
+                        self.send_error(HTTPStatus.NOT_FOUND)
+                        return
+                    if requested_version != current_version:
+                        self.send_error(HTTPStatus.NOT_FOUND)
+                        return
                 preview_kind = normalize_build_preview_kind(query.get("preview_kind", ["card"])[0])
                 persistent_build_preview = build_preview_source(root, source)
                 preview_dir = build_preview_dir(preview_kind, root) if persistent_build_preview else cache_dir
@@ -27529,6 +27576,17 @@ class Handler(SimpleHTTPRequestHandler):
                     query.get("kind", ["card"])[0],
                     query.get("key", [""])[0],
                 )
+                if not target or not target.is_file():
+                    self.send_error(HTTPStatus.NOT_FOUND)
+                    return
+                self.send_local_file(target, "image/jpeg", cache_control="private, max-age=31536000, immutable")
+                return
+            if parsed.path == "/api/build-preview-source":
+                root = library_root()
+                if not root:
+                    self.send_error(HTTPStatus.NOT_FOUND)
+                    return
+                target = build_preview_path_for_source_query(root, parse_qs(parsed.query))
                 if not target or not target.is_file():
                     self.send_error(HTTPStatus.NOT_FOUND)
                     return
@@ -27580,6 +27638,22 @@ class Handler(SimpleHTTPRequestHandler):
                     query.get("kind", ["card"])[0],
                     query.get("key", [""])[0],
                 )
+                if not target or not target.is_file():
+                    self.send_error(HTTPStatus.NOT_FOUND)
+                    return
+                self.send_local_file(
+                    target,
+                    "image/jpeg",
+                    head_only=True,
+                    cache_control="private, max-age=31536000, immutable",
+                )
+                return
+            if parsed.path == "/api/build-preview-source":
+                root = library_root()
+                if not root:
+                    self.send_error(HTTPStatus.NOT_FOUND)
+                    return
+                target = build_preview_path_for_source_query(root, parse_qs(parsed.query))
                 if not target or not target.is_file():
                     self.send_error(HTTPStatus.NOT_FOUND)
                     return

@@ -104,13 +104,22 @@ function cardDisplayItemForContext(post, item, className = "") {
     card_local_preview: true,
     card_preview_retries: 2,
   };
-  if (detailItemType(cardItem) !== "video") return cardItem;
+  const type = detailItemType(cardItem);
+  if (type !== "video") {
+    const previewSource = mediaPreviewUrl({ ...cardItem, type });
+    return {
+      ...cardItem,
+      card_preview_fallback_source: previewSource,
+    };
+  }
   const posterUrl = buildCardVideoPosterUrl(post, cardItem);
-  if (!posterUrl) return cardItem;
+  const staticPreviewSource = posterUrl || videoPreviewUrl(cardItem);
+  if (!staticPreviewSource) return cardItem;
   return {
     ...cardItem,
-    thumbnail_url: cardItem.thumbnail_url || posterUrl,
-    poster_url: cardItem.poster_url || posterUrl,
+    thumbnail_url: cardItem.thumbnail_url || staticPreviewSource,
+    poster_url: cardItem.poster_url || staticPreviewSource,
+    card_preview_fallback_source: staticPreviewSource,
     card_static_video_preview: true,
   };
 }

@@ -18,6 +18,7 @@ const CARD_PREVIEW_LIST_MAX_ACTIVE = 2;
 // Builds created before the persistent Build thumbnail fix may have a generic native
 // icon cached at this same URL. Advance only when the persisted preview contract changes.
 const BUILD_PREVIEW_CACHE_REVISION = "2";
+const BUILD_VIDEO_PREVIEW_KEY_REVISION = "ffmpeg-first-frame-v1";
 // Queue order alone could not get the opened detail served first. Sorting only reorders
 // what is still waiting, and a started task keeps its slot until the native call returns —
 // cancelling it does nothing (see the cancel() in queueCardPreviewWork). So a thumbnail the
@@ -1038,7 +1039,11 @@ async function lookupPersistentCardPreview(rawUrl, kind = "card", cacheIdentity 
     if (!match) return "";
     const modifiedNs = BigInt(`0x${match[1]}`).toString(10);
     const size = BigInt(`0x${match[2]}`).toString(10);
-    const key = await sha256Text(`${mediaPath}\0${modifiedNs}\0${size}`);
+    const rawKey = `${mediaPath}\0${modifiedNs}\0${size}`;
+    const keySource = /\.(?:m4v|mov|mp4|webm)$/i.test(mediaPath)
+      ? `${BUILD_VIDEO_PREVIEW_KEY_REVISION}\0${rawKey}`
+      : rawKey;
+    const key = await sha256Text(keySource);
     if (!key) return "";
     const previewUrl = buildPersistentPreviewUrl(previewKind, key);
     const response = await fetch(previewUrl, { method: "HEAD", cache: "no-cache" });
@@ -1077,19 +1082,44 @@ function buildPersistentPreviewUrl(kind, key) {
   return `/api/build-preview?kind=${kind}&key=${key}&rev=${BUILD_PREVIEW_CACHE_REVISION}`;
 }
 
+async function deterministicBuildCardPreviewUrl(rawUrl, kind = "card") {
+  try {
+    const parsed = new URL(String(rawUrl || ""), location.origin);
+    if (parsed.origin !== location.origin || parsed.pathname !== "/api/media") return "";
+    const mediaPath = String(parsed.searchParams.get("path") || "").replace(/^\/+/, "");
+    const version = String(parsed.searchParams.get("v") || "");
+    const match = version.match(/^([a-f0-9]+)-([a-f0-9]+)$/i);
+    if (!/^(created|collection)\//.test(mediaPath) || !match) return "";
+    const modifiedNs = BigInt(`0x${match[1]}`).toString(10);
+    const size = BigInt(`0x${match[2]}`).toString(10);
+    const rawKey = `${mediaPath}\0${modifiedNs}\0${size}`;
+    const keySource = /\.(?:m4v|mov|mp4|webm)$/i.test(mediaPath)
+      ? `${BUILD_VIDEO_PREVIEW_KEY_REVISION}\0${rawKey}`
+      : rawKey;
+    const key = await sha256Text(keySource);
+    return key ? buildPersistentPreviewUrl(kind, key) : "";
+  } catch (_) {
+    return "";
+  }
+}
+
 function resolveLocalCardPreview(url, kind = "card", cacheIdentity = "") {
   const target = arguments[3] || null;
   const key = String(url || "");
   if (!key) return Promise.resolve("");
   const nativePreview = window.grokChameleonNative?.cardPreview;
-  const resolve = () => existingPersistentCardPreview(key, kind, cacheIdentity).then((existingPreview) => {
+  // A virtualized list recreates visible cards after they return from off-screen. Most of
+  // those cards already have a persistent preview, so its lookup must not wait behind the
+  // native preview-generation queue. Queue only the expensive cache-miss generation; this
+  // lets Build main and Collection second-main restore cached cards immediately.
+  return existingPersistentCardPreview(key, kind, cacheIdentity).then((existingPreview) => {
     if (existingPreview) return existingPreview;
     if (typeof nativePreview !== "function") return key;
-    return nativePreview({ url: key, kind, cache_identity: cacheIdentity })
+    const generate = () => nativePreview({ url: key, kind, cache_identity: cacheIdentity })
       .then((result) => String(result?.url || (target && !target.isConnected ? "" : key)))
       .catch(() => key);
+    return target ? queueCardPreviewWork(target, generate) : generate();
   });
-  return target ? queueCardPreviewWork(target, resolve) : resolve();
 }
 
 function scheduleLocalCardPreview(preview, url, kind = "card", cacheIdentity = "") {
@@ -1121,8 +1151,22 @@ function scheduleLocalCardPreview(preview, url, kind = "card", cacheIdentity = "
       });
       return;
     }
-    resolveLocalCardPreview(url, kind, cacheIdentity, preview).then((resolvedUrl) => {
-      if (preview.isConnected && resolvedUrl) preview.src = resolvedUrl;
+    deterministicBuildCardPreviewUrl(url, kind).then((directUrl) => {
+      if (!preview.isConnected) return;
+      if (directUrl) {
+        preview.dataset.cardPreviewResolvedUrl = directUrl;
+        const rect = preview.getBoundingClientRect();
+        const listRect = preview.closest(".card_list")?.getBoundingClientRect();
+        if (listRect && rect.bottom > listRect.top && rect.top < listRect.bottom) {
+          preview.loading = "eager";
+          preview.fetchPriority = "high";
+        }
+        preview.src = directUrl;
+        return;
+      }
+      resolveLocalCardPreview(url, kind, cacheIdentity, preview).then((resolvedUrl) => {
+        if (preview.isConnected && resolvedUrl) preview.src = resolvedUrl;
+      });
     });
   };
   if (localCardPreviewObserver) localCardPreviewObserver.observe(preview);
@@ -1157,6 +1201,7 @@ function bindCardPreviewLoadState(media, preview, url, options = {}) {
     preview.classList.add("card_preview_loaded");
   };
   const retryPreview = () => {
+    if (typeof preview.cardPreviewErrorFallback === "function" && preview.cardPreviewErrorFallback()) return;
     if (retryPending) return;
     if (retryCount >= maxRetries) {
       if (terminalPending) return;
@@ -1219,6 +1264,31 @@ function bindCardPreviewLoadState(media, preview, url, options = {}) {
 }
 
 function appendCardImagePreview(host, media, preview, previewUrl, item) {
+  const fallbackSource = String(item?.card_preview_fallback_source || "").trim();
+  if (fallbackSource) {
+    preview.cardPreviewErrorFallback = () => {
+      if (preview.dataset.cardPreviewFallbackStarted === "true") {
+        media.classList.add("card_media_failed");
+        return true;
+      }
+      preview.dataset.cardPreviewFallbackStarted = "true";
+      const nativePreview = window.grokChameleonNative?.cardPreview;
+      if (typeof nativePreview !== "function") return false;
+      queueNativeCardPreview(preview, {
+        url: fallbackSource,
+        kind: "card",
+        cache_identity: cardPreviewStableIdentity(item),
+      }).then((result) => {
+        if (!preview.isConnected || !result) return;
+        media.classList.remove("card_media_failed");
+        const resolvedUrl = String(preview.dataset.cardPreviewResolvedUrl || result?.url || previewUrl);
+        preview.src = cardPreviewRetryUrl(resolvedUrl, `generated-${Date.now()}`);
+      }).catch(() => {
+        if (preview.isConnected) media.classList.add("card_media_failed");
+      });
+      return true;
+    };
+  }
   bindCardPreviewLoadState(media, preview, previewUrl, cardPreviewLoadOptions(host, item, previewUrl));
   media.append(preview);
   if (item?.card_local_preview) {
