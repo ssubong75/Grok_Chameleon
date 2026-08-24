@@ -707,13 +707,74 @@ function writeCardPreviewImage(sourceImage, targetPath, kind = "card") {
   }
 }
 
-async function generateCardPreview(sourcePath, targetPath, kind = "card") {
+function cardPreviewFfmpegBinary() {
+  const binaryName = process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg";
+  const candidates = [
+    ...(process.platform === "darwin"
+      ? ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"]
+      : []),
+    path.join(APP_ROOT, "vendor", "ffmpeg", binaryName),
+  ];
+  return candidates.find((candidate) => {
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }) || "";
+}
+
+function execCardPreviewFfmpeg(binary, args) {
+  return new Promise((resolve, reject) => {
+    execFile(binary, args, {
+      timeout: 30000,
+      maxBuffer: 1024 * 1024,
+      windowsHide: true,
+    }, (error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+}
+
+async function generateVideoCardPreview(sourcePath, targetPath, kind = "card") {
   const normalizedKind = normalizedPreviewKind(kind);
   const maxPreviewEdge = normalizedKind === "thumbnail" ? THUMBNAIL_PREVIEW_MAX_EDGE : CARD_PREVIEW_MAX_EDGE;
+  const binary = cardPreviewFfmpegBinary();
+  if (!binary) throw new Error("FFmpeg is unavailable for the video poster.");
+  const framePath = `${targetPath}.${process.pid}.${Date.now()}.frame.jpg`;
+  try {
+    // Start decoding at timestamp zero and take the first decoded frame. The resting poster
+    // therefore matches the exact frame where hover playback begins.
+    await execCardPreviewFfmpeg(binary, [
+      "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+      "-i", sourcePath,
+      "-map", "0:v:0",
+      "-an", "-sn", "-dn",
+      "-frames:v", "1",
+      "-vf", `scale=${maxPreviewEdge}:${maxPreviewEdge}:force_original_aspect_ratio=decrease`,
+      "-q:v", "3",
+      framePath,
+    ]);
+    const frame = nativeImage.createFromPath(framePath);
+    if (frame.isEmpty()) throw new Error("FFmpeg produced an empty first-frame poster.");
+    writeCardPreviewImage(frame, targetPath, normalizedKind);
+  } finally {
+    try {
+      fs.unlinkSync(framePath);
+    } catch (_) {}
+  }
+}
+
+async function generateCardPreview(sourcePath, targetPath, kind = "card") {
+  const normalizedKind = normalizedPreviewKind(kind);
   const isVideo = /\.(?:m4v|mov|mp4|webm)$/i.test(sourcePath);
-  const sourceImage = isVideo
-    ? await nativeImage.createThumbnailFromPath(sourcePath, { width: maxPreviewEdge, height: maxPreviewEdge })
-    : nativeImage.createFromBuffer(fs.readFileSync(sourcePath));
+  if (isVideo) {
+    await generateVideoCardPreview(sourcePath, targetPath, normalizedKind);
+    return;
+  }
+  const sourceImage = nativeImage.createFromBuffer(fs.readFileSync(sourcePath));
   writeCardPreviewImage(sourceImage, targetPath, normalizedKind);
 }
 
@@ -736,6 +797,7 @@ async function ensureCardPreview(payload = {}) {
   const remoteSource = source.pathname === "/api/imagine/remote/media";
   let info;
   let sourcePath = "";
+  let sourceInfoUrl = null;
   let storage = "cache";
   let previewKey = "";
   if (remoteSource) {
@@ -753,6 +815,7 @@ async function ensureCardPreview(payload = {}) {
     const infoUrl = new URL("/api/card-preview/source-info", SERVER_BASE);
     infoUrl.search = source.search;
     infoUrl.searchParams.set("preview_kind", previewKind);
+    sourceInfoUrl = infoUrl;
     info = await fetchJson(infoUrl, { signal: AbortSignal.timeout(3000) });
     sourcePath = String(info?.source_path || "").trim();
     storage = info?.storage === "build" ? "build" : "cache";
@@ -793,7 +856,20 @@ async function ensureCardPreview(payload = {}) {
       fs.unlinkSync(targetPath);
     } catch (_) {}
     if (remoteSource) await generateRemoteCardPreview(source.href, targetPath, previewKind);
-    else await generateCardPreview(sourcePath, targetPath, previewKind);
+    else {
+      await generateCardPreview(sourcePath, targetPath, previewKind);
+      try {
+        const verified = await fetchJson(sourceInfoUrl, { signal: AbortSignal.timeout(3000) });
+        if (String(verified?.preview_key || "").trim().toLowerCase() !== previewKey) {
+          throw new Error("Card preview source changed during generation.");
+        }
+      } catch (error) {
+        try {
+          fs.unlinkSync(targetPath);
+        } catch (_) {}
+        throw error;
+      }
+    }
     if (storage === "cache") scheduleCardPreviewCachePrune(previewDir, targetPath);
     return cardPreviewResult(previewKey, storage, previewKind);
   });

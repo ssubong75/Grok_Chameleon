@@ -279,7 +279,6 @@
           : (collection?.posts || [])
       );
       const targetLabel = () => {
-        if (targetPath === "created") return "Build Main";
         const collection = library_state.collections.find((item) => item.path === activeCollectionPath);
         if (!collection) return "Choose a folder";
         if (targetPath === collection.path) return collection.name || readableName(collection.id);
@@ -291,9 +290,11 @@
         const blocked = !targetPath || targetBlocked(targetPath);
         if (confirmButton) confirmButton.disabled = blocked;
         if (selectionLabel) {
-          selectionLabel.textContent = blocked
-            ? "This folder is included in the merge."
-            : `Destination: ${targetLabel()}`;
+          selectionLabel.textContent = !blocked && targetPath === "created"
+            ? ""
+            : (blocked
+              ? "This folder is included in the merge."
+              : `Destination: ${targetLabel()}`);
           selectionLabel.classList.toggle("blocked", blocked);
         }
       };
