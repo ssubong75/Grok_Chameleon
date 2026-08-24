@@ -1458,6 +1458,7 @@ const imagineGeneratedSavedSyncAssetIds = new Set();
 const imagineGeneratedSavedOfficialAssetIds = new Set();
 let imagineGeneratedSavedSyncRefreshTimer = 0;
 let imagineGeneratedSavedSyncRefreshAttempt = 0;
+let imagineGeneratedSavedSyncRestoredFromStorage = false;
 let imagineSavedDisplayCacheWrite = Promise.resolve();
 let imagineSavedDisplayCacheWriteRevision = 0;
 
@@ -1562,6 +1563,57 @@ function releaseImagineGeneratedSavedSyncForDeletedItems(items = []) {
   return true;
 }
 
+function removeImagineConfirmedDeletedPendingItems(posts, assetIds) {
+  if (!assetIds?.size) return Array.isArray(posts) ? posts : [];
+  return (posts || []).map((post) => {
+    const previousItems = Array.isArray(post?.items) ? post.items : [];
+    const items = previousItems.filter((item) => {
+      const assetId = imagineSavedItemAssetId(item);
+      return !assetId || !assetIds.has(assetId);
+    });
+    if (items.length === previousItems.length) return post;
+    if (!items.length) return null;
+    const metadata = post?.metadata && typeof post.metadata === "object"
+      ? { ...post.metadata }
+      : {};
+    if (!items.some((item) => item?.metadata?.saved_sync_pending === true)) {
+      delete metadata.saved_sync_pending;
+    }
+    const representative = representativeItem(items, { ...post, items }) || items[0] || null;
+    return {
+      ...post,
+      items,
+      metadata,
+      representative_item: representative,
+      representative: representative?.url || representative?.remote_url || representative?.item_id || "",
+    };
+  }).filter(Boolean);
+}
+
+function applyImagineConfirmedDeletedPendingAssets(data) {
+  const assetIds = new Set(
+    (Array.isArray(data?.confirmed_deleted_pending_asset_ids)
+      ? data.confirmed_deleted_pending_asset_ids
+      : [])
+      .map((value) => String(value || "").trim())
+      .filter(Boolean),
+  );
+  if (!assetIds.size) return;
+  releaseImagineGeneratedSavedSyncForDeletedItems([...assetIds]);
+  library_state.imagineRemotePosts = removeImagineConfirmedDeletedPendingItems(
+    library_state.imagineRemotePosts,
+    assetIds,
+  );
+  library_state.imagineLikedPosts = removeImagineConfirmedDeletedPendingItems(
+    library_state.imagineLikedPosts,
+    assetIds,
+  );
+  // releaseImagineGeneratedSavedSyncForDeletedItems clears the pending marker. Persist
+  // that cleaned card set now, otherwise app restart would restore the deleted bundle.
+  persistImaginePendingSavedPosts();
+  if (typeof syncImagineRemotePostsIntoLibrary === "function") syncImagineRemotePostsIntoLibrary();
+}
+
 function imagineItemMatchesGeneratedSavedSync(item, assetIds) {
   if (!item || !assetIds?.size) return false;
   return imaginePostIdKeysForItem(item).some((key) => assetIds.has(String(key || "").trim()));
@@ -1620,6 +1672,7 @@ function clearImagineGeneratedSavedSync() {
   const settled = new Set(imagineGeneratedSavedSyncAssetIds);
   imagineGeneratedSavedOfficialAssetIds.clear();
   imagineGeneratedSavedSyncAssetIds.clear();
+  imagineGeneratedSavedSyncRestoredFromStorage = false;
   cancelImagineGeneratedSavedSyncRefresh();
   setImagineGeneratedSavedSyncItemState(settled, false);
   persistImagineGeneratedSavedSync();
@@ -1636,6 +1689,7 @@ function resetImagineGeneratedSavedSyncForAccountChange(nextAccountId = "") {
   setImagineGeneratedSavedSyncItemState(previousAssetIds, false);
   imagineGeneratedSavedOfficialAssetIds.clear();
   imagineGeneratedSavedSyncAssetIds.clear();
+  imagineGeneratedSavedSyncRestoredFromStorage = false;
   imagineGeneratedSavedSyncAccountId = String(nextAccountId || "").trim();
   if (!imagineGeneratedSavedSyncAccountId) return;
   try {
@@ -1646,6 +1700,7 @@ function resetImagineGeneratedSavedSyncForAccountChange(nextAccountId = "") {
       const value = String(assetId || "").trim();
       if (value) imagineGeneratedSavedSyncAssetIds.add(value);
     }
+    imagineGeneratedSavedSyncRestoredFromStorage = imagineGeneratedSavedSyncAssetIds.size > 0;
   } catch {
     // Ignore malformed old session data.
   }
@@ -1691,6 +1746,7 @@ function beginImagineGeneratedSavedSync(result) {
     resetImagineGeneratedSavedSyncForAccountChange(accountId);
   }
   imagineGeneratedSavedSyncAccountId = accountId;
+  imagineGeneratedSavedSyncRestoredFromStorage = false;
   imagineGeneratedSavedOfficialAssetIds.clear();
   for (const assetId of assetIds) imagineGeneratedSavedSyncAssetIds.add(assetId);
   // applyImagineDirectResult() has already placed this result in the main view. Mark it
@@ -1701,7 +1757,10 @@ function beginImagineGeneratedSavedSync(result) {
 }
 
 function imagineSavedPostIsPending(post) {
-  return post?.metadata?.saved_sync_pending === true;
+  return Boolean(
+    post?.metadata?.saved_sync_pending === true
+    && (post?.items || []).some((item) => item?.metadata?.saved_sync_pending === true),
+  );
 }
 
 function imaginePendingSavedPosts() {
@@ -1917,6 +1976,7 @@ function collectImagineSavedOfficialAssetIds(data, accountId) {
 }
 
 function applyImagineSavedOfficialPage(data, { replacesList = false } = {}) {
+  applyImagineConfirmedDeletedPendingAssets(data);
   applyImagineLikedExclusionSnapshot(data, imaginePendingSavedAccountId());
   collectImagineSavedOfficialAssetIds(data, imaginePendingSavedAccountId());
   const remotePosts = normalizeImagineRemotePosts(
@@ -1969,6 +2029,7 @@ function applyImagineSavedOfficialPage(data, { replacesList = false } = {}) {
 function combineImagineSavedOfficialPages(pages) {
   const completedPage = pages.at(-1) || {};
   const officialAssetIds = new Set();
+  const confirmedDeletedPendingAssetIds = new Set();
   const posts = [];
   for (const page of pages || []) {
     for (const post of Array.isArray(page?.posts) ? page.posts : []) posts.push(post);
@@ -1976,11 +2037,18 @@ function combineImagineSavedOfficialPages(pages) {
       const value = String(assetId || "").trim();
       if (value) officialAssetIds.add(value);
     }
+    for (const assetId of Array.isArray(page?.confirmed_deleted_pending_asset_ids)
+      ? page.confirmed_deleted_pending_asset_ids
+      : []) {
+      const value = String(assetId || "").trim();
+      if (value) confirmedDeletedPendingAssetIds.add(value);
+    }
   }
   return {
     ...completedPage,
     posts,
     official_asset_ids: [...officialAssetIds],
+    confirmed_deleted_pending_asset_ids: [...confirmedDeletedPendingAssetIds],
     next_cursor: "",
     has_more: false,
   };
@@ -2000,8 +2068,20 @@ async function streamImagineSavedPages(context, { stage = false } = {}) {
       limit: IMAGINE_SAVED_PAGE_SIZE,
       cursor,
       sync_token: library_state.imagineRemoteSyncToken,
+      pending_asset_ids: [...imagineGeneratedSavedSyncAssetIds],
+      // A result made in this running session gets one complete Saved read before exact
+      // deletion checks begin. Restored pending state has already crossed an app restart,
+      // so it can be checked immediately without preserving a stale card for another pass.
+      confirm_pending_asset_deletions: (
+        imagineGeneratedSavedSyncRestoredFromStorage
+        || imagineGeneratedSavedSyncRefreshAttempt > 0
+      ),
     }, { signal: context.controller.signal });
     if (!imagineSavedResponseMatches(context, data)) return false;
+
+    // A first-page exact 404/410 can remove a restored card immediately; the remaining
+    // Saved pages are still staged and replace the list authoritatively when complete.
+    applyImagineConfirmedDeletedPendingAssets(data);
 
     if (stage) stagedPages.push(data);
     else applyImagineSavedOfficialPage(data, { replacesList });

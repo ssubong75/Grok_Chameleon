@@ -148,6 +148,9 @@ IMAGINE_DIRECT_LONG_I2V_CANDIDATE_STABILIZE_SECONDS = 30
 IMAGINE_DIRECT_CONFIRMED_MODERATION_NETWORK_TIMEOUT_SECONDS = 2
 IMAGINE_DIRECT_CONFIRMED_MODERATION_FINAL_PROBE_SECONDS = 2
 IMAGINE_SAVED_MEDIA_KEYS_CACHE_SECONDS = 45
+# Legacy Lucky recovery tagging is currently unused.  Keep the implementation and
+# call sites available for reference, but do not write Lucky flags to new results.
+LEGACY_LUCKY_RESULT_TAGGING_ENABLED = False
 
 IMAGINE_SAVED_MEDIA_KEYS_CACHE: dict[str, tuple[float, set[str]]] = {}
 IMAGINE_SAVED_MEDIA_KEYS_CACHE_LOCK = threading.Lock()
@@ -915,6 +918,8 @@ def imagine_debug_attachment_summary(payload: dict) -> list[dict]:
     for index, attachment in enumerate(attachments[:12]):
         if not isinstance(attachment, dict):
             continue
+        metadata = attachment.get("metadata") if isinstance(attachment.get("metadata"), dict) else {}
+        imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
         rows.append({
             "index": index,
             "name": attachment.get("name") or "",
@@ -935,6 +940,22 @@ def imagine_debug_attachment_summary(payload: dict) -> list[dict]:
             "remote_url": imagine_debug_compact_url(attachment.get("remote_url")),
             "aspect_ratio": attachment.get("aspect_ratio") or attachment.get("aspectRatio") or "",
             "video_duration": attachment.get("video_duration") or attachment.get("duration") or "",
+            "external_reference": bool(
+                attachment.get("external_reference")
+                or attachment.get("link_source")
+                or metadata.get("external_reference")
+                or metadata.get("link_source")
+                or imagine.get("external_reference")
+                or imagine.get("link_source")
+            ),
+            "fresh_source_required": bool(attachment.get("fresh_source_required")),
+            "cloned_copy": bool(
+                attachment.get("cloned_copy")
+                or metadata.get("cloned_copy")
+                or imagine.get("cloned_copy")
+            ),
+            "official_upload_source": bool(attachment.get("official_upload_source")),
+            "upload_origin_bundle": bool(attachment.get("upload_origin_bundle")),
         })
     return rows
 
@@ -3292,6 +3313,37 @@ def imagine_relation_asset_exists_officially(asset_id: str, account: dict) -> bo
     except Exception:
         return None
     return True
+
+
+def imagine_confirm_deleted_asset_ids(
+    asset_ids: set[str],
+    account: dict,
+    *,
+    limit: int = 32,
+) -> set[str]:
+    """Return only ids whose exact upstream asset endpoint answers 404/410."""
+    candidates = sorted({
+        str(asset_id or "").strip()
+        for asset_id in asset_ids
+        if str(asset_id or "").strip()
+    })[:max(1, min(int(limit or 32), 64))]
+    if not candidates:
+        return set()
+    confirmed_deleted: set[str] = set()
+    with ThreadPoolExecutor(max_workers=min(8, len(candidates))) as executor:
+        futures = {
+            executor.submit(imagine_relation_asset_exists_officially, asset_id, account): asset_id
+            for asset_id in candidates
+        }
+        for future in as_completed(futures):
+            asset_id = futures[future]
+            try:
+                status = future.result()
+            except Exception:
+                status = None
+            if status is False:
+                confirmed_deleted.add(asset_id)
+    return confirmed_deleted
 
 
 def imagine_forget_relations_deleted_remotely(root: Path, account: dict) -> None:
@@ -6673,7 +6725,11 @@ def imagine_missing_direct_upload_conversation_candidates(
     skipped = skip_asset_ids or set()
     candidates: dict[str, dict] = {}
     for asset in assets:
-        if not isinstance(asset, dict) or imagine_asset_upload_only(asset):
+        if (
+            not isinstance(asset, dict)
+            or bool(asset.get("isDeleted"))
+            or imagine_asset_upload_only(asset)
+        ):
             continue
         asset_id = str(asset.get("assetId") or asset.get("id") or "").strip()
         conversation_id = str(
@@ -6758,14 +6814,24 @@ def imagine_missing_cached_direct_upload_conversation_candidates(
     return candidates
 
 
+def imagine_error_is_confirmed_not_found(error: Exception) -> bool:
+    message = str(error or "").strip().lower()
+    return bool(
+        "imagine http 404" in message
+        or "imagine http 410" in message
+        or ("'conversation'" in message and "was not found" in message)
+    )
+
+
 def imagine_recover_missing_direct_upload_conversation_cards(
     candidates: dict[str, dict],
     account: dict,
-) -> list[dict]:
+) -> tuple[list[dict], set[str]]:
     """Recover complete cards only when the exact official detail proves the pairing."""
     if not candidates:
-        return []
+        return [], set()
     recovered: list[dict] = []
+    deleted_conversation_ids: set[str] = set()
     # The normal Saved pass already uses eight concurrent detail requests.  This is a
     # fallback for the exceptional asset-only rows, not a second broad historical sweep.
     with ThreadPoolExecutor(max_workers=min(8, len(candidates))) as executor:
@@ -6779,8 +6845,11 @@ def imagine_recover_missing_direct_upload_conversation_cards(
             try:
                 detail = future.result()
             except Exception as exc:
+                if imagine_error_is_confirmed_not_found(exc):
+                    deleted_conversation_ids.add(conversation_id)
                 imagine_debug_event("saved_asset_conversation_detail_failed", {
                     "conversation_id": conversation_id,
+                    "confirmed_deleted": conversation_id in deleted_conversation_ids,
                     "error": str(exc)[:400],
                 })
                 continue
@@ -6808,7 +6877,67 @@ def imagine_recover_missing_direct_upload_conversation_cards(
             ):
                 continue
             recovered.append(post)
-    return recovered
+    return recovered, deleted_conversation_ids
+
+
+def imagine_filter_deleted_conversation_posts(
+    posts: list[dict],
+    deleted_conversation_ids: set[str],
+    deleted_asset_ids: set[str] | None = None,
+) -> list[dict]:
+    """Remove only media whose owning conversation or asset is definitively deleted."""
+    deleted_conversations = {
+        str(value).strip()
+        for value in deleted_conversation_ids
+        if str(value or "").strip()
+    }
+    deleted_assets = {
+        str(value).strip()
+        for value in (deleted_asset_ids or set())
+        if str(value or "").strip()
+    }
+    if not deleted_conversations and not deleted_assets:
+        return posts
+    filtered_posts: list[dict] = []
+    for raw_post in posts if isinstance(posts, list) else []:
+        if not isinstance(raw_post, dict):
+            continue
+        post = dict(raw_post)
+        metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+        imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
+        post_conversation_ids = {
+            str(value).strip()
+            for value in (
+                metadata.get("conversation_id"),
+                imagine.get("conversation_id"),
+                post.get("conversation_id"),
+            )
+            if str(value or "").strip()
+        }
+        if metadata.get("relation_only_card") is True and post_conversation_ids & deleted_conversations:
+            continue
+        items = [
+            item
+            for item in post.get("items") or []
+            if (
+                isinstance(item, dict)
+                and imagine_item_asset_id(item) not in deleted_assets
+                and imagine_relation_conversation_id(item) not in deleted_conversations
+            )
+        ]
+        if not items:
+            continue
+        post["items"] = items
+        representative = imagine_representative_item(items) or items[-1]
+        post["representative_item"] = representative
+        post["representative"] = (
+            representative.get("url")
+            or representative.get("remote_url")
+            or representative.get("item_id")
+            or ""
+        )
+        filtered_posts.append(post)
+    return filtered_posts
 
 
 def remove_imagine_remote_cache_assets(
@@ -7016,6 +7145,39 @@ def save_imagine_saved_display_cache(payload: dict) -> dict:
     }
 
 
+def prune_imagine_saved_display_cache(
+    root: Path,
+    account: dict,
+    deleted_conversation_ids: set[str],
+    deleted_asset_ids: set[str],
+) -> int:
+    """Persist a confirmed upstream deletion even if the current live sweep aborts later."""
+    path = imagine_saved_display_cache_path(root, account)
+    data = read_json(path, {})
+    if not isinstance(data, dict) or int(data.get("version") or 0) != IMAGINE_SAVED_DISPLAY_CACHE_VERSION:
+        return 0
+    existing_posts = [post for post in data.get("posts") or [] if isinstance(post, dict)]
+    filtered_posts = imagine_filter_deleted_conversation_posts(
+        existing_posts,
+        deleted_conversation_ids,
+        deleted_asset_ids,
+    )
+    existing_item_count = sum(len(post.get("items") or []) for post in existing_posts)
+    filtered_item_count = sum(len(post.get("items") or []) for post in filtered_posts)
+    removed_count = max(0, len(existing_posts) - len(filtered_posts)) + max(
+        0,
+        existing_item_count - filtered_item_count,
+    )
+    if removed_count <= 0:
+        return 0
+    write_json(path, {
+        **data,
+        "updated_at": now_iso(),
+        "posts": filtered_posts,
+    })
+    return removed_count
+
+
 def list_imagine_saved_cache(payload: dict) -> dict:
     root = library_root()
     if not root:
@@ -7218,6 +7380,7 @@ def list_imagine_saved(payload: dict) -> dict:
     # to the renderer below are deliberately enriched with this app's generated-relations
     # overlay, so their items cannot prove that Grok's Saved list has caught up yet.
     official_asset_ids: set[str] = set()
+    deleted_conversation_ids: set[str] = set()
     posts = []
 
     def append_recovered_direct_upload_posts(recovered_posts: list[dict]) -> None:
@@ -7251,12 +7414,14 @@ def list_imagine_saved(payload: dict) -> dict:
         account,
         skip_asset_ids=hidden_remote_ids,
     )
-    append_recovered_direct_upload_posts(
+    cached_recovered_posts, cached_deleted_conversation_ids = (
         imagine_recover_missing_direct_upload_conversation_cards(
             cached_missing_direct_upload_candidates,
             account,
         )
     )
+    deleted_conversation_ids.update(cached_deleted_conversation_ids)
+    append_recovered_direct_upload_posts(cached_recovered_posts)
 
     for official_order, conversation in conversation_entries:
         conversation_id = str(conversation.get("conversationId") or "")
@@ -7363,12 +7528,85 @@ def list_imagine_saved(payload: dict) -> dict:
             | cached_complete_upload_asset_ids
         ),
     )
-    append_recovered_direct_upload_posts(
+    recovered_posts, asset_deleted_conversation_ids = (
         imagine_recover_missing_direct_upload_conversation_cards(
             missing_direct_upload_candidates,
             account,
         )
     )
+    deleted_conversation_ids.update(asset_deleted_conversation_ids)
+    append_recovered_direct_upload_posts(recovered_posts)
+
+    deleted_asset_ids = {
+        str(asset.get("assetId") or asset.get("id") or "").strip()
+        for asset in assets
+        if isinstance(asset, dict) and bool(asset.get("isDeleted"))
+    } - {""}
+    for asset in assets:
+        if not isinstance(asset, dict):
+            continue
+        asset_conversation_id = str(
+            asset.get("sourceConversationId")
+            or asset.get("rootAssetSourceConversationId")
+            or asset.get("conversationId")
+            or ""
+        ).strip()
+        if asset_conversation_id not in deleted_conversation_ids:
+            continue
+        asset_id = str(asset.get("assetId") or asset.get("id") or "").strip()
+        if asset_id:
+            deleted_asset_ids.add(asset_id)
+
+    if deleted_conversation_ids or deleted_asset_ids:
+        # /rest/assets can outlive a deleted Saved conversation.  A definitive 404/410
+        # for that conversation wins over the orphan asset and over our local lineage
+        # overlay; otherwise every refresh recreates the card and writes it back to cache.
+        remove_imagine_generated_relation_state(
+            root,
+            asset_ids=deleted_asset_ids,
+            group_ids=deleted_conversation_ids,
+        )
+        if deleted_asset_ids:
+            prune_imagine_remote_cache_assets(root, account, deleted_asset_ids)
+        if deleted_conversation_ids:
+            remove_imagine_remote_cache_post_keys(
+                root,
+                account,
+                deleted_conversation_ids,
+                allowed_provenances={"normal-saved"},
+            )
+        pruned_display_cache_count = 0
+        try:
+            pruned_display_cache_count = prune_imagine_saved_display_cache(
+                root,
+                account,
+                deleted_conversation_ids,
+                deleted_asset_ids,
+            )
+        except Exception as exc:
+            imagine_debug_event("saved_display_cache_prune_failed", {
+                "account_id": str(account.get("id") or ""),
+                "error": str(exc)[:400],
+            })
+        relations = imagine_state.load_generated_relations(root)
+        hidden_bundle_asset_ids = imagine_hidden_bundle_asset_ids(relations)
+        posts = imagine_filter_deleted_conversation_posts(
+            posts,
+            deleted_conversation_ids,
+            deleted_asset_ids,
+        )
+        local_heart_posts = imagine_filter_deleted_conversation_posts(
+            local_heart_posts,
+            deleted_conversation_ids,
+            deleted_asset_ids,
+        )
+        official_asset_ids.difference_update(deleted_asset_ids)
+        imagine_debug_event("saved_deleted_conversations_pruned", {
+            "account_id": str(account.get("id") or ""),
+            "conversation_ids": sorted(deleted_conversation_ids),
+            "asset_ids": sorted(deleted_asset_ids),
+            "display_cache_removed": pruned_display_cache_count,
+        })
 
     grouped_asset_ids = hidden_bundle_asset_ids | cached_grouped_asset_ids | {
         imagine_item_asset_id(item)
@@ -7414,9 +7652,17 @@ def list_imagine_saved(payload: dict) -> dict:
     for post in posts:
         merge_imagine_flat_saved_post(saved_groups, post)
     for asset in assets:
-        if not isinstance(asset, dict):
+        if not isinstance(asset, dict) or bool(asset.get("isDeleted")):
             continue
         asset_id = str(asset.get("assetId") or asset.get("id") or "").strip()
+        asset_conversation_id = str(
+            asset.get("sourceConversationId")
+            or asset.get("rootAssetSourceConversationId")
+            or asset.get("conversationId")
+            or ""
+        ).strip()
+        if asset_conversation_id in deleted_conversation_ids:
+            continue
         if asset_id:
             official_asset_ids.add(asset_id)
         if imagine_asset_upload_only(asset):
@@ -7535,6 +7781,52 @@ def list_imagine_saved(payload: dict) -> dict:
         if has_more
         else ""
     )
+    confirmed_deleted_pending_asset_ids: set[str] = set()
+    if not cursor and bool((payload or {}).get("confirm_pending_asset_deletions")):
+        raw_pending_asset_ids = (payload or {}).get("pending_asset_ids")
+        pending_asset_ids = {
+            str(value or "").strip()
+            for value in (raw_pending_asset_ids if isinstance(raw_pending_asset_ids, list) else [])[:64]
+            if str(value or "").strip()
+        }
+        if pending_asset_ids:
+            confirmed_deleted_pending_asset_ids = imagine_confirm_deleted_asset_ids(
+                pending_asset_ids,
+                account,
+                limit=64,
+            )
+            if confirmed_deleted_pending_asset_ids:
+                remove_imagine_generated_relation_state(
+                    root,
+                    asset_ids=confirmed_deleted_pending_asset_ids,
+                )
+                prune_imagine_remote_cache_assets(
+                    root,
+                    account,
+                    confirmed_deleted_pending_asset_ids,
+                )
+                try:
+                    prune_imagine_saved_display_cache(
+                        root,
+                        account,
+                        set(),
+                        confirmed_deleted_pending_asset_ids,
+                    )
+                except Exception as exc:
+                    imagine_debug_event("saved_pending_display_cache_prune_failed", {
+                        "account_id": str(account.get("id") or ""),
+                        "error": str(exc)[:400],
+                    })
+                imagine_debug_event("saved_pending_assets_confirmed_deleted", {
+                    "account_id": str(account.get("id") or ""),
+                    "asset_ids": sorted(confirmed_deleted_pending_asset_ids),
+                })
+                posts = imagine_filter_deleted_conversation_posts(
+                    posts,
+                    set(),
+                    confirmed_deleted_pending_asset_ids,
+                )
+                official_asset_ids.difference_update(confirmed_deleted_pending_asset_ids)
     if not has_more and sync_token:
         try:
             library_index.finalize_imagine_remote_sync(
@@ -7567,6 +7859,9 @@ def list_imagine_saved(payload: dict) -> dict:
         # This deliberately excludes generated-relation overlays.  The renderer uses it to
         # decide when an optimistic result may become a confirmed Saved item.
         "official_asset_ids": sorted(official_asset_ids),
+        # Pending results survive a temporarily lagging Saved list.  The renderer may
+        # discard them only after this exact-asset 404/410 confirmation.
+        "confirmed_deleted_pending_asset_ids": sorted(confirmed_deleted_pending_asset_ids),
         "liked_exclusion": imagine_liked_exclusion_payload(root, account, relations),
         "imagine": {
             "id": account.get("id") or "",
@@ -9483,6 +9778,18 @@ def remove_imagine_generated_relation_state(
                 changed = True
                 continue
             record = dict(raw_record)
+            record_group_keys = {
+                str(source_id).strip(),
+                str(record.get("source_post_id") or "").strip(),
+                str(record.get("conversation_id") or "").strip(),
+                str(record.get("root_post_id") or "").strip(),
+            } - {""}
+            # group_ids represent a whole deleted conversation/card.  Removing only the
+            # matching child items left upload-origin relation records capable of rebuilding
+            # that card from their stored source on the next Saved refresh.
+            if record_group_keys & remove_groups:
+                changed = True
+                continue
             # A source/root or immediate parent is a lineage reference, not an item that
             # owns every descendant.  Removing it must never erase the remaining branch.
             source_asset_keys = {
@@ -13656,6 +13963,76 @@ def imagine_prepare_direct_image_attachments(
             })
 
 
+def imagine_prepare_direct_video_attachment(
+    attachment: dict,
+    account: dict,
+    request_id: str,
+    action: str,
+    payload: dict | None = None,
+) -> None:
+    """Resolve an external Extend source to an asset owned by the active account."""
+    if not isinstance(attachment, dict):
+        return
+    imagine_substitute_cloned_source([attachment], account, request_id, action, payload)
+    if not imagine_attachment_requires_fresh_source(attachment):
+        return
+
+    source_id = ""
+    for key in (
+        "asset_id", "post_id", "source_item_id", "item_id", "detail_item_id",
+        "parent_post_id", "root_post_id", "original_post_id",
+    ):
+        source_id = extract_imagine_post_id_from_text(attachment.get(key))
+        if source_id:
+            break
+    if not source_id:
+        source_id = extract_imagine_post_id_from_text(imagine_attachment_raw_url(attachment))
+    if not source_id:
+        raise RuntimeError("Imagine external Extend source id could not be resolved.")
+
+    root = library_root()
+    if not root:
+        raise RuntimeError("Library path is not set.")
+    clone_result = imagine_clone_external_assets(account, {source_id})
+    records = [
+        record
+        for record in imagine_normalize_external_clone_records(clone_result.get("cloned"))
+        if str(record.get("source_asset_id") or "").strip() == source_id
+    ]
+    if not records:
+        error = str(clone_result.get("error") or "").strip()
+        raise RuntimeError(error or "Imagine could not copy the external video into this account.")
+
+    update_imagine_clone_asset_map(root, account, records)
+    clone_ids = {
+        str(record.get("asset_id") or "").strip()
+        for record in records
+        if str(record.get("asset_id") or "").strip()
+    }
+    if clone_ids:
+        # This copy exists only to make the foreign video a valid generation source. Keep it
+        # out of Imagine main just like copies created by the Liked clone-batch workflow.
+        update_imagine_account_setting_ids(
+            root,
+            "imagine_cloned_asset_ids",
+            account,
+            add=clone_ids,
+        )
+    if not any(str(attachment.get(key) or "").strip() for key in ("asset_id", "post_id", "source_item_id", "item_id")):
+        attachment["post_id"] = source_id
+    imagine_substitute_cloned_source([attachment], account, request_id, action, payload)
+    if imagine_attachment_requires_fresh_source(attachment):
+        raise RuntimeError("Imagine external Extend source was copied but could not be substituted.")
+    attachment["cloned_copy"] = True
+    attachment["_imagine_owned_clone_source"] = True
+    imagine_debug_event("external_video_source_cloned", {
+        "request_id": request_id,
+        "action": action,
+        "source_asset_id": source_id,
+        "clone_asset_ids": sorted(clone_ids),
+    })
+
+
 def imagine_needs_upload_image_post(attachment: dict) -> bool:
     if not isinstance(attachment, dict):
         return False
@@ -14265,6 +14642,24 @@ def imagine_event_is_moderated(value) -> bool:
     ))
 
 
+def imagine_event_is_terminal_video_moderation(value) -> bool:
+    if not imagine_event_is_moderated(value):
+        return False
+    if isinstance(value, dict) and value.get("grokChameleonTerminalModeration") is True:
+        return True
+    progress = imagine_event_numeric_progress(value)
+    return progress is not None and progress >= 100
+
+
+def imagine_event_is_terminal_image_moderation(value) -> bool:
+    if not imagine_event_is_moderated(value):
+        return False
+    if isinstance(value, dict) and value.get("grokChameleonTerminalModeration") is True:
+        return True
+    progress = imagine_event_numeric_progress(value)
+    return progress is not None and progress >= 100
+
+
 def imagine_confirmed_moderation_detected_at(events: list) -> float | None:
     detected: list[float] = []
     for event in events or []:
@@ -14329,9 +14724,12 @@ def imagine_usage_limit_message_from_events(events: list) -> str:
 
 
 def imagine_lucky_reason_from_events(events: list) -> str:
-    if any(imagine_event_is_moderated(event) for event in events):
+    if any(imagine_event_is_terminal_video_moderation(event) for event in events):
         return "moderated"
-    if any(imagine_event_is_terminal_failure(event) for event in events):
+    if any(
+        imagine_event_is_terminal_failure(event) and not imagine_event_is_moderated(event)
+        for event in events
+    ):
         return "terminal"
     return ""
 
@@ -14847,7 +15245,7 @@ def imagine_t2i_candidate_from_event(event: dict, prompt: str, owner_user_id: st
         raw_url = imagine_generated_image_urls(owner_user_id, image_id)[0]
     status = str(event.get("current_status") or "").strip().lower()
     progress = imagine_event_numeric_progress(event)
-    moderated = imagine_event_is_moderated(event)
+    moderated = imagine_event_is_terminal_image_moderation(event)
     terminal_image = (
         str(event.get("type") or "").strip().lower() == "image"
         and progress is not None
@@ -14902,6 +15300,7 @@ def imagine_t2i_direct_items(
     candidates: dict[str, dict] = {}
     last_events: list = []
     signal_seen = False
+    provisional_moderation_seen = False
     completed_count = 0
     completed_grace_deadline = 0.0
     candidate_recovery_attempts = 0
@@ -14925,6 +15324,7 @@ def imagine_t2i_direct_items(
         time.sleep(0.25)
         ws.send_json(create_payload)
         imagine_debug_event("t2i_ws_sent", {"request_id": request_id, "transport": "raw_websocket"})
+        request_deadline = time.monotonic() + IMAGINE_DIRECT_IMAGE_MAX_WAIT_SECONDS
         while True:
             if cancel_checker and cancel_checker():
                 raise JobCancelled("Job cancelled.")
@@ -14969,6 +15369,17 @@ def imagine_t2i_direct_items(
                     if candidate_recovery_attempts >= 2 and completed_count > 0:
                         break
                     completed_grace_deadline = time.monotonic() + 2
+                if time.monotonic() >= request_deadline:
+                    completed_count = sum(1 for item in candidates.values() if item.get("completed"))
+                    imagine_debug_event("t2i_final_timeout", {
+                        "request_id": request_id,
+                        "completed_count": completed_count,
+                        "candidate_count": len(candidates),
+                        "provisional_moderation_seen": provisional_moderation_seen,
+                    })
+                    if completed_count > 0:
+                        break
+                    raise RuntimeError("Imagine T2I did not return a final image within the response window.")
                 continue
             try:
                 text = ws.recv_text()
@@ -15001,18 +15412,31 @@ def imagine_t2i_direct_items(
             last_events.append(event)
             if len(last_events) > IMAGINE_DEBUG_LAST_EVENT_COUNT:
                 last_events.pop(0)
-            event_moderated = imagine_event_is_moderated(event)
+            event_moderated = imagine_event_is_terminal_image_moderation(event)
             candidate = imagine_t2i_candidate_from_event(event, prompt, owner_user_id)
             if event_moderated and not candidate:
                 imagine_debug_event("t2i_moderated", {"request_id": request_id, "event_payload": event})
                 raise RuntimeError("Imagine moderated the request.")
+            if imagine_event_is_moderated(event) and not event_moderated:
+                provisional_moderation_seen = True
+                imagine_debug_event("t2i_moderation_provisional", {
+                    "request_id": request_id,
+                    "progress": imagine_event_numeric_progress(event),
+                })
             signal_seen = True
             progress = imagine_event_numeric_progress(event)
             if progress is not None and progress_callback:
                 progress_callback(display_generation_progress(progress), "running", progress_context())
             if progress is not None:
                 imagine_debug_event("t2i_progress", {"request_id": request_id, "progress": progress})
-                log_imagine_stream_event_if_needed(request_id, event, progress, imagine_event_is_terminal_failure(event), "t2i_progress")
+                log_imagine_stream_event_if_needed(
+                    request_id,
+                    event,
+                    progress,
+                    imagine_event_is_terminal_image_moderation(event)
+                    or (imagine_event_is_terminal_failure(event) and not imagine_event_is_moderated(event)),
+                    "t2i_progress",
+                )
             if candidate:
                 candidate_is_new = candidate["post_id"] not in candidates
                 candidates[candidate["post_id"]] = candidate
@@ -16500,6 +16924,19 @@ def imagine_wait_for_saved_direct_result(
                 media_key = imagine_media_candidate_key(entry_url)
                 if not entry_id or not entry_url:
                     continue
+                # This direct-post branch reads every child of the source post.
+                # Unlike the conversation branch above it previously skipped the
+                # creation-time check, allowing an older video to be returned as
+                # the result of a request whose response was never captured.
+                if not imagine_candidate_created_after_request(entry, progress_started_at):
+                    imagine_debug_event("candidate_root_recheck_stale_skipped", {
+                        "request_id": request_id,
+                        "action": action,
+                        "root_post_id": root_post_id,
+                        "entry_id": entry_id,
+                        "created_at": entry.get("created_at") or "",
+                    })
+                    continue
                 if entry_id in baseline_ids or media_key in baseline_ids:
                     continue
                 if entry_id in source_ids or media_key in source_ids or media_key in ignored_keys:
@@ -16693,11 +17130,19 @@ def imagine_i2i_request(payload: dict, prompt: str, request_id: str, account: di
     parent_post_id = "" if direct_upload else imagine_attachment_real_post_id(
         source,
         "post_id",
+        "detail_item_id",
+        "item_id",
+        "source_item_id",
         "parent_post_id",
         "original_post_id",
-        "detail_item_id",
     )
-    root_post_id = imagine_attachment_real_post_id(source, "root_post_id", "detail_root_post_id") or parent_post_id
+    # parentPostId is the selected current child, not its lineage parent/original. The root
+    # is the containing conversation/card when known; originalPostId stays lineage-only.
+    root_post_id = (
+        str(conversation_id or "").strip()
+        or imagine_attachment_real_post_id(source, "root_post_id", "detail_root_post_id")
+        or parent_post_id
+    )
     if direct_upload:
         root_post_id = ""
     demoted_upload_references: list[dict] = []
@@ -16896,11 +17341,11 @@ def imagine_video_request(payload: dict, prompt: str, request_id: str, action: s
     if image_attachments:
         imagine_mark_external_lineage_fresh_source(payload, image_attachments, account or {})
         imagine_prepare_direct_image_attachments(image_attachments, account or {}, request_id, action, payload=payload)
-    # Extend takes a video, so it never reaches the image path where a copy is swapped in
-    # for the original it was made from. Without this it would send the other account's
-    # asset and conversation, which grok.com answers with its anti-bot rejection.
+    # Extend takes a video, so it never reaches the image path where an external source can
+    # be re-uploaded. Reuse an existing account-owned clone, or create one on demand for a
+    # plain Liked/Discover video, before the generation request is assembled.
     if action == "extend" and isinstance(video_attachment, dict):
-        imagine_substitute_cloned_source([video_attachment], account or {}, request_id, action, payload)
+        imagine_prepare_direct_video_attachment(video_attachment, account or {}, request_id, action, payload)
     context_attachment = video_attachment if action == "extend" else (image_attachments[0] if image_attachments else None)
     conversation_id, parent_response_id = imagine_source_conversation_context(payload, context_attachment, account)
     direct_upload = bool(
@@ -16955,14 +17400,23 @@ def imagine_video_request(payload: dict, prompt: str, request_id: str, action: s
         else:
             source_duration = imagine_attachment_video_duration(video_attachment, source_detail) or 6.0
             source_trim = source_duration + (1 / 24)
-        original_post_id = extend_post_id
+        # The selected video is the extension asset (argument 7).  Its original image, when
+        # present, is a separate parentPostId (argument 2).  Treating the video child itself
+        # as original/parent duplicates one id across two different official parameters.
+        original_post_id = (
+            extract_imagine_post_id_from_text(source_detail.get("originalPostId"))
+            or imagine_attachment_id(video_attachment, "original_post_id", "parent_post_id")
+        )
+        if original_post_id == extend_post_id:
+            original_post_id = ""
         original_ref_type = (
             str(source_detail.get("originalRefType") or "").strip()
             or imagine_attachment_id(video_attachment, "original_ref_type")
             or "ORIGINAL_REF_TYPE_VIDEO_EXTENSION"
         )
         source_root_post_id = (
-            extract_imagine_post_id_from_text(source_detail.get("rootPostId"))
+            str(conversation_id or "").strip()
+            or extract_imagine_post_id_from_text(source_detail.get("rootPostId"))
             or imagine_attachment_id(video_attachment, "root_post_id", "detail_root_post_id")
             or extend_post_id
         )
@@ -16976,11 +17430,12 @@ def imagine_video_request(payload: dict, prompt: str, request_id: str, action: s
             "extendPostId": extend_post_id,
             "stitchWithExtendPostId": True,
             "originalPrompt": prompt,
-            "originalPostId": original_post_id,
             "originalRefType": original_ref_type,
             "mode": "custom",
-            "parentPostId": extend_post_id,
         })
+        if original_post_id:
+            model_config["originalPostId"] = original_post_id
+            model_config["parentPostId"] = original_post_id
         if source_root_post_id and not start_new_conversation:
             model_config["rootPostId"] = source_root_post_id
         detail_width, detail_height = imagine_node_resolution(source_detail) if source_detail else (0, 0)
@@ -17030,9 +17485,11 @@ def imagine_video_request(payload: dict, prompt: str, request_id: str, action: s
             parent_post_id = "" if direct_upload else imagine_attachment_real_post_id(
                 source,
                 "post_id",
+                "detail_item_id",
+                "item_id",
+                "source_item_id",
                 "parent_post_id",
                 "original_post_id",
-                "detail_item_id",
             )
             original_post_id = "" if direct_upload else imagine_attachment_real_post_id(source, "original_post_id")
             source_is_t2i_result = bool(
@@ -17056,10 +17513,10 @@ def imagine_video_request(payload: dict, prompt: str, request_id: str, action: s
                     # alone.
                     original_post_id = parent_post_id
             root_post_id = "" if direct_upload else (
-                imagine_attachment_real_post_id(source, "root_post_id", "detail_root_post_id") or parent_post_id
+                str(conversation_id or "").strip()
+                or imagine_attachment_real_post_id(source, "root_post_id", "detail_root_post_id")
+                or parent_post_id
             )
-            if not direct_upload and original_post_id and (not root_post_id or root_post_id == parent_post_id):
-                root_post_id = original_post_id
             file_attachment_ids = [parent_post_id] if parent_post_id else []
             # grok.com's own body carries none of these, and neither does ours — the bridge
             # reads them to work out the container and input asset it passes to the site's
@@ -17707,7 +18164,12 @@ def imagine_native_bridge_generate(
                 ],
             })
         post_candidates = fresh_candidates
-    confirmed_moderation = any(imagine_event_has_moderation_flag(event) for event in result_events)
+    confirmed_moderation = any(
+        imagine_event_is_terminal_video_moderation(event)
+        if expected_type == "video"
+        else imagine_event_is_terminal_image_moderation(event)
+        for event in result_events
+    )
     moderation_detected_at = imagine_confirmed_moderation_detected_at(result_events) if confirmed_moderation else None
     if expected_type == "video" and any(imagine_event_is_moderated(event) for event in events):
         imagine_debug_event("video_moderation_provisional", {
@@ -17779,16 +18241,39 @@ def imagine_native_bridge_generate(
             })
             raise RuntimeError(usage_limit_message)
 
+    # The official i2v terminal frame is definitive: progress=100 plus
+    # moderated=true, with a post id but deliberately no video or thumbnail URL.
+    # There is no media to discover in Saved, so probing that id only delays the
+    # Moderated result and can briefly create an empty-video card.
+    if not item and expected_type == "video" and confirmed_moderation and post_candidates:
+        moderated_candidate = post_candidates[-1]
+        item = imagine_moderated_item_from_candidate(
+            moderated_candidate,
+            expected_type,
+            account,
+            prompt,
+            action,
+            request_id,
+            source_info,
+        )
+        direct_items = [item]
+        imagine_debug_event("confirmed_video_moderation_direct", {
+            "request_id": request_id,
+            "action": action,
+            "expected_type": expected_type,
+            "post_id": moderated_candidate.get("post_id") or "",
+        })
+
     # Text-to-video joins this recovery path because it starts from nothing: raising on
     # moderation leaves no trace of the request at all, while Grok keeps a moderated card
     # of its own. The progress chunk that precedes the verdict carries videoPostId, so the
     # same re-fetch that recovers a moderated i2i result finds the card here too. Note it
-    # reports moderation as an "error" string rather than a boolean, so confirmed_moderation
-    # (which only reads flags) stays False and imagine_event_is_moderated is the right test.
+    # reports moderation as an "error" string rather than a boolean. It is still only
+    # actionable on the terminal frame; early prompt-screening errors remain provisional.
     t2v_moderation_recovery = (
         action == "t2v"
         and bool(post_candidates)
-        and any(imagine_event_is_moderated(event) for event in result_events)
+        and any(imagine_event_is_terminal_video_moderation(event) for event in result_events)
     )
     if not item and (expected_type == "image" or t2v_moderation_recovery) and (
         post_candidates or action in {"i2i", "aspect"}
@@ -17944,7 +18429,13 @@ def imagine_native_bridge_generate(
                 "reason": "temporary data url did not resolve to final media",
             })
             raise RuntimeError("Imagine did not return a final image.")
-        if any(imagine_event_is_moderated(event) for event in events):
+        moderated_result = any(
+            imagine_event_is_terminal_video_moderation(event)
+            if expected_type == "video"
+            else imagine_event_is_terminal_image_moderation(event)
+            for event in events
+        )
+        if moderated_result:
             raise RuntimeError("Imagine moderated the request.")
         if expected_type == "video":
             imagine_debug_event("native_bridge_no_media_timeout", {
@@ -18196,6 +18687,27 @@ def classify_imagine_job_error(message: str) -> str:
     return "failed"
 
 
+def imagine_direct_result_is_moderated(result) -> bool:
+    if not isinstance(result, dict):
+        return False
+    candidates = []
+    item = result.get("item")
+    if isinstance(item, dict):
+        candidates.append(item)
+    candidates.extend(candidate for candidate in (result.get("items") or []) if isinstance(candidate, dict))
+    for candidate in candidates:
+        metadata = candidate.get("metadata") if isinstance(candidate.get("metadata"), dict) else {}
+        imagine_metadata = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
+        if (
+            candidate.get("moderated") is True
+            or str(candidate.get("status") or "").strip().lower() == "moderated"
+            or metadata.get("moderated") is True
+            or imagine_metadata.get("moderated") is True
+        ):
+            return True
+    return False
+
+
 def start_imagine_job(payload: dict) -> dict:
     payload = dict(payload or {})
     payload["prompt"] = normalize_unicode_text(payload.get("prompt")).strip()
@@ -18326,8 +18838,15 @@ def start_imagine_job(payload: dict) -> dict:
             )
         try:
             result = imagine_direct_generate(payload, progress_callback=progress, cancel_checker=lambda: imagine_job_cancelled(job_id))
-            update_imagine_job(job_id, status="done", progress=100, result=result)
-            imagine_debug_event("job_done", {
+            moderated = imagine_direct_result_is_moderated(result)
+            update_imagine_job(
+                job_id,
+                status="moderated" if moderated else "done",
+                progress=100,
+                result=result,
+                **({"error": "Imagine moderated the request."} if moderated else {}),
+            )
+            imagine_debug_event("job_moderated" if moderated else "job_done", {
                 "job_id": job_id,
                 "action": action,
                 "request_id": result.get("request_id") if isinstance(result, dict) else "",
@@ -19280,6 +19799,10 @@ def media_item_key(item: dict | None) -> str:
 
 def mark_lucky_media_item(item: dict | None, reason: str = "") -> dict | None:
     if not isinstance(item, dict):
+        return item
+    # Currently unused: the old recovery flow marked media obtained after a moderation
+    # response as Lucky.  Leave the legacy implementation below intact but disconnected.
+    if not LEGACY_LUCKY_RESULT_TAGGING_ENABLED:
         return item
     item["lucky"] = True
     if reason:
@@ -20857,6 +21380,7 @@ def native_bridge_fetch_events(
         add_bridge_id(bridge_parent_ids, value.get(key))
     for raw_id in value.get("baselineIds") if isinstance(value.get("baselineIds"), list) else []:
         add_bridge_id(bridge_baseline_ids, raw_id)
+    is_video_request = str(request_payload.get("modelName") or "") == "imagine-video-gen"
     for event in events:
         if not isinstance(event, dict):
             continue
@@ -20906,8 +21430,9 @@ def native_bridge_fetch_events(
                 "video_request_final_patch_applied",
                 "video_request_final_patch_disarmed",
                 "store_generation_ui_action_clicked",
-                "store_generation_moderation_grace_start",
-                "store_generation_moderation_grace_complete",
+                "store_generation_video_moderation_provisional",
+                "store_generation_terminal_video_moderation",
+                "store_generation_video_source_not_materialized",
                 "store_generation_image_moderation_fast_path_start",
                 "store_generation_image_moderation_fast_path_complete",
                 "store_generation_image_response_moderation_start",
@@ -20924,7 +21449,11 @@ def native_bridge_fetch_events(
         if cancel_checker and cancel_checker():
             raise JobCancelled("Job cancelled.")
         progress = imagine_event_numeric_progress(event)
-        terminal = imagine_event_is_terminal_failure(event)
+        terminal = (
+            imagine_event_is_terminal_video_moderation(event)
+            if is_video_request and imagine_event_is_moderated(event)
+            else imagine_event_is_terminal_failure(event)
+        )
         if progress is not None and progress_callback:
             progress_callback(display_generation_progress(progress), "running", {"request_id": request_id, "progress_source": "native_bridge"})
         if progress is not None:
@@ -21091,11 +21620,16 @@ def chrome_bridge_fetch_events(
     })
     if status_code >= 400:
         raise RuntimeError(f"Imagine Chrome bridge HTTP {status_code}: {str(value.get('text') or '')[:1000]}")
+    is_video_request = str(request_payload.get("modelName") or "") == "imagine-video-gen"
     for event in events:
         if cancel_checker and cancel_checker():
             raise JobCancelled("Job cancelled.")
         progress = imagine_event_numeric_progress(event)
-        terminal = imagine_event_is_terminal_failure(event)
+        terminal = (
+            imagine_event_is_terminal_video_moderation(event)
+            if is_video_request and imagine_event_is_moderated(event)
+            else imagine_event_is_terminal_failure(event)
+        )
         if progress is not None and progress_callback:
             progress_callback(display_generation_progress(progress), "running", {"request_id": request_id, "progress_source": "chrome_bridge"})
         if progress is not None:

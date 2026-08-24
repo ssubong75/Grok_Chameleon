@@ -1,6 +1,9 @@
 // Toasts, error messages, and clipboard helpers
 const ERROR_TOAST_DURATION_MS = 7200;
 const SAVED_ERROR_LOGS_KEY = "grok_studio_w_saved_error_logs";
+// Currently unused: Lucky completion notices belonged to the retired moderation
+// recovery flow. Keep the implementation below, but leave its UI connection disabled.
+const LEGACY_LUCKY_NOTICE_ENABLED = false;
 
 async function copyText(text) {
   const value = String(text || "");
@@ -198,6 +201,7 @@ function toastError(message) {
 }
 
 function resultHasLucky(result) {
+  if (!LEGACY_LUCKY_NOTICE_ENABLED) return false;
   if (!result) return false;
   const hasItemLucky = (item) => (typeof mediaItemLucky === "function" ? mediaItemLucky(item) : Boolean(item?.lucky || item?.lucky_recovery));
   if (result.lucky || hasItemLucky(result.item)) return true;
@@ -209,6 +213,8 @@ function resultHasLucky(result) {
 }
 
 function showLuckyNotice() {
+  // Currently unused. Retain the legacy notice implementation without displaying it.
+  if (!LEGACY_LUCKY_NOTICE_ENABLED) return;
   let notice = document.getElementById("luckyNotice");
   if (!notice) {
     notice = document.createElement("div");

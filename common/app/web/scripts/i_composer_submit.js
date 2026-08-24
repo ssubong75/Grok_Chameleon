@@ -142,7 +142,9 @@ function updateImagineJobProgressDom(job) {
   for (const progressEl of document.querySelectorAll(`.detail_generation_progress[data-imagine-job-id="${jobIdSelector}"]`)) {
     const slotIndex = Number.parseInt(String(progressEl.dataset.jobSlotIndex || ""), 10) || 0;
     const slotProgress = typeof buildJobSlotProgress === "function" ? buildJobSlotProgress(job, slotIndex) : buildJobProgress(job);
-    progressEl.innerHTML = `Creating <span class="detail_generation_percent">${Math.max(1, slotProgress)}%</span>`;
+    progressEl.innerHTML = typeof buildJobPreparing === "function" && buildJobPreparing(job)
+      ? "Preparing"
+      : `Creating <span class="detail_generation_percent">${Math.max(1, slotProgress)}%</span>`;
   }
 
   for (const progressEl of document.querySelectorAll(`.detail_job_thumb[data-imagine-job-id="${jobIdSelector}"] .detail_job_thumb_progress`)) {

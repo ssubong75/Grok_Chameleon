@@ -3,8 +3,6 @@
   const METHOD_WRAP_MARK = Symbol.for("grokChameleonStoreMethodWrapped");
   const STORE_TRACE_LIMIT = 180;
   const CONFIRMED_IMAGE_MODERATION_STABILIZE_MS = 1000;
-  const CONFIRMED_VIDEO_MODERATION_WAIT_NUMERATOR = 2;
-  const CONFIRMED_VIDEO_MODERATION_WAIT_DENOMINATOR = 3;
   const MEDIA_STORE_MODULE_IDS = [2447692, 5823886];
   let capturedMediaStore = null;
   let capturedMediaStorePath = "";
@@ -29,15 +27,6 @@
 
   function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
-  function confirmedVideoModerationStabilizeMs(candidateStabilizeMs) {
-    const candidateSeconds = Math.max(1, Math.round(Number(candidateStabilizeMs || 10000) / 1000));
-    const moderatedSeconds = Math.max(1, Math.floor((
-      candidateSeconds * CONFIRMED_VIDEO_MODERATION_WAIT_NUMERATOR
-      + Math.floor(CONFIRMED_VIDEO_MODERATION_WAIT_DENOMINATOR / 2)
-    ) / CONFIRMED_VIDEO_MODERATION_WAIT_DENOMINATOR));
-    return moderatedSeconds * 1000;
   }
 
   function compactValue(value, depth = 0) {
@@ -89,12 +78,13 @@
         "containerPostId", "imageUrls", "inputAssets", "videoExtensionStartTime",
         "args", "value", "isRedo", "numOfImages", "imageReferences", "videoInputAsset",
         "inflightId", "trackedIds", "noCandidateMs", "sourceId", "targetId", "targets", "storeObservationMs",
-        "candidateStabilizeMs", "confirmedModerationStabilizeMs",
+        "candidateStabilizeMs", "confirmedModerationStabilizeMs", "requireMaterialized",
         "fileAttachments", "resolvedImageReferences", "videoGenModelConfig",
         "imageEditModelConfig", "mediaGenInput", "params", "url", "mimeType",
         "filename", "fileName", "grokChameleonDirectUpload", "grokChameleonUploadAssetIds", "grokChameleonUploadUrls",
         "activeContainerIds", "canonicalContainerId", "discoverNewContainers", "startNewConversation",
-        "moderationDetectedAtMs", "moderationElapsedMs",
+        "moderationDetectedAtMs", "moderationElapsedMs", "moderated", "provisionalModerated",
+        "videoGenModerated", "captureDone", "captureRequestCount", "grokChameleonTerminalModeration",
       ]) {
         if (Object.prototype.hasOwnProperty.call(value, key)) output[key] = compactValue(value[key], depth + 1);
       }
@@ -138,6 +128,8 @@
       apiError: "",
       moderated: false,
       moderationReason: "",
+      provisionalModerated: false,
+      provisionalModerationReason: "",
       released: false,
     };
     generationResponseCaptures.push(capture);
@@ -158,13 +150,22 @@
   }
 
   function generationResponseCaptureForBody(body) {
-    if (!body || typeof body !== "object") return null;
+    const activeCaptures = generationResponseCaptures.filter((capture) => (
+      !capture.released && !capture.done
+    ));
+    // Electron's CDP occasionally gives main no request body for the official
+    // generation endpoint.  The bridge has one generation in flight per hidden
+    // account window, so bind an unlabelled response only when that makes the
+    // association unambiguous.  Do not use this fallback for a known, mismatched
+    // model: that would allow an ordinary conversation response to finish it.
+    if (!body || typeof body !== "object" || !String(body.modelName || "")) {
+      return activeCaptures.length === 1 ? activeCaptures[0] : null;
+    }
     const modelName = String(body.modelName || "");
     const variant = mediaGenVariant(body.mediaGenInput);
     const bodyPrompt = String(variant.params?.prompt || body.message || "").replace(/\s*--mode=custom\s*$/i, "").trim();
-    for (let index = generationResponseCaptures.length - 1; index >= 0; index -= 1) {
-      const capture = generationResponseCaptures[index];
-      if (capture.released) continue;
+    for (let index = activeCaptures.length - 1; index >= 0; index -= 1) {
+      const capture = activeCaptures[index];
       if (capture.modelName && capture.modelName !== modelName) continue;
       if (capture.prompt && bodyPrompt && capture.prompt.trim() !== bodyPrompt) continue;
       return capture;
@@ -210,8 +211,11 @@
     if (!capture || !value || typeof value !== "object") return;
     const moderationReason = generationPayloadModerationReason(value);
     if (moderationReason) {
-      capture.moderated = true;
-      capture.moderationReason = capture.moderationReason || moderationReason;
+      // Image and video responses can both report prompt screening while generation
+      // continues. Metadata is therefore diagnostic only; a terminal streaming frame,
+      // or a response that ends without any terminal frame, decides the final result.
+      capture.provisionalModerated = true;
+      capture.provisionalModerationReason = capture.provisionalModerationReason || moderationReason;
     }
     const stack = [value];
     let visited = 0;
@@ -253,6 +257,28 @@
         if (child && typeof child === "object") stack.push(child);
       }
     }
+    if (
+      capture.apiError
+      && generationPayloadModerationReason({ error: capture.apiError })
+    ) {
+      // A moderation-shaped error before the terminal generation frame is another
+      // provisional screening signal, not a transport failure.
+      capture.provisionalModerated = true;
+      capture.provisionalModerationReason = capture.provisionalModerationReason || "error";
+      capture.apiError = "";
+    }
+  }
+
+  function finalizeGenerationCapture(capture) {
+    if (!capture || capture.moderated) return;
+    const hasTerminalResponse = capture.events.some((event) => event?.grokChameleonTerminalResponse === true);
+    if (!hasTerminalResponse && capture.provisionalModerated) {
+      // Some rejected requests end after an id-less moderation payload. It is final only
+      // after the response stream itself has closed; while the stream is open the same
+      // payload is just the initial prompt-screening phase.
+      capture.moderated = true;
+      capture.moderationReason = capture.provisionalModerationReason || "moderated";
+    }
   }
 
   function appendGenerationCaptureEvent(capture, expectedType, node) {
@@ -266,12 +292,26 @@
       ? (node.videoUrl || node.video_url || node.mediaUrl || node.media_url || "")
       : (node.imageUrl || node.image_url || node.mediaUrl || node.media_url || "");
     const url = assetUrlFromFileUri(rawUrl);
-    const progressValue = Number(node.progress);
+    const progressValue = Number(node.progress ?? node.percentageComplete ?? node.percentage_complete);
     const progress = Number.isFinite(progressValue) ? progressValue : (url ? 100 : 1);
+    const nodeModerationReason = generationPayloadModerationReason(node);
+    const moderated = Boolean(nodeModerationReason);
+    const terminalResponse = progress >= 100;
+    const terminalModeration = terminalResponse && moderated;
     if (!id && !url && !Object.prototype.hasOwnProperty.call(node, "progress")) return;
-    const key = [type, id, progress, url].join("|");
+    // A later frame can revise moderation for the same id/progress pair.
+    const key = [type, id, progress, url, moderated ? "1" : "0"].join("|");
     if (capture.eventKeys.has(key)) return;
     capture.eventKeys.add(key);
+    if (terminalResponse) {
+      // Final-only semantics: an early true is provisional, and a later terminal
+      // success is allowed to clear it. Never promote metadata to progress=100.
+      capture.events = capture.events.filter((event) => !event?.grokChameleonTerminalResponse);
+      capture.moderated = terminalModeration;
+      capture.moderationReason = terminalModeration
+        ? (capture.moderationReason || nodeModerationReason || capture.provisionalModerationReason || "moderated")
+        : "";
+    }
     const base = {
       progress,
       prompt: node.prompt || capture.prompt || "",
@@ -284,11 +324,13 @@
       conversationId: node.conversationId || node.conversation_id || capture.conversationId || "",
       responseId: node.responseId || node.response_id || capture.responseId || "",
       parentResponseId: node.parentResponseId || node.parent_response_id || capture.parentResponseId || "",
-      moderated: Boolean(node.moderated),
+      moderated,
     };
     if (type === "video") {
       capture.events.push({
         ...base,
+        grokChameleonTerminalResponse: terminalResponse,
+        grokChameleonTerminalModeration: terminalModeration,
         videoId: id,
         videoPostId: id,
         videoUrl: url,
@@ -299,6 +341,8 @@
     } else {
       capture.events.push({
         ...base,
+        grokChameleonTerminalResponse: terminalResponse,
+        grokChameleonTerminalModeration: terminalModeration,
         imageId: id,
         assetId: id,
         imageUrl: url,
@@ -376,12 +420,15 @@
       capture.error = error?.message || String(error);
     } finally {
       capture.done = true;
+      finalizeGenerationCapture(capture);
       pushStoreTrace("generation_response_capture_done", {
         requestId: capture.requestId,
         status: capture.status,
         eventCount: capture.events.length,
         conversationId: capture.conversationId,
         rootPostId: capture.rootPostId,
+        moderated: capture.moderated,
+        provisionalModerated: capture.provisionalModerated,
         error: capture.error,
       });
     }
@@ -421,6 +468,7 @@
       endpoint: payload.endpoint || "",
       status: capture.status,
       requestCount: capture.requestCount,
+      matchedWithoutRequestBody: !String(requestBody?.modelName || ""),
     });
     for (const line of String(payload.body || "").split(/\r?\n/)) {
       parseGenerationCaptureLine(capture, line);
@@ -429,6 +477,7 @@
       capture.apiError = `Imagine request failed (HTTP ${capture.status}).`;
     }
     capture.done = true;
+    finalizeGenerationCapture(capture);
     pushStoreTrace("generation_response_network_done", {
       requestId: capture.requestId,
       status: capture.status,
@@ -436,6 +485,8 @@
       conversationId: capture.conversationId,
       rootPostId: capture.rootPostId,
       apiError: capture.apiError,
+      moderated: capture.moderated,
+      provisionalModerated: capture.provisionalModerated,
     });
     return { matched: true, requestId: capture.requestId, eventCount: capture.events.length };
   }
@@ -443,7 +494,9 @@
   function generationCaptureEvents(capture, expectedType, conversationId = "", parentResponseId = "") {
     if (!capture) return [];
     const capturedEvents = capture.events
-      .filter((event) => expectedType === "video" ? (event.videoId || event.videoUrl) : (event.imageId || event.imageUrl))
+      .filter((event) => expectedType === "video"
+        ? (event.videoId || event.videoUrl || event.grokChameleonTerminalModeration)
+        : (event.imageId || event.imageUrl || event.grokChameleonTerminalModeration))
       .map((event) => ({
         ...event,
         rootPostId: event.rootPostId || capture.rootPostId || capture.conversationId || conversationId || "",
@@ -451,14 +504,19 @@
         responseId: event.responseId || capture.responseId || "",
         parentResponseId: event.parentResponseId || capture.parentResponseId || parentResponseId || "",
       }));
-    // Moderated image-edit responses commonly contain no image id or URL. Preserve the
-    // terminal response signal as an event so the server can report Moderated instead
-    // of treating the expected lack of media as an unknown generation failure.
-    if (capture.moderated) {
+    // Moderated responses can contain no media id or URL. Preserve only a confirmed
+    // terminal verdict; provisional prompt-screening signals must not become a synthetic
+    // progress=100 event while the response is still open.
+    const hasCapturedTerminalModeration = capturedEvents.some((event) => (
+      event?.moderated === true
+      && (event?.grokChameleonTerminalModeration === true || Number(event?.progress) >= 100)
+    ));
+    if (capture.moderated && !hasCapturedTerminalModeration) {
       capturedEvents.push({
         moderated: true,
         moderationSignal: "official_response",
         moderationReason: capture.moderationReason || "",
+        grokChameleonTerminalModeration: true,
         progress: 100,
         prompt: capture.prompt || "",
         modelName: capture.modelName || "",
@@ -1898,9 +1956,36 @@
 
   function hasFinalStoreMediaEvent(event, expectedType) {
     if (!event) return false;
+    if (event?.moderated === true && !isTerminalModerationEvent(event, expectedType)) return false;
     const url = expectedType === "video" ? event.videoUrl : event.imageUrl;
     if (!url) return false;
     return expectedType !== "image" || !isTemporaryImageUrl(url);
+  }
+
+  function isTerminalVideoModerationEvent(event) {
+    return Boolean(
+      event?.moderated === true
+      && (
+        event?.grokChameleonTerminalModeration === true
+        || Number(event?.progress) >= 100
+      )
+    );
+  }
+
+  function isTerminalImageModerationEvent(event) {
+    return Boolean(
+      event?.moderated === true
+      && (
+        event?.grokChameleonTerminalModeration === true
+        || Number(event?.progress) >= 100
+      )
+    );
+  }
+
+  function isTerminalModerationEvent(event, expectedType) {
+    return expectedType === "video"
+      ? isTerminalVideoModerationEvent(event)
+      : isTerminalImageModerationEvent(event);
   }
 
   function collectStoreEvents(state, containerId, expectedType, requestId, prompt, beforeIds, tracking = null, conversationId = "", parentResponseId = "", sourceIds = []) {
@@ -2200,6 +2285,10 @@
         snapshot.lastHasUrl,
         stateInfo?.state,
         stateInfo?.error,
+        Boolean(state?.videoGenModerated),
+        Boolean(responseCapture?.done),
+        Boolean(responseCapture?.moderated),
+        Boolean(responseCapture?.provisionalModerated),
       ].join("|");
       pollCount += 1;
       if (pollCount === 1 || snapshotKey !== lastSnapshotKey || Date.now() - lastSnapshotLogAt >= 10000) {
@@ -2209,6 +2298,11 @@
           callState: stateInfo,
           activeContainerIds,
           trackedIds: tracking?.ids ? Array.from(tracking.ids).slice(0, 20) : [],
+          videoGenModerated: Boolean(state?.videoGenModerated),
+          captureDone: Boolean(responseCapture?.done),
+          captureRequestCount: Number(responseCapture?.requestCount || 0),
+          moderated: Boolean(responseCapture?.moderated),
+          provisionalModerated: Boolean(responseCapture?.provisionalModerated),
           pollCount,
         });
         lastSnapshotLogAt = Date.now();
@@ -2246,6 +2340,44 @@
         if (eventId) rememberedEvents.set(eventId, event);
       }
       let retainedEvents = Array.from(rememberedEvents.values());
+      if (tracking) {
+        const terminalModerationSignals = lastEvents.filter((event) => isTerminalModerationEvent(event, expectedType));
+        if (terminalModerationSignals.length > 0) {
+          const detectedAt = tracking.moderatedSeenAt || Date.now();
+          tracking.moderatedSeenAt = detectedAt;
+          for (const event of terminalModerationSignals) {
+            const eventId = String(expectedType === "video"
+              ? (event?.videoPostId || event?.videoId || "")
+              : (event?.imageId || event?.assetId || event?.postId || "")
+            ).trim();
+            if (!eventId) continue;
+            rememberedEvents.set(eventId, {
+              ...event,
+              grokChameleonTerminalModeration: true,
+              grokChameleonModerationDetectedAtMs: detectedAt,
+            });
+          }
+          retainedEvents = Array.from(rememberedEvents.values());
+          const idlessSignals = terminalModerationSignals
+            .filter((event) => !String(expectedType === "video"
+              ? (event?.videoPostId || event?.videoId || "")
+              : (event?.imageId || event?.assetId || event?.postId || "")
+            ).trim())
+            .map((event) => ({
+              ...event,
+              grokChameleonTerminalModeration: true,
+              grokChameleonModerationDetectedAtMs: detectedAt,
+            }));
+          pushStoreTrace("store_generation_terminal_moderation", {
+            requestId,
+            containerId,
+            expectedType,
+            moderationDetectedAtMs: detectedAt,
+            trackedIds: Array.from(tracking.ids || []).slice(0, 20),
+          });
+          return retainedEvents.concat(idlessSignals);
+        }
+      }
       if (retainedEvents.some((event) => hasFinalStoreMediaEvent(event, expectedType))) return retainedEvents;
       if (isRateLimitedStoreCall(stateInfo)) {
         pushStoreTrace("store_generation_rate_limited_stop", {
@@ -2262,7 +2394,7 @@
           event?.imageId || event?.assetId || event?.postId || ""
         ).trim());
         const allImageCandidatesModerated = imageCandidates.length > 0
-          && imageCandidates.every((event) => event?.moderated === true);
+          && imageCandidates.every(isTerminalImageModerationEvent);
         if (allImageCandidatesModerated) {
           const now = Date.now();
           if (!tracking.moderatedSeenAt) {
@@ -2304,7 +2436,7 @@
       // moderation instead of eventually reporting a misleading missing-media failure.
       if (expectedType === "image" && tracking) {
         const idlessModerationSignals = lastEvents.filter((event) => Boolean(
-          event?.moderated === true
+          isTerminalImageModerationEvent(event)
           && !String(event?.imageId || event?.assetId || event?.postId || "").trim()
         ));
         if (idlessModerationSignals.length) {
@@ -2337,45 +2469,21 @@
         if (!globalModerated) tracking.globalModerationArmed = true;
         const globalModerationSignal = globalModerated && tracking.globalModerationArmed;
         if (globalModerationSignal) tracking.globalModerationArmed = false;
-        const moderated = Boolean(
+        // The global store flag and sub-100 candidate flags belong to the early
+        // prompt-screening/generation phases. Observe them for diagnostics, but
+        // never convert them into a final moderation verdict.
+        const provisionalModeration = Boolean(
           globalModerationSignal
-          || lastEvents.some((event) => event?.moderated)
-          || retainedEvents.some((event) => event?.moderated)
+          || lastEvents.some((event) => event?.moderated === true)
+          || retainedEvents.some((event) => event?.moderated === true)
         );
-        if (moderated) {
-          if (!tracking.moderatedSeenAt) {
-            tracking.moderatedSeenAt = now;
-            const stabilityStartedAt = tracking.firstCandidateSeenAt || now;
-            const confirmedModerationStabilizeMs = confirmedVideoModerationStabilizeMs(
-              tracking.candidateStabilizeMs
-            );
-            tracking.moderatedStableAt = stabilityStartedAt + confirmedModerationStabilizeMs;
-            pushStoreTrace("store_generation_moderation_grace_start", {
-              requestId,
-              containerId,
-              candidateStabilizeMs: tracking.candidateStabilizeMs,
-              confirmedModerationStabilizeMs,
-              moderatedStableAt: tracking.moderatedStableAt,
-              trackedIds: Array.from(tracking.ids || []).slice(0, 20),
-            });
-          }
-          for (const [eventId, event] of rememberedEvents.entries()) {
-            rememberedEvents.set(eventId, {
-              ...event,
-              moderated: true,
-              grokChameleonModerationDetectedAtMs: tracking.moderatedSeenAt,
-            });
-          }
-          retainedEvents = Array.from(rememberedEvents.values());
-          if (now >= Number(tracking.moderatedStableAt || 0)) {
-            pushStoreTrace("store_generation_moderation_grace_complete", {
-              requestId,
-              containerId,
-              stableMs: now - (tracking.firstCandidateSeenAt || tracking.moderatedSeenAt),
-              trackedIds: Array.from(tracking.ids || []).slice(0, 20),
-            });
-            return retainedEvents;
-          }
+        if (provisionalModeration && !tracking.provisionalModerationLogged) {
+          tracking.provisionalModerationLogged = true;
+          pushStoreTrace("store_generation_video_moderation_provisional", {
+            requestId,
+            containerId,
+            trackedIds: Array.from(tracking.ids || []).slice(0, 20),
+          });
         }
         const hasInProgressCandidate = retainedEvents.some((event) => {
           const progress = Number(event?.progress);
@@ -2429,6 +2537,35 @@
         const hasVisibleCandidate = activeContainerIds.some((activeContainerId) => (
           hasVisibleVideoGenerationCandidate(state, activeContainerId, beforeIds, tracking)
         ));
+        const hasRequestEvidence = Boolean(
+          Number(responseCapture?.requestCount || 0) > 0
+          || tracking.ids?.size > 0
+          || hasVisibleCandidate
+        );
+        const requestWatchStartedAt = Number(tracking.requestWatchStartedAt || 0);
+        const requestStartMaxMs = Number(tracking.requestStartMaxMs || 0);
+        const callReturnedWithoutRequest = Boolean(
+          responseCapture
+          && requestWatchStartedAt > 0
+          && requestStartMaxMs > 0
+          && !hasRequestEvidence
+          && ["resolved", "returned"].includes(stateName)
+          && Date.now() - requestWatchStartedAt >= requestStartMaxMs
+        );
+        if (callReturnedWithoutRequest) {
+          tracking.requestNotStarted = true;
+          pushStoreTrace("store_generation_video_request_not_started", {
+            requestId,
+            containerId,
+            sourceId: tracking.sourceId || "",
+            callState: stateInfo,
+            requestCount: Number(responseCapture?.requestCount || 0),
+            elapsedMs: Date.now() - requestWatchStartedAt,
+            trackedIds: Array.from(tracking.ids || []).slice(0, 20),
+            snapshot,
+          });
+          return retainedEvents;
+        }
         if (tracking.retainTrackedCandidateUntilDeadline && tracking.ids?.size > 0 && deadline < absoluteDeadline) {
           deadline = absoluteDeadline;
           pushStoreTrace("store_generation_tracked_candidate_deadline_retained", {
@@ -2496,11 +2633,35 @@
       sourceIds,
     ));
     finalEvents.push(...generationCaptureEvents(responseCapture, expectedType, conversationId, parentResponseId));
+    const finalTerminalModerationSignals = finalEvents.filter((event) => (
+      isTerminalModerationEvent(event, expectedType)
+    ));
+    const finalDetectedAt = finalTerminalModerationSignals.length > 0
+      ? (tracking?.moderatedSeenAt || Date.now())
+      : 0;
     for (const event of finalEvents) {
       const eventId = String(event?.videoPostId || event?.videoId || event?.imageId || event?.assetId || "").trim();
-      if (eventId) rememberedEvents.set(eventId, event);
+      if (eventId) {
+        rememberedEvents.set(eventId, isTerminalModerationEvent(event, expectedType)
+          ? {
+              ...event,
+              grokChameleonTerminalModeration: true,
+              grokChameleonModerationDetectedAtMs: finalDetectedAt,
+            }
+          : event);
+      }
     }
     const finalRetainedEvents = Array.from(rememberedEvents.values());
+    const finalIdlessModerationSignals = finalTerminalModerationSignals
+      .filter((event) => !String(expectedType === "video"
+        ? (event?.videoPostId || event?.videoId || "")
+        : (event?.imageId || event?.assetId || event?.postId || "")
+      ).trim())
+      .map((event) => ({
+        ...event,
+        grokChameleonTerminalModeration: true,
+        grokChameleonModerationDetectedAtMs: finalDetectedAt,
+      }));
     pushStoreTrace("store_generation_poll_timeout", {
       requestId,
       snapshot: storeSnapshot(finalState, finalSnapshotContainerId, expectedType),
@@ -2512,7 +2673,7 @@
       deadline,
       absoluteDeadline,
     });
-    return finalRetainedEvents;
+    return finalRetainedEvents.concat(finalIdlessModerationSignals);
   }
 
   function mediaTypeValue(expectedType) {
@@ -2539,32 +2700,158 @@
     return state?.optimisticToRealIdMap?.[value] || value;
   }
 
-  function containerPostIdFor(state, id) {
-    const value = resolvedMediaId(state, id);
-    if (!value) return "";
-    if (typeof state?.getContainerPostId === "function") {
-      try {
-        const containerId = state.getContainerPostId(value);
-        if (containerId) return resolvedMediaId(state, containerId);
-      } catch (_) {}
-    }
-    const directRoot = state?.directLoadRootContainerByChildId?.[value];
-    if (directRoot) return resolvedMediaId(state, directRoot);
-    for (const [containerId, items] of Object.entries(state?.imageByMediaId || {})) {
-      if (Array.isArray(items) && items.some((item) => String(item?.id || item?.itemId || "") === value)) {
-        return resolvedMediaId(state, containerId);
-      }
-    }
-    for (const [containerId, items] of Object.entries(state?.videoByMediaId || {})) {
-      if (Array.isArray(items) && items.some((item) => String(item?.id || item?.itemId || "") === value)) {
-        return resolvedMediaId(state, containerId);
-      }
-    }
-    return value;
+  function containerHasSourceId(state, containerId, sourceId) {
+    const container = resolvedMediaId(state, containerId);
+    const source = resolvedMediaId(state, sourceId);
+    if (!container || !source) return false;
+    if (container === source) return true;
+    const directRoot = resolvedMediaId(state, state?.directLoadRootContainerByChildId?.[source]);
+    if (directRoot && directRoot === container) return true;
+    return Boolean(
+      hasChildItem(state?.imageByMediaId?.[container], source)
+      || hasChildItem(state?.videoByMediaId?.[container], source)
+    );
   }
 
-  function rootContainerIdFor(state, id) {
-    return containerPostIdFor(state, id);
+  function collectionContainerIdFor(state, sourceId, preferredRootId = "") {
+    const source = resolvedMediaId(state, sourceId);
+    const preferredRoot = resolvedMediaId(state, preferredRootId);
+    if (!source) return "";
+    // A caller-supplied root is authoritative only when the official store proves
+    // that the exact selected child belongs to it. This prevents a stale route id
+    // from replacing a real source container while preserving root/child identity.
+    if (preferredRoot && preferredRoot !== source && containerHasSourceId(state, preferredRoot, source)) {
+      return preferredRoot;
+    }
+    for (const collection of [state?.imageByMediaId, state?.videoByMediaId]) {
+      for (const [containerId, items] of Object.entries(collection || {})) {
+        if (Array.isArray(items) && items.some((item) => (
+          resolvedMediaId(state, storeItemId(item)) === source
+        ))) {
+          return resolvedMediaId(state, containerId);
+        }
+      }
+    }
+    return "";
+  }
+
+  function containerPostIdFor(state, id, preferredRootId = "") {
+    const value = resolvedMediaId(state, id);
+    if (!value) return "";
+
+    // The official helper can temporarily return the child itself even though the
+    // same store already exposes root -> child membership. Trust concrete membership
+    // before that self fallback; otherwise generateVideoForImage receives child/child
+    // and resolves without sending a network request.
+    const collectionRoot = collectionContainerIdFor(state, value, preferredRootId);
+    if (collectionRoot) return collectionRoot;
+
+    const directRoot = resolvedMediaId(state, state?.directLoadRootContainerByChildId?.[value]);
+    if (directRoot && directRoot !== value) return directRoot;
+
+    let officialContainerId = "";
+    if (typeof state?.getContainerPostId === "function") {
+      try {
+        officialContainerId = resolvedMediaId(state, state.getContainerPostId(value));
+      } catch (_) {}
+    }
+    if (officialContainerId && officialContainerId !== value) return officialContainerId;
+    return officialContainerId || value;
+  }
+
+  function rootContainerIdFor(state, id, preferredRootId = "") {
+    return containerPostIdFor(state, id, preferredRootId);
+  }
+
+  function assertVideoGenerationIdentity(state, {
+    requestId,
+    variant,
+    containerId,
+    sourceId,
+    preferredRootId,
+    videoInputAsset,
+    extendPostId,
+    imageReferences,
+    directUpload,
+  }) {
+    const container = resolvedMediaId(state, containerId);
+    const source = resolvedMediaId(state, sourceId);
+    const preferredRoot = resolvedMediaId(state, preferredRootId);
+    const verifiedDistinctRoot = Boolean(
+      !directUpload
+      && preferredRoot
+      && source
+      && preferredRoot !== source
+      && containerHasSourceId(state, preferredRoot, source)
+    );
+    if (!container) throw new Error("Official video container could not be resolved.");
+    if (verifiedDistinctRoot && container !== preferredRoot) {
+      throw new Error(`Imagine source identity mismatch: root=${preferredRoot} selected=${source} callRoot=${container}.`);
+    }
+    if (variant === "imageToVideo") {
+      const inputAsset = resolvedMediaId(state, videoInputAsset);
+      if (!source || !inputAsset || source !== inputAsset) {
+        throw new Error(`Imagine i2v source identity mismatch: selected=${source || "none"} input=${inputAsset || "none"}.`);
+      }
+    } else if (variant === "referenceToVideo") {
+      if (videoInputAsset !== undefined) {
+        throw new Error("Imagine reference-to-video must leave the image input argument empty.");
+      }
+      if (!Array.isArray(imageReferences) || imageReferences.length === 0) {
+        throw new Error("Imagine reference-to-video has no reference images.");
+      }
+    } else if (variant === "videoExtension") {
+      const extensionSource = resolvedMediaId(state, extendPostId);
+      if (!source || !extensionSource || source !== extensionSource) {
+        throw new Error(`Imagine Extend source identity mismatch: selected=${source || "none"} extend=${extensionSource || "none"}.`);
+      }
+    }
+    pushStoreTrace("store_generation_video_identity_verified", {
+      requestId,
+      variant,
+      containerId: container,
+      sourceId: source,
+      preferredRootId: preferredRoot,
+      verifiedDistinctRoot,
+      videoInputAsset: resolvedMediaId(state, videoInputAsset),
+      extendPostId: resolvedMediaId(state, extendPostId),
+      referenceCount: Array.isArray(imageReferences) ? imageReferences.length : 0,
+      directUpload: Boolean(directUpload),
+    });
+  }
+
+  function assertImageGenerationIdentity(state, {
+    requestId,
+    variant,
+    containerId,
+    sourceId,
+    preferredRootId,
+    directUpload,
+  }) {
+    const container = resolvedMediaId(state, containerId);
+    const source = resolvedMediaId(state, sourceId);
+    const preferredRoot = resolvedMediaId(state, preferredRootId);
+    const verifiedDistinctRoot = Boolean(
+      !directUpload
+      && preferredRoot
+      && source
+      && preferredRoot !== source
+      && containerHasSourceId(state, preferredRoot, source)
+    );
+    if (!container) throw new Error("Official image edit container could not be resolved.");
+    if (!directUpload && !source) throw new Error("Official image edit source could not be resolved.");
+    if (verifiedDistinctRoot && container !== preferredRoot) {
+      throw new Error(`Imagine image source identity mismatch: root=${preferredRoot} selected=${source} callRoot=${container}.`);
+    }
+    pushStoreTrace("store_generation_image_identity_verified", {
+      requestId,
+      variant,
+      containerId: container,
+      sourceId: source,
+      preferredRootId: preferredRoot,
+      verifiedDistinctRoot,
+      directUpload: Boolean(directUpload),
+    });
   }
 
   function syncCurrentRootContainer(state, requestId, variant, containerId) {
@@ -2679,11 +2966,28 @@
     return after;
   }
 
-  function generationSourceReady(state, sourceId, rootSourceId = "") {
+  function generationSourceReady(state, sourceId, rootSourceId = "", requireMaterialized = false) {
     const value = resolvedMediaId(state, sourceId);
     if (!value) return false;
     const sourceLoaded = Boolean(state?.byId?.[value]);
     const rootId = resolvedMediaId(state, rootSourceId);
+    const sourceInRootCollection = Boolean(
+      rootId
+      && value !== rootId
+      && (
+        hasChildItem(state?.imageByMediaId?.[rootId], value)
+        || hasChildItem(state?.videoByMediaId?.[rootId], value)
+      )
+    );
+    const sourceIsExactRootChild = Boolean(
+      sourceInRootCollection
+      && state?.byId?.[rootId]
+    );
+    // Official post pages materialize a generated child in the root container's
+    // image/video collection without necessarily adding a separate byId entry for
+    // that child.  generateVideoForImage accepts that representation as long as
+    // the root itself is loaded and the exact selected child belongs to it.
+    if (requireMaterialized) return sourceLoaded || sourceIsExactRootChild;
     if (rootId) {
       if (value === rootId) return sourceLoaded;
       // fetchMediaPost(root) can populate a root's image/video collection before
@@ -2691,8 +2995,7 @@
       // the official store's positive evidence that this source is ready; requiring
       // both representations made valid card sources look absent.
       return sourceLoaded
-        || hasChildItem(state?.imageByMediaId?.[rootId], value)
-        || hasChildItem(state?.videoByMediaId?.[rootId], value);
+        || sourceInRootCollection;
     }
     if (sourceLoaded) return true;
     for (const collection of [state?.imageByMediaId, state?.videoByMediaId]) {
@@ -2703,10 +3006,10 @@
     return false;
   }
 
-  async function hydrateGenerationSource(storeContext, sourceId, requestId, variant, rootSourceId = "", timeoutMs = 8000) {
+  async function hydrateGenerationSource(storeContext, sourceId, requestId, variant, rootSourceId = "", timeoutMs = 8000, requireMaterialized = false) {
     const value = String(sourceId || "").trim();
     let state = storeContext.record ? mediaStoreStateForRecord(storeContext.record) : getMediaStoreState();
-    if (!value || generationSourceReady(state, value, rootSourceId)) return state;
+    if (!value || generationSourceReady(state, value, rootSourceId, requireMaterialized)) return state;
     const startedAt = Date.now();
     const deadline = startedAt + Math.max(1000, Number(timeoutMs) || 8000);
     const targets = [];
@@ -2715,13 +3018,14 @@
       if (id && !targets.includes(id)) targets.push(id);
     };
     addTarget(rootSourceId);
-    addTarget(containerPostIdFor(state, value));
+    addTarget(containerPostIdFor(state, value, rootSourceId));
     addTarget(value);
     pushStoreTrace("store_generation_source_hydration_start", {
       requestId,
       variant,
       sourceId: value,
       targets,
+      requireMaterialized,
     });
     for (const targetId of targets) {
       state = storeContext.record ? mediaStoreStateForRecord(storeContext.record) : getMediaStoreState();
@@ -2733,7 +3037,7 @@
         sleep(Math.max(250, Math.min(4000, deadline - Date.now()))),
       ]);
       state = storeContext.record ? mediaStoreStateForRecord(storeContext.record) : getMediaStoreState();
-      if (generationSourceReady(state, value, rootSourceId)) {
+      if (generationSourceReady(state, value, rootSourceId, requireMaterialized)) {
         pushStoreTrace("store_generation_source_hydration_ready", {
           requestId,
           variant,
@@ -2747,7 +3051,7 @@
     }
     while (Date.now() < deadline) {
       state = storeContext.record ? mediaStoreStateForRecord(storeContext.record) : getMediaStoreState();
-      if (generationSourceReady(state, value, rootSourceId)) {
+      if (generationSourceReady(state, value, rootSourceId, requireMaterialized)) {
         pushStoreTrace("store_generation_source_hydration_ready", {
           requestId,
           variant,
@@ -2786,6 +3090,7 @@
     variant,
     directUpload = false,
     strict = false,
+    requireMaterialized = false,
   }) {
     const source = String(sourceId || "").trim();
     const root = String(rootSourceId || "").trim();
@@ -2805,8 +3110,10 @@
         requestId,
         variant,
         readyRoot,
+        8000,
+        requireMaterialized,
       );
-      if (generationSourceReady(preparedState, source, readyRoot)) return preparedState;
+      if (generationSourceReady(preparedState, source, readyRoot, requireMaterialized)) return preparedState;
       if (attempt === 0) {
         preparedState = await reResolveGenerationSource(
           storeContext,
@@ -2815,7 +3122,7 @@
           requestId,
           variant,
         );
-        readyRoot = containerPostIdFor(preparedState, source) || readyRoot;
+        readyRoot = containerPostIdFor(preparedState, source, readyRoot) || readyRoot;
       }
     }
     pushStoreTrace("store_generation_source_hydration_unconfirmed", {
@@ -2824,9 +3131,10 @@
       sourceId: source,
       rootSourceId: readyRoot,
       strict,
+      requireMaterialized,
     });
     if (strict) {
-      throw new Error("Imagine selected source is not ready in the official media store.");
+      throw new Error("Imagine could not load the selected source from the official page.");
     }
     return preparedState;
   }
@@ -2927,13 +3235,9 @@
       const explicitImageContainerSeedId = String(
         conversationId
         || imageConfig.containerPostId
-        || imageConfig.parentPostId
         || imageConfig.rootPostId
-        || imageConfig.originalPostId
         || payload.containerPostId
-        || payload.parentPostId
         || payload.rootPostId
-        || payload.originalPostId
         || ""
       ).trim();
       if (!startNewConversation && explicitImageContainerSeedId && typeof state.resolveRootContainerForDirectLoad === "function") {
@@ -2956,7 +3260,7 @@
       // 2026-08-14), and following the source's container instead put the result in the
       // t2i batch card the source came from. Only look up a container when continuing.
       const explicitImageContainerId = explicitImageContainerSeedId && !startNewConversation
-        ? containerPostIdFor(state, explicitImageContainerSeedId)
+        ? containerPostIdFor(state, explicitImageContainerSeedId, explicitImageContainerSeedId)
         : "";
       // An account-library i2i source must already be a real Grok asset.  Do not use the
       // URL fallback for it: createMediaPostFromUrl creates an official, source-only post.
@@ -2965,17 +3269,19 @@
       // the selected asset when it is absent from the WebView store.
       const existingImageSourceId = firstExistingPostId(state, inputIds) || inputIds[0] || "";
       const existingImageContainerId = existingImageSourceId
-        ? containerPostIdFor(state, existingImageSourceId)
+        ? containerPostIdFor(state, existingImageSourceId, explicitImageContainerSeedId)
         : "";
-      const containerId = explicitImageContainerId || (
-        directUpload
-          ? (
-            prepareOnly
-              ? (directUploadAssetIds[0] || inputIds[0] || "")
-              : await ensureContainerFromInput(state, "image", prompt, inputIds, urls, "image/png")
-          )
-          : existingImageContainerId
-      );
+      // The official edit call takes the card/container holding the selected image and the
+      // selected image itself as two different ids. Prefer the container discovered from
+      // the child: a conversation id is only a hydration hint and is not always the card
+      // id (standalone saved/clone assets are their own containers).
+      let containerId = directUpload
+        ? (
+          prepareOnly
+            ? (directUploadAssetIds[0] || inputIds[0] || "")
+            : await ensureContainerFromInput(state, "image", prompt, inputIds, urls, "image/png")
+        )
+        : (existingImageContainerId || explicitImageContainerId);
       if (!containerId) throw new Error("Official image edit container could not be resolved.");
       const parentPostId = directUpload ? undefined : (imageConfig.parentPostId || inputIds[0] || containerId);
       // Loading the source into the store is about whether the source exists on grok.com,
@@ -2990,12 +3296,23 @@
         storeContext,
         state,
         sourceId: parentPostId || inputIds[0] || containerId,
-        rootSourceId: containerId,
+        rootSourceId: explicitImageContainerSeedId || containerId,
         requestId,
         variant: variant.kind,
         directUpload,
         strict: true,
       });
+      if (!directUpload) {
+        // Hydration can reveal that a child which initially looked standalone actually
+        // belongs to a root card. Re-resolve after loading so containerPostId never gets
+        // the selected child merely because the relation was cold at call entry.
+        const hydratedImageContainerId = containerPostIdFor(
+          state,
+          parentPostId || inputIds[0] || containerId,
+          explicitImageContainerSeedId || containerId,
+        );
+        if (hydratedImageContainerId) containerId = hydratedImageContainerId;
+      }
       if (!startNewConversation) {
         syncCurrentRootContainer(state, requestId, variant.kind, containerId);
       }
@@ -3006,6 +3323,22 @@
         "fetchGenerateImageEdits",
         [containerId].concat(inputIds, directUploadAssetIds, urls),
       );
+      if (!directUpload) {
+        const finalImageContainerId = containerPostIdFor(
+          state,
+          parentPostId || inputIds[0] || containerId,
+          explicitImageContainerSeedId || containerId,
+        );
+        if (finalImageContainerId) containerId = finalImageContainerId;
+      }
+      assertImageGenerationIdentity(state, {
+        requestId,
+        variant: variant.kind,
+        containerId,
+        sourceId: parentPostId || inputIds[0] || containerId,
+        preferredRootId: explicitImageContainerSeedId || containerId,
+        directUpload,
+      });
       if (!startNewConversation) syncCurrentRootContainer(state, requestId, variant.kind, containerId);
       if (prepareOnly) {
         return {
@@ -3028,9 +3361,13 @@
         prompt: prompt || " ",
         source: "imagine_feed_query_bar",
         isRedo: false,
+        forceNewConversation: startNewConversation || undefined,
       };
       if (!directUpload) {
-        if (!startNewConversation) imageArgs.containerPostId = containerId;
+        // Keep the source root and selected child present even when the result starts a
+        // fresh conversation. The official store has a dedicated force flag for output
+        // placement; removing the root instead conflates that decision with source lookup.
+        imageArgs.containerPostId = containerId;
         imageArgs.parentPostId = parentPostId;
         imageArgs.conversationId = continueExistingConversation ? conversationId : undefined;
         imageArgs.parentResponseId = continueExistingConversation ? parentResponseId : undefined;
@@ -3215,11 +3552,11 @@
         ? (inputIds[0] || videoConfig.extendPostId || videoConfig.parentPostId || "")
         : (inputIds[0] || videoConfig.parentPostId || "");
       const explicitRootSeedId = (variant.kind === "imageToVideo" || variant.kind === "referenceToVideo")
-        ? (conversationId || videoConfig.rootPostId || videoConfig.originalPostId || fileAttachmentIds[0] || "")
+        ? (conversationId || videoConfig.rootPostId || fileAttachmentIds[0] || "")
         : (variant.kind === "videoExtension" ? (conversationId || videoConfig.rootPostId || "") : "");
       const rootSeedId = (variant.kind === "imageToVideo" || variant.kind === "referenceToVideo")
         ? (explicitRootSeedId || videoSeedId)
-        : (videoConfig.rootPostId || videoConfig.originalPostId || videoSeedId);
+        : (videoConfig.rootPostId || videoSeedId);
       if (!prepareOnly && directUpload && !conversationId && videoSeedId && !generationSourceReady(state, videoSeedId) && urls.length > 0) {
         await ensureContainerFromInput(state, "image", prompt, inputIds, urls, "image/png");
         state = storeContext.record ? mediaStoreStateForRecord(storeContext.record) : getMediaStoreState();
@@ -3237,14 +3574,18 @@
           });
         }
       }
-      // Same rule as the image edit above: resolving a container from the source asset files
-      // the video inside whatever conversation that asset lives in. An i2v off a t2i result
-      // landed in the t2i batch card because of this, while grok.com would have opened a new
-      // conversation. Extension is excluded -- it continues its own video's thread, which is
-      // what the site does too.
-      let rootContainerId = (startNewConversation && variant.kind !== "videoExtension")
-        ? ""
-        : rootContainerIdFor(state, explicitRootSeedId || rootSeedId);
+      // The first generateVideoForImage argument is always the loaded source root.
+      // Starting a new output conversation is a separate official argument; blanking
+      // the root here changed valid root/child sources into child/child no-op calls.
+      // Resolve the callable container from the selected child first. Depending on how the
+      // official store materialized the card this is either the child itself (standalone
+      // saved/clone asset) or the root card containing it. conversation/root ids remain
+      // hydration fallbacks, not unconditional replacements for that answer.
+      let rootContainerId = rootContainerIdFor(
+        state,
+        videoSeedId || explicitRootSeedId || rootSeedId,
+        explicitRootSeedId || rootSeedId,
+      );
       let generateVideoMethod = resolveStoreMethod(state, storeContext.record, "generateVideoForImage");
       const stateFunctionNames = listFunctionNames(state);
       const storeFunctionNames = listFunctionNames(storeContext.record?.store);
@@ -3279,21 +3620,25 @@
           : [];
         const existingParentId = firstExistingPostId(state, inputIds);
         parentPostId = directUpload ? undefined : (videoConfig.parentPostId || existingParentId || inputIds[0] || undefined);
-        videoInputAsset = directUploadAssetIds[0] || parentPostId || rawInputAssets[0] || inputIds[0] || undefined;
+        // Official referenceToVideo leaves generateVideoForImage argument 2 empty. Its
+        // sources are the reference URL array; parentPostId remains local readiness state
+        // only and must not leak into the image-to-video parent slot.
+        videoInputAsset = undefined;
         containerId = directUpload
-          ? (rootContainerId || videoInputAsset || await ensureContainerFromInput(
+          ? (rootContainerId || directUploadAssetIds[0] || await ensureContainerFromInput(
             state, "video", prompt, inputIds, urls, "video/mp4", { allowCreate: !prepareOnly },
           ))
-          : (videoInputAsset || parentPostId || rootContainerId || videoConfig.rootPostId || videoConfig.originalPostId);
-        const extraReferenceUrls = explicitReferenceUrls.length > 1
-          ? explicitReferenceUrls.slice(1)
-          : (urls.length > 1 ? urls.slice(1) : []);
-        imageReferences = extraReferenceUrls.length > 0 ? extraReferenceUrls : undefined;
+          : (rootContainerId || videoConfig.rootPostId || parentPostId);
+        const allReferenceUrls = explicitReferenceUrls.length > 0 ? explicitReferenceUrls : urls;
+        imageReferences = allReferenceUrls.length > 0 ? allReferenceUrls : undefined;
       } else if (variant.kind === "videoExtension") {
         extendPostId = inputIds[0] || videoConfig.extendPostId || videoConfig.parentPostId || "";
-        containerId = extendPostId || rootContainerId || videoConfig.rootPostId;
-        videoInputAsset = extendPostId;
-        parentPostId = undefined;
+        containerId = rootContainerId || videoConfig.rootPostId || extendPostId;
+        // For a new extension the official argument 2 is the video's original image when
+        // known, while argument 7 is the selected video child. Never duplicate the video
+        // child into the image-parent slot.
+        parentPostId = videoConfig.parentPostId || videoConfig.originalPostId || undefined;
+        videoInputAsset = parentPostId;
         extendCurrentTime = Number(params.videoExtensionStartTime ?? videoConfig.videoExtensionStartTime ?? 0) || 0;
         imageReferences = undefined;
       } else {
@@ -3304,7 +3649,7 @@
           ? (rootContainerId || videoInputAsset || parentPostId || await ensureContainerFromInput(
             state, "image", prompt, inputIds, urls, "image/png", { allowCreate: !prepareOnly },
           ))
-          : (videoInputAsset || parentPostId || rootContainerId || videoConfig.rootPostId || videoConfig.originalPostId);
+          : (rootContainerId || videoConfig.rootPostId || videoInputAsset || parentPostId);
         if (containerId && videoInputAsset && containerId !== videoInputAsset) {
           pushStoreTrace("store_generation_source_link_skipped", {
             requestId,
@@ -3320,27 +3665,21 @@
       }
 
       if (!containerId) throw new Error("Official video container could not be resolved.");
-      const generationSourceId = () => videoInputAsset || parentPostId || extendPostId || containerId;
+      const generationSourceId = () => (
+        variant.kind === "videoExtension"
+          ? (extendPostId || containerId)
+          : (videoInputAsset || parentPostId || containerId)
+      );
       const generationRootId = () => rootContainerId || containerId;
-      // I2V intentionally starts a new output conversation.  That must not hide
-      // the selected source's existing conversation from the read-only source
-      // preflight; use it only for hydration, not as the output container.
+      // I2V can start a new output conversation while still using the selected
+      // source's existing root for hydration and the official method call.
       const sourceHydrationRootId = () => (
-        rootContainerId || explicitRootSeedId || rootSeedId || containerId
+        explicitRootSeedId || rootSeedId || rootContainerId || containerId
       );
       const needsSourceReadiness = ["imageToVideo", "referenceToVideo", "videoExtension"].includes(variant.kind);
-      if (needsSourceReadiness && !directUpload) {
-        state = await hydrateGenerationSource(
-          storeContext,
-          generationSourceId(),
-          requestId,
-          variant.kind,
-          sourceHydrationRootId(),
-        );
-      }
       let sourceReady = !needsSourceReadiness || (directUpload
         ? Boolean(generationSourceId() && generationRootId())
-        : generationSourceReady(state, generationSourceId(), sourceHydrationRootId()));
+        : generationSourceReady(state, generationSourceId(), sourceHydrationRootId(), true));
       if (!sourceReady) {
         state = await requireGenerationSourceReady({
           storeContext,
@@ -3351,10 +3690,37 @@
           variant: variant.kind,
           directUpload,
           strict: true,
+          requireMaterialized: true,
         });
         sourceReady = true;
       }
+      if (needsSourceReadiness && !directUpload) {
+        // As with image edits, a fetch during readiness may be the operation that exposes
+        // root -> child membership. The official call receives that resolved root as
+        // argument 1; the selected child stays in its variant-specific slot (argument 2
+        // for i2v, the reference array for r2v, or argument 7 for Extend).
+        const hydratedRootContainerId = rootContainerIdFor(
+          state,
+          generationSourceId(),
+          sourceHydrationRootId(),
+        );
+        if (hydratedRootContainerId) {
+          rootContainerId = hydratedRootContainerId;
+          containerId = hydratedRootContainerId;
+        }
+      }
       if (prepareOnly) {
+        assertVideoGenerationIdentity(state, {
+          requestId,
+          variant: variant.kind,
+          containerId,
+          sourceId: generationSourceId(),
+          preferredRootId: sourceHydrationRootId(),
+          videoInputAsset,
+          extendPostId,
+          imageReferences,
+          directUpload,
+        });
         return {
           ok: true,
           status: 200,
@@ -3375,9 +3741,34 @@
         syncCurrentRootContainer(state, requestId, variant.kind, rootContainerId || containerId);
       }
       state = ensureStoreLoginState(state, storeContext.record, requestId, "generateVideoForImage", [containerId, videoInputAsset, parentPostId, extendPostId].concat(videoRequestInputIds, directUploadAssetIds));
+      if (needsSourceReadiness && !directUpload) {
+        // Login reconciliation can replace the state snapshot. Re-derive argument 1
+        // from the same selected source one final time and retain an explicit root
+        // only when this snapshot still proves root -> child membership.
+        const finalRootContainerId = rootContainerIdFor(
+          state,
+          generationSourceId(),
+          sourceHydrationRootId(),
+        );
+        if (finalRootContainerId) {
+          rootContainerId = finalRootContainerId;
+          containerId = finalRootContainerId;
+        }
+      }
       if (!startNewConversation && (variant.kind === "imageToVideo" || variant.kind === "referenceToVideo" || variant.kind === "videoExtension")) {
         syncCurrentRootContainer(state, requestId, variant.kind, rootContainerId || containerId);
       }
+      assertVideoGenerationIdentity(state, {
+        requestId,
+        variant: variant.kind,
+        containerId,
+        sourceId: generationSourceId(),
+        preferredRootId: sourceHydrationRootId(),
+        videoInputAsset,
+        extendPostId,
+        imageReferences,
+        directUpload,
+      });
       generateVideoMethod = resolveStoreMethod(state, storeContext.record, "generateVideoForImage");
       if (!generateVideoMethod.fn && !useOfficialUiAction) throw new Error("Official generateVideoForImage is missing.");
       const beforeIds = allCurrentIds(state, "video");
@@ -3386,7 +3777,7 @@
         : Math.max(3000, Number(maxWaitMs || 90000)));
       const videoTracking = {
         ids: new Set(),
-        sourceId: videoInputAsset || parentPostId || extendPostId || "",
+        sourceId: generationSourceId() || "",
         assetId: directUploadAssetIds[0] || "",
         sourceContainerIds: startNewConversation ? [containerId, rootContainerId, explicitRootSeedId].filter(Boolean) : [],
         containerSeedIds: [containerId, rootContainerId, explicitRootSeedId].filter(Boolean),
@@ -3398,6 +3789,9 @@
         retainTrackedCandidateUntilDeadline: tieredI2vWait || variant.kind === "textToVideo",
         noCandidateMaxMs: tieredI2vWait ? 0 : 10000,
         noCandidateSince: 0,
+        requestStartMaxMs: 5000,
+        requestWatchStartedAt: 0,
+        requestNotStarted: false,
         baseDeadlineAt,
         absoluteDeadlineAt: tieredI2vWait ? baseDeadlineAt : baseDeadlineAt + 15000,
         lateCandidateGraceMs: tieredI2vWait ? 0 : 15000,
@@ -3407,7 +3801,7 @@
         firstCandidateSeenAt: 0,
         lastGraceLogAt: 0,
         moderatedSeenAt: 0,
-        moderatedStableAt: 0,
+        provisionalModerationLogged: false,
         globalModerationArmed: !Boolean(state?.videoGenModerated),
       };
       pushStoreTrace("store_generation_wait_policy", {
@@ -3422,12 +3816,26 @@
         baseDeadlineAt: videoTracking.baseDeadlineAt,
         absoluteDeadlineAt: videoTracking.absoluteDeadlineAt,
         noCandidateMaxMs: videoTracking.noCandidateMaxMs,
+        requestStartMaxMs: videoTracking.requestStartMaxMs,
         lateCandidateGraceMs: videoTracking.lateCandidateGraceMs,
         candidateStabilizeMs: videoTracking.candidateStabilizeMs,
         storeObservationMs: videoTracking.storeObservationMs,
         startNewConversation,
       });
       videoGenerationPreflight(state, containerId, videoInputAsset, requestId);
+      if (
+        needsSourceReadiness
+        && !directUpload
+        && !generationSourceReady(state, generationSourceId(), sourceHydrationRootId(), true)
+      ) {
+        pushStoreTrace("store_generation_video_source_not_materialized", {
+          requestId,
+          variant: variant.kind,
+          sourceId: generationSourceId(),
+          rootSourceId: sourceHydrationRootId(),
+        });
+        throw new Error("Imagine could not load the selected source from the official page; generation was not sent.");
+      }
       const onVideoGenerationStart = (inflightId) => {
         const callbackState = mediaStoreStateForRecord(storeContext.record);
         addTrackedVideoId(videoTracking, callbackState, inflightId);
@@ -3457,6 +3865,8 @@
         isRedo,
         imageReferences,
         onVideoGenerationStart,
+        undefined,
+        startNewConversation || undefined,
         videoRequestMediaGenInput
       ];
       const activeConversationRoute = continueExistingConversation
@@ -3489,6 +3899,7 @@
         args,
       });
       let callState;
+      videoTracking.requestWatchStartedAt = Date.now();
       if (useOfficialUiAction) {
         callState = await clickOfficialVideoAction({ requestId, variant: variant.kind, prompt });
       } else {
@@ -3520,6 +3931,10 @@
         videoRequestInputIds,
         videoResponseCapture,
       );
+      if (videoTracking.requestNotStarted) {
+        releaseGenerationResponseCapture(videoResponseCapture);
+        throw new Error("Imagine video generation did not start on the official page; no generation request was sent.");
+      }
       const videoRateLimitError = finalRateLimitedStoreCallError(callState, resultEvents, "video");
       if (videoRateLimitError) {
         releaseGenerationResponseCapture(videoResponseCapture);
@@ -3561,8 +3976,8 @@
         events: events.concat(resultEvents),
         canonicalContainerId,
         resolvedContainerId: canonicalContainerId || containerId,
-        resolvedParentPostId: parentPostId || videoInputAsset || extendPostId || "",
-        sourceContainerId: rootContainerId || videoConfig.rootPostId || videoConfig.originalPostId || "",
+        resolvedParentPostId: generationSourceId() || "",
+        sourceContainerId: rootContainerId || videoConfig.rootPostId || containerId || "",
         baselineIds: Array.from(beforeIds),
         elapsedMs: Date.now() - startedAt,
         bridgeStatus: this.status(),

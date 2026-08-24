@@ -25,6 +25,9 @@ const BUILD_PREVIEW_CACHE_REVISION = "2";
 // Detail work gets its own slots instead of competing for those four.
 const CARD_PREVIEW_DETAIL_MAX_ACTIVE = 2;
 const DETAIL_THUMB_SELECTOR = ".i_detail_thumb, .b_detail_thumb";
+// Currently unused: Lucky card/detail badges belonged to the retired moderation
+// recovery flow. Keep the readers and renderers, but ignore both new and stored flags.
+const LEGACY_LUCKY_BADGES_ENABLED = false;
 const nativeCardPreviewQueue = [];
 let activeNativeCardPreviewTasks = 0;
 let activeDetailCardPreviewTasks = 0;
@@ -44,6 +47,7 @@ function detailItemType(item) {
 }
 
 function mediaItemLucky(item) {
+  if (!LEGACY_LUCKY_BADGES_ENABLED) return false;
   const metadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
   const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
   return Boolean(item?.lucky || item?.lucky_recovery || metadata.lucky || imagine.lucky);
@@ -56,6 +60,8 @@ function postHasLucky(post, item = null) {
 }
 
 function appendLuckyBadge(host, item, post = null, className = "") {
+  // Currently unused. Retain the legacy badge renderer without attaching it to the UI.
+  if (!LEGACY_LUCKY_BADGES_ENABLED) return null;
   if (!host || !postHasLucky(post, item)) return null;
   const badge = document.createElement("span");
   badge.className = `lucky_badge${className ? ` ${className}` : ""}`;
