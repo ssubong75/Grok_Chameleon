@@ -30,6 +30,10 @@ const IMAGINE_BRIDGE_ASSUMED_WINDOW_BYTES = 480 * 1024 * 1024;
 const IMAGINE_BRIDGE_MAX_ACCOUNT_WINDOWS = 40;
 const IMAGINE_BRIDGE_NETWORK_BUFFER_BYTES = 50 * 1024 * 1024;
 const IMAGINE_BRIDGE_NETWORK_RESOURCE_BUFFER_BYTES = 10 * 1024 * 1024;
+// The generation-response filter identifies only Imagine requests by modelName in
+// the request JSON.  CDP omits postData unless a limit is explicitly supplied.
+// 64 KiB covers the JSON request while avoiding buffering image-upload bodies.
+const IMAGINE_BRIDGE_NETWORK_POST_DATA_BYTES = 64 * 1024;
 const IMAGINE_BRIDGE_SCRIPT_TIMEOUT_MS = 3000;
 const IMAGINE_BRIDGE_PREPARE_TIMEOUT_MS = 30000;
 
@@ -1795,11 +1799,404 @@ async function applyBridgeCookies(win, command, options = {}) {
   return true;
 }
 
+// A direct connection to each Grok page is intentionally used instead of
+// webContents.debugger.  The latter attaches successfully but did not emit the
+// official app-chat Fetch request at all, which left I2V waiting for Saved
+// recovery.  A remote DevTools page target sees the same Network events as the
+// official-network tracker and can evaluate the captured response in that
+// exact renderer.
+const imagineExternalGenerationCapture = {
+  started: false,
+  stopped: false,
+  discoveryInFlight: false,
+  timer: null,
+  targets: new Map(),
+  lastDiscoveryError: "",
+};
+
+function cdpTextFromMessage(data) {
+  if (typeof data === "string") return data;
+  if (data instanceof ArrayBuffer) return Buffer.from(data).toString("utf8");
+  if (ArrayBuffer.isView(data)) return Buffer.from(data.buffer, data.byteOffset, data.byteLength).toString("utf8");
+  return String(data || "");
+}
+
+function createRemoteCdpClient(wsUrl, onEvent, onClose) {
+  if (typeof WebSocket !== "function") throw new Error("WebSocket is unavailable in the Electron main process.");
+  let nextId = 1;
+  let settled = false;
+  const pending = new Map();
+  const socket = new WebSocket(wsUrl);
+  let resolveReady;
+  let rejectReady;
+  const ready = new Promise((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
+  });
+
+  function rejectPending(error) {
+    for (const { reject, timer } of pending.values()) {
+      clearTimeout(timer);
+      reject(error);
+    }
+    pending.clear();
+  }
+
+  function close(error = new Error("CDP websocket closed.")) {
+    if (!settled) {
+      settled = true;
+      rejectReady(error);
+    }
+    rejectPending(error);
+    try {
+      if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) socket.close();
+    } catch (_) {}
+  }
+
+  socket.addEventListener("open", () => {
+    if (settled) return;
+    settled = true;
+    resolveReady();
+  }, { once: true });
+  socket.addEventListener("error", () => {
+    if (!settled) {
+      settled = true;
+      rejectReady(new Error("CDP websocket open failed."));
+    }
+  });
+  socket.addEventListener("close", () => {
+    const error = new Error("CDP websocket closed.");
+    if (!settled) {
+      settled = true;
+      rejectReady(error);
+    }
+    rejectPending(error);
+    try {
+      onClose?.();
+    } catch (_) {}
+  }, { once: true });
+  socket.addEventListener("message", (event) => {
+    let message = null;
+    try {
+      message = JSON.parse(cdpTextFromMessage(event.data));
+    } catch (_) {
+      return;
+    }
+    if (message?.id && pending.has(message.id)) {
+      const record = pending.get(message.id);
+      pending.delete(message.id);
+      clearTimeout(record.timer);
+      if (message.error) {
+        record.reject(new Error(message.error.message || JSON.stringify(message.error)));
+      } else {
+        record.resolve(message.result || {});
+      }
+      return;
+    }
+    if (message?.method) {
+      try {
+        onEvent?.(message.method, message.params || {});
+      } catch (error) {
+        appendLog(`external CDP generation event failed error=${error.message || String(error)}`);
+      }
+    }
+  });
+
+  async function call(method, params = {}, timeoutMs = IMAGINE_EXTERNAL_CDP_CALL_TIMEOUT_MS) {
+    await ready;
+    if (socket.readyState !== WebSocket.OPEN) throw new Error("CDP websocket is not open.");
+    const id = nextId++;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        reject(new Error(`CDP ${method} timed out.`));
+      }, timeoutMs);
+      pending.set(id, { resolve, reject, timer });
+      try {
+        socket.send(JSON.stringify({ id, method, params }));
+      } catch (error) {
+        pending.delete(id);
+        clearTimeout(timer);
+        reject(error);
+      }
+    });
+  }
+
+  return { ready, call, close };
+}
+
+function isImagineGenerationConversationRequest(request = {}) {
+  let endpoint = "";
+  try {
+    endpoint = new URL(String(request.url || "")).pathname;
+  } catch (_) {}
+  if (
+    String(request.method || "").toUpperCase() !== "POST"
+    || !/^\/rest\/app-chat\/conversations\/(?:new|[^/]+\/responses)$/.test(endpoint)
+  ) return { endpoint, requestBody: null, matched: false };
+  let requestBody = null;
+  try {
+    requestBody = JSON.parse(String(request.postData || ""));
+  } catch (_) {}
+  // Chrome can omit postData for this Fetch.  The renderer only accepts such a
+  // response while it has one active Imagine generation capture.
+  const modelName = String(requestBody?.modelName || "");
+  return {
+    endpoint,
+    requestBody,
+    matched: !modelName || /^imagine-(?:video-gen|image-edit)$/.test(modelName),
+  };
+}
+
+function appendExternalGenerationResponseChunk(record, encodedChunk) {
+  const raw = String(encodedChunk || "");
+  if (!raw) return;
+  try {
+    const decoded = Buffer.from(raw, "base64").toString("utf8");
+    if (decoded) record.chunks.push(decoded);
+  } catch (_) {}
+}
+
+async function deliverExternalGenerationResponse(entry, record, requestId) {
+  try {
+    await record.streamPromise;
+  } catch (_) {}
+  let body = record.chunks.join("");
+  if (!body) {
+    try {
+      const result = await entry.client.call("Network.getResponseBody", { requestId });
+      body = result?.base64Encoded
+        ? Buffer.from(String(result.body || ""), "base64").toString("utf8")
+        : String(result?.body || "");
+    } catch (error) {
+      appendLog(`external CDP generation fallback read failed error=${error.message || String(error)}`);
+    }
+  }
+  if (!body) {
+    appendLog(`external CDP generation body missing endpoint=${record.endpoint || ""} target=${entry.targetId}`);
+    return;
+  }
+  const payload = JSON.stringify({
+    endpoint: record.endpoint,
+    requestBody: record.requestBody,
+    status: record.status,
+    body,
+  });
+  const result = await entry.client.call("Runtime.evaluate", {
+    expression: `(() => {
+      const bridge = window.__grokChameleonImagineBridge;
+      if (!bridge || typeof bridge.acceptGenerationNetworkResponse !== 'function') {
+        return { matched: false, error: 'generation response receiver missing' };
+      }
+      return bridge.acceptGenerationNetworkResponse(${payload});
+    })()`,
+    awaitPromise: true,
+    returnByValue: true,
+  });
+  const accepted = result?.result?.value || {};
+  appendLog(
+    `external CDP generation response delivered endpoint=${record.endpoint || ""} target=${entry.targetId} bytes=${Buffer.byteLength(body)} matched=${Boolean(accepted?.matched)} events=${Number(accepted?.eventCount || 0)}`
+  );
+}
+
+function handleExternalGenerationCdpEvent(entry, method, params = {}) {
+  if (method === "Network.requestWillBeSent") {
+    const match = isImagineGenerationConversationRequest(params.request || {});
+    if (!match.matched) return;
+    entry.pending.set(params.requestId, {
+      endpoint: match.endpoint,
+      requestBody: match.requestBody,
+      status: 0,
+      chunks: [],
+      streamPromise: Promise.resolve(),
+    });
+    appendLog(`external CDP generation request observed endpoint=${match.endpoint} target=${entry.targetId}`);
+    return;
+  }
+  if (method === "Network.responseReceived") {
+    const record = entry.pending.get(params.requestId);
+    if (!record) return;
+    record.status = Number(params.response?.status || 0);
+    record.streamPromise = entry.client.call("Network.streamResourceContent", {
+      requestId: params.requestId,
+    }).then((result) => {
+      appendExternalGenerationResponseChunk(record, result?.bufferedData || "");
+    }).catch((error) => {
+      appendLog(`external CDP generation stream failed error=${error.message || String(error)}`);
+    });
+    return;
+  }
+  if (method === "Network.dataReceived") {
+    const record = entry.pending.get(params.requestId);
+    if (record && params.data) appendExternalGenerationResponseChunk(record, params.data);
+    return;
+  }
+  if (method === "Network.loadingFailed") {
+    entry.pending.delete(params.requestId);
+    return;
+  }
+  if (method !== "Network.loadingFinished") return;
+  const record = entry.pending.get(params.requestId);
+  if (!record) return;
+  entry.pending.delete(params.requestId);
+  deliverExternalGenerationResponse(entry, record, params.requestId).catch((error) => {
+    appendLog(`external CDP generation response capture failed error=${error.message || String(error)}`);
+  });
+}
+
+function attachExternalGenerationCdpTarget(target) {
+  const targetId = String(target?.id || "");
+  const wsUrl = String(target?.webSocketDebuggerUrl || "");
+  if (!targetId || !wsUrl || imagineExternalGenerationCapture.targets.has(targetId)) return;
+  const entry = { targetId, client: null, pending: new Map(), closed: false };
+  imagineExternalGenerationCapture.targets.set(targetId, entry);
+  try {
+    entry.client = createRemoteCdpClient(
+      wsUrl,
+      (method, params) => handleExternalGenerationCdpEvent(entry, method, params),
+      () => {
+        entry.pending.clear();
+        if (imagineExternalGenerationCapture.targets.get(targetId) === entry) {
+          imagineExternalGenerationCapture.targets.delete(targetId);
+        }
+      },
+    );
+  } catch (error) {
+    imagineExternalGenerationCapture.targets.delete(targetId);
+    appendLog(`external CDP generation target open failed error=${error.message || String(error)}`);
+    return;
+  }
+  entry.client.ready.then(async () => {
+    await entry.client.call("Network.enable", {
+      maxTotalBufferSize: IMAGINE_EXTERNAL_CDP_TOTAL_BUFFER_BYTES,
+      maxResourceBufferSize: IMAGINE_EXTERNAL_CDP_RESOURCE_BUFFER_BYTES,
+      maxPostDataSize: IMAGINE_BRIDGE_NETWORK_POST_DATA_BYTES,
+    });
+    appendLog(`external CDP generation target attached target=${targetId}`);
+  }).catch((error) => {
+    appendLog(`external CDP generation target enable failed error=${error.message || String(error)}`);
+    entry.client.close();
+  });
+}
+
+async function discoverExternalGenerationCdpTargets() {
+  if (imagineExternalGenerationCapture.stopped || imagineExternalGenerationCapture.discoveryInFlight) return;
+  imagineExternalGenerationCapture.discoveryInFlight = true;
+  try {
+    const response = await fetch(`http://127.0.0.1:${CDP_PORT}/json/list`, {
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const targets = await response.json();
+    const grokTargets = Array.isArray(targets) ? targets.filter((target) => (
+      target?.type === "page"
+      && /^https:\/\/grok\.com(?:\/|$)/.test(String(target?.url || ""))
+      && typeof target?.webSocketDebuggerUrl === "string"
+    )) : [];
+    const activeIds = new Set(grokTargets.map((target) => String(target.id || "")));
+    for (const [targetId, entry] of imagineExternalGenerationCapture.targets) {
+      if (activeIds.has(targetId)) continue;
+      entry.pending.clear();
+      entry.client?.close();
+      imagineExternalGenerationCapture.targets.delete(targetId);
+    }
+    for (const target of grokTargets) attachExternalGenerationCdpTarget(target);
+    imagineExternalGenerationCapture.lastDiscoveryError = "";
+  } catch (error) {
+    const detail = error.message || String(error);
+    if (detail !== imagineExternalGenerationCapture.lastDiscoveryError) {
+      imagineExternalGenerationCapture.lastDiscoveryError = detail;
+      appendLog(`external CDP generation discovery unavailable port=${CDP_PORT} error=${detail}`);
+    }
+  } finally {
+    imagineExternalGenerationCapture.discoveryInFlight = false;
+  }
+}
+
+function startExternalGenerationCdpCapture() {
+  if (imagineExternalGenerationCapture.started) return;
+  imagineExternalGenerationCapture.started = true;
+  imagineExternalGenerationCapture.stopped = false;
+  void discoverExternalGenerationCdpTargets();
+  imagineExternalGenerationCapture.timer = setInterval(() => {
+    void discoverExternalGenerationCdpTargets();
+  }, IMAGINE_EXTERNAL_CDP_DISCOVERY_MS);
+}
+
+function stopExternalGenerationCdpCapture() {
+  imagineExternalGenerationCapture.stopped = true;
+  if (imagineExternalGenerationCapture.timer) clearInterval(imagineExternalGenerationCapture.timer);
+  imagineExternalGenerationCapture.timer = null;
+  for (const entry of imagineExternalGenerationCapture.targets.values()) {
+    entry.pending.clear();
+    entry.client?.close();
+  }
+  imagineExternalGenerationCapture.targets.clear();
+}
+
+function installUnusedExternalGenerationCdpCapture(win) {
+  if (!win || win.isDestroyed() || win.__grokGenerationNetworkCaptureInstalled) return;
+  win.__grokGenerationNetworkCaptureInstalled = true;
+  startExternalGenerationCdpCapture();
+}
+
 function installImagineGenerationNetworkCapture(win) {
   if (!win || win.isDestroyed() || win.__grokGenerationNetworkCaptureInstalled) return;
   win.__grokGenerationNetworkCaptureInstalled = true;
   const pending = new Map();
   const debuggerApi = win.webContents.debugger;
+
+  function appendGenerationResponseChunk(record, encodedChunk) {
+    const raw = String(encodedChunk || "");
+    if (!raw) return;
+    // Network.streamResourceContent returns base64 chunks.  Do not wait for
+    // loadingFinished to ask Chrome for the body: with Grok's HTTP/3 JSON stream
+    // that late read can be empty even though the stream carried the verdict.
+    try {
+      const decoded = Buffer.from(raw, "base64").toString("utf8");
+      if (decoded) record.chunks.push(decoded);
+    } catch (_) {}
+  }
+
+  async function deliverGenerationResponse(record, requestId) {
+    try {
+      await record.streamPromise;
+    } catch (_) {}
+    let body = record.chunks.join("");
+    if (!body) {
+      try {
+        const result = await debuggerApi.sendCommand("Network.getResponseBody", { requestId });
+        body = result?.base64Encoded
+          ? Buffer.from(String(result.body || ""), "base64").toString("utf8")
+          : String(result?.body || "");
+      } catch (error) {
+        appendLog(`bridge generation response fallback read failed error=${error.message || String(error)}`);
+      }
+    }
+    if (!body || !win || win.isDestroyed()) {
+      appendLog(`bridge generation response body missing endpoint=${record.endpoint || ""}`);
+      return;
+    }
+    const payload = JSON.stringify({
+      endpoint: record.endpoint,
+      requestBody: record.requestBody,
+      status: record.status,
+      body,
+    });
+    const accepted = await win.webContents.executeJavaScript(`
+      (() => {
+        const bridge = window.__grokChameleonImagineBridge;
+        if (!bridge || typeof bridge.acceptGenerationNetworkResponse !== 'function') {
+          return { matched: false, error: 'generation response receiver missing' };
+        }
+        return bridge.acceptGenerationNetworkResponse(${payload});
+      })()
+    `, true);
+    appendLog(
+      `bridge generation response delivered endpoint=${record.endpoint || ""} bytes=${Buffer.byteLength(body)} matched=${Boolean(accepted?.matched)} events=${Number(accepted?.eventCount || 0)}`
+    );
+  }
+
   try {
     if (!debuggerApi.isAttached()) debuggerApi.attach("1.3");
   } catch (error) {
@@ -1821,17 +2218,36 @@ function installImagineGenerationNetworkCapture(win) {
       try {
         requestBody = JSON.parse(String(request.postData || ""));
       } catch (_) {}
-      if (!/^imagine-(?:video-gen|image-edit)$/.test(String(requestBody?.modelName || ""))) return;
+      // CDP can still omit or truncate postData even with maxPostDataSize.  In that
+      // case keep this conversation response and let the renderer bind it to its
+      // one active generation capture.  A readable non-Imagine request is still
+      // rejected here, so ordinary Grok chat responses never enter this path.
+      if (requestBody && !/^imagine-(?:video-gen|image-edit)$/.test(String(requestBody.modelName || ""))) return;
       pending.set(params.requestId, {
         endpoint,
         requestBody,
         status: 0,
+        chunks: [],
+        streamPromise: Promise.resolve(),
       });
       return;
     }
     if (method === "Network.responseReceived") {
       const record = pending.get(params.requestId);
-      if (record) record.status = Number(params.response?.status || 0);
+      if (!record) return;
+      record.status = Number(params.response?.status || 0);
+      record.streamPromise = debuggerApi.sendCommand("Network.streamResourceContent", {
+        requestId: params.requestId,
+      }).then((result) => {
+        appendGenerationResponseChunk(record, result?.bufferedData || "");
+      }).catch((error) => {
+        appendLog(`bridge generation response stream failed error=${error.message || String(error)}`);
+      });
+      return;
+    }
+    if (method === "Network.dataReceived") {
+      const record = pending.get(params.requestId);
+      if (record && params.data) appendGenerationResponseChunk(record, params.data);
       return;
     }
     if (method === "Network.loadingFailed") {
@@ -1842,27 +2258,7 @@ function installImagineGenerationNetworkCapture(win) {
     const record = pending.get(params.requestId);
     if (!record) return;
     pending.delete(params.requestId);
-    debuggerApi.sendCommand("Network.getResponseBody", { requestId: params.requestId }).then((result) => {
-      if (!win || win.isDestroyed()) return;
-      const body = result?.base64Encoded
-        ? Buffer.from(String(result.body || ""), "base64").toString("utf8")
-        : String(result?.body || "");
-      const payload = JSON.stringify({
-        endpoint: record.endpoint,
-        requestBody: record.requestBody,
-        status: record.status,
-        body,
-      });
-      return win.webContents.executeJavaScript(`
-        (() => {
-          const bridge = window.__grokChameleonImagineBridge;
-          if (!bridge || typeof bridge.acceptGenerationNetworkResponse !== 'function') {
-            return { matched: false, error: 'generation response receiver missing' };
-          }
-          return bridge.acceptGenerationNetworkResponse(${payload});
-        })()
-      `, true);
-    }).catch((error) => {
+    deliverGenerationResponse(record, params.requestId).catch((error) => {
       appendLog(`bridge generation response capture failed error=${error.message || String(error)}`);
     });
   });
@@ -1890,6 +2286,7 @@ function enableBridgeNetworkCapture(win) {
   debuggerApi.sendCommand("Network.enable", {
     maxTotalBufferSize: IMAGINE_BRIDGE_NETWORK_BUFFER_BYTES,
     maxResourceBufferSize: IMAGINE_BRIDGE_NETWORK_RESOURCE_BUFFER_BYTES,
+    maxPostDataSize: IMAGINE_BRIDGE_NETWORK_POST_DATA_BYTES,
   }).catch((error) => {
     win.__grokNetworkCaptureEnabled = false;
     appendLog(`bridge generation response capture enable failed error=${error.message || String(error)}`);

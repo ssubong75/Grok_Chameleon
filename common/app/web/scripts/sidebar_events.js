@@ -139,7 +139,16 @@ document.getElementById("titleImagineBtn")?.addEventListener("click", async () =
   if (titleRefreshInProgress) return;
   titleRefreshInProgress = true;
   try {
-    await refreshCurrentMainView();
+    const screenId = screen_state.account_visible ? "account" : screen_state.current_screen;
+    const savedIsCurrentView = Boolean(
+      screenId === "i_main"
+      && library_state.iMainView === imagineViewValue("IMAGINE", "imagine")
+    );
+    // The title is the global Grok Imagine refresh control. Always reconcile the
+    // selected account's complete official Saved feed first, even when the user is
+    // currently looking at detail, search, Liked, Upload, or another screen.
+    await refreshImagineSavedMain();
+    if (!savedIsCurrentView) await refreshCurrentMainView();
   } catch (error) {
     setLibraryMessage(error.message || "Refresh failed.");
   } finally {
