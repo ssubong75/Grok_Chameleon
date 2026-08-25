@@ -55,8 +55,6 @@ jobs:
             --enable-parser=h264,hevc,mjpeg \
             --enable-encoder=mjpeg \
             --enable-filter=scale \
-            --enable-small \
-            --disable-x86asm \
             --extra-ldflags="-static -static-libgcc" \
             | tee configure.out
 
