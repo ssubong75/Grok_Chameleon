@@ -1805,6 +1805,36 @@ html.platform-macos .detail_job_badge {
   transform: translateY(-1px);
 }
 
+/* Windows only: match the card grid's delete_x_icon shape/size instead of the "×"
+   glyph -- same red circle and same #ffdada color, just the mark itself redrawn. */
+html.platform-windows .detail_job_badge.failed .detail_job_badge_label {
+  position: relative;
+  width: 16px;
+  height: 16px;
+  font-size: 0;
+  transform: none;
+}
+
+html.platform-windows .detail_job_badge.failed .detail_job_badge_label::before,
+html.platform-windows .detail_job_badge.failed .detail_job_badge_label::after {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 16px;
+  height: 3px;
+  border-radius: 999px;
+  background: #ffdada;
+  content: "";
+}
+
+html.platform-windows .detail_job_badge.failed .detail_job_badge_label::before {
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+
+html.platform-windows .detail_job_badge.failed .detail_job_badge_label::after {
+  transform: translate(-50%, -50%) rotate(-45deg);
+}
+
 .detail_job_thumb {
   isolation: isolate;
 }
