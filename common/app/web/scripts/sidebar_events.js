@@ -58,11 +58,15 @@ function cardListForRefreshScreen(screenId) {
 }
 
 function showMainRefreshLoading(screenId) {
-  if (screenId === "i_main") {
+  // These screens own keyed or virtual lists. Replacing their DOM from outside the
+  // renderer breaks the stable-card cache and causes the exact flash refresh is avoiding,
+  // so append a loading node instead of wiping the list.
+  if (["i_main", "i_discover_main", "b_main", "collection_main", "2nd_main"].includes(screenId)) {
     const list = cardListForRefreshScreen(screenId);
-    if (!list || list.querySelector(":scope > .imagine_title_refresh_loading")) return;
-    // Keep the keyed cards intact while making an explicit title refresh visible.
-    const loading = emptyLibraryNode("Loading...");
+    // virtual_card_loading also matches the list's own paging/initial-load indicator, so this
+    // skips adding a second one when that's already showing.
+    if (!list || list.querySelector(":scope > .virtual_card_loading")) return;
+    const loading = emptyLibraryNode("Loading . . .");
     loading.classList.add(
       "discover_loading_more",
       "virtual_card_loading",
@@ -71,11 +75,6 @@ function showMainRefreshLoading(screenId) {
     loading.setAttribute("role", "status");
     loading.setAttribute("aria-live", "polite");
     list.append(loading);
-    return;
-  }
-  // These screens own keyed or virtual lists. Replacing their DOM from outside the
-  // renderer breaks the stable-card cache and causes the exact flash refresh is avoiding.
-  if (["i_discover_main", "b_main", "collection_main", "2nd_main"].includes(screenId)) {
     return;
   }
   const list = cardListForRefreshScreen(screenId);
