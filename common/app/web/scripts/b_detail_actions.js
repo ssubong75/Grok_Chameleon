@@ -117,7 +117,9 @@ function handleBuildDetailThumbAction(thumb) {
 async function deleteBuildSelectedDetailItemFromLibrary() {
   const post = selectedLibraryPost();
   const item = selectedDetailItem(post);
-  if (selectedBuildJob()) {
+  const job = selectedBuildJob();
+  const jobSourceItem = job ? generationJobSourceItem(job, post, null) : null;
+  if (job && jobSourceItem && mediaItemKey(jobSourceItem) === mediaItemKey(item)) {
     showErrorPanel("Delete unavailable", "Cancel or dismiss the current generation first.");
     return;
   }
