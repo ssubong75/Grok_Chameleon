@@ -73,6 +73,20 @@ jobs:
           ./ffmpeg -hide_banner -filters  | grep -q " scale "
           ls -l ffmpeg
 
+      - name: Functional check -- decode+scale+mjpeg against a real h264 source
+        run: |
+          set -e
+          brew install ffmpeg
+          ffmpeg -hide_banner -loglevel error -y -f lavfi -i "testsrc=size=1280x720:rate=30" \
+            -t 1 -c:v libx264 -pix_fmt yuv420p -movflags +faststart test_source.mp4
+          cd src
+          ./ffmpeg -hide_banner -loglevel error -nostdin -y \
+            -i ../test_source.mp4 \
+            -map 0:v:0 -an -sn -dn -frames:v 1 \
+            -vf "scale=960:960:force_original_aspect_ratio=decrease" \
+            -q:v 3 poster.jpg
+          ls -l poster.jpg
+
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
@@ -80,4 +94,5 @@ jobs:
           path: |
             src/ffmpeg
             src/COPYING.LGPLv2.1
+            src/poster.jpg
           if-no-files-found: error
