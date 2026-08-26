@@ -306,6 +306,10 @@ async function submitBuildComposer() {
     pruneComposerAttachmentsForMode();
     const lockedAttachments = [...composerAttachments];
     const primarySource = buildPrimarySubmissionAttachment(lockedAttachments);
+    // buildPrimarySubmissionAttachment() already returns the FIRST matching attachment
+    // (attach order = array order), which is the lineage parent (e.g. the start image of
+    // an i2v). Any additional attachment (a style/character reference) is never picked up
+    // here, so it never becomes a parent.
     const sourcePostPath = buildAttachmentSubmissionPostPath(primarySource);
     const sourceItemId = buildAttachmentSubmissionItemId(primarySource);
     const preview = primarySource
@@ -345,6 +349,18 @@ async function submitBuildComposer() {
     if (data?.job) {
       if (pendingJob) discardPendingBuildJob(pendingJob.id, false);
       upsertBuildJob(data.job);
+      if (sourcePostPath) {
+        // 서버는 방금 이 업로드 post를 build_visible로 바꿨다(새 job의 부모가 됐으므로).
+        // 인덱스 모드의 빌드메인 목록은 library_state.posts가 아니라 indexedBuildPosts를
+        // 그리므로, 그 배열을 다시 받아와야 생성중 카드가 즉시 보인다.
+        if (typeof loadIndexedBuildPosts === "function" && library_state.libraryIndexEnabled) {
+          loadIndexedBuildPosts({ force: true })
+            .then(() => renderSourceCards("build"))
+            .catch(() => {});
+        } else if (typeof loadIndexedPost === "function") {
+          loadIndexedPost(sourcePostPath).then(() => renderSourceCards("build")).catch(() => {});
+        }
+      }
       if (isTextToImage) {
         showBuildMainNow();
       } else {

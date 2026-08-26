@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 LIST_SUMMARY_VERSION = 2
 STATE_DIRECTORY = "sql_data"
 DATABASE_FILENAME = "library_index.sqlite3"
@@ -85,6 +85,7 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL,
             activity_at TEXT NOT NULL DEFAULT '',
             build_visible INTEGER NOT NULL DEFAULT 0,
+            job_parent_visible INTEGER NOT NULL DEFAULT 0,
             favorite INTEGER NOT NULL DEFAULT 0,
             order_value INTEGER NOT NULL DEFAULT 0,
             grid_slot INTEGER NOT NULL DEFAULT 0,
@@ -98,6 +99,8 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             ON library_posts(area, created_at DESC, path);
         CREATE INDEX IF NOT EXISTS library_posts_build_idx
             ON library_posts(build_visible, area, created_at DESC, path);
+        CREATE INDEX IF NOT EXISTS library_posts_job_parent_idx
+            ON library_posts(job_parent_visible, area, activity_at DESC, path);
         CREATE INDEX IF NOT EXISTS library_posts_path_key_idx
             ON library_posts(path_key);
         CREATE INDEX IF NOT EXISTS library_posts_collection_idx
@@ -405,6 +408,22 @@ def _is_build_visible(post: dict) -> bool:
     return any(_item_has_build_media(item) for item in (post.get("items") or []) if isinstance(item, dict))
 
 
+def _is_job_parent_visible(post: dict, active_source_paths: frozenset[str] = frozenset()) -> bool:
+    """살아있는 build job의 소스(부모)로 참조되는 업로드 원본인지.
+
+    build_visible과 분리해서 관리한다. build_visible은 컬렉션 목록·카운트 등
+    여러 쿼리가 공유하므로, 거기에 업로드를 섞으면 그 화면들까지 오염된다.
+    이 플래그는 빌드메인(컬렉션 끔) 목록에서만 합쳐 쓴다.
+    """
+    if str(post.get("area") or "") != "upload":
+        return False
+    # 모더/실패 이력은 post.json에 영구 기록되므로 job 메모리와 무관하게 유지된다.
+    if post.get("build_job_failed"):
+        return True
+    path = str(post.get("folder_path") or "").replace("\\", "/").strip("/")
+    return bool(path) and path in active_source_paths
+
+
 def _list_item(item: dict | None) -> dict:
     if not isinstance(item, dict):
         return {}
@@ -521,7 +540,7 @@ def _post_list_summary(post: dict) -> dict:
     return summary
 
 
-def _post_row(post: dict) -> tuple:
+def _post_row(post: dict, active_source_paths: frozenset[str] = frozenset()) -> tuple:
     path = str(post.get("folder_path") or "").replace("\\", "/").strip("/")
     parent_path = _parent_path(path)
     return (
@@ -538,6 +557,7 @@ def _post_row(post: dict) -> tuple:
         str(post.get("created_at") or ""),
         post_activity_at(post),
         1 if _is_build_visible(post) else 0,
+        1 if _is_job_parent_visible(post, active_source_paths) else 0,
         1 if (post.get("build_favorite") or post.get("favorite") or post.get("liked")) else 0,
         _safe_int(post.get("order"), 0),
         _safe_int(post.get("grid_slot"), 0),
@@ -562,8 +582,16 @@ def _collection_row(collection: dict, post_count: int | None = None) -> tuple:
     )
 
 
-def _insert_posts(connection: sqlite3.Connection, posts: list[dict]) -> None:
-    rows = [_post_row(post) for post in posts if str(post.get("folder_path") or "").strip()]
+def _insert_posts(
+    connection: sqlite3.Connection,
+    posts: list[dict],
+    active_source_paths: frozenset[str] = frozenset(),
+) -> None:
+    rows = [
+        _post_row(post, active_source_paths)
+        for post in posts
+        if str(post.get("folder_path") or "").strip()
+    ]
     if not rows:
         return
     connection.executemany(
@@ -571,8 +599,9 @@ def _insert_posts(connection: sqlite3.Connection, posts: list[dict]) -> None:
         INSERT INTO library_posts(
             path, path_key, parent_path, parent_path_key,
             area, collection_name, source, mode, title, prompt,
-            created_at, activity_at, build_visible, favorite, order_value, grid_slot, list_json, data_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            created_at, activity_at, build_visible, job_parent_visible,
+            favorite, order_value, grid_slot, list_json, data_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(path) DO UPDATE SET
             path_key = excluded.path_key,
             parent_path = excluded.parent_path,
@@ -586,6 +615,7 @@ def _insert_posts(connection: sqlite3.Connection, posts: list[dict]) -> None:
             created_at = excluded.created_at,
             activity_at = excluded.activity_at,
             build_visible = excluded.build_visible,
+            job_parent_visible = excluded.job_parent_visible,
             favorite = excluded.favorite,
             order_value = excluded.order_value,
             grid_slot = excluded.grid_slot,
@@ -596,7 +626,14 @@ def _insert_posts(connection: sqlite3.Connection, posts: list[dict]) -> None:
     )
 
 
-def rebuild(root: Path, posts: list[dict], collections: list[dict], *, updated_at: str = "") -> None:
+def rebuild(
+    root: Path,
+    posts: list[dict],
+    collections: list[dict],
+    *,
+    updated_at: str = "",
+    active_source_paths: frozenset[str] = frozenset(),
+) -> None:
     def rebuild_once() -> None:
         with _connection(root, write=True) as connection:
             connection.executescript(
@@ -607,7 +644,7 @@ def rebuild(root: Path, posts: list[dict], collections: list[dict], *, updated_a
                 """
             )
             _create_schema(connection)
-            _insert_posts(connection, posts)
+            _insert_posts(connection, posts, active_source_paths)
             if collections:
                 connection.executemany(
                     """
@@ -694,11 +731,15 @@ def ready(root: Path) -> bool:
         return False
 
 
-def replace_posts(root: Path, posts: list[dict]) -> None:
+def replace_posts(
+    root: Path,
+    posts: list[dict],
+    active_source_paths: frozenset[str] = frozenset(),
+) -> None:
     with _lock_for(root):
         with _connection(root, write=True) as connection:
             _create_schema(connection)
-            _insert_posts(connection, posts)
+            _insert_posts(connection, posts, active_source_paths)
 
 
 def delete_paths(root: Path, paths: list[str], *, recursive: bool = False) -> None:
@@ -844,9 +885,15 @@ def query_posts(
     parameters: list[object] = []
     normalized_scope = str(scope or "all").lower()
     if normalized_scope in {"build", "build_main"}:
-        clauses.append("build_visible = 1")
         if not include_collections:
+            # 빌드메인에서만 살아있는 job의 부모 업로드 원본을 함께 보여준다.
+            clauses.append("(build_visible = 1 OR job_parent_visible = 1)")
             clauses.append("area != 'collection'")
+        else:
+            # 컬렉션 목록에는 폴더이동으로 컬렉션에 지정된 카드만 나온다.
+            # created(생성 결과물)나 업로드 원본은 빌드메인 전용이다.
+            clauses.append("area = 'collection'")
+            clauses.append("build_visible = 1")
     elif normalized_scope == "upload":
         clauses.append("area = 'upload'")
     elif normalized_scope == "created":

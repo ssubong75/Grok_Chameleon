@@ -20063,6 +20063,7 @@ def post_from_folder(root: Path, folder: Path, context: dict) -> dict | None:
         "split_from_post_id": (meta or {}).get("split_from_post_id") or "",
         "account_id": (meta or {}).get("account_id") or post_field(meta, "imagine_account_id") or "",
         "account_email": (meta or {}).get("account_email") or post_field(meta, "imagine_account_email") or "",
+        "build_job_failed": bool((meta or {}).get("build_job_failed")),
         "build_favorite": bool((meta or {}).get("build_favorite") or (meta or {}).get("favorite") or (meta or {}).get("liked")),
         "favorite": bool((meta or {}).get("favorite") or (meta or {}).get("build_favorite") or (meta or {}).get("liked")),
         "order": safe_int((meta or {}).get("order"), 0),
@@ -20507,7 +20508,13 @@ def scan_library_unlocked(root: Path) -> dict:
         "rebuildable": True,
     }
     write_json(root / "library.json", library)
-    library_index.rebuild(root, posts, collections, updated_at=str(library.get("updated_at") or ""))
+    library_index.rebuild(
+        root,
+        posts,
+        collections,
+        updated_at=str(library.get("updated_at") or ""),
+        active_source_paths=active_build_job_source_paths(),
+    )
     accounts = account_files(root)
     sync_account_registries(root, accounts)
     snapshot = indexed_library_snapshot(root)
@@ -20635,7 +20642,7 @@ def refresh_library_index_paths(
             if post:
                 refreshed_posts.append(post)
     if refreshed_posts:
-        library_index.replace_posts(root, refreshed_posts)
+        library_index.replace_posts(root, refreshed_posts, active_build_job_source_paths())
         record_library_index_changes(changed_posts=refreshed_posts)
     library_index.replace_collections(root, indexed_collection_headers(root))
 
@@ -22649,6 +22656,7 @@ def post_json_from_post(post: dict, **overrides) -> dict:
         "split_from_post_id": overrides.get("split_from_post_id", post.get("split_from_post_id") or ""),
         "account_id": overrides.get("account_id", post.get("account_id") or ""),
         "account_email": overrides.get("account_email", post.get("account_email") or ""),
+        "build_job_failed": bool(overrides.get("build_job_failed", post.get("build_job_failed") or False)),
         "build_favorite": bool(overrides.get("build_favorite", post.get("build_favorite") or post.get("favorite") or post.get("liked") or False)),
         "favorite": bool(overrides.get("favorite", overrides.get("build_favorite", post.get("favorite") or post.get("build_favorite") or post.get("liked") or False))),
         "order": safe_int(overrides.get("order", post.get("order")), 0),
@@ -25056,6 +25064,62 @@ def classify_build_job_error(message: str) -> str:
     return "failed"
 
 
+def mark_upload_source_job_failed(job: dict | None) -> None:
+    """모더/실패한 job의 소스가 업로드 원본이면, 그 사실을 post.json에 남긴다.
+
+    job은 서버 메모리(BUILD_JOBS)에만 살아있어서 재실행하면 사라진다. 실패 이력을
+    파일에 남겨야 재실행·재스캔 후에도 그 업로드 카드가 빌드메인에 유지된다.
+    (성공한 경우에는 결과물 post가 따로 생기므로 기록하지 않는다.)
+    """
+    rel_path = str((job or {}).get("context", {}).get("source_post_path") or "").strip("/")
+    if not rel_path or not rel_path.startswith("upload/"):
+        return
+    try:
+        root = library_root()
+        if not root:
+            return
+        folder = safe_join(root, rel_path)
+        post_path = folder / "post.json"
+        with BUILD_T2I_FILE_LOCK:
+            if not folder.is_dir() or not post_path.is_file():
+                return
+            meta = read_json(post_path, {})
+            if not isinstance(meta, dict):
+                return
+            if meta.get("build_job_failed"):
+                return
+            meta["build_job_failed"] = True
+            meta["updated_at"] = now_iso()
+            write_json(post_path, meta)
+        refresh_library_index_paths(root, [rel_path])
+    except Exception as exc:
+        log_event(f"upload source failure mark skipped path={rel_path} detail={exc}")
+
+
+def active_build_job_source_paths() -> frozenset[str]:
+    with BUILD_JOB_LOCK:
+        jobs = list(BUILD_JOBS.values())
+    paths = set()
+    for job in jobs:
+        if str(job.get("status") or "") in {"done", "cancelled"}:
+            continue
+        path = str((job.get("context") or {}).get("source_post_path") or "").replace("\\", "/").strip("/")
+        if path:
+            paths.add(path)
+    return frozenset(paths)
+
+
+def refresh_build_job_source_index(root: Path | None, job: dict | None) -> None:
+    path = str((job or {}).get("context", {}).get("source_post_path") or "").strip("/") if job else ""
+    if not root or not path:
+        return
+    try:
+        refresh_library_index_paths(root, [path])
+    except Exception as exc:
+        appendable = str(exc) or "unknown error"
+        log_event(f"build job source index refresh failed path={path} detail={appendable}")
+
+
 def start_build_job(payload: dict) -> dict:
     payload = dict(payload or {})
     payload["prompt"] = normalize_unicode_text(payload.get("prompt")).strip()
@@ -25077,6 +25141,7 @@ def start_build_job(payload: dict) -> dict:
     }
     with BUILD_JOB_LOCK:
         BUILD_JOBS[job_id] = job
+    refresh_build_job_source_index(library_root(), job)
 
     smooth_video_progress = job["kind"] == "video"
     video_progress_lock = threading.Lock()
@@ -25147,15 +25212,18 @@ def start_build_job(payload: dict) -> dict:
             result = build_generate(payload, progress_callback=progress, cancel_checker=lambda: build_job_cancelled(job_id))
             stop_video_progress()
             update_build_job(job_id, status="done", progress=100, result=result)
+            refresh_build_job_source_index(library_root(), job)
         except JobCancelled:
             stop_video_progress()
             update_build_job(job_id, status="cancelled", progress=0, error="Job cancelled.")
+            refresh_build_job_source_index(library_root(), job)
         except Exception as exc:
             stop_video_progress()
             message = str(exc) or "Build request failed."
             status = classify_build_job_error(message)
             update_build_job(job_id, status=status, progress=max(1, int(job.get("progress") or 1)), error=message)
             log_event(f"build_job_failed id={job_id} status={status} detail={message}")
+            mark_upload_source_job_failed(job)
 
     thread = threading.Thread(target=worker, name=f"build-job-{job_id}", daemon=True)
     thread.start()
@@ -25190,7 +25258,8 @@ def cancel_build_job(payload: dict) -> dict:
         job["cancel_requested"] = True
         job["status"] = "cancelled"
         job["updated_at"] = now_iso()
-        return {"ok": True, "job": build_job_snapshot(job)}
+    refresh_build_job_source_index(library_root(), job)
+    return {"ok": True, "job": build_job_snapshot(job)}
 
 
 def dismiss_build_job(payload: dict) -> dict:
@@ -25198,7 +25267,8 @@ def dismiss_build_job(payload: dict) -> dict:
     if not job_id:
         raise RuntimeError("Build job id is missing.")
     with BUILD_JOB_LOCK:
-        BUILD_JOBS.pop(job_id, None)
+        job = BUILD_JOBS.pop(job_id, None)
+    refresh_build_job_source_index(library_root(), job)
     return {"ok": True}
 
 

@@ -706,13 +706,13 @@
       library_state.indexedBuildKey = key;
       library_state.indexedBuildOffset = 0;
       library_state.indexedBuildHasMore = true;
-      if (!sameScope && key === "without-collections") {
-        // The old `with` scope contains the entire new `without` scope plus collection
-        // cards. Filtering those cards is safe and keeps the remaining view mounted while
-        // the exact new snapshot is fetched. Switching the other way is already a safe
-        // subset, so it can remain visible unchanged.
+      if (!sameScope) {
+        // 두 스코프는 서로의 부분집합이 아니다. `without`에만 있는 것(업로드 원본 카드)과
+        // `with`에만 있는 것(컬렉션 카드)이 각각 존재하므로, 새 스냅샷을 받아오는 동안
+        // 남겨둘 카드에서 반대쪽 전용 카드를 걸러낸다.
+        const dropArea = key === "without-collections" ? "collection" : "upload";
         library_state.indexedBuildPosts = (library_state.indexedBuildPosts || [])
-          .filter((post) => String(post?.area || "") !== "collection");
+          .filter((post) => String(post?.area || "") !== dropArea);
       }
     }
     try {
