@@ -371,7 +371,7 @@ jobs:
           }
           $libraryIndexText = Get-Content -Raw -LiteralPath $targetLibraryIndex
           foreach ($marker in @(
-            'SCHEMA_VERSION = 7',
+            'SCHEMA_VERSION = 8',
             'list_json TEXT NOT NULL',
             'CREATE INDEX IF NOT EXISTS library_posts_parent_idx',
             'def query_posts(',
@@ -840,7 +840,7 @@ jobs:
           grep -F 'def query_library_posts(payload: dict) -> dict:' "$server_py"
           grep -F '"/api/library/posts": query_library_posts' "$server_py"
           grep -F '"/api/library/post": get_library_post' "$server_py"
-          grep -F 'SCHEMA_VERSION = 7' "$library_index_py"
+          grep -F 'SCHEMA_VERSION = 8' "$library_index_py"
           grep -F 'list_json TEXT NOT NULL' "$library_index_py"
           grep -F 'CREATE INDEX IF NOT EXISTS library_posts_parent_idx' "$library_index_py"
           grep -F 'def query_posts(' "$library_index_py"
