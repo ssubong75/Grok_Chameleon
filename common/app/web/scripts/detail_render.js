@@ -450,7 +450,15 @@ function detailThumbButtonForItem(prefix, item, post, options = {}) {
     fill.replaceChildren(video);
     bindHoverVideoPreview(button, video);
   };
-  if (queuedPreviewSource && typeof resolveLocalCardPreview === "function") {
+  const remoteImagineVideoWithoutPoster = prefix === "i"
+    && queuedPreviewSourceIsVideo
+    && typeof isImagineRemoteCardPreview === "function"
+    && isImagineRemoteCardPreview(buildPreviewSource);
+  if (remoteImagineVideoWithoutPoster) {
+    // Remote video has no image source to turn into a thumbnail. Generating one through
+    // the image cache path only retries the MP4 as an image, so retain direct playback.
+    requestAnimationFrame(appendVideoFallback);
+  } else if (queuedPreviewSource && typeof resolveLocalCardPreview === "function") {
     fill.classList.add("detail_thumb_preview");
     if ((prefix === "b" || prefix === "i") && typeof existingPersistentCardPreview === "function") {
       // A detail version strip can be long. Ask its 320px cache in a bounded parallel

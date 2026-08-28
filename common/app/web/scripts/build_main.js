@@ -684,6 +684,13 @@
       if (typeof disposeCardPreviewNode === "function") disposeCardPreviewNode(oldThumb);
     }
     thumbList.replaceChildren(...baseThumbs, ...jobThumbs);
+    // Job details own a custom strip so the live job thumbnail can sit beside the source
+    // media. The normal detail renderer starts deferred cache loads after mounting its
+    // buttons; without the same step here, a remote Imagine source button remains empty
+    // while the direct job-preview thumbnail renders normally.
+    if ((prefix === "b" || prefix === "i") && typeof startDetailThumbCacheLoads === "function") {
+      startDetailThumbCacheLoads(baseThumbs);
+    }
     if (thumbList._detailThumbLayoutFrame) {
       cancelAnimationFrame(thumbList._detailThumbLayoutFrame);
       thumbList._detailThumbLayoutFrame = 0;
