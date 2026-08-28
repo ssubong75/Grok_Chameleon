@@ -94,7 +94,7 @@ jobs:
 
     steps:
       - name: Check out the shared source commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Download the exact Windows runtime package
         id: windows_input
@@ -579,7 +579,7 @@ jobs:
           "windows-output-sha256=" + (Get-FileHash -Algorithm SHA256 -LiteralPath $outputZip).Hash.ToLowerInvariant()
 
       - name: Retain the verified Windows build
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.artifact }}
           path: output/${{ matrix.output_zip }}
@@ -607,7 +607,7 @@ jobs:
 
     steps:
       - name: Check out the shared source commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Download the exact Mac runtime package
         id: macos_input
@@ -1216,7 +1216,7 @@ jobs:
           shasum -a 256 "output/$OUTPUT_ZIP"
 
       - name: Retain the verified Mac build
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.artifact }}
           path: output/${{ matrix.output_zip }}
@@ -1232,16 +1232,16 @@ jobs:
       - build-macos
     steps:
       - name: Check out the release notes
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Download the verified Windows build
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: windows-build
           path: release/windows
 
       - name: Download the verified Mac build
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: mac-build
           path: release/macos
@@ -1341,7 +1341,7 @@ jobs:
 
     steps:
       - name: Check out the exact shared source commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Download and verify the actual published Mac ZIP
         shell: bash
