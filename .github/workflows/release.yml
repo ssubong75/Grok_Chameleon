@@ -516,7 +516,7 @@ jobs:
           if (-not (Get-Content -Raw -LiteralPath $targetAccountStyle).Contains(".lucky_notice.in_detail_media")) { throw "Lucky media position marker missing." }
           if (-not (Get-Content -Raw -LiteralPath $targetDetailMedia).Contains("function scheduleLocalCardVideoPoster(")) { throw "Build video poster scheduling marker missing." }
           if (-not (Get-Content -Raw -LiteralPath $targetCardRender).Contains('card_static_video_preview: type === "video" && Boolean(previewUrl)')) { throw "Static Imagine video poster marker missing." }
-          if (-not $mainText.Contains("const CARD_PREVIEW_MAX_EDGE = 960;")) { throw "Card preview size dropped below the 512x288 requirement." }
+          if (-not $mainText.Contains("const CARD_PREVIEW_MAX_EDGE = 640;")) { throw "Card preview size is not the required 640px." }
           if ((Test-Path -LiteralPath (Join-Path $root "Resources\Migration")) -or (Test-Path -LiteralPath (Join-Path $root "Migration.exe"))) {
             throw "Migration app remains in the Windows package."
           }
@@ -920,7 +920,7 @@ jobs:
           grep -F '.lucky_notice.in_detail_media' "$account_css"
           grep -F 'function scheduleLocalCardVideoPoster(' "$detail_media_js"
           grep -F 'card_static_video_preview: type === "video" && Boolean(previewUrl)' "$card_render_js"
-          grep -F 'const CARD_PREVIEW_MAX_EDGE = 960;' "$main_js"
+          grep -F 'const CARD_PREVIEW_MAX_EDGE = 640;' "$main_js"
           grep -F 'RUNTIME_ROOT = Path(__file__).resolve().parent' "$server_py"
           grep -F 'APP_ROOT = RUNTIME_ROOT.parent' "$server_py"
           if grep -E 'C:\\|python\.exe' "$server_py"; then
