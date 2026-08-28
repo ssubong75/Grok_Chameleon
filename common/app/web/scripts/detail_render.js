@@ -280,7 +280,10 @@ function syncBuildDetailHeartState(post) {
   button.hidden = true;
 }
 
-function renderDetailViews() {
+function renderDetailViews(options = {}) {
+  const activePrefix = options.activeOnly
+    ? (screen_state.current_screen === "i_detail" ? "i" : (screen_state.current_screen === "b_detail" ? "b" : ""))
+    : "";
   const post = selectedLibraryPost();
   const buildJobs = typeof buildJobsForPost === "function" ? buildJobsForPost(post) : [];
   const imagineJobs = typeof imagineJobsForPost === "function" ? imagineJobsForPost(post) : [];
@@ -289,8 +292,8 @@ function renderDetailViews() {
     ? selectedImagineJobForPost(post)
     : (typeof selectedImagineJob === "function" ? selectedImagineJob() : null);
   const imaginePost = imagineJob && typeof imagineJobDetailPost === "function" ? imagineJobDetailPost(imagineJob, post, imagineJobs) : post;
-  renderDetailView("i", imaginePost);
-  renderDetailView("b", buildJob ? buildJobDetailPost(buildJob, post, buildJobs) : post);
+  if (activePrefix !== "b") renderDetailView("i", imaginePost, options);
+  if (activePrefix !== "i") renderDetailView("b", buildJob ? buildJobDetailPost(buildJob, post, buildJobs) : post, options);
   updateDetailPostNavigationButtons();
 }
 
@@ -505,7 +508,7 @@ function renderImagineDetailAspectMenu(item) {
     }));
 }
 
-function renderDetailView(prefix, post) {
+function renderDetailView(prefix, post, options = {}) {
   const thumbList = document.querySelector(`.${prefix}_detail_thumb_list`);
   const media = document.querySelector(`.${prefix}_detail_media`);
   const mediaWrap = document.querySelector(`.${prefix}_detail_media_wrap`);
@@ -519,10 +522,12 @@ function renderDetailView(prefix, post) {
   mediaWrap?.querySelector(".detail_job_badges")?.remove();
   modelBadge?.querySelector(".detail_lucky_badge")?.remove();
   if (post?.is_job_post) {
-    renderBuildJobDetailView(prefix, post);
+    renderBuildJobDetailView(prefix, post, options);
     return;
   }
   if (!post?.items?.length) return;
+  const preserveThumbScroll = Boolean(options.preserveThumbScroll);
+  const previousThumbScrollTop = preserveThumbScroll ? thumbList.scrollTop : 0;
   const selectedItem = selectedDetailItem(post);
   if (prefix === "i") syncImagineDetailHeartState(post, selectedItem);
   if (prefix === "b") syncBuildDetailHeartState(post);
@@ -532,7 +537,6 @@ function renderDetailView(prefix, post) {
   const splitPickActive = Boolean(library_state.splitPickPending && screen_state.current_screen === `${prefix}_detail`);
   thumbList.classList.toggle("source_pick_active", sourcePickActive);
   thumbList.classList.toggle("split_pick_active", splitPickActive);
-  let selectedThumb = null;
   // Selecting a thumbnail re-renders the whole strip. Rebuilding it threw every node away,
   // and disposing a node cancels its queued preview, so each click restarted work that had
   // already been done or was halfway there. Keep the nodes whose contents did not change
@@ -551,7 +555,6 @@ function renderDetailView(prefix, post) {
     if (existing && existing.dataset.thumbSignature === detailThumbSignature(prefix, item, post)) {
       reusedThumbs.add(existing);
       applyDetailThumbState(existing, type, { active, sourcePickActive, splitPickActive });
-      if (active) selectedThumb = existing;
       return existing;
     }
     const button = detailThumbButtonForItem(prefix, item, post, {
@@ -559,7 +562,6 @@ function renderDetailView(prefix, post) {
       sourcePickActive,
       splitPickActive,
     });
-    if (active) selectedThumb = button;
     return button;
   });
   for (const oldThumb of previousThumbs.values()) {
@@ -572,15 +574,23 @@ function renderDetailView(prefix, post) {
   const orderUnchanged = currentThumbs.length === thumbs.length
     && currentThumbs.every((node, index) => node === thumbs[index]);
   if (!orderUnchanged) thumbList.replaceChildren(...thumbs);
-  if (selectedThumb) {
-    requestAnimationFrame(() => {
-      syncDetailThumbListOverflow(thumbList);
-      thumbList.scrollTop = thumbList.scrollHeight;
-    });
+  if (thumbList._detailThumbLayoutFrame) {
+    cancelAnimationFrame(thumbList._detailThumbLayoutFrame);
+    thumbList._detailThumbLayoutFrame = 0;
+  }
+  if (preserveThumbScroll && orderUnchanged) {
+    // The user just picked an item in the visible strip. Its layout is unchanged, so avoid
+    // a forced measurement and, critically, do not pull the list back to its newest item.
   } else {
-    requestAnimationFrame(() => {
+    thumbList._detailThumbLayoutFrame = requestAnimationFrame(() => {
+      thumbList._detailThumbLayoutFrame = 0;
       syncDetailThumbListOverflow(thumbList);
-      thumbList.scrollTop = thumbList.scrollHeight;
+      if (preserveThumbScroll) {
+        const maxScrollTop = Math.max(0, thumbList.scrollHeight - thumbList.clientHeight);
+        thumbList.scrollTop = Math.min(previousThumbScrollTop, maxScrollTop);
+      } else {
+        thumbList.scrollTop = thumbList.scrollHeight;
+      }
     });
   }
 

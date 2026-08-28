@@ -251,7 +251,8 @@ function setSelectedDetailItem(itemId) {
     return false;
   }
   library_state.selectedDetailItemId = nextItemId;
-  renderDetailViews();
+  const selectingInDetail = screen_state.current_screen === "i_detail" || screen_state.current_screen === "b_detail";
+  renderDetailViews(selectingInDetail ? { activeOnly: true, preserveThumbScroll: true } : {});
   if (typeof renderComposerOptions === "function") renderComposerOptions();
   if (composerState.mode === "extend") {
     prepareDetailExtendFromCurrentVideo();

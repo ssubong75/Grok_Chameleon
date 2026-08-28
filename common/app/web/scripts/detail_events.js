@@ -62,7 +62,7 @@ for (const thumbListSelector of [".i_detail_thumb_list", ".b_detail_thumb_list"]
       library_state.selectedJobId = thumb.dataset.buildJobId;
       library_state.selectedImagineJobId = "";
       library_state.selectedDetailItemId = thumb.dataset.libraryItemId || "";
-      renderDetailViews();
+      renderDetailViews({ activeOnly: true, preserveThumbScroll: true });
       syncComposerPromptFromDetail();
       composerState.dismissedDetailAttachmentKey = "";
       syncDetailAttachmentForComposerTray().catch((error) => console.warn(error));
@@ -72,7 +72,7 @@ for (const thumbListSelector of [".i_detail_thumb_list", ".b_detail_thumb_list"]
       library_state.selectedImagineJobId = thumb.dataset.imagineJobId;
       library_state.selectedJobId = "";
       library_state.selectedDetailItemId = thumb.dataset.libraryItemId || "";
-      renderDetailViews();
+      renderDetailViews({ activeOnly: true, preserveThumbScroll: true });
       syncComposerPromptFromDetail();
       composerState.dismissedDetailAttachmentKey = "";
       syncDetailAttachmentForComposerTray().catch((error) => console.warn(error));

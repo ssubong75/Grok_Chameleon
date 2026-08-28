@@ -606,7 +606,7 @@
   }
 
 
-  function renderBuildJobDetailView(prefix, post) {
+  function renderBuildJobDetailView(prefix, post, options = {}) {
     const job = post?.job;
     const jobs = (Array.isArray(post?.jobs) && post.jobs.length ? post.jobs : [job]).filter(Boolean);
     const basePost = post?.base_post?.items?.length ? post.base_post : null;
@@ -618,6 +618,8 @@
     const providerBadge = document.querySelector(`.${prefix}_detail_provider_badge`);
     const modelName = document.querySelector(`.${prefix}_detail_model_name`);
     if (!job || !jobs.length || !thumbList || !media) return;
+    const preserveThumbScroll = Boolean(options.preserveThumbScroll);
+    const previousThumbScrollTop = preserveThumbScroll ? thumbList.scrollTop : 0;
     mediaWrap?.querySelector(".detail_job_badges")?.remove();
 
     const type = buildJobTargetType(job);
@@ -682,9 +684,19 @@
       if (typeof disposeCardPreviewNode === "function") disposeCardPreviewNode(oldThumb);
     }
     thumbList.replaceChildren(...baseThumbs, ...jobThumbs);
-    requestAnimationFrame(() => {
+    if (thumbList._detailThumbLayoutFrame) {
+      cancelAnimationFrame(thumbList._detailThumbLayoutFrame);
+      thumbList._detailThumbLayoutFrame = 0;
+    }
+    thumbList._detailThumbLayoutFrame = requestAnimationFrame(() => {
+      thumbList._detailThumbLayoutFrame = 0;
       if (typeof syncDetailThumbListOverflow === "function") syncDetailThumbListOverflow(thumbList);
-      (selectedBaseItem ? thumbList.querySelector(".active") : jobThumbs.find((thumb) => thumb.classList.contains("active")) || jobThumbs[0])?.scrollIntoView({ block: "end", inline: "nearest" });
+      if (preserveThumbScroll) {
+        const maxScrollTop = Math.max(0, thumbList.scrollHeight - thumbList.clientHeight);
+        thumbList.scrollTop = Math.min(previousThumbScrollTop, maxScrollTop);
+      } else {
+        (selectedBaseItem ? thumbList.querySelector(".active") : jobThumbs.find((thumb) => thumb.classList.contains("active")) || jobThumbs[0])?.scrollIntoView({ block: "end", inline: "nearest" });
+      }
     });
 
     const renderJobBadges = () => {

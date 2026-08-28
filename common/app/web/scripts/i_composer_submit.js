@@ -640,9 +640,19 @@ function applyImagineDirectResult(result, options = {}) {
         ...(library_state.imagineRemotePosts || []),
         ...(library_state.posts || []),
       ].filter((candidate) => candidate?.folder_path === targetPath);
-      const existing = targetIdentity && typeof libraryPostMatchesIdentity === "function"
-        ? candidates.find((candidate) => libraryPostMatchesIdentity(candidate, targetIdentity))
-        : (candidates.length === 1 ? candidates[0] : null);
+      // A direct result that names its source card as the target belongs on the card the
+      // user is already viewing. During Saved's eventual-consistency window that card can
+      // appear more than once in the remote and library lists, or its refreshed identity can
+      // differ briefly. Prefer the selected source over treating that ambiguity as a new card.
+      const selectedSourcePost = targetPath === sourcePath
+        && String(library_state.selectedPostPath || "") === sourcePath
+        ? selectedLibraryPost()
+        : null;
+      const existing = selectedSourcePost?.folder_path === targetPath
+        ? selectedSourcePost
+        : (targetIdentity && typeof libraryPostMatchesIdentity === "function"
+          ? candidates.find((candidate) => libraryPostMatchesIdentity(candidate, targetIdentity))
+          : (candidates.length === 1 ? candidates[0] : null));
       if (existing) {
         const mergedPost = mergeImagineGeneratedItems(existing, items, {
           markGeneratedRelation: true,
