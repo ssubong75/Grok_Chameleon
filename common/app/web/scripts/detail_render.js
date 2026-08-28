@@ -1,52 +1,52 @@
 // Detail view rendering and model labels
-const BUILD_DETAIL_THUMB_CACHE_MAX_ACTIVE = 12;
-const buildDetailThumbCacheQueue = [];
-let activeBuildDetailThumbCacheLoads = 0;
-let buildDetailThumbCachePumpScheduled = false;
+const DETAIL_THUMB_CACHE_MAX_ACTIVE = 12;
+const detailThumbCacheQueue = [];
+let activeDetailThumbCacheLoads = 0;
+let detailThumbCachePumpScheduled = false;
 
-function pumpBuildDetailThumbCacheQueue() {
-  buildDetailThumbCachePumpScheduled = false;
-  while (activeBuildDetailThumbCacheLoads < BUILD_DETAIL_THUMB_CACHE_MAX_ACTIVE && buildDetailThumbCacheQueue.length) {
-    const entry = buildDetailThumbCacheQueue.shift();
+function pumpDetailThumbCacheQueue() {
+  detailThumbCachePumpScheduled = false;
+  while (activeDetailThumbCacheLoads < DETAIL_THUMB_CACHE_MAX_ACTIVE && detailThumbCacheQueue.length) {
+    const entry = detailThumbCacheQueue.shift();
     if (!entry?.button?.isConnected) continue;
-    activeBuildDetailThumbCacheLoads += 1;
+    activeDetailThumbCacheLoads += 1;
     Promise.resolve()
       .then(entry.load)
       .catch(() => {
         // The thumbnail's source fallback is retained by its own loader.
       })
       .finally(() => {
-        activeBuildDetailThumbCacheLoads -= 1;
-        if (!buildDetailThumbCachePumpScheduled) {
-          buildDetailThumbCachePumpScheduled = true;
-          Promise.resolve().then(pumpBuildDetailThumbCacheQueue);
+        activeDetailThumbCacheLoads -= 1;
+        if (!detailThumbCachePumpScheduled) {
+          detailThumbCachePumpScheduled = true;
+          Promise.resolve().then(pumpDetailThumbCacheQueue);
         }
       });
   }
 }
 
-function queueBuildDetailThumbCacheLoad(button, load, priority = false) {
+function queueDetailThumbCacheLoad(button, load, priority = false) {
   if (!button || typeof load !== "function") return;
   const entry = { button, load };
   if (priority) {
-    const firstNormal = buildDetailThumbCacheQueue.findIndex((candidate) => !candidate.priority);
-    if (firstNormal >= 0) buildDetailThumbCacheQueue.splice(firstNormal, 0, { ...entry, priority: true });
-    else buildDetailThumbCacheQueue.push({ ...entry, priority: true });
+    const firstNormal = detailThumbCacheQueue.findIndex((candidate) => !candidate.priority);
+    if (firstNormal >= 0) detailThumbCacheQueue.splice(firstNormal, 0, { ...entry, priority: true });
+    else detailThumbCacheQueue.push({ ...entry, priority: true });
   } else {
-    buildDetailThumbCacheQueue.push({ ...entry, priority: false });
+    detailThumbCacheQueue.push({ ...entry, priority: false });
   }
-  if (!buildDetailThumbCachePumpScheduled) {
-    buildDetailThumbCachePumpScheduled = true;
-    Promise.resolve().then(pumpBuildDetailThumbCacheQueue);
+  if (!detailThumbCachePumpScheduled) {
+    detailThumbCachePumpScheduled = true;
+    Promise.resolve().then(pumpDetailThumbCacheQueue);
   }
 }
 
-function startBuildDetailThumbCacheLoads(thumbs) {
+function startDetailThumbCacheLoads(thumbs) {
   const start = (thumb, priority) => {
-    const load = thumb?._buildDetailThumbCacheLoad;
+    const load = thumb?._detailThumbCacheLoad;
     if (typeof load !== "function") return;
-    delete thumb._buildDetailThumbCacheLoad;
-    queueBuildDetailThumbCacheLoad(thumb, load, priority);
+    delete thumb._detailThumbCacheLoad;
+    queueDetailThumbCacheLoad(thumb, load, priority);
   };
   for (const thumb of thumbs) {
     if (thumb.classList.contains("active")) start(thumb, true);
@@ -452,12 +452,11 @@ function detailThumbButtonForItem(prefix, item, post, options = {}) {
   };
   if (queuedPreviewSource && typeof resolveLocalCardPreview === "function") {
     fill.classList.add("detail_thumb_preview");
-    if (prefix === "b" && typeof existingPersistentCardPreview === "function") {
-      // Build detail can have a long version strip. Do not make every button request its
-      // full source first: the strip asks its 320px cache in a bounded parallel batch.
-      // Cache misses reveal the source only for that item and generate in the separate
-      // native queue, so misses never hold up cached thumbnails behind them.
-      button._buildDetailThumbCacheLoad = () => {
+    if ((prefix === "b" || prefix === "i") && typeof existingPersistentCardPreview === "function") {
+      // A detail version strip can be long. Ask its 320px cache in a bounded parallel
+      // batch instead of making every button request its source first. Cache misses use
+      // the separate native queue, so they never hold up cached thumbnails behind them.
+      button._detailThumbCacheLoad = () => {
         const showSourceFallback = () => {
           if (!fill.isConnected) return;
           if (queuedPreviewSourceIsVideo) appendVideoFallback();
@@ -469,14 +468,14 @@ function detailThumbButtonForItem(prefix, item, post, options = {}) {
           fill.replaceChildren();
           fill.style.backgroundImage = `url("${resolvedUrl}")`;
         };
-        return existingPersistentCardPreview(buildPreviewSource, "thumbnail", previewCacheIdentity).then((existingPreview) => {
-          if (!fill.isConnected) return;
-          if (existingPreview) {
-            showCachedPreview(existingPreview);
+        const remoteImagineSource = prefix === "i"
+          && typeof isImagineRemoteCardPreview === "function"
+          && isImagineRemoteCardPreview(buildPreviewSource);
+        const queueMissingPreview = () => {
+          if (typeof window.grokChameleonNative?.cardPreview !== "function") {
+            if (remoteImagineSource) showSourceFallback();
             return;
           }
-          showSourceFallback();
-          if (typeof window.grokChameleonNative?.cardPreview !== "function") return;
           // Intentionally do not return this promise. The 12-slot cache loader can keep
           // checking the rest of the strip while only this cache miss waits to generate.
           queueNativeCardPreview(fill, {
@@ -487,9 +486,24 @@ function detailThumbButtonForItem(prefix, item, post, options = {}) {
             const generatedUrl = String(result?.url || "").trim();
             if (generatedUrl) showCachedPreview(generatedUrl);
           }).catch(() => {
-            // The source fallback remains visible when generation cannot complete.
+            if (remoteImagineSource) showSourceFallback();
           });
-        }).catch(showSourceFallback);
+        };
+        return existingPersistentCardPreview(buildPreviewSource, "thumbnail", previewCacheIdentity).then((existingPreview) => {
+          if (!fill.isConnected) return;
+          if (existingPreview) {
+            showCachedPreview(existingPreview);
+            return;
+          }
+          // An Imagine cache miss would otherwise make every thumbnail fetch from Grok
+          // at once. Let the detail-native queue start only two remote generations; Build
+          // and local Imagine media can reveal their local source immediately.
+          if (!remoteImagineSource) showSourceFallback();
+          queueMissingPreview();
+        }).catch(() => {
+          if (!remoteImagineSource) showSourceFallback();
+          queueMissingPreview();
+        });
       };
     } else {
       if (previewUrl && !queuedPreviewSourceIsVideo) {
@@ -672,7 +686,7 @@ function renderDetailView(prefix, post, options = {}) {
   const orderUnchanged = currentThumbs.length === thumbs.length
     && currentThumbs.every((node, index) => node === thumbs[index]);
   if (!orderUnchanged) thumbList.replaceChildren(...thumbs);
-  if (prefix === "b") startBuildDetailThumbCacheLoads(thumbs);
+  if (prefix === "b" || prefix === "i") startDetailThumbCacheLoads(thumbs);
   if (thumbList._detailThumbLayoutFrame) {
     cancelAnimationFrame(thumbList._detailThumbLayoutFrame);
     thumbList._detailThumbLayoutFrame = 0;
