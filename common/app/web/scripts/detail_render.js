@@ -1,4 +1,61 @@
 // Detail view rendering and model labels
+const BUILD_DETAIL_THUMB_CACHE_MAX_ACTIVE = 12;
+const buildDetailThumbCacheQueue = [];
+let activeBuildDetailThumbCacheLoads = 0;
+let buildDetailThumbCachePumpScheduled = false;
+
+function pumpBuildDetailThumbCacheQueue() {
+  buildDetailThumbCachePumpScheduled = false;
+  while (activeBuildDetailThumbCacheLoads < BUILD_DETAIL_THUMB_CACHE_MAX_ACTIVE && buildDetailThumbCacheQueue.length) {
+    const entry = buildDetailThumbCacheQueue.shift();
+    if (!entry?.button?.isConnected) continue;
+    activeBuildDetailThumbCacheLoads += 1;
+    Promise.resolve()
+      .then(entry.load)
+      .catch(() => {
+        // The thumbnail's source fallback is retained by its own loader.
+      })
+      .finally(() => {
+        activeBuildDetailThumbCacheLoads -= 1;
+        if (!buildDetailThumbCachePumpScheduled) {
+          buildDetailThumbCachePumpScheduled = true;
+          Promise.resolve().then(pumpBuildDetailThumbCacheQueue);
+        }
+      });
+  }
+}
+
+function queueBuildDetailThumbCacheLoad(button, load, priority = false) {
+  if (!button || typeof load !== "function") return;
+  const entry = { button, load };
+  if (priority) {
+    const firstNormal = buildDetailThumbCacheQueue.findIndex((candidate) => !candidate.priority);
+    if (firstNormal >= 0) buildDetailThumbCacheQueue.splice(firstNormal, 0, { ...entry, priority: true });
+    else buildDetailThumbCacheQueue.push({ ...entry, priority: true });
+  } else {
+    buildDetailThumbCacheQueue.push({ ...entry, priority: false });
+  }
+  if (!buildDetailThumbCachePumpScheduled) {
+    buildDetailThumbCachePumpScheduled = true;
+    Promise.resolve().then(pumpBuildDetailThumbCacheQueue);
+  }
+}
+
+function startBuildDetailThumbCacheLoads(thumbs) {
+  const start = (thumb, priority) => {
+    const load = thumb?._buildDetailThumbCacheLoad;
+    if (typeof load !== "function") return;
+    delete thumb._buildDetailThumbCacheLoad;
+    queueBuildDetailThumbCacheLoad(thumb, load, priority);
+  };
+  for (const thumb of thumbs) {
+    if (thumb.classList.contains("active")) start(thumb, true);
+  }
+  for (const thumb of thumbs) {
+    if (!thumb.classList.contains("active")) start(thumb, false);
+  }
+}
+
 function detailModelCandidateText(value, depth = 0) {
   if (value === null || value === undefined || depth > 3) return "";
   if (typeof value === "string" || typeof value === "number") return String(value).trim();
@@ -395,27 +452,68 @@ function detailThumbButtonForItem(prefix, item, post, options = {}) {
   };
   if (queuedPreviewSource && typeof resolveLocalCardPreview === "function") {
     fill.classList.add("detail_thumb_preview");
-    if (previewUrl && !queuedPreviewSourceIsVideo) {
-      fill.style.backgroundImage = `url("${previewUrl}")`;
-    } else if (queuedPreviewSourceIsVideo) {
-      requestAnimationFrame(appendVideoFallback);
-    }
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        if (!fill.isConnected) return;
-        // The legacy call shape, resolveLocalCardPreview(buildPreviewSource, "thumbnail"), remains supported.
-        resolveLocalCardPreview(buildPreviewSource, "thumbnail", previewCacheIdentity, fill).then((resolvedUrl) => {
+    if (prefix === "b" && typeof existingPersistentCardPreview === "function") {
+      // Build detail can have a long version strip. Do not make every button request its
+      // full source first: the strip asks its 320px cache in a bounded parallel batch.
+      // Cache misses reveal the source only for that item and generate in the separate
+      // native queue, so misses never hold up cached thumbnails behind them.
+      button._buildDetailThumbCacheLoad = () => {
+        const showSourceFallback = () => {
           if (!fill.isConnected) return;
-          if (resolvedUrl && (!queuedPreviewSourceIsVideo || resolvedUrl !== queuedPreviewSource)) {
-            fill.style.backgroundImage = `url("${resolvedUrl}")`;
-          } else if (type === "video") {
-            appendVideoFallback();
-          } else if (previewUrl) {
-            fill.style.backgroundImage = `url("${previewUrl}")`;
+          if (queuedPreviewSourceIsVideo) appendVideoFallback();
+          else if (previewUrl) fill.style.backgroundImage = `url("${previewUrl}")`;
+        };
+        const showCachedPreview = (resolvedUrl) => {
+          if (!fill.isConnected || !resolvedUrl) return;
+          fill.classList.remove("detail_thumb_video_preview");
+          fill.replaceChildren();
+          fill.style.backgroundImage = `url("${resolvedUrl}")`;
+        };
+        return existingPersistentCardPreview(buildPreviewSource, "thumbnail", previewCacheIdentity).then((existingPreview) => {
+          if (!fill.isConnected) return;
+          if (existingPreview) {
+            showCachedPreview(existingPreview);
+            return;
           }
+          showSourceFallback();
+          if (typeof window.grokChameleonNative?.cardPreview !== "function") return;
+          // Intentionally do not return this promise. The 12-slot cache loader can keep
+          // checking the rest of the strip while only this cache miss waits to generate.
+          queueNativeCardPreview(fill, {
+            url: buildPreviewSource,
+            kind: "thumbnail",
+            cache_identity: previewCacheIdentity,
+          }).then((result) => {
+            const generatedUrl = String(result?.url || "").trim();
+            if (generatedUrl) showCachedPreview(generatedUrl);
+          }).catch(() => {
+            // The source fallback remains visible when generation cannot complete.
+          });
+        }).catch(showSourceFallback);
+      };
+    } else {
+      if (previewUrl && !queuedPreviewSourceIsVideo) {
+        fill.style.backgroundImage = `url("${previewUrl}")`;
+      } else if (queuedPreviewSourceIsVideo) {
+        requestAnimationFrame(appendVideoFallback);
+      }
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          if (!fill.isConnected) return;
+          // The legacy call shape, resolveLocalCardPreview(buildPreviewSource, "thumbnail"), remains supported.
+          resolveLocalCardPreview(buildPreviewSource, "thumbnail", previewCacheIdentity, fill).then((resolvedUrl) => {
+            if (!fill.isConnected) return;
+            if (resolvedUrl && (!queuedPreviewSourceIsVideo || resolvedUrl !== queuedPreviewSource)) {
+              fill.style.backgroundImage = `url("${resolvedUrl}")`;
+            } else if (type === "video") {
+              appendVideoFallback();
+            } else if (previewUrl) {
+              fill.style.backgroundImage = `url("${previewUrl}")`;
+            }
+          });
         });
       });
-    });
+    }
   } else if (previewUrl) {
     fill.classList.add("detail_thumb_preview");
     fill.style.backgroundImage = `url("${previewUrl}")`;
@@ -574,6 +672,7 @@ function renderDetailView(prefix, post, options = {}) {
   const orderUnchanged = currentThumbs.length === thumbs.length
     && currentThumbs.every((node, index) => node === thumbs[index]);
   if (!orderUnchanged) thumbList.replaceChildren(...thumbs);
+  if (prefix === "b") startBuildDetailThumbCacheLoads(thumbs);
   if (thumbList._detailThumbLayoutFrame) {
     cancelAnimationFrame(thumbList._detailThumbLayoutFrame);
     thumbList._detailThumbLayoutFrame = 0;

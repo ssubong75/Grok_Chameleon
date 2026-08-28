@@ -458,7 +458,8 @@ const bridgeCommandQueues = new Map();
 const usageWindows = new Map();
 const totalAccountWindows = new Map();
 let selectedImagineAccountKey = "";
-const CARD_PREVIEW_MAX_EDGE = 960;
+const CARD_PREVIEW_MAX_EDGE = 640;
+const CARD_PREVIEW_RENDER_REVISION = "card-640-v1";
 const THUMBNAIL_PREVIEW_MAX_EDGE = 320;
 const CARD_PREVIEW_MAX_ACTIVE = 4;
 const CARD_PREVIEW_MAX_FILES = 5000;
@@ -806,8 +807,8 @@ async function ensureCardPreview(payload = {}) {
     });
     const cacheIdentity = String(payload.cache_identity || "").trim().normalize("NFC");
     const keySource = cacheIdentity && cacheIdentity.length <= 512
-      ? `remote\0${previewKind}\0identity\0${cacheIdentity}`
-      : `remote\0${previewKind}\0${source.pathname}${source.search}`;
+      ? `remote\0${CARD_PREVIEW_RENDER_REVISION}\0${previewKind}\0identity\0${cacheIdentity}`
+      : `remote\0${CARD_PREVIEW_RENDER_REVISION}\0${previewKind}\0${source.pathname}${source.search}`;
     previewKey = crypto.createHash("sha256")
       .update(keySource)
       .digest("hex");

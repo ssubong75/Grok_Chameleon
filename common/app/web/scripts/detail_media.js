@@ -15,6 +15,9 @@ const persistentCardPreviewLookupCache = new Map();
 const cardPreviewDisposers = new WeakMap();
 const CARD_PREVIEW_NATIVE_MAX_ACTIVE = 4;
 const CARD_PREVIEW_LIST_MAX_ACTIVE = 2;
+// Change this whenever a card preview's rendered pixels change. It gives old previews a
+// distinct key so the server can clear them once and rebuild cards at the new size.
+const CARD_PREVIEW_RENDER_REVISION = "card-640-v1";
 // Builds created before the persistent Build thumbnail fix may have a generic native
 // icon cached at this same URL. Advance only when the persisted preview contract changes.
 const BUILD_PREVIEW_CACHE_REVISION = "2";
@@ -1018,10 +1021,10 @@ async function lookupPersistentCardPreview(rawUrl, kind = "card", cacheIdentity 
       const stableIdentity = String(cacheIdentity || "").trim();
       const keySources = stableIdentity
         ? [
-          `remote\0${previewKind}\0identity\0${stableIdentity}`,
-          `remote\0${previewKind}\0${parsed.pathname}${parsed.search}`,
+          `remote\0${CARD_PREVIEW_RENDER_REVISION}\0${previewKind}\0identity\0${stableIdentity}`,
+          `remote\0${CARD_PREVIEW_RENDER_REVISION}\0${previewKind}\0${parsed.pathname}${parsed.search}`,
         ]
-        : [`remote\0${previewKind}\0${parsed.pathname}${parsed.search}`];
+        : [`remote\0${CARD_PREVIEW_RENDER_REVISION}\0${previewKind}\0${parsed.pathname}${parsed.search}`];
       for (const keySource of keySources) {
         const key = await sha256Text(keySource);
         if (!key) continue;
@@ -1039,11 +1042,7 @@ async function lookupPersistentCardPreview(rawUrl, kind = "card", cacheIdentity 
     if (!match) return "";
     const modifiedNs = BigInt(`0x${match[1]}`).toString(10);
     const size = BigInt(`0x${match[2]}`).toString(10);
-    const rawKey = `${mediaPath}\0${modifiedNs}\0${size}`;
-    const keySource = /\.(?:m4v|mov|mp4|webm)$/i.test(mediaPath)
-      ? `${BUILD_VIDEO_PREVIEW_KEY_REVISION}\0${rawKey}`
-      : rawKey;
-    const key = await sha256Text(keySource);
+    const key = await buildPersistentCardPreviewKey(mediaPath, modifiedNs, size, previewKind);
     if (!key) return "";
     const previewUrl = buildPersistentPreviewUrl(previewKind, key);
     const response = await fetch(previewUrl, { method: "HEAD", cache: "no-cache" });
@@ -1082,6 +1081,18 @@ function buildPersistentPreviewUrl(kind, key) {
   return `/api/build-preview?kind=${kind}&key=${key}&rev=${BUILD_PREVIEW_CACHE_REVISION}`;
 }
 
+async function buildPersistentCardPreviewKey(mediaPath, modifiedNs, size, kind = "card") {
+  const rawKey = `${mediaPath}\0${modifiedNs}\0${size}`;
+  const sourceKey = await sha256Text(/\.(?:m4v|mov|mp4|webm)$/i.test(mediaPath)
+    ? `${BUILD_VIDEO_PREVIEW_KEY_REVISION}\0${rawKey}`
+    : rawKey);
+  if (!sourceKey) return "";
+  const previewKind = String(kind || "").toLowerCase() === "thumbnail" ? "thumbnail" : "card";
+  return previewKind === "card"
+    ? sha256Text(`${CARD_PREVIEW_RENDER_REVISION}\0${sourceKey}`)
+    : sourceKey;
+}
+
 async function deterministicBuildCardPreviewUrl(rawUrl, kind = "card") {
   try {
     const parsed = new URL(String(rawUrl || ""), location.origin);
@@ -1092,11 +1103,7 @@ async function deterministicBuildCardPreviewUrl(rawUrl, kind = "card") {
     if (!/^(created|collection)\//.test(mediaPath) || !match) return "";
     const modifiedNs = BigInt(`0x${match[1]}`).toString(10);
     const size = BigInt(`0x${match[2]}`).toString(10);
-    const rawKey = `${mediaPath}\0${modifiedNs}\0${size}`;
-    const keySource = /\.(?:m4v|mov|mp4|webm)$/i.test(mediaPath)
-      ? `${BUILD_VIDEO_PREVIEW_KEY_REVISION}\0${rawKey}`
-      : rawKey;
-    const key = await sha256Text(keySource);
+    const key = await buildPersistentCardPreviewKey(mediaPath, modifiedNs, size, kind);
     return key ? buildPersistentPreviewUrl(kind, key) : "";
   } catch (_) {
     return "";
@@ -1151,22 +1158,35 @@ function scheduleLocalCardPreview(preview, url, kind = "card", cacheIdentity = "
       });
       return;
     }
-    deterministicBuildCardPreviewUrl(url, kind).then((directUrl) => {
+    // A deterministic Build preview URL is only a possible file location. After a
+    // preview-render revision it will not exist until this card has been generated.
+    // Show the original immediately on a cache miss, then replace it in the background;
+    // never assign a missing preview URL and turn a valid card into "unavailable".
+    existingPersistentCardPreview(url, kind, cacheIdentity).then((existingPreview) => {
       if (!preview.isConnected) return;
-      if (directUrl) {
-        preview.dataset.cardPreviewResolvedUrl = directUrl;
+      if (existingPreview) {
+        preview.dataset.cardPreviewResolvedUrl = existingPreview;
         const rect = preview.getBoundingClientRect();
         const listRect = preview.closest(".card_list")?.getBoundingClientRect();
         if (listRect && rect.bottom > listRect.top && rect.top < listRect.bottom) {
           preview.loading = "eager";
           preview.fetchPriority = "high";
         }
-        preview.src = directUrl;
+        preview.src = existingPreview;
         return;
       }
-      resolveLocalCardPreview(url, kind, cacheIdentity, preview).then((resolvedUrl) => {
-        if (preview.isConnected && resolvedUrl) preview.src = resolvedUrl;
+      preview.src = url;
+      const nativePreview = window.grokChameleonNative?.cardPreview;
+      if (typeof nativePreview !== "function") return;
+      queueNativeCardPreview(preview, { url, kind, cache_identity: cacheIdentity }).then((result) => {
+        if (!preview.isConnected) return;
+        const generatedUrl = String(result?.url || "").trim();
+        if (generatedUrl) preview.src = generatedUrl;
+      }).catch(() => {
+        // Keep the already-visible source media when preview generation fails.
       });
+    }).catch(() => {
+      if (preview.isConnected) preview.src = url;
     });
   };
   if (localCardPreviewObserver) localCardPreviewObserver.observe(preview);

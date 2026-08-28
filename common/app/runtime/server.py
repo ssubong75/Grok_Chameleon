@@ -19565,6 +19565,7 @@ BUILD_PREVIEW_KINDS = {
     "card": "cards",
     "thumbnail": "thumbnails",
 }
+CARD_PREVIEW_RENDER_REVISION = "card-640-v1"
 BUILD_VIDEO_PREVIEW_KEY_REVISION = "ffmpeg-first-frame-v1"
 
 
@@ -19613,11 +19614,16 @@ def build_preview_path_for_source_query(root: Path, query: dict) -> Path | None:
         return None
     if requested_version and requested_version != current_version:
         return None
+    preview_kind = normalize_build_preview_kind(query.get("kind", ["card"])[0])
     try:
-        key = preview_key_for_source(root, source)
+        key = (
+            card_preview_key_for_source(root, source)
+            if preview_kind == "card"
+            else preview_key_for_source(root, source)
+        )
     except (OSError, ValueError):
         return None
-    return build_preview_path(query.get("kind", ["card"])[0], key, root)
+    return build_preview_path(preview_kind, key, root)
 
 
 def build_preview_source(root: Path, source: Path) -> bool:
@@ -19646,25 +19652,69 @@ def preview_key_for_source(
     return hashlib.sha256(raw).hexdigest()
 
 
+def card_preview_key_for_source(root: Path, source: Path) -> str:
+    source_key = preview_key_for_source(root, source)
+    raw = f"{CARD_PREVIEW_RENDER_REVISION}\0{source_key}".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
 def cached_card_preview_key_for_source(root: Path, source: Path, kind: str) -> str:
     source_key = preview_key_for_source(root, source)
     preview_kind = normalize_build_preview_kind(kind)
     raw = f"{source_key}\0{preview_kind}".encode("utf-8")
+    if preview_kind == "card":
+        raw = CARD_PREVIEW_RENDER_REVISION.encode("utf-8") + b"\0" + raw
     return hashlib.sha256(raw).hexdigest()
+
+
+def card_preview_render_revision_path(root: Path) -> Path:
+    cache_root = card_preview_cache_root(root)
+    candidate = (cache_root / "card-preview-render-revision").resolve()
+    if candidate.parent != cache_root or candidate.name != "card-preview-render-revision":
+        raise RuntimeError("Refusing unsafe card preview revision path.")
+    return candidate
+
+
+def clear_stale_card_previews(root: Path) -> bool:
+    marker = card_preview_render_revision_path(root)
+    try:
+        if marker.read_text(encoding="utf-8").strip() == CARD_PREVIEW_RENDER_REVISION:
+            return False
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return False
+    preview_dirs = (card_preview_cache_dir(root), build_preview_dir("card", root))
+    for preview_dir in preview_dirs:
+        try:
+            for candidate in preview_dir.glob("*.jpg"):
+                if candidate.is_file() and re.fullmatch(r"[a-f0-9]{64}\.jpg", candidate.name):
+                    candidate.unlink()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return False
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(f"{CARD_PREVIEW_RENDER_REVISION}\n", encoding="utf-8")
+    except OSError:
+        return False
+    return True
 
 
 def remove_build_previews_for_source(root: Path, source: Path) -> None:
     if not source.is_file() or not build_preview_source(root, source):
         return
     try:
-        keys = {preview_key_for_source(root, source)}
+        source_keys = {preview_key_for_source(root, source)}
         if source.suffix.lower() in {".m4v", ".mov", ".mp4", ".webm"}:
-            keys.add(preview_key_for_source(root, source, legacy_video=True))
-            keys.add(preview_key_for_source(root, source, video_revision="ffmpeg-frame-v1"))
+            source_keys.add(preview_key_for_source(root, source, legacy_video=True))
+            source_keys.add(preview_key_for_source(root, source, video_revision="ffmpeg-frame-v1"))
+        card_keys = {card_preview_key_for_source(root, source), *source_keys}
     except (OSError, ValueError):
         return
     for kind in BUILD_PREVIEW_KINDS:
-        for key in keys:
+        for key in (card_keys if kind == "card" else source_keys):
             target = build_preview_path(kind, key, root)
             if not target:
                 continue
@@ -27582,6 +27632,7 @@ class Handler(SimpleHTTPRequestHandler):
                 if not root or not root.is_dir() or not legacy_cache_dir:
                     self.send_error(HTTPStatus.NOT_FOUND)
                     return
+                clear_stale_card_previews(root)
                 self.send_json({
                     "ok": True,
                     "cache_dir": str(cache_dir),
@@ -27596,6 +27647,7 @@ class Handler(SimpleHTTPRequestHandler):
                 if not root or not legacy_cache_dir:
                     self.send_error(HTTPStatus.NOT_FOUND)
                     return
+                clear_stale_card_previews(root)
                 query = parse_qs(parsed.query)
                 source = safe_join(root, query.get("path", [""])[0])
                 if not source.is_file():
@@ -27615,7 +27667,7 @@ class Handler(SimpleHTTPRequestHandler):
                 persistent_build_preview = build_preview_source(root, source)
                 preview_dir = build_preview_dir(preview_kind, root) if persistent_build_preview else cache_dir
                 preview_key = (
-                    preview_key_for_source(root, source)
+                    (card_preview_key_for_source(root, source) if preview_kind == "card" else preview_key_for_source(root, source))
                     if persistent_build_preview
                     else cached_card_preview_key_for_source(root, source, preview_kind)
                 )
