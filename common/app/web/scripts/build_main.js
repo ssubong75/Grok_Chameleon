@@ -312,7 +312,7 @@
 
     for (const progressEl of document.querySelectorAll(`.detail_job_thumb[data-build-job-id="${jobIdSelector}"] .detail_job_thumb_progress`)) {
       const slotIndex = Number.parseInt(String(progressEl.closest(".detail_job_thumb")?.dataset.jobSlotIndex || ""), 10) || 0;
-      progressEl.textContent = String(Math.max(1, buildJobSlotProgress(job, slotIndex)));
+      progressEl.textContent = buildJobSlotProgressText(job, slotIndex);
     }
 
     for (const badge of document.querySelectorAll(`.detail_job_badge[data-build-job-id="${jobIdSelector}"]`)) {

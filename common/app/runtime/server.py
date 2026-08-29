@@ -18126,7 +18126,29 @@ def imagine_native_bridge_generate(
     if action in {"i2i", "aspect", "t2v", "i2v", "extend"}:
         if progress_callback:
             progress_callback(2, "running", {"action": action, "request_id": request_id, "phase": "preparing"})
-        native_bridge_prepare_generation(root, account, request_payload, request_id, referer)
+        try:
+            native_bridge_prepare_generation(root, account, request_payload, request_id, referer)
+        except RuntimeError as exc:
+            # A just-created, cloned, liked, or discovered source can be absent from
+            # a reused official media store briefly. Retry preparation once with a
+            # fresh store, while retaining the exact selected source in request_payload.
+            if action not in {"i2i", "i2v", "extend"} or not imagine_source_preparation_needs_refresh(exc):
+                raise
+            imagine_debug_event("native_bridge_source_refresh_retry", {
+                "request_id": request_id,
+                "action": action,
+                "source_post_path": str(payload.get("source_post_path") or ""),
+                "source_item_id": str(payload.get("source_item_id") or ""),
+                "source_id": str(request_payload.get("source_id") or ""),
+            })
+            native_bridge_prepare_generation(
+                root,
+                account,
+                request_payload,
+                request_id,
+                referer,
+                force_refresh=True,
+            )
         if cancel_checker and cancel_checker():
             raise JobCancelled("Job cancelled.")
     video_deadline = job_started_at + max_wait if expected_type == "video" else None
@@ -18837,19 +18859,31 @@ def start_imagine_job(payload: dict) -> dict:
                 "context": context,
             })
 
-    def start_display_progress(display_action: str, display_seconds: int, display_max_progress: int) -> threading.Event:
+    def start_display_progress(
+        display_action: str,
+        display_seconds: int,
+        display_max_progress: int,
+        wait_for_phase: str = "",
+    ) -> threading.Event:
         stop_event = threading.Event()
-        started_at = time.time()
-        deadline = started_at + display_seconds
 
         def run() -> None:
             last_progress = 0
+            started_at: float | None = None
+            deadline: float | None = None
             while not stop_event.is_set():
                 with IMAGINE_JOB_LOCK:
                     current = IMAGINE_JOBS.get(job_id)
                     status_text = str((current or {}).get("status") or "")
+                    phase = str(((current or {}).get("context") or {}).get("phase") or "")
                 if status_text in {"done", "failed", "moderated", "cancelled"}:
                     break
+                if wait_for_phase and phase != wait_for_phase:
+                    stop_event.wait(0.2)
+                    continue
+                if started_at is None:
+                    started_at = time.time()
+                    deadline = started_at + display_seconds
                 display_progress = elapsed_display_progress(
                     started_at,
                     deadline,
@@ -18873,18 +18907,25 @@ def start_imagine_job(payload: dict) -> dict:
         if action == "t2i":
             display_stop = start_display_progress("t2i", IMAGINE_DIRECT_T2I_DISPLAY_SECONDS, IMAGINE_DIRECT_T2I_DISPLAY_MAX_PROGRESS)
         elif action == "i2i":
-            display_stop = start_display_progress("i2i", IMAGINE_DIRECT_I2I_DISPLAY_SECONDS, IMAGINE_DIRECT_I2I_DISPLAY_MAX_PROGRESS)
+            display_stop = start_display_progress(
+                "i2i",
+                IMAGINE_DIRECT_I2I_DISPLAY_SECONDS,
+                IMAGINE_DIRECT_I2I_DISPLAY_MAX_PROGRESS,
+                wait_for_phase="generating",
+            )
         elif action in {"i2v", "t2v"}:
             display_stop = start_display_progress(
                 action,
                 int(video_wait_policy["display_seconds"]),
                 IMAGINE_DIRECT_I2V_DISPLAY_MAX_PROGRESS,
+                wait_for_phase="generating",
             )
         elif action == "extend":
             display_stop = start_display_progress(
                 "extend",
                 int(video_wait_policy["display_seconds"]),
                 IMAGINE_DIRECT_EXTEND_DISPLAY_MAX_PROGRESS,
+                wait_for_phase="generating",
             )
         try:
             result = imagine_direct_generate(payload, progress_callback=progress, cancel_checker=lambda: imagine_job_cancelled(job_id))
@@ -21456,6 +21497,7 @@ def native_bridge_prepare_generation(
     request_payload: dict,
     request_id: str,
     referer: str,
+    force_refresh: bool = False,
 ) -> None:
     if not native_bridge_wait_available(timeout_seconds=8, max_age_seconds=60):
         raise RuntimeError("Native WebView bridge is not running. Launch Grok Chameleon.app.")
@@ -21469,6 +21511,7 @@ def native_bridge_prepare_generation(
             "url": referer if referer and referer.startswith(IMAGINE_BASE) else IMAGINE_BASE + "/imagine",
             "request_payload": request_payload,
             "max_wait_seconds": 45,
+            "force_refresh": bool(force_refresh),
         },
         timeout_seconds=max(75, IMAGINE_BRIDGE_LOGIN_WAIT_SECONDS + 45),
     )
@@ -21476,6 +21519,16 @@ def native_bridge_prepare_generation(
     if status_code >= 400 or not bool(value.get("ready")):
         detail = str(value.get("text") or "Imagine source preparation did not complete.")[:500]
         raise RuntimeError(f"Imagine source preparation failed: {detail}")
+
+
+def imagine_source_preparation_needs_refresh(error: Exception | str) -> bool:
+    """True only for the official store's source-materialization failures."""
+    text = str(error or "").lower()
+    return any(marker in text for marker in (
+        "could not load the selected source from the official page",
+        "selected source is not ready in the official media store",
+        "fallback source is still preparing",
+    ))
 
 
 def native_bridge_fetch_events(

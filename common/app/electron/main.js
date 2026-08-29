@@ -1497,7 +1497,10 @@ function bridgeCommandCanRunInParallel(command) {
 }
 
 function bridgeCommandUsesEphemeralWindow(command) {
-  return ["t2i_ws", "crop_image"].includes(String(command?.type || ""));
+  // A forced source refresh must never reload the account's shared media-store tab:
+  // fetch_stream requests on that account are intentionally allowed in parallel.
+  return ["t2i_ws", "crop_image"].includes(String(command?.type || ""))
+    || Boolean(command?.force_refresh);
 }
 
 function bridgeAccountKey(command) {
@@ -3399,6 +3402,7 @@ function grokUrlMatches(current, target) {
 async function waitForLoad(win, url, options = {}) {
   const targetUrl = url || "https://grok.com/imagine";
   const forceTarget = Boolean(options.forceTarget);
+  const forceReload = Boolean(options.forceReload);
   const timeoutMs = Math.max(1000, Number(options.timeoutMs || 12000));
   const attempts = Math.max(1, Number(options.attempts || 3));
   const targetReached = () => {
@@ -3413,7 +3417,7 @@ async function waitForLoad(win, url, options = {}) {
       || !win.webContents.isLoadingMainFrame()
     )
   );
-  if (domReadyAtTarget()) return;
+  if (!forceReload && domReadyAtTarget()) return;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     await new Promise((resolve) => {
       let settled = false;
@@ -3437,9 +3441,9 @@ async function waitForLoad(win, url, options = {}) {
       win.webContents.on("dom-ready", ready);
       win.webContents.on("did-finish-load", ready);
       win.webContents.on("did-stop-loading", ready);
-      if (domReadyAtTarget()) {
+      if (!forceReload && domReadyAtTarget()) {
         done();
-      } else if (!targetReached()) {
+      } else if (forceReload || !targetReached()) {
         win.loadURL(targetUrl).catch(done);
       }
     });
@@ -3691,6 +3695,7 @@ async function prepareBridgeWindow(win, command, prepareGeneration = 0) {
 
   await waitForLoad(win, targetUrl, {
     forceTarget: ["t2i_ws", "prepare", "prepare_generation", "fetch_stream", "crop_image", "open_page"].includes(command.type),
+    forceReload: Boolean(command.force_refresh),
     timeoutMs: storePageCommand ? IMAGINE_BRIDGE_PAGE_TIMEOUT_MS : undefined,
     attempts: storePageCommand ? 1 : undefined,
   });
