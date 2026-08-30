@@ -4,6 +4,8 @@ Grok Chameleon is a desktop app designed to make Grok Imagine and Build more con
 
 **From creation to management, a more convenient way to experience Grok's imagination.**
 
+[**Installation & Launch**](assets/Grok-Chameleon.mp4)
+
 ## Getting Started
 
 1. Launch Grok Chameleon.
