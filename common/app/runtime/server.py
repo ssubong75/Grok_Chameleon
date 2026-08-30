@@ -6763,14 +6763,18 @@ def imagine_missing_direct_upload_conversation_candidates(
     assets: list[dict],
     *,
     skip_asset_ids: set[str] | None = None,
-    max_conversations: int = 8,
+    max_conversations: int = 32,
 ) -> dict[str, dict]:
-    """Find generated assets whose official upload parent is absent from Saved cards.
+    """Find generated assets whose owning conversation is absent from Saved cards.
 
-    Grok can list an older direct-upload result in /rest/assets while leaving its
-    conversation out of the paged conversation feed.  The asset records the exact
-    conversation and input asset ids, but it is not enough to draw a source card:
-    those ids must be verified against the official conversation response first.
+    Grok can list an older result in /rest/assets while leaving its conversation out of
+    the paged conversation feed.  Such a conversation is often still readable by id, and
+    it is the only place the prompt and the parent asset are recorded, so ask for it.
+
+    Only an asset that declares its input assets can also prove a deletion: for it the
+    official response either matches the recorded pairing or the conversation is truly
+    gone.  An asset that declares nothing is asking a question, not making a claim -- a
+    404 for it means the conversation is unreadable, never that the asset is deleted.
     """
     skipped = skip_asset_ids or set()
     candidates: dict[str, dict] = {}
@@ -6794,16 +6798,19 @@ def imagine_missing_direct_upload_conversation_candidates(
             for value in media_gen.get("input_assets") or []
             if str(value or "").strip()
         }
-        if not asset_id or asset_id in skipped or not conversation_id or not source_ids:
+        if not asset_id or asset_id in skipped or not conversation_id:
             continue
         if conversation_id not in candidates and len(candidates) >= max(1, max_conversations):
             continue
         record = candidates.setdefault(conversation_id, {
             "result_asset_ids": set(),
             "source_asset_ids": set(),
+            "proves_deletion": False,
         })
         record["result_asset_ids"].add(asset_id)
         record["source_asset_ids"].update(source_ids)
+        if source_ids:
+            record["proves_deletion"] = True
     return candidates
 
 
@@ -6895,7 +6902,7 @@ def imagine_recover_missing_direct_upload_conversation_cards(
             try:
                 detail = future.result()
             except Exception as exc:
-                if imagine_error_is_confirmed_not_found(exc):
+                if imagine_error_is_confirmed_not_found(exc) and expected.get("proves_deletion"):
                     deleted_conversation_ids.add(conversation_id)
                 imagine_debug_event("saved_asset_conversation_detail_failed", {
                     "conversation_id": conversation_id,
@@ -7576,6 +7583,9 @@ def list_imagine_saved(payload: dict) -> dict:
             hidden_remote_ids
             | complete_upload_asset_ids
             | cached_complete_upload_asset_ids
+            # An asset the conversation feed already placed on a card needs no lookup.
+            | official_asset_ids
+            | cached_grouped_asset_ids
         ),
     )
     recovered_posts, asset_deleted_conversation_ids = (
@@ -10492,6 +10502,48 @@ def imagine_asset_group_key(asset: dict, fallback: str) -> str:
     return fallback
 
 
+def imagine_asset_reference_source_ids(asset: dict) -> list[str]:
+    """Read the parent asset ids grok.com only exposes through auxKeys references.
+
+    A /rest/assets row for an edited image or an animated video carries no
+    mediaGenInput, parentPostId or originalPostId: its source survives solely as an
+    asset url inside auxKeys. Without reading it every asset-only card stands alone
+    instead of joining the card its source already has. The reference arrives in both
+    url shapes -- /generated/<id>/image.jpg for a generated parent and
+    /users/<owner>/<id>/content for an uploaded one -- so resolve it through the
+    identity helper that already knows every shape rather than a single pattern.
+    """
+    aux_keys = asset.get("auxKeys") if isinstance(asset.get("auxKeys"), dict) else {}
+    if not aux_keys:
+        return []
+    values: list = []
+    for key in ("image_references", "imageReferences", "image_reference", "imageReference"):
+        raw = aux_keys.get(key)
+        if raw is None:
+            continue
+        if isinstance(raw, list):
+            values.extend(raw)
+            continue
+        text = str(raw).strip()
+        if not text:
+            continue
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                parsed = None
+            if isinstance(parsed, list):
+                values.extend(parsed)
+                continue
+        values.append(text)
+    source_ids: list[str] = []
+    for value in values:
+        source_id = imagine_media_identity_id_from_text(value)
+        if source_id and source_id not in source_ids:
+            source_ids.append(source_id)
+    return source_ids
+
+
 def imagine_unsaved_post_from_asset(asset: dict, account: dict) -> dict | None:
     if not isinstance(asset, dict):
         return None
@@ -10516,9 +10568,14 @@ def imagine_unsaved_post_from_asset(asset: dict, account: dict) -> dict | None:
     media_gen = imagine_conversation_media_gen(asset)
     prompt = imagine_text_value(media_gen.get("prompt") or asset.get("prompt") or asset.get("metadata") or "")
     input_assets = [str(value) for value in media_gen.get("input_assets") or [] if str(value or "").strip()]
+    reference_assets = imagine_asset_reference_source_ids(asset)
     source_item_id = (
         next((value for value in input_assets if value != asset_id), "")
         or str(asset.get("parentPostId") or asset.get("originalPostId") or "").strip()
+        # Last, because it is the only source these asset-only rows ever declare.  It
+        # must not reach input_assets: an asset with input_assets is handed to the
+        # missing-conversation probe, and a 404 there marks the asset itself deleted.
+        or next((value for value in reference_assets if value != asset_id), "")
     )
     owner_user_id = str(asset.get("ownerUserId") or asset.get("owner_user_id") or "").strip()
     item = {
