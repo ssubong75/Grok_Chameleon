@@ -557,6 +557,13 @@ function detailThumbButtonForItem(prefix, item, post, options = {}) {
   return button;
 }
 
+function syncBuildDetailToolButtons(type) {
+  const isImage = type === "image";
+  document.querySelectorAll(".b_detail_image_tool_btn").forEach((button) => {
+    button.hidden = !isImage;
+  });
+}
+
 function syncImagineDetailToolButtons(type, item = null, post = null) {
   const isImage = type === "image";
   const isVideo = type === "video";
@@ -638,6 +645,7 @@ function renderDetailView(prefix, post, options = {}) {
   const modelName = document.querySelector(`.${prefix}_detail_model_name`);
   if (!thumbList || !media) return;
   if (prefix === "i") syncImagineDetailToolButtons("");
+  if (prefix === "b") syncBuildDetailToolButtons("");
   setDetailResolutionLabel(prefix, "");
   mediaWrap?.querySelector(".detail_job_badges")?.remove();
   modelBadge?.querySelector(".detail_lucky_badge")?.remove();
@@ -717,6 +725,7 @@ function renderDetailView(prefix, post, options = {}) {
 
   const type = detailItemType(selectedItem);
   if (prefix === "i") syncImagineDetailToolButtons(type, selectedItem, post);
+  if (prefix === "b") syncBuildDetailToolButtons(type);
   if (prefix === "i") renderImagineDetailAspectMenu(selectedItem);
   const renderItem = detailRenderableItem(prefix, selectedItem, post);
   const detailMediaUrl = detailMediaUrlForItem(prefix, selectedItem, post);

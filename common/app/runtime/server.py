@@ -3063,7 +3063,7 @@ def imagine_relation_stored_item(item: dict) -> dict:
         stored_metadata["owner_user_id"] = owner_user_id
     if metadata.get("aspect_ratio"):
         stored_metadata["aspect_ratio"] = metadata.get("aspect_ratio")
-    return {
+    stored_fields = {
         key: item.get(key)
         for key in (
             "item_id", "post_id", "asset_id", "type", "mime_type", "role", "relation",
@@ -3075,7 +3075,17 @@ def imagine_relation_stored_item(item: dict) -> dict:
             "bundle_source_snapshot", "bundle_local_path",
         )
         if item.get(key) not in (None, "")
-    } | {
+    }
+    # A picked video mode rides the message as a --mode= flag, and a promptless mode is
+    # the whole message. grok.com stores that generation with an empty videoPrompt, so
+    # keeping the flag here would show the card a prompt the site never had.
+    if "prompt" in stored_fields:
+        cleaned_prompt = imagine_conversation_request_prompt(stored_fields["prompt"])
+        if cleaned_prompt:
+            stored_fields["prompt"] = cleaned_prompt
+        else:
+            stored_fields.pop("prompt")
+    return stored_fields | {
         "file": "",
         "url": raw_url,
         "remote_url": raw_url,
@@ -3139,6 +3149,10 @@ def imagine_relation_materialized_item(item: dict, account: dict, root: Path | N
         "liked": True,
         "favorite": True,
     })
+    # Records written before the flag was stripped on save still carry it, so clean the
+    # prompt on the way out too rather than leaving those cards showing a --mode= line.
+    if stored.get("prompt"):
+        stored["prompt"] = imagine_conversation_request_prompt(stored["prompt"])
     return stored
 
 
@@ -5052,7 +5066,11 @@ def imagine_conversation_request_prompt(value) -> str:
     text = imagine_text_value(value).strip()
     if not text:
         return ""
-    text = re.sub(r"\s+--mode(?:=|\s+)\S+\s*$", "", text, flags=re.IGNORECASE).strip()
+    # A picked video mode rides along on the message, and grok.com never shows it as the
+    # prompt: a Spicy request sends the flag with nothing else and the result comes back
+    # with an empty videoPrompt. Requiring leading whitespace kept the flag whenever it
+    # stood alone, which is exactly the promptless case.
+    text = re.sub(r"(?:^|\s+)--mode(?:=|\s+)\S+\s*$", "", text, flags=re.IGNORECASE).strip()
     for pattern in (
         r"^I edited the image with the prompt:\s*(['\"])(.*)\1\s*$",
         r"^I generated (?:an image|a video) with the prompt:\s*(['\"])(.*)\1\s*$",
@@ -17481,6 +17499,11 @@ def imagine_video_request(payload: dict, prompt: str, request_id: str, action: s
     if resolution not in VIDEO_RESOLUTIONS:
         resolution = "480p"
     aspect_ratio = str(options.get("aspect_ratio") or "").strip()
+    # grok.com carries the chosen video mode twice: as mediaGenInput's mode field and as a
+    # --mode= flag on the message. The name comes from the site's own mode list, so take it
+    # from the caller rather than naming any single mode here. Absent one, keep the custom
+    # mode this app has always sent.
+    video_generation_mode = str(options.get("video_mode") or "").strip() or "custom"
     source_info: dict = {}
     ignored: set[str] = set()
     parent_ids: set[str] = set()
@@ -17674,7 +17697,7 @@ def imagine_video_request(payload: dict, prompt: str, request_id: str, action: s
             }
             if model_config.get("aspectRatio"):
                 media_gen_video["aspectRatio"] = model_config["aspectRatio"]
-            media_gen_video["mode"] = "custom"
+            media_gen_video["mode"] = video_generation_mode
             media_gen_input = {"imageToVideo": media_gen_video}
         else:
             referer = IMAGINE_BASE + "/imagine/saved"
@@ -17688,8 +17711,9 @@ def imagine_video_request(payload: dict, prompt: str, request_id: str, action: s
             media_gen_input = {"textToVideo": media_gen_video}
 
     direct_prompt = prompt.strip()
-    if "--mode=custom" not in direct_prompt:
-        direct_prompt = f"{direct_prompt} --mode=custom".strip()
+    mode_flag = f"--mode={video_generation_mode}"
+    if mode_flag not in direct_prompt:
+        direct_prompt = f"{direct_prompt} {mode_flag}".strip()
     request = {
         "temporary": True,
         "modelName": "imagine-video-gen",
@@ -18687,7 +18711,12 @@ def imagine_direct_generate(payload: dict, progress_callback=None, cancel_checke
         raise RuntimeError("Select or capture an Imagine account first.")
     prompt = str(payload.get("prompt") or "").strip()
     action = imagine_direct_action(payload)
-    if action not in {"upscale", "aspect"} and not prompt:
+    direct_options = payload.get("options") if isinstance(payload.get("options"), dict) else {}
+    # A picked video mode is the instruction on its own: grok.com sends the mode with an
+    # empty prompt and puts only the --mode= flag on the message. Requiring a prompt here
+    # would reject exactly the requests the site makes.
+    named_video_mode = bool(str(direct_options.get("video_mode") or "").strip())
+    if action not in {"upscale", "aspect"} and not prompt and not named_video_mode:
         raise RuntimeError("Prompt is empty.")
     if action == "upscale":
         return upscale_imagine_video_post(payload, progress_callback=progress_callback, cancel_checker=cancel_checker)
@@ -24098,6 +24127,12 @@ def build_video_request(payload: dict, options: dict, prompt: str, image_attachm
         body["aspect_ratio"] = aspect
     if resolution in VIDEO_RESOLUTIONS:
         body["resolution"] = resolution
+    # The Imagine video model is the same one the site drives with a named mode, and this
+    # body is flat rather than nested, so the mode goes on the request itself. An unknown
+    # field is the API's to reject; naming none keeps the previous request untouched.
+    video_generation_mode = str(options.get("video_mode") or "").strip()
+    if video_generation_mode:
+        body["mode"] = video_generation_mode
     return "/videos/generations", body, "i2v" if image_attachments else "t2v"
 
 
@@ -24692,7 +24727,11 @@ def build_generate(payload: dict, progress_callback=None, cancel_checker=None) -
     report_progress(1)
     ensure_library_root(root)
     prompt = str(payload.get("prompt") or "").strip()
-    if not prompt:
+    build_options = payload.get("options") if isinstance(payload.get("options"), dict) else {}
+    # A picked video mode is the whole instruction, exactly as Imagine sends it: the mode
+    # travels in the request and the prompt stays empty.
+    named_video_mode = bool(str(build_options.get("video_mode") or "").strip())
+    if not prompt and not named_video_mode:
         raise RuntimeError("Prompt is empty.")
     mode = clean_option(payload.get("mode"), "image")
     if mode not in {"image", "video", "extend", "video_edit"}:
@@ -24805,7 +24844,7 @@ def build_generate(payload: dict, progress_callback=None, cancel_checker=None) -
                                 "post_id": Path(folder_path).name,
                                 "source": "build",
                                 "mode": action,
-                                "title": title_from_prompt(prompt, action),
+                                "title": title_from_prompt(prompt, "" if named_video_mode else action),
                                 "prompt": prompt,
                                 "created_at": now_iso(),
                                 "updated_at": now_iso(),
@@ -25093,7 +25132,7 @@ def build_generate(payload: dict, progress_callback=None, cancel_checker=None) -
             "post_id": post_id,
             "source": existing_post.get("source") or "build",
             "mode": existing_post.get("mode") or action,
-            "title": existing_post.get("title") or title_from_prompt(prompt, action),
+            "title": existing_post.get("title") or title_from_prompt(prompt, "" if named_video_mode else action),
             "prompt": existing_post.get("prompt") or prompt,
             "created_at": existing_post.get("created_at") or now_iso(),
             "updated_at": now_iso(),

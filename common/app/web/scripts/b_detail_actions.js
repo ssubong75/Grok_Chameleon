@@ -179,9 +179,83 @@ function bindBuildDetailActions() {
       showErrorPanel("Delete failed", error?.message || "Delete failed.");
     });
   });
+  document.querySelector(".b_detail_spicy")?.addEventListener("click", (event) => {
+    const button = event.currentTarget;
+    startBuildDetailSpicyVideo(button).catch((error) => {
+      console.warn(error);
+      showErrorPanel("Spicy failed", error?.message || "Spicy failed.");
+    });
+  });
   document.querySelector(".b_detail_edit")?.addEventListener("click", () => {
     openBuildDetailImageEditor();
   });
+}
+
+// Build drives the same Imagine video model through api.x.ai, so send the mode the site
+// names and let the API answer rather than deciding here which sources may use it.
+const BUILD_SPICY_VIDEO_MODE = "extremely-spicy-or-crazy";
+
+async function startBuildDetailSpicyVideo(button = null) {
+  const post = selectedLibraryPost();
+  const item = selectedDetailItem(post);
+  if (!post || !item || detailItemType(item) !== "image") {
+    showErrorPanel("Spicy unavailable", "Select a Build image thumbnail.");
+    return;
+  }
+  const sourceUrl = detailMediaUrlForItem("b", item, post);
+  if (!sourceUrl) {
+    showErrorPanel("Spicy unavailable", "This Build image has no source file.");
+    return;
+  }
+  const composerOptions = typeof composerRequestOptions === "function" ? composerRequestOptions() : {};
+  // The composer tray carries this metadata for every detail-sourced request, and it is
+  // what ties the result to the card it came from. Building the attachment by hand
+  // without it left the video standing alone on Build main.
+  const sourceMetadata = typeof composerAttachmentMetadataForItem === "function"
+    ? composerAttachmentMetadataForItem(post, item)
+    : {};
+  const attachment = {
+    name: item.file || item.title || `${mediaItemKey(item) || "build-spicy-source"}.jpg`,
+    type: String(item.mime_type || item.mime || "image/jpeg"),
+    role: "source",
+    url: sourceUrl,
+    raw_url: sourceUrl,
+    source_url: sourceUrl,
+    aspect_ratio: typeof composerAttachmentAspectForItem === "function"
+      ? composerAttachmentAspectForItem(item)
+      : "",
+    detail_auto: true,
+    detail_key: mediaItemKey(item),
+    detail_post_path: post.folder_path || "",
+    detail_item_id: mediaItemKey(item),
+    ...sourceMetadata,
+  };
+  if (button) button.disabled = true;
+  try {
+    await ensureComposerAttachmentDataUrl(attachment);
+    const data = await qApi("/api/build/start", {
+      provider: "build",
+      mode: "video",
+      prompt: "",
+      options: { ...composerOptions, video_mode: BUILD_SPICY_VIDEO_MODE },
+      attachments: [attachment],
+      preview_url: detailPreviewUrlForItem("b", item, post) || sourceUrl,
+      preview_type: "image",
+      source_post_path: post.folder_path || "",
+      source_item_id: mediaItemKey(item),
+    });
+    if (!data?.job) throw new Error("Spicy job was not created.");
+    upsertBuildJob(data.job);
+    // Without the poll the card sits at its first percent forever: the job runs to
+    // completion on the server and nothing ever asks for the result.
+    selectBuildJob(data.job.id, {
+      keepDetailPost: screen_state.current_screen === "b_detail",
+      focusJobThumb: true,
+    });
+    scheduleBuildJobPoll(data.job.id);
+  } finally {
+    if (button) button.disabled = false;
+  }
 }
 
 bindBuildDetailActions();

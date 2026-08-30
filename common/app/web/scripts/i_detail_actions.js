@@ -1883,6 +1883,67 @@ function imagineDetailAspectAttachment(post, item) {
   };
 }
 
+// The site keeps its video modes in a server list and marks the mature one
+// model_generated_only, then hides it for a user-uploaded source.  We send the request
+// ourselves, so let the server answer instead of hiding the button in advance.
+const IMAGINE_SPICY_VIDEO_MODE = "extremely-spicy-or-crazy";
+
+async function startImagineDetailSpicyVideo(button = null) {
+  const post = selectedLibraryPost();
+  const item = selectedDetailItem(post);
+  if (!post || !item || detailItemType(item) !== "image") {
+    showErrorPanel("Spicy unavailable", "Select an Imagine image thumbnail.");
+    return;
+  }
+  const sourcePostId = imagineActionPostIdForItem(item);
+  const rawUrl = rawImagineDetailMediaUrl(item);
+  if (!sourcePostId || !rawUrl) {
+    showErrorPanel("Spicy unavailable", "This Imagine image has no source post.");
+    return;
+  }
+  // The composer bar owns duration and resolution for every other video request, so read
+  // the same controls here instead of letting the server fall back to its own defaults.
+  const composerOptions = typeof composerRequestOptions === "function" ? composerRequestOptions() : {};
+  const itemAspect = typeof detailAspectFromItem === "function"
+    ? detailAspectFromItem(item).replace(/\s*\/\s*/g, ":")
+    : "";
+  const aspectRatio = String(composerOptions.aspect_ratio || "").trim() || itemAspect;
+  const payload = {
+    provider: "imagine",
+    mode: "video",
+    prompt: "",
+    preview_url: detailPreviewUrlForItem("i", item, post) || detailMediaUrlForItem("i", item, post) || "",
+    preview_type: "image",
+    source_post_path: post.folder_path || "",
+    source_item_id: mediaItemKey(item),
+    options: {
+      ...composerOptions,
+      video_mode: IMAGINE_SPICY_VIDEO_MODE,
+      aspect_ratio: aspectRatio,
+    },
+    attachments: [imagineDetailAspectAttachment(post, item)],
+    account_id: iDetailAccountId(item, post),
+    id: sourcePostId,
+    post_id: sourcePostId,
+    item_id: item.item_id || mediaItemKey(item),
+    type: "video",
+    metadata: item.metadata || {},
+  };
+  if (button) button.disabled = true;
+  try {
+    const data = await qApi("/api/imagine/start", payload);
+    if (!data?.job) throw new Error("Spicy job was not created.");
+    upsertImagineJob(data.job);
+    selectImagineJob(data.job.id, {
+      keepDetailPost: true,
+      focusJobThumb: true,
+    });
+    scheduleImagineJobPoll(data.job.id);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
 async function startImagineDetailAspectRatio(label, button = null) {
   const aspectRatio = imagineDetailAspectValue(label);
   const post = selectedLibraryPost();
@@ -2489,6 +2550,13 @@ function bindImagineDetailActions() {
     deleteImagineSelectedDetailItem().catch((error) => {
       console.warn(error);
       showErrorPanel("Delete failed", error?.message || "Delete failed.");
+    });
+  });
+  document.querySelector(".i_detail_spicy")?.addEventListener("click", (event) => {
+    const button = event.currentTarget;
+    startImagineDetailSpicyVideo(button).catch((error) => {
+      console.warn(error);
+      showErrorPanel("Spicy failed", error?.message || "Spicy failed.");
     });
   });
   document.querySelector(".i_detail_edit")?.addEventListener("click", () => {

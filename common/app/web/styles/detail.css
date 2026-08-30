@@ -1401,6 +1401,25 @@
   fill: currentColor;
 }
 
+.i_detail_spicy_glyph,
+.b_detail_spicy_glyph {
+  display: block;
+  font-family: "Arial Rounded MT Bold", Arial, sans-serif;
+  font-size: 12.5px;
+  font-style: normal;
+  font-weight: 700;
+  letter-spacing: -0.2px;
+  line-height: 1;
+}
+
+.i_detail_action.i_detail_spicy:hover,
+.i_detail_action.i_detail_spicy:focus-visible,
+.b_detail_action.b_detail_spicy:hover,
+.b_detail_action.b_detail_spicy:focus-visible {
+  background: transparent;
+  color: #ff4d4d;
+}
+
 .i_detail_action.i_detail_edit:hover,
 .i_detail_action.i_detail_edit:focus-visible,
 .i_detail_source_btn:hover,
