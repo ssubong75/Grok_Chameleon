@@ -300,6 +300,11 @@ NATIVE_BRIDGE_LAST_POLL_AT = 0.0
 IMAGINE_VIDEO_TERMINAL_STATUSES = {"failed", "expired", "cancelled", "canceled"}
 IMAGINE_DEBUG_RAW_PROGRESS_THRESHOLD = 90
 IMAGINE_DEBUG_LAST_EVENT_COUNT = 5
+TRANSLATION_CACHE: dict[tuple[str, str, str], dict] = {}
+TRANSLATION_STATE_LOCK = threading.Lock()
+TRANSLATION_CACHE_LIMIT = 512
+TRANSLATION_BLOCK_COOLDOWN_SECONDS = 300.0
+TRANSLATION_BLOCKED_UNTIL = 0.0
 
 
 class JobCancelled(RuntimeError):
@@ -25603,6 +25608,44 @@ def delete_prompt(payload: dict) -> dict:
     return current_library_snapshot(root)
 
 
+def translation_cache_get(key: tuple[str, str, str]) -> dict | None:
+    with TRANSLATION_STATE_LOCK:
+        cached = TRANSLATION_CACHE.pop(key, None)
+        if cached is None:
+            return None
+        TRANSLATION_CACHE[key] = cached
+        return dict(cached)
+
+
+def translation_cache_put(key: tuple[str, str, str], value: dict) -> None:
+    with TRANSLATION_STATE_LOCK:
+        TRANSLATION_CACHE.pop(key, None)
+        TRANSLATION_CACHE[key] = dict(value)
+        while len(TRANSLATION_CACHE) > TRANSLATION_CACHE_LIMIT:
+            TRANSLATION_CACHE.pop(next(iter(TRANSLATION_CACHE)))
+
+
+def translation_block_remaining() -> int:
+    with TRANSLATION_STATE_LOCK:
+        remaining = TRANSLATION_BLOCKED_UNTIL - time.monotonic()
+    return max(0, int(remaining + 0.999))
+
+
+def start_translation_block() -> None:
+    global TRANSLATION_BLOCKED_UNTIL
+    with TRANSLATION_STATE_LOCK:
+        TRANSLATION_BLOCKED_UNTIL = time.monotonic() + TRANSLATION_BLOCK_COOLDOWN_SECONDS
+
+
+def translation_error_detail(raw: str) -> str:
+    # A throttled call comes back as Google's whole "Sorry..." HTML page. Passing that
+    # straight through put a screen of markup in the toast; keep the readable sentence.
+    text = re.sub(r"(?is)<(script|style)\b.*?</\1>", " ", raw)
+    text = re.sub(r"(?s)<[^>]*>", " ", text)
+    text = re.sub(r"\s+", " ", html.unescape(text)).strip()
+    return text[:200]
+
+
 def translate_prompt(payload: dict) -> dict:
     text = str(payload.get("text") or "").strip()
     if not text:
@@ -25617,6 +25660,16 @@ def translate_prompt(payload: dict) -> dict:
         raise RuntimeError("Unsupported source translation language.")
     if not language_code_pattern.fullmatch(target_code):
         raise RuntimeError("Unsupported target translation language.")
+    cache_key = (source_code, target_code, text)
+    cached = translation_cache_get(cache_key)
+    if cached is not None:
+        return cached
+    blocked_for = translation_block_remaining()
+    if blocked_for > 0:
+        raise RuntimeError(
+            "Google Translate is rate limiting this network. "
+            f"Translation resumes in {blocked_for}s."
+        )
     query = urlencode({"client": "gtx", "sl": source_code, "tl": target_code, "dt": "t"})
     request = urllib.request.Request(
         f"https://translate.googleapis.com/translate_a/single?{query}",
@@ -25631,7 +25684,19 @@ def translate_prompt(payload: dict) -> dict:
         with urllib.request.urlopen(request, timeout=30) as response:
             result = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        detail = exc.read(1000).decode("utf-8", errors="replace")
+        detail = translation_error_detail(exc.read(2000).decode("utf-8", errors="replace"))
+        if exc.code in (429, 403):
+            # The endpoint throttles per IP, and every further attempt renews the block
+            # rather than shortening it. Stop asking until the cooldown has run out.
+            start_translation_block()
+            log_event(
+                f"translate_rate_limited http={exc.code} "
+                f"cooldown={int(TRANSLATION_BLOCK_COOLDOWN_SECONDS)}s"
+            )
+            raise RuntimeError(
+                f"Google Translate is rate limiting this network (HTTP {exc.code}). "
+                f"Translation resumes in {translation_block_remaining()}s."
+            ) from exc
         raise RuntimeError(f"Google translation HTTP {exc.code}: {detail}") from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"Google translation network error: {exc}") from exc
@@ -25650,7 +25715,7 @@ def translate_prompt(payload: dict) -> dict:
         if isinstance(result, list) and len(result) > 2 and isinstance(result[2], str)
         else source_code
     )
-    return {
+    result_payload = {
         "translation": translation,
         "source_language_code": source_code,
         "detected_source_language_code": detected_source_code,
@@ -25658,6 +25723,8 @@ def translate_prompt(payload: dict) -> dict:
         "target_language": {"ko": "Korean", "en": "English"}.get(target_code, target_code),
         "provider": "Google Translate",
     }
+    translation_cache_put(cache_key, result_payload)
+    return result_payload
 
 
 def save_accounts(payload: dict) -> dict:

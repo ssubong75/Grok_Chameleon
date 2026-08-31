@@ -42,8 +42,26 @@ promptSave?.querySelector(".prompt_language_options")?.addEventListener("click",
   selectPromptTranslationLanguage(option.dataset.languageCode || "");
 });
 
-promptSave?.querySelector(".prompt_save_original")?.addEventListener("input", () => {
-  schedulePromptTranslation({ immediate: false, clear: true });
+const promptOriginalInput = promptSave?.querySelector(".prompt_save_original");
+
+// Chromium and WebKit disagree on whether compositionend precedes the final input
+// event, so both paths schedule. The debounce timer is reset on every schedule, and
+// the language-pair key suppresses the duplicate, so ordering does not matter here.
+promptOriginalInput?.addEventListener("compositionstart", () => {
+  promptTranslationState.composing = true;
+  cancelPromptTranslationWork();
+});
+
+promptOriginalInput?.addEventListener("compositionend", () => {
+  promptTranslationState.composing = false;
+  schedulePromptTranslation({ immediate: false, clear: false });
+});
+
+promptOriginalInput?.addEventListener("input", (event) => {
+  if (event.isComposing || promptTranslationState.composing) return;
+  // The previous translation stays put until the new one lands. Blanking it on every
+  // keystroke made the box flicker and lost a good answer the moment typing resumed.
+  schedulePromptTranslation({ immediate: false, clear: false });
 });
 
 window.addEventListener("resize", () => {

@@ -352,7 +352,7 @@ const PROMPT_TRANSLATION_DETECTED_ALIASES = Object.freeze({
   "zh-Hans": "zh-CN",
   "zh-Hant": "zh-TW",
 });
-const PROMPT_TRANSLATION_DELAY_MS = 650;
+const PROMPT_TRANSLATION_DELAY_MS = 1100;
 const promptTranslationState = {
   sourceCode: "en",
   targetCode: "ko",
@@ -360,7 +360,19 @@ const promptTranslationState = {
   timer: 0,
   requestVersion: 0,
   controller: null,
+  // Hangul and every other IME fires `input` once per composition step, so pausing
+  // mid-syllable used to send an unfinished cluster off for translation. Held while
+  // a composition is open; compositionend hands the committed text back.
+  composing: false,
+  // Language pair plus the text of the translation currently on screen. A repeat of
+  // that exact request has its answer already and never reaches the network.
+  lastKey: "",
 };
+
+function promptTranslationKey(text) {
+  const { sourceCode, targetCode } = promptTranslationState;
+  return `${sourceCode}|${targetCode}|${text}`;
+}
 
 function promptTranslationElements() {
   return {
@@ -509,8 +521,14 @@ function schedulePromptTranslation({ immediate = false, clear = true } = {}) {
   const { original, translation } = promptTranslationElements();
   cancelPromptTranslationWork();
   const text = String(original?.value || "").trim();
+  if (!text) {
+    if (translation) translation.value = "";
+    promptTranslationState.lastKey = "";
+    return;
+  }
+  if (promptTranslationState.composing) return;
+  if (promptTranslationKey(text) === promptTranslationState.lastKey) return;
   if (clear && translation) translation.value = "";
-  if (!text) return;
   promptTranslationState.timer = window.setTimeout(
     () => translatePromptSave(),
     immediate ? 0 : PROMPT_TRANSLATION_DELAY_MS,
@@ -529,6 +547,7 @@ async function translatePromptSave({ detectSource = false } = {}) {
   const targetCode = promptTranslationState.targetCode;
   if (!detectSource && sourceCode === targetCode) {
     if (translation) translation.value = text;
+    promptTranslationState.lastKey = promptTranslationKey(text);
     return;
   }
   window.clearTimeout(promptTranslationState.timer);
@@ -553,7 +572,11 @@ async function translatePromptSave({ detectSource = false } = {}) {
       }
     }
     if (translation) translation.value = normalizeNfcText(data.translation || "");
+    promptTranslationState.lastKey = promptTranslationKey(text);
   } catch (error) {
+    // A pair that failed must not read as already answered, or the next edit that
+    // returns to this exact text would sit there with no translation and no request.
+    promptTranslationState.lastKey = "";
     if (error?.name === "AbortError" || requestVersion !== promptTranslationState.requestVersion) return;
     showErrorPanel("Translation failed", error?.message || "Translation failed.");
   } finally {
@@ -598,6 +621,7 @@ function swapPromptTranslationLanguages() {
   if (original && translation) {
     [original.value, translation.value] = [translation.value, original.value];
   }
+  promptTranslationState.lastKey = "";
   syncPromptTranslationControls();
   original?.focus({ preventScroll: true });
 }
@@ -607,6 +631,8 @@ function resetPromptTranslationDialog({ translate = false } = {}) {
   promptTranslationState.sourceCode = "en";
   promptTranslationState.targetCode = "ko";
   promptTranslationState.openSide = "";
+  promptTranslationState.composing = false;
+  promptTranslationState.lastKey = "";
   const { search } = promptTranslationElements();
   if (search) search.value = "";
   syncPromptTranslationControls();
