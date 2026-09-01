@@ -36,6 +36,8 @@ const REGENERATED_ON_SCAN = new Set([
 // protected without anyone remembering to add it here.
 const LIBRARY_JSON_KEY = canonicalPathKey("library.json");
 const LIBRARY_JSON_REGENERATED_FIELDS = ["updated_at", "posts", "collections", "prompts", "card_index"];
+const ALWAYS_HASH_EXTENSIONS = new Set([".json", ".sqlite3", ".db"]);
+const ALWAYS_HASH_DIRECTORIES = new Set(["account", "prompt", "sql_data"]);
 const IGNORED_NAMES = new Set([".DS_Store", "Thumbs.db", "desktop.ini"]);
 const HISTORY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const PROGRESS_INTERVAL_MS = 200;
@@ -112,6 +114,29 @@ function writeJsonAtomic(filePath, value) {
   }
 }
 
+function snapshotJsonFiles(filePaths) {
+  return filePaths.map((filePath) => ({
+    filePath,
+    existed: pathExists(filePath),
+    value: pathExists(filePath) ? readJson(filePath) : null,
+  }));
+}
+
+function restoreJsonFiles(snapshots) {
+  const failures = [];
+  for (const snapshot of [...snapshots].reverse()) {
+    try {
+      if (snapshot.existed) writeJsonAtomic(snapshot.filePath, snapshot.value);
+      else fs.unlinkSync(snapshot.filePath);
+    } catch (error) {
+      if (!(error?.code === "ENOENT" && !snapshot.existed)) {
+        failures.push(`${snapshot.filePath}: ${error.message}`);
+      }
+    }
+  }
+  return failures;
+}
+
 function libraryIdentity(root) {
   const libraryPath = path.join(root, "library.json");
   if (!pathExists(libraryPath)) return "";
@@ -169,6 +194,19 @@ function shouldIgnoreFile(name) {
   // time comes to move it into place. It carries no library content either way.
   if (name.startsWith("._")) return true;
   return IGNORED_NAMES.has(name) || lower.endsWith(".tmp") || lower.endsWith("-journal") || lower.endsWith("-wal") || lower.endsWith("-shm");
+}
+
+// Size and modification time are only a fast cache key, not proof that contents are equal.
+// Removable filesystems can round timestamps and sync tools can preserve them. Re-hash the
+// small, mutable records that define the library while retaining stat-based reuse for large,
+// immutable media files.
+function mustAlwaysHash(relativePath) {
+  const relative = canonicalRelativePath(relativePath);
+  const key = canonicalPathKey(relative);
+  const topLevel = key.split("/")[0];
+  return key === LIBRARY_JSON_KEY
+    || ALWAYS_HASH_DIRECTORIES.has(topLevel)
+    || ALWAYS_HASH_EXTENSIONS.has(path.posix.extname(key));
 }
 
 function collectFiles(root) {
@@ -314,7 +352,13 @@ function manifestToJson(libraryId, generation, manifest) {
   };
 }
 
-async function scanLibrary(root, { previous = null, progress = null, signal = null, phase = "Scanning" } = {}) {
+async function scanLibrary(root, {
+  previous = null,
+  progress = null,
+  signal = null,
+  phase = "Scanning",
+  forceHashKeys = null,
+} = {}) {
   if (!pathExists(root)) return { records: new Map() };
   const files = collectFiles(root);
   const records = new Map();
@@ -334,7 +378,7 @@ async function scanLibrary(root, { previous = null, progress = null, signal = nu
     }
     const stat = fs.statSync(filePath);
     const cached = previous?.records?.get(key);
-    const forceHash = ["library.json", "post.json"].includes(path.basename(filePath));
+    const forceHash = mustAlwaysHash(relativePath) || Boolean(forceHashKeys?.has(key));
     const digest = cached && !forceHash && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs
       ? cached.sha256
       : await sha256File(filePath, signal);
@@ -446,7 +490,7 @@ async function fileMatchesRecord(root, record, signal) {
   if (!pathExists(filePath)) return false;
   const stat = fs.statSync(filePath);
   if (!stat.isFile() || stat.size !== record.size) return false;
-  if (stat.mtimeMs === record.mtimeMs) return true;
+  if (!mustAlwaysHash(record.relativePath) && stat.mtimeMs === record.mtimeMs) return true;
   return (await sha256File(filePath, signal)) === record.sha256;
 }
 
@@ -702,6 +746,16 @@ class LibraryBackup {
           "PLAN_CHANGED",
         );
       }
+      for (const record of manifest.records.values()) {
+        if (!mustAlwaysHash(record.relativePath)) continue;
+        throwIfCancelled(this.signal);
+        if (!(await fileMatchesRecord(root, record, this.signal))) {
+          throw new LibraryBackupError(
+            "The libraries changed after the review. Nothing was copied - review the backup again.",
+            "PLAN_CHANGED",
+          );
+        }
+      }
     }
 
     const report = throttledProgress(this.progress);
@@ -724,48 +778,90 @@ class LibraryBackup {
     this.emit("Rechecking the reviewed changes.", 0, 1, "confirm");
     const current = await this.confirmPlan(analysis);
     const destinationControl = analysis.direction === "to-external" ? current.paths.externalControl : current.paths.localControl;
+    let sourceAfter = null;
+    let destinationAfter = null;
+    let completion = null;
+    const changedKeys = new Set(current.changes.map((change) => canonicalPathKey(change.relativePath)));
+    const metadataSnapshots = snapshotJsonFiles([
+      current.paths.externalManifest,
+      current.paths.localBaseline,
+      current.paths.session,
+    ]);
+    const finalizeCompletedBackup = async () => {
+      let metadataTouched = false;
+      try {
+        // Once application starts, cancellation is intentionally ignored until verification,
+        // receipt writes and rollback have finished. Mutable metadata is always re-hashed;
+        // immutable media retains the fast size/mtime cache.
+        this.emit("Verifying completed backup.", null, null, "verify");
+        sourceAfter = await scanLibrary(current.source, {
+          previous: current.sourceManifest,
+          forceHashKeys: changedKeys,
+        });
+        destinationAfter = await scanLibrary(current.destination, {
+          previous: current.destinationManifest,
+          forceHashKeys: changedKeys,
+        });
+        if (manifestFingerprint(sourceAfter) !== manifestFingerprint(destinationAfter)) {
+          throw new LibraryBackupError(
+            "Final verification failed. Source and destination are different.",
+            "VERIFY_FAILED",
+          );
+        }
+
+        metadataTouched = true;
+        if (analysis.direction === "to-external") {
+          const nextGeneration = current.generation + (current.changes.length > 0 || !current.storedExternal ? 1 : 0);
+          saveStoredManifest(current.paths.externalManifest, current.libraryId, nextGeneration, destinationAfter);
+          saveStoredManifest(current.paths.localBaseline, current.libraryId, nextGeneration, sourceAfter);
+          try { fs.unlinkSync(current.paths.session); } catch (error) { if (error?.code !== "ENOENT") throw error; }
+          completion = { direction: analysis.direction, generation: nextGeneration, changed: current.changes.length, completedAt: utcNow() };
+          return;
+        }
+
+        const nextGeneration = Math.max(1, current.generation || current.storedExternal?.generation || 1);
+        saveStoredManifest(current.paths.externalManifest, current.libraryId, nextGeneration, sourceAfter);
+        saveStoredManifest(current.paths.localBaseline, current.libraryId, nextGeneration, destinationAfter);
+        writeJsonAtomic(current.paths.session, {
+          schema_version: 1,
+          library_id: current.libraryId,
+          machine_id: this.machineId,
+          platform: process.platform,
+          generation: nextGeneration,
+          base_fingerprint: manifestFingerprint(sourceAfter),
+          started_at: utcNow(),
+        });
+        completion = { direction: analysis.direction, generation: nextGeneration, changed: current.changes.length, completedAt: utcNow() };
+      } catch (error) {
+        if (metadataTouched) {
+          const failures = restoreJsonFiles(metadataSnapshots);
+          if (failures.length) {
+            const metadataError = new LibraryBackupError(
+              `Backup failed and ${failures.length} control record(s) could not be restored. Stop using both libraries and inspect the backup records before retrying.`,
+              "METADATA_ROLLBACK_FAILED",
+            );
+            metadataError.cause = error;
+            metadataError.rollbackFailures = failures;
+            throw metadataError;
+          }
+        }
+        throw error;
+      }
+    };
     const historyPath = await applyChanges(
       current.source,
       current.destination,
       current.changes,
       destinationControl,
-      { progress: this.progress, signal: this.signal },
+      { progress: this.progress, signal: this.signal, verify: finalizeCompletedBackup },
     );
-    // From here the destination already holds the new files. Stopping now would leave the
-    // libraries updated but the manifests unwritten, which locks both directions until the
-    // control folders are deleted by hand - so verification and the manifest writes below
-    // deliberately ignore the cancel signal. Comparing the destination against its own
-    // pre-change manifest also forces every file this run touched to be hashed again.
-    this.emit("Verifying completed backup.", null, null, "verify");
-    const sourceAfter = await scanLibrary(current.source, { previous: current.sourceManifest });
-    const destinationAfter = await scanLibrary(current.destination, { previous: current.destinationManifest });
-    if (manifestFingerprint(sourceAfter) !== manifestFingerprint(destinationAfter)) {
-      throw new LibraryBackupError("Final verification failed. Source and destination are different.", "VERIFY_FAILED");
-    }
-
-    if (analysis.direction === "to-external") {
-      const nextGeneration = current.generation + (current.changes.length > 0 || !current.storedExternal ? 1 : 0);
-      saveStoredManifest(current.paths.externalManifest, current.libraryId, nextGeneration, destinationAfter);
-      saveStoredManifest(current.paths.localBaseline, current.libraryId, nextGeneration, sourceAfter);
-      try { fs.unlinkSync(current.paths.session); } catch (_) {}
-      this.emit("Backup to External Library completed.", 1, 1, "complete");
-      return { direction: analysis.direction, generation: nextGeneration, changed: current.changes.length, historyPath, completedAt: utcNow() };
-    }
-
-    const nextGeneration = Math.max(1, current.generation || current.storedExternal?.generation || 1);
-    saveStoredManifest(current.paths.externalManifest, current.libraryId, nextGeneration, sourceAfter);
-    saveStoredManifest(current.paths.localBaseline, current.libraryId, nextGeneration, destinationAfter);
-    writeJsonAtomic(current.paths.session, {
-      schema_version: 1,
-      library_id: current.libraryId,
-      machine_id: this.machineId,
-      platform: process.platform,
-      generation: nextGeneration,
-      base_fingerprint: manifestFingerprint(sourceAfter),
-      started_at: utcNow(),
-    });
-    this.emit("Restore to Local Library completed.", 1, 1, "complete");
-    return { direction: analysis.direction, generation: nextGeneration, changed: current.changes.length, historyPath, completedAt: utcNow() };
+    this.emit(
+      analysis.direction === "to-external" ? "Backup to External Library completed." : "Restore to Local Library completed.",
+      1,
+      1,
+      "complete",
+    );
+    return { ...completion, historyPath };
   }
 }
 
@@ -839,8 +935,15 @@ async function copyFileVerified(sourcePath, destinationPath, expectedHash, signa
   }
 }
 
-async function applyChanges(sourceRoot, destinationRoot, changes, controlRoot, { progress = null, signal = null } = {}) {
-  if (!changes.length) return "";
+async function applyChanges(sourceRoot, destinationRoot, changes, controlRoot, {
+  progress = null,
+  signal = null,
+  verify = null,
+} = {}) {
+  if (!changes.length) {
+    if (verify) await verify();
+    return "";
+  }
   fs.mkdirSync(destinationRoot, { recursive: true });
   fs.mkdirSync(controlRoot, { recursive: true });
   pruneStagingRoot(controlRoot);
@@ -923,7 +1026,13 @@ async function applyChanges(sourceRoot, destinationRoot, changes, controlRoot, {
         completed += 1;
         report({ phase: "apply", message: `Moved to history: ${change.relativePath}`, current: completed, total });
       }
+      pruneEmptyDirectories(destinationRoot);
+      // Verification is part of the transaction. Until it succeeds, every replaced or deleted
+      // destination file remains recoverable from history and any newly added file is tracked
+      // by rollback. This prevents a late source change from leaving a half-applied backup.
+      if (verify) await verify();
     } catch (error) {
+      const rollbackFailures = [];
       for (const item of rollback.reverse()) {
         try {
           if (pathExists(item.destinationPath)) fs.unlinkSync(item.destinationPath);
@@ -931,11 +1040,24 @@ async function applyChanges(sourceRoot, destinationRoot, changes, controlRoot, {
             fs.mkdirSync(path.dirname(item.destinationPath), { recursive: true });
             fs.renameSync(item.historyPath, item.destinationPath);
           }
-        } catch (_) {}
+        } catch (rollbackError) {
+          rollbackFailures.push(`${item.destinationPath}: ${rollbackError.message}`);
+        }
+      }
+      if (rollbackFailures.length) {
+        const rollbackError = new LibraryBackupError(
+          `Backup failed and ${rollbackFailures.length} destination change(s) could not be rolled back. Stop using both libraries and inspect the backup history before retrying.`,
+          "ROLLBACK_FAILED",
+        );
+        rollbackError.cause = error;
+        rollbackError.rollbackFailures = rollbackFailures;
+        throw rollbackError;
+      }
+      if (error?.code === "VERIFY_FAILED") {
+        error.message = "Final verification failed. All applied changes were rolled back.";
       }
       throw error;
     }
-    pruneEmptyDirectories(destinationRoot);
   } finally {
     // Clearing the staging area is housekeeping, not part of the backup. Some filesystems -
     // exFAT on a removable drive especially - answer ENOTEMPTY for a directory whose files
