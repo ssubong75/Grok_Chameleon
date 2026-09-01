@@ -5,6 +5,10 @@ const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
 const net = require("node:net");
+const {
+  LibraryBackup,
+  inspectPaths: inspectLibraryBackupPaths,
+} = require("./library-backup");
 
 const APP_NAME = "Grok Chameleon";
 const APP_BUNDLE_IDENTIFIER = "local.grokchameleon.app";
@@ -466,6 +470,10 @@ let promptTranslationPair = "";
 let promptTranslationQueue = Promise.resolve();
 const promptTranslationCache = new Map();
 let promptTranslationBlockedUntil = 0;
+const libraryBackupAnalyses = new Map();
+let libraryBackupOperation = null;
+let libraryBackupAbortController = null;
+let libraryBackupAnalysisController = null;
 const CARD_PREVIEW_MAX_EDGE = 640;
 const CARD_PREVIEW_RENDER_REVISION = "card-640-v1";
 const THUMBNAIL_PREVIEW_MAX_EDGE = 320;
@@ -484,6 +492,24 @@ function appendLog(line) {
     fs.mkdirSync(LOG_DIR, { recursive: true });
     fs.appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${line}\n`);
   } catch (_) {}
+}
+
+function libraryBackupMachineId() {
+  return crypto.createHash("sha256")
+    .update([process.platform, os.hostname(), os.homedir()].join("\0"))
+    .digest("hex")
+    .slice(0, 32);
+}
+
+function libraryBackupPathsMatch(first, second) {
+  if (!first || !second) return false;
+  let left = path.resolve(String(first));
+  let right = path.resolve(String(second));
+  if (process.platform === "win32") {
+    left = left.toLocaleLowerCase("en-US");
+    right = right.toLocaleLowerCase("en-US");
+  }
+  return left === right;
 }
 
 function verifiedLibraryCardPreviewCacheDir(info = {}) {
@@ -1286,6 +1312,142 @@ async function startServer() {
     throw new Error(`Local server did not answer health check on port ${PORT}. See ${LOG_FILE}`);
   }
   throw new Error(`Local server did not start. See ${LOG_FILE}`);
+}
+
+async function libraryBackupRuntimeStatus() {
+  return fetchJson(`${SERVER_BASE}/api/library-backup/runtime`, {
+    signal: AbortSignal.timeout(3000),
+  });
+}
+
+async function stopServerForLibraryBackup() {
+  await requestShutdown();
+  for (let index = 0; index < 40; index += 1) {
+    if (!(await serverPortOpen())) {
+      serverProcess = null;
+      return;
+    }
+    await sleep(100);
+  }
+  if (serverProcess && !serverProcess.killed) {
+    try { serverProcess.kill("SIGTERM"); } catch (_) {}
+  }
+  for (let index = 0; index < 20; index += 1) {
+    if (!(await serverPortOpen())) {
+      serverProcess = null;
+      return;
+    }
+    await sleep(100);
+  }
+  killServerPortPids("KILL");
+  serverProcess = null;
+  if (await serverPortOpen()) {
+    throw new Error("The library server could not be paused for Library Backup.");
+  }
+}
+
+function sendLibraryBackupProgress(payload = {}) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send("grok-chameleon:library-backup-progress", payload);
+}
+
+function pruneLibraryBackupAnalyses() {
+  const oldestAllowed = Date.now() - (10 * 60 * 1000);
+  for (const [token, entry] of libraryBackupAnalyses) {
+    if (Number(entry.createdAt) < oldestAllowed) libraryBackupAnalyses.delete(token);
+  }
+}
+
+function publicLibraryBackupAnalysis(token, analysis) {
+  return {
+    ok: true,
+    token,
+    direction: analysis.direction,
+    summary: analysis.summary,
+    warning: analysis.warning || "",
+    analyzed_at: analysis.analyzedAt,
+  };
+}
+
+async function analyzeLibraryBackup(payload = {}) {
+  if (libraryBackupOperation || libraryBackupAnalysisController) throw new Error("Library Backup is already running.");
+  pruneLibraryBackupAnalyses();
+  const controller = new AbortController();
+  libraryBackupAnalysisController = controller;
+  try {
+    const engine = new LibraryBackup({
+      localRoot: payload.local_path,
+      externalRoot: payload.external_path,
+      machineId: libraryBackupMachineId(),
+      signal: controller.signal,
+      progress: sendLibraryBackupProgress,
+    });
+    sendLibraryBackupProgress({ phase: "start", message: "Comparing library folders.", current: 0, total: 1 });
+    const analysis = await engine.analyze(String(payload.direction || ""));
+    const token = crypto.randomUUID();
+    libraryBackupAnalyses.set(token, {
+      createdAt: Date.now(),
+      analysis,
+      localPath: path.resolve(String(payload.local_path || "")),
+      externalPath: path.resolve(String(payload.external_path || "")),
+    });
+    sendLibraryBackupProgress({ phase: "review", message: "Comparison complete. Review the changes.", current: 1, total: 1 });
+    return publicLibraryBackupAnalysis(token, analysis);
+  } finally {
+    if (libraryBackupAnalysisController === controller) libraryBackupAnalysisController = null;
+  }
+}
+
+async function executeLibraryBackup(payload = {}) {
+  if (libraryBackupOperation) throw new Error("Library Backup is already running.");
+  const token = String(payload.token || "");
+  const entry = libraryBackupAnalyses.get(token);
+  if (!entry) throw new Error("The backup review expired. Refresh and review it again.");
+  libraryBackupAnalyses.delete(token);
+  const operation = crypto.randomUUID();
+  libraryBackupOperation = operation;
+  libraryBackupAbortController = new AbortController();
+  let serverPaused = false;
+  try {
+    const runtime = await libraryBackupRuntimeStatus();
+    const activeRoot = String(runtime.library_root || "");
+    const touchesActiveLibrary = libraryBackupPathsMatch(activeRoot, entry.localPath)
+      || libraryBackupPathsMatch(activeRoot, entry.externalPath);
+    if (touchesActiveLibrary && Number(runtime.active_jobs || 0) > 0) {
+      throw new Error("A Build or Imagine job is still running. Finish it before Library Backup.");
+    }
+    if (touchesActiveLibrary) {
+      sendLibraryBackupProgress({ phase: "pause", message: "Pausing the library server.", current: 0, total: 1 });
+      await stopServerForLibraryBackup();
+      serverPaused = true;
+    }
+    const engine = new LibraryBackup({
+      localRoot: entry.localPath,
+      externalRoot: entry.externalPath,
+      machineId: libraryBackupMachineId(),
+      signal: libraryBackupAbortController.signal,
+      progress: sendLibraryBackupProgress,
+    });
+    const result = await engine.execute(entry.analysis);
+    appendLog(`library backup complete direction=${result.direction} changed=${result.changed} generation=${result.generation}`);
+    return { ok: true, ...result };
+  } catch (error) {
+    appendLog(`library backup failed: ${error.stack || error.message || String(error)}`);
+    throw error;
+  } finally {
+    if (serverPaused) {
+      sendLibraryBackupProgress({ phase: "restart", message: "Restarting the library server.", current: 0, total: 1 });
+      try {
+        await startServer();
+        sendLibraryBackupProgress({ phase: "restart", message: "Library server restarted.", current: 1, total: 1 });
+      } catch (error) {
+        appendLog(`library server restart after backup failed: ${error.stack || error.message || String(error)}`);
+        dialog.showErrorBox(APP_NAME, `Library Backup finished, but the library server could not restart.\n\n${error.message || error}`);
+      }
+    }
+    if (libraryBackupOperation === operation) libraryBackupOperation = null;
+    libraryBackupAbortController = null;
+  }
 }
 
 const EDIT_CONTEXT_ICON_CACHE = new Map();
@@ -4058,6 +4220,25 @@ ipcMain.handle("grok-chameleon:open-imagine-usage", async (_event, payload = {})
 
 ipcMain.handle("grok-chameleon:card-preview", async (_event, payload = {}) => ensureCardPreview(payload));
 ipcMain.handle("grok-chameleon:translate-prompt", async (_event, payload = {}) => queuePromptTranslation(payload));
+ipcMain.handle("grok-chameleon:library-backup-choose", async (_event, payload = {}) => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: String(payload.title || "Select Library Folder"),
+    defaultPath: String(payload.current || "") || undefined,
+    buttonLabel: "Select",
+    properties: ["openDirectory", "createDirectory"],
+  });
+  return { ok: true, cancelled: result.canceled, path: result.canceled ? "" : String(result.filePaths[0] || "") };
+});
+ipcMain.handle("grok-chameleon:library-backup-status", async (_event, payload = {}) => (
+  inspectLibraryBackupPaths(payload.local_path, payload.external_path, libraryBackupMachineId())
+));
+ipcMain.handle("grok-chameleon:library-backup-analyze", async (_event, payload = {}) => analyzeLibraryBackup(payload));
+ipcMain.handle("grok-chameleon:library-backup-execute", async (_event, payload = {}) => executeLibraryBackup(payload));
+ipcMain.handle("grok-chameleon:library-backup-cancel", async () => {
+  libraryBackupAnalysisController?.abort();
+  libraryBackupAbortController?.abort();
+  return { ok: true, cancelling: Boolean(libraryBackupOperation || libraryBackupAnalysisController) };
+});
 
 async function runFetchStream(win, command) {
   const requestId = String(command.request_id || "");

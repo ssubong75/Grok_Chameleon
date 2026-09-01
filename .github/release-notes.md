@@ -24,6 +24,15 @@ Grok Chameleon is a desktop app designed to make Grok Imagine and Build more con
 - **Zoom**: Hold `Shift` and scroll the mouse wheel.
 - **Pan**: Release `Shift`, then click and drag with the left mouse button.
 
+### Library Backup
+
+1. Open **Library Backup** from the sidebar.
+2. Select the Local Library and External Library folders.
+3. Use **Local Drive → External Drive** to back up local changes.
+4. On another computer, use **External Drive → Local Drive** to restore the library, then back up to the External Drive when the work is finished.
+
+Library Backup copies only supported library content and keeps replaced or deleted destination files in its hidden history folder. The selected library, account data, cookies, and OAuth sessions are processed locally and are never uploaded to GitHub.
+
 ### First Launch
 
 **Windows**

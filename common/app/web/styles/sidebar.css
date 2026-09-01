@@ -488,8 +488,8 @@ html.sidebar_toggle_placed .sidebar_toggle {
 }
 
 .sidebar_library_spacer {
-  height: 42px;
-  min-height: 42px;
+  height: 28px;
+  min-height: 28px;
 }
 
 .sidebar_library_divider {

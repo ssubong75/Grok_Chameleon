@@ -20554,6 +20554,24 @@ def health_snapshot() -> dict:
     return {"ok": True, "status": "ready", "pid": os.getpid()}
 
 
+def library_backup_runtime_status() -> dict:
+    with BUILD_JOB_LOCK:
+        build_jobs = [build_job_snapshot(job) for job in BUILD_JOBS.values()]
+    with IMAGINE_JOB_LOCK:
+        imagine_jobs = [imagine_job_snapshot(job) for job in IMAGINE_JOBS.values()]
+    terminal = {"done", "failed", "moderated", "cancelled"}
+    active_build = [job for job in build_jobs if str(job.get("status") or "").lower() not in terminal]
+    active_imagine = [job for job in imagine_jobs if str(job.get("status") or "").lower() not in terminal]
+    root = library_root()
+    return {
+        "ok": True,
+        "library_root": str(root.resolve()) if root else "",
+        "active_build_jobs": len(active_build),
+        "active_imagine_jobs": len(active_imagine),
+        "active_jobs": len(active_build) + len(active_imagine),
+    }
+
+
 def library_state_cache_path(root: Path) -> Path:
     return root / "runtime_data" / "library_state.json"
 
@@ -27872,6 +27890,9 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             if parsed.path == "/api/health":
                 self.send_json(health_snapshot())
+                return
+            if parsed.path == "/api/library-backup/runtime":
+                self.send_json(library_backup_runtime_status())
                 return
             if parsed.path == "/api/state":
                 self.send_json(startup_library_snapshot())

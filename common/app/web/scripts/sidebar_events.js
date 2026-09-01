@@ -259,6 +259,11 @@ document.getElementById("account_usage_btn")?.addEventListener("click", () => {
   openUsagePage().catch((error) => setLibraryMessage(error.message || "Usage page failed."));
 });
 
+document.getElementById("library_backup_btn")?.addEventListener("click", () => {
+  clearSidebarSearchQuery();
+  openScreen("library_backup", "library_backup_btn");
+});
+
 document.getElementById("accountButton")?.addEventListener("click", () => {
   clearSidebarSearchQuery();
   showAccountScreen(true, { pushHistory: true });

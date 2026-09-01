@@ -16,4 +16,25 @@ contextBridge.exposeInMainWorld("grokChameleonNative", {
   translatePrompt(payload) {
     return ipcRenderer.invoke("grok-chameleon:translate-prompt", payload || {});
   },
+  chooseLibraryBackupFolder(payload) {
+    return ipcRenderer.invoke("grok-chameleon:library-backup-choose", payload || {});
+  },
+  libraryBackupStatus(payload) {
+    return ipcRenderer.invoke("grok-chameleon:library-backup-status", payload || {});
+  },
+  analyzeLibraryBackup(payload) {
+    return ipcRenderer.invoke("grok-chameleon:library-backup-analyze", payload || {});
+  },
+  executeLibraryBackup(payload) {
+    return ipcRenderer.invoke("grok-chameleon:library-backup-execute", payload || {});
+  },
+  cancelLibraryBackup() {
+    return ipcRenderer.invoke("grok-chameleon:library-backup-cancel");
+  },
+  onLibraryBackupProgress(callback) {
+    if (typeof callback !== "function") return () => {};
+    const listener = (_event, payload) => callback(payload || {});
+    ipcRenderer.on("grok-chameleon:library-backup-progress", listener);
+    return () => ipcRenderer.removeListener("grok-chameleon:library-backup-progress", listener);
+  },
 });

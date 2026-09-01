@@ -51,6 +51,7 @@
     <script src="./scripts/detail_events.js" defer></script>
     <script src="./scripts/composer_events.js" defer></script>
     <script src="./scripts/sidebar_events.js" defer></script>
+    <script src="./scripts/library_backup.js?v=20260901-1" defer></script>
     <script src="./scripts/prompt_events.js" defer></script>
     <script src="./scripts/collection_events.js" defer></script>
     <script src="./scripts/screen_events.js" defer></script>
@@ -85,7 +86,7 @@
               <span>Grok Build</span>
             </button>
             <button id="b_collection_nav_btn" class="nav_item nav_sub_item" type="button">
-              <span class="nav_icon suit_nav_icon" aria-hidden="true">♦</span>
+              <img src="./assets/icons/collection.svg" alt="" />
               <span>Collection</span>
             </button>
             <div class="nav_spacer" aria-hidden="true"></div>
@@ -102,20 +103,25 @@
 
         <section class="account-card" aria-label="Account">
           <div class="sidebar_library_actions">
-            <button id="folder_btn" class="nav_item open_folder_btn" type="button">
-              <span class="nav_icon suit_nav_icon" aria-hidden="true">♠</span>
+            <button id="library_backup_btn" class="nav_item open_folder_btn library_backup_btn" type="button">
+              <img src="./assets/icons/library-backup.svg" alt="" />
+              <span>Library Backup</span>
+            </button>
+            <button id="folder_btn" class="nav_item nav_sub_item open_folder_btn" type="button">
+              <img src="./assets/icons/folder-open.svg" alt="" />
               <span>Open Folder</span>
             </button>
+            <div class="sidebar_library_spacer" aria-hidden="true"></div>
             <button id="set_library_path_btn" class="nav_item set_library_path_btn" type="button">
               <img src="./assets/icons/map-pin.svg" alt="" />
               <span>Set Library Path</span>
             </button>
-          </div>
-          <div class="sidebar_account_actions">
             <button id="account_usage_btn" class="nav_item sidebar_usage_btn account_usage_btn" type="button">
               <img src="./assets/icons/usage.svg" alt="" />
               <span>Usage</span>
             </button>
+          </div>
+          <div class="sidebar_account_actions">
             <button id="accountButton" class="account-button" type="button">
               <span class="account-summary-row account-summary-imagine">
                 <span class="account-avatar account-avatar-imagine" aria-hidden="true">I</span>
@@ -500,6 +506,54 @@
               <span>Waiting for web session usage data.</span>
             </article>
           </section>
+        </section>
+
+        <section id="library_backup" class="account library_backup_screen" hidden tabindex="-1" aria-label="Library Backup">
+          <header class="account_screen_head b_main_header">
+            <h2>Library Backup</h2>
+          </header>
+          <div class="library_backup_body">
+            <section class="library_backup_path_grid" aria-label="Library locations">
+              <article class="library_backup_path_column">
+                <h3>Local Library</h3>
+                <div class="library_backup_path_row">
+                  <input id="library_backup_local_path" type="text" placeholder="Select Local Library" readonly aria-label="Local Library" />
+                  <button id="library_backup_local_choose" class="library_backup_choose_btn" type="button">Choose</button>
+                </div>
+              </article>
+              <article class="library_backup_path_column">
+                <h3>External Library</h3>
+                <div class="library_backup_path_row">
+                  <input id="library_backup_external_path" type="text" placeholder="Select External Library" readonly aria-label="External Library" />
+                  <button id="library_backup_external_choose" class="library_backup_choose_btn" type="button">Choose</button>
+                </div>
+              </article>
+            </section>
+
+            <section class="library_backup_action_grid" aria-label="Backup direction">
+              <button id="library_backup_to_external" class="library_backup_direction_btn library_backup_direction_local" type="button">
+                Local Drive <span aria-hidden="true">→</span> External Drive
+              </button>
+              <button id="library_backup_to_local" class="library_backup_direction_btn library_backup_direction_external" type="button">
+                External Drive <span aria-hidden="true">→</span> Local Drive
+              </button>
+            </section>
+
+            <section class="library_backup_status_panel" aria-label="Backup status">
+              <header class="library_backup_status_head">
+                <h3>Status</h3>
+                <button id="library_backup_refresh" class="library_backup_refresh_btn" type="button">Refresh</button>
+              </header>
+              <p id="library_backup_status">Select both library folders.</p>
+            </section>
+
+            <section class="library_backup_progress_panel" aria-label="Backup progress">
+              <div class="library_backup_progress_track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                <span></span>
+              </div>
+              <div id="library_backup_log" class="library_backup_log">Ready.</div>
+            </section>
+          </div>
         </section>
 
         <section id="account" class="account" hidden tabindex="-1" aria-label="Account">

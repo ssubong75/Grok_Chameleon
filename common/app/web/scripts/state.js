@@ -22,6 +22,7 @@ document.documentElement.classList.toggle("platform-macos", isMacRenderer);
     "b_detail",
     "prompt_main",
     "usage",
+    "library_backup",
   ];
 
     const navButtonIds = [
@@ -31,6 +32,7 @@ document.documentElement.classList.toggle("platform-macos", isMacRenderer);
       "b_collection_nav_btn",
       "prompt_main_btn",
       "account_usage_btn",
+      "library_backup_btn",
   ];
 
   const screens = screenIds
@@ -301,10 +303,10 @@ document.documentElement.classList.toggle("platform-macos", isMacRenderer);
   }
 
   function syncSidebarTogglePosition() {
-    // Halfway between Search and Open Folder. Both rows survive collapsing and the narrow
+    // Halfway between Search and Library Backup. Both rows survive collapsing and the narrow
     // layouts — only their labels go — so the same two anchors serve every state.
     const upperRect = document.getElementById("search_btn")?.getBoundingClientRect();
-    const lowerRect = document.getElementById("folder_btn")?.getBoundingClientRect();
+    const lowerRect = document.getElementById("library_backup_btn")?.getBoundingClientRect();
     // On a cold load the rows can still measure zero, and the one scheduled call on startup
     // was the only one -- the button then kept whatever the stylesheet guessed. It is hidden
     // until placed now, so a missed measurement would hide it for good; keep asking until
