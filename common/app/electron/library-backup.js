@@ -19,7 +19,6 @@ const STATE_FILES = new Set([
   "library_index.sqlite3",
 ]);
 const AUTOMATIC_METADATA_PATHS = new Set([
-  "library.json",
   "sql_data/library_index.sqlite3",
   "sql_data/state.backup.json",
   "sql_data/state.backup.sqlite3",
@@ -28,9 +27,15 @@ const AUTOMATIC_METADATA_PATHS = new Set([
 // merely opening the app. They still travel with the backup; they just do not count as a
 // local edit when deciding whether the Local Library is behind the backup.
 const REGENERATED_ON_SCAN = new Set([
-  "library.json",
   "sql_data/library_index.sqlite3",
 ].map(canonicalPathKey));
+// library.json is rewritten on every scan, but only these fields are what the scan puts back.
+// The rest of the file - collection order, sort, hidden uploads, and any setting added later -
+// is the user's and cannot be recovered by scanning, so it is compared like any other content.
+// Fields are subtracted rather than selected on purpose: a setting introduced tomorrow is then
+// protected without anyone remembering to add it here.
+const LIBRARY_JSON_KEY = canonicalPathKey("library.json");
+const LIBRARY_JSON_REGENERATED_FIELDS = ["updated_at", "posts", "collections", "prompts", "card_index"];
 const IGNORED_NAMES = new Set([".DS_Store", "Thumbs.db", "desktop.ini"]);
 const HISTORY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const PROGRESS_INTERVAL_MS = 200;
@@ -158,6 +163,11 @@ function validateLibraryPair(sourceRoot, destinationRoot, sourceLabel, destinati
 
 function shouldIgnoreFile(name) {
   const lower = name.toLowerCase();
+  // "._name" is the sidecar macOS writes for a file whose extended attributes the volume
+  // cannot hold. Copying one onto exFAT does not produce a file: the system folds it back
+  // into the file it belongs to, so the copy verifies and then the name is gone when the
+  // time comes to move it into place. It carries no library content either way.
+  if (name.startsWith("._")) return true;
   return IGNORED_NAMES.has(name) || lower.endsWith(".tmp") || lower.endsWith("-journal") || lower.endsWith("-wal") || lower.endsWith("-shm");
 }
 
@@ -233,6 +243,35 @@ async function sha256File(filePath, signal) {
   });
 }
 
+// Key order in JSON is not meaningful, so it is sorted before hashing; otherwise a rewrite
+// that only shuffled keys would read as a user edit.
+function stableStringify(value) {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value === undefined ? null : value);
+}
+
+function libraryJsonCompareDigest(relativePath, filePath) {
+  if (canonicalPathKey(relativePath) !== LIBRARY_JSON_KEY) return "";
+  try {
+    const data = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    if (!data || typeof data !== "object" || Array.isArray(data)) return "";
+    const compared = { ...data };
+    for (const field of LIBRARY_JSON_REGENERATED_FIELDS) delete compared[field];
+    return crypto.createHash("sha256").update(stableStringify(compared)).digest("hex");
+  } catch (_) {
+    return "";
+  }
+}
+
+// What a file is compared by when deciding whether someone changed it. Everything but
+// library.json is its own content; library.json is its content minus what the scan rewrites.
+function comparableDigest(record) {
+  return record.compareSha256 || record.sha256;
+}
+
 function manifestFromJson(data) {
   if (!data || Number(data.schema_version) !== MANIFEST_VERSION || !Array.isArray(data.files)) return null;
   const records = new Map();
@@ -245,6 +284,8 @@ function manifestFromJson(data) {
       mtimeMs: Number(item.mtime_ms) || 0,
       sha256: String(item.sha256 || ""),
     };
+    const compare = String(item.compare_sha256 || "");
+    if (compare) record.compareSha256 = compare;
     records.set(canonicalPathKey(relativePath), record);
   }
   return {
@@ -268,6 +309,7 @@ function manifestToJson(libraryId, generation, manifest) {
         size: record.size,
         mtime_ms: record.mtimeMs,
         sha256: record.sha256,
+        ...(record.compareSha256 ? { compare_sha256: record.compareSha256 } : {}),
       })),
   };
 }
@@ -296,13 +338,16 @@ async function scanLibrary(root, { previous = null, progress = null, signal = nu
     const digest = cached && !forceHash && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs
       ? cached.sha256
       : await sha256File(filePath, signal);
-    records.set(key, {
+    const record = {
       relativePath,
       diskRelativePath,
       size: stat.size,
       mtimeMs: stat.mtimeMs,
       sha256: digest,
-    });
+    };
+    const compare = libraryJsonCompareDigest(relativePath, filePath);
+    if (compare) record.compareSha256 = compare;
+    records.set(key, record);
     report({ phase: "scan", message: `${phase}: ${index} of ${files.length}`, current: index, total: files.length });
   }
   return { records };
@@ -329,16 +374,20 @@ function changedManifestKeys(previous, current) {
   for (const key of keys) {
     const before = previous.records.get(key);
     const after = current.records.get(key);
-    if (!before || !after || before.relativePath !== after.relativePath || before.size !== after.size || before.sha256 !== after.sha256) {
+    if (!before || !after || before.relativePath !== after.relativePath || comparableDigest(before) !== comparableDigest(after)) {
       changed.add(key);
     }
   }
   return changed;
 }
 
+// The fingerprint that raises "the drive drifted" hashes file contents, while this asks whether
+// anything worth defending actually changed - so a rewrite that only touched regenerated values
+// leaves nothing here to report. An empty set therefore means nothing of the user's moved, not
+// that the question is unanswered.
 function onlyAutomaticMetadataChanged(previous, current) {
   const changed = changedManifestKeys(previous, current);
-  return changed.size > 0 && [...changed].every((key) => AUTOMATIC_METADATA_PATHS.has(key));
+  return [...changed].every((key) => AUTOMATIC_METADATA_PATHS.has(key));
 }
 
 function unexpectedExternalKeys(previous, current) {
@@ -367,6 +416,29 @@ function windowsPortabilityIssues(manifest) {
     if (issue) issues.push(issue);
   }
   return issues.sort((a, b) => a.localeCompare(b, "en"));
+}
+
+// A listing of what is on disk right now, without reading any of it. Enough to notice a file
+// that appeared, vanished, was renamed, or grew since the review, which is what the plan alone
+// cannot tell us.
+function quickInventory(root) {
+  const entries = new Map();
+  if (!pathExists(root)) return entries;
+  for (const filePath of collectFiles(root)) {
+    const diskRelativePath = path.relative(root, filePath).split(path.sep).join("/");
+    const stat = fs.statSync(filePath);
+    entries.set(canonicalPathKey(diskRelativePath), { size: stat.size, mtimeMs: stat.mtimeMs });
+  }
+  return entries;
+}
+
+function inventoryMatchesManifest(manifest, inventory) {
+  if (manifest.records.size !== inventory.size) return false;
+  for (const [key, record] of manifest.records) {
+    const seen = inventory.get(key);
+    if (!seen || seen.size !== record.size || seen.mtimeMs !== record.mtimeMs) return false;
+  }
+  return true;
 }
 
 async function fileMatchesRecord(root, record, signal) {
@@ -614,8 +686,24 @@ class LibraryBackup {
         || manifestFingerprint(storedExternal) !== manifestFingerprint(reviewed)
       ));
     if (externalMoved) {
-      throw new LibraryBackupError("External Library changed after the review. Refresh and review the backup again.", "PLAN_CHANGED");
+      throw new LibraryBackupError("External Library changed after the review. Nothing was copied - review the backup again.", "PLAN_CHANGED");
     }
+    // The plan names only what differed at review time. A file created, deleted or renamed
+    // since then appears in neither library's plan, so checking the plan alone would let the
+    // run start and only discover the mismatch in the final verification - by which point the
+    // destination has already been half rewritten. Walking both listings first costs a stat
+    // per file and keeps that from ever happening.
+    this.emit("Checking both libraries for changes since the review.", 0, 1, "confirm");
+    for (const [root, manifest] of [[analysis.source, analysis.sourceManifest], [analysis.destination, analysis.destinationManifest]]) {
+      throwIfCancelled(this.signal);
+      if (!inventoryMatchesManifest(manifest, quickInventory(root))) {
+        throw new LibraryBackupError(
+          "The libraries changed after the review. Nothing was copied - review the backup again.",
+          "PLAN_CHANGED",
+        );
+      }
+    }
+
     const report = throttledProgress(this.progress);
     let checked = 0;
     for (const change of analysis.changes) {
@@ -623,7 +711,7 @@ class LibraryBackup {
       const stale = (change.sourceRecord && !(await fileMatchesRecord(analysis.source, change.sourceRecord, this.signal)))
         || (change.destinationRecord && !(await fileMatchesRecord(analysis.destination, change.destinationRecord, this.signal)));
       if (stale) {
-        throw new LibraryBackupError("Library files changed after the review. Refresh and review the backup again.", "PLAN_CHANGED");
+        throw new LibraryBackupError("Library files changed after the review. Nothing was copied - review the backup again.", "PLAN_CHANGED");
       }
       checked += 1;
       report({ phase: "confirm", message: `Rechecking reviewed changes: ${checked} of ${analysis.changes.length}`, current: checked, total: analysis.changes.length });
@@ -783,6 +871,20 @@ async function applyChanges(sourceRoot, destinationRoot, changes, controlRoot, {
       copied.push({ change, stagedPath });
       completed += 1;
       report({ phase: "copy", message: `Copy verified: ${change.relativePath}`, current: completed, total });
+    }
+
+    // Everything is staged; make sure it is all still there before the destination is touched.
+    // exFAT can absorb a file written under one name into another - an AppleDouble sidecar is
+    // folded into the file it describes - so a copy can verify and then be gone by the time it
+    // is moved into place. Catching that here means the destination is never half-written and
+    // there is nothing to roll back.
+    for (const { change, stagedPath } of copied) {
+      if (!pathExists(stagedPath)) {
+        throw new LibraryBackupError(
+          `The staged copy of ${change.relativePath} disappeared before it could be applied. The destination was left untouched.`,
+          "STAGING_LOST",
+        );
+      }
     }
 
     const rollback = [];
