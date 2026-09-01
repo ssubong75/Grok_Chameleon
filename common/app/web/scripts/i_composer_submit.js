@@ -542,6 +542,9 @@ function mergeImagineGeneratedItems(post, generatedItems, options = {}) {
 function upsertImagineRemotePost(post) {
   if (!post?.folder_path) return "";
   const normalized = normalizeServerPost(post);
+  if (typeof isImagineRemoteMainPost === "function" && !isImagineRemoteMainPost(normalized)) {
+    return "";
+  }
   const currentPosts = Array.isArray(library_state.imagineRemotePosts) ? library_state.imagineRemotePosts : [];
   const identity = typeof libraryPostStableIdentity === "function"
     ? libraryPostStableIdentity(normalized)
@@ -643,13 +646,20 @@ function applyImagineDirectResult(result, options = {}) {
       const candidates = [
         ...(library_state.imagineRemotePosts || []),
         ...(library_state.posts || []),
-      ].filter((candidate) => candidate?.folder_path === targetPath);
+      ].filter((candidate) => (
+        candidate?.folder_path === targetPath
+        && (typeof isImagineRemoteMainPost !== "function" || isImagineRemoteMainPost(candidate))
+      ));
       // A direct result that names its source card as the target belongs on the card the
       // user is already viewing. During Saved's eventual-consistency window that card can
       // appear more than once in the remote and library lists, or its refreshed identity can
       // differ briefly. Prefer the selected source over treating that ambiguity as a new card.
       const selectedSourcePost = targetPath === sourcePath
         && String(library_state.selectedPostPath || "") === sourcePath
+        && (
+          typeof isImagineRemoteMainPost !== "function"
+          || isImagineRemoteMainPost(selectedLibraryPost())
+        )
         ? selectedLibraryPost()
         : null;
       const existing = selectedSourcePost?.folder_path === targetPath

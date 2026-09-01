@@ -309,6 +309,18 @@ function postUsesImagineRemoteHiddenFilter(post) {
   );
 }
 
+function isImagineRemoteMainPost(post) {
+  const path = String(post?.folder_path || "");
+  return Boolean(
+    post?.source === "imagine"
+    && (
+      post?.remote
+      || post?.area === "imagine_remote"
+      || /^imagine_(saved|generated)\//.test(path)
+    )
+  );
+}
+
 function withoutHiddenImagineItems(post) {
   if (!post || !postUsesImagineRemoteHiddenFilter(post)) return normalizeServerPost(post);
   if (imaginePostHidden(post)) return null;
@@ -318,6 +330,7 @@ function withoutHiddenImagineItems(post) {
 function normalizeImagineRemotePosts(posts) {
   return (posts || [])
     .map(normalizeServerPost)
+    .filter(isImagineRemoteMainPost)
     .map(withoutHiddenImagineItems)
     .filter(Boolean);
 }
@@ -1547,7 +1560,8 @@ function saveImagineSavedDisplayCache() {
   if (!accountId) return;
   const posts = (library_state.imagineRemotePosts || [])
     .filter((post) => (
-      imagineSavedPostProvenance(post) === "normal-saved"
+      isImagineRemoteMainPost(post)
+      && imagineSavedPostProvenance(post) === "normal-saved"
       && !imagineSavedPostIsPending(post)
     ));
   const revision = ++imagineSavedDisplayCacheWriteRevision;

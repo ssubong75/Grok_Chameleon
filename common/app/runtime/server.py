@@ -7141,6 +7141,103 @@ def remove_imagine_remote_cache_post_keys(
 IMAGINE_SAVED_DISPLAY_CACHE_VERSION = 1
 
 
+def imagine_saved_display_post_allowed(post: dict) -> bool:
+    if not isinstance(post, dict) or str(post.get("source") or "") != "imagine":
+        return False
+    path = str(post.get("folder_path") or "")
+    return bool(
+        post.get("remote")
+        or str(post.get("area") or "") == "imagine_remote"
+        or re.match(r"^imagine_(saved|generated)/", path)
+    )
+
+
+def imagine_saved_post_identity_ids(post: dict) -> set[str]:
+    if not isinstance(post, dict):
+        return set()
+    metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+    imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
+    aliases = metadata.get("saved_anchor_aliases") if isinstance(metadata.get("saved_anchor_aliases"), list) else []
+    return {
+        str(value or "").strip()
+        for value in (
+            post.get("post_id"),
+            post.get("source_post_id"),
+            post.get("original_post_id"),
+            post.get("group_id"),
+            post.get("root_post_id"),
+            metadata.get("saved_anchor_id"),
+            metadata.get("saved_display_group_id"),
+            metadata.get("conversation_id"),
+            metadata.get("lineage_root_asset_id"),
+            metadata.get("lineage_source_post_id"),
+            imagine.get("saved_anchor_id"),
+            imagine.get("conversation_id"),
+            *aliases,
+        )
+        if str(value or "").strip()
+    }
+
+
+def imagine_saved_post_asset_ids(post: dict) -> set[str]:
+    return {
+        asset_id
+        for item in (post.get("items") if isinstance(post, dict) and isinstance(post.get("items"), list) else [])
+        if isinstance(item, dict) and (asset_id := imagine_item_asset_id(item))
+    }
+
+
+def imagine_collection_moved_identity(root: Path, account: dict) -> tuple[set[str], set[str]]:
+    """Return exact remote identities already represented by a local Collection card."""
+    account_id = str(account.get("id") or "").strip()
+    identity_ids: set[str] = set()
+    asset_ids: set[str] = set()
+    offset = 0
+    while True:
+        try:
+            page = library_index.query_posts(
+                root,
+                scope="collection",
+                full=True,
+                offset=offset,
+                limit=5000,
+            )
+        except Exception:
+            return identity_ids, asset_ids
+        local_posts = page.get("posts") or []
+        for post in local_posts:
+            if not isinstance(post, dict):
+                continue
+            post_account_id = str(post.get("account_id") or "").strip()
+            if account_id and post_account_id and post_account_id != account_id:
+                continue
+            identity_ids.update(
+                str(post.get(key) or "").strip()
+                for key in ("source_post_id", "original_post_id", "group_id", "root_post_id")
+                if str(post.get(key) or "").strip()
+            )
+            asset_ids.update(imagine_saved_post_asset_ids(post))
+        if not page.get("has_more") or not local_posts:
+            break
+        offset = safe_int(page.get("next_offset"), offset + len(local_posts))
+    return identity_ids, asset_ids
+
+
+def filter_imagine_posts_moved_to_collection(root: Path, account: dict, posts: list[dict]) -> list[dict]:
+    local_identity_ids, local_asset_ids = imagine_collection_moved_identity(root, account)
+    if not local_identity_ids and not local_asset_ids:
+        return posts
+    return [
+        post
+        for post in posts
+        if isinstance(post, dict)
+        and not (
+            imagine_saved_post_identity_ids(post) & local_identity_ids
+            or imagine_saved_post_asset_ids(post) & local_asset_ids
+        )
+    ]
+
+
 def imagine_saved_display_cache_path(root: Path, account: dict) -> Path:
     account_key = imagine_account_settings_key(account)
     if not account_key:
@@ -7177,7 +7274,12 @@ def list_imagine_saved_display_cache(payload: dict) -> dict:
                 "tier": account.get("tier") or "",
             },
         }
-    posts = [post for post in data.get("posts") or [] if isinstance(post, dict)]
+    posts = [
+        post
+        for post in data.get("posts") or []
+        if imagine_saved_display_post_allowed(post)
+    ]
+    posts = filter_imagine_posts_moved_to_collection(root, account, posts)
     return {
         "ok": True,
         "source": "saved_display_cache",
@@ -7205,7 +7307,8 @@ def save_imagine_saved_display_cache(payload: dict) -> dict:
         raise RuntimeError("Imagine display cache posts are required.")
     if len(supplied_posts) > 5000:
         raise RuntimeError("Imagine display cache is too large.")
-    posts = [post for post in supplied_posts if isinstance(post, dict)]
+    posts = [post for post in supplied_posts if imagine_saved_display_post_allowed(post)]
+    posts = filter_imagine_posts_moved_to_collection(root, account, posts)
     write_json(imagine_saved_display_cache_path(root, account), {
         "version": IMAGINE_SAVED_DISPLAY_CACHE_VERSION,
         "updated_at": now_iso(),
@@ -7247,6 +7350,37 @@ def prune_imagine_saved_display_cache(
         0,
         existing_item_count - filtered_item_count,
     )
+    if removed_count <= 0:
+        return 0
+    write_json(path, {
+        **data,
+        "updated_at": now_iso(),
+        "posts": filtered_posts,
+    })
+    return removed_count
+
+
+def prune_imagine_saved_display_moved_source(
+    root: Path,
+    account: dict,
+    identity_ids: set[str],
+    asset_ids: set[str],
+) -> int:
+    """Remove a locally moved source card from the persisted Imagine display cache."""
+    path = imagine_saved_display_cache_path(root, account)
+    data = read_json(path, {})
+    if not isinstance(data, dict) or int(data.get("version") or 0) != IMAGINE_SAVED_DISPLAY_CACHE_VERSION:
+        return 0
+    existing_posts = [post for post in data.get("posts") or [] if isinstance(post, dict)]
+    filtered_posts = [
+        post
+        for post in existing_posts
+        if not (
+            imagine_saved_post_identity_ids(post) & identity_ids
+            or imagine_saved_post_asset_ids(post) & asset_ids
+        )
+    ]
+    removed_count = len(existing_posts) - len(filtered_posts)
     if removed_count <= 0:
         return 0
     write_json(path, {
@@ -7813,6 +7947,7 @@ def list_imagine_saved(payload: dict) -> dict:
     posts = imagine_filter_liked_scope_posts(list(saved_groups.values()), hidden_remote_ids)
     posts = merge_imagine_saved_lineage_cards(posts)
     posts = imagine_filter_liked_scope_posts(posts, hidden_remote_ids)
+    posts = filter_imagine_posts_moved_to_collection(root, account, posts)
     # Keep the public Saved-page order intact here.  The renderer first collects every
     # page, then calculates each card's latest activity and sorts the complete snapshot
     # once; sorting this fragment would make the upstream order meaningless before that.
@@ -26537,19 +26672,50 @@ def copy_imagine_remote_item_to_directory(root: Path, item: dict, target_dir: Pa
 
 
 def remote_collection_source_ids(post: dict) -> set[str]:
-    return {
+    source_ids = {
         str(post.get(key) or "").strip()
         for key in ("post_id", "source_post_id", "original_post_id", "group_id", "root_post_id")
         if str(post.get(key) or "").strip()
     }
+    source_ids.update(imagine_saved_post_identity_ids(post))
+    return source_ids
 
 
 def remote_collection_item_ids(items: list[dict]) -> set[str]:
     return {
-        str(item.get("item_id") or item.get("id") or "").strip()
+        imagine_item_asset_id(item)
         for item in items
-        if isinstance(item, dict) and str(item.get("item_id") or item.get("id") or "").strip()
+        if isinstance(item, dict) and imagine_item_asset_id(item)
     }
+
+
+def hide_imagine_source_moved_to_collection(
+    root: Path,
+    account: dict,
+    source_post: dict,
+    items: list[dict],
+) -> set[str]:
+    """Hide an Imagine card only after its local Collection copy is durable."""
+    asset_ids = remote_collection_item_ids(items)
+    identity_ids = remote_collection_source_ids(source_post)
+    exclusion_ids = asset_ids | identity_ids
+    if not exclusion_ids:
+        return set()
+    ensure_imagine_state_migrated(root)
+    imagine_state.add_local_exclusions(
+        root,
+        imagine_account_settings_key(account),
+        exclusion_ids,
+        reason="moved_to_collection",
+    )
+    try:
+        prune_imagine_saved_display_moved_source(root, account, identity_ids, asset_ids)
+    except Exception as exc:
+        imagine_debug_event("collection_move_display_cache_prune_failed", {
+            "account_id": str(account.get("id") or ""),
+            "error": str(exc)[:400],
+        })
+    return exclusion_ids
 
 
 def existing_remote_collection_post(target_parent: Path, source_post: dict, items: list[dict]) -> tuple[Path, dict] | None:
@@ -26589,6 +26755,9 @@ def copy_imagine_remote_post_to_collection(payload: dict, item_only: bool = Fals
             raise RuntimeError("Selected media item was not found.")
     if not items:
         raise RuntimeError("Remote media item was not found.")
+    account = active_imagine_account(root, str(source_post.get("account_id") or ""))
+    if not account:
+        raise RuntimeError("Select or capture the Imagine account for this card first.")
 
     with COLLECTION_MOVE_LOCK:
         existing = existing_remote_collection_post(target_parent, source_post, items)
@@ -26601,9 +26770,14 @@ def copy_imagine_remote_post_to_collection(payload: dict, item_only: bool = Fals
             data["selected_item_id"] = media_item_key(existing_items[-1] if existing_items else {})
             data["selected_collection_path"] = collection_path
             data["selected_collection_post_path"] = target_parent_path or existing_path
+            data["imagine_moved_ids"] = sorted(hide_imagine_source_moved_to_collection(
+                root,
+                account,
+                source_post,
+                items,
+            ))
             return data
 
-        account = active_imagine_account(root, str(source_post.get("account_id") or ""))
         # Name the folder after the asset id, not the title. An Imagine card's title is its
         # prompt, so titles put a whole prompt -- punctuation, spaces and all -- into a path
         # segment, and safe_name caps nothing. The asset id is unique, fixed width and already
@@ -26653,6 +26827,12 @@ def copy_imagine_remote_post_to_collection(payload: dict, item_only: bool = Fals
         data["selected_item_id"] = media_item_key(copied_items[-1] if copied_items else {})
         data["selected_collection_path"] = collection_path
         data["selected_collection_post_path"] = target_parent_path or post_json["folder_path"]
+        data["imagine_moved_ids"] = sorted(hide_imagine_source_moved_to_collection(
+            root,
+            account,
+            source_post,
+            items,
+        ))
         return data
 
 

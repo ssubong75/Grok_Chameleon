@@ -155,6 +155,26 @@
       || null;
   }
 
+  function removeMovedImagineSourceFromMain(source) {
+    if (!source || (
+      typeof isImagineRemoteMainPost === "function"
+        ? !isImagineRemoteMainPost(source)
+        : source.source !== "imagine"
+    )) {
+      return;
+    }
+    const sourceIdentity = typeof libraryPostStableIdentity === "function"
+      ? libraryPostStableIdentity(source)
+      : String(source.folder_path || "");
+    library_state.imagineRemotePosts = (library_state.imagineRemotePosts || []).flatMap((candidate) => {
+      const matches = typeof libraryPostMatchesIdentity === "function"
+        ? libraryPostMatchesIdentity(candidate, sourceIdentity)
+        : candidate?.folder_path === source.folder_path;
+      if (!matches) return [candidate];
+      return [];
+    });
+  }
+
   async function moveToCollectionTarget({
     sourcePost,
     sourcePosts = [],
@@ -194,13 +214,24 @@
           collection_path: targetCollectionPath,
           target_parent_path: targetPostPath || "",
         };
-        if (source.remote || source.area === "imagine_remote" || source.area === "imagine_upload_remote") {
+        const remoteImagineSource = typeof isImagineRemoteMainPost === "function"
+          ? isImagineRemoteMainPost(source)
+          : source.source === "imagine" && (
+            source.remote
+            || source.area === "imagine_remote"
+            || source.area === "imagine_upload_remote"
+          );
+        if (remoteImagineSource) {
           payload.source_post = source;
         }
         if (itemKey) payload.item_key = itemKey;
         data = await qApi(endpoint, payload);
         applyLibrarySnapshot(data);
+        if (remoteImagineSource) removeMovedImagineSourceFromMain(source);
       }
+      if (typeof syncImagineRemotePostsIntoLibrary === "function") syncImagineRemotePostsIntoLibrary();
+      if (typeof saveImagineSavedDisplayCache === "function") saveImagineSavedDisplayCache();
+      if (typeof renderImagineSourceCards === "function") renderImagineSourceCards();
       closeMoveToCollectionDialog();
       for (const source of sources) {
         const selectionKey = typeof libraryPostStableIdentity === "function"
