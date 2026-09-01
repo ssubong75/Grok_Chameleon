@@ -408,6 +408,11 @@ def cancel_scheduled_shutdown_for_request(path: str, method: str) -> None:
     cancel_scheduled_shutdown()
 
 
+# Shutdowns the app asks for as part of another operation, rather than because it is closing.
+# They skip the exit chores above and do not need the grace period a real exit gets.
+QUICK_SHUTDOWN_EVENTS = frozenset({"restart-cleanup", "library-backup-pause"})
+
+
 def schedule_server_shutdown(server: ThreadingHTTPServer, delay: float = 2.0) -> None:
     global SHUTDOWN_TIMER
     with SHUTDOWN_LOCK:
@@ -28118,7 +28123,7 @@ class Handler(SimpleHTTPRequestHandler):
                 )
                 self.send_json({
                     "ok": True,
-                    "delay": 0.3 if event == "restart-cleanup" else 2.0,
+                    "delay": 0.3 if event in QUICK_SHUTDOWN_EVENTS else 2.0,
                     **({"cleanup": cleanup} if cleanup is not None else {}),
                     **(
                         {"login_sessions_cleanup": login_sessions_cleanup}
@@ -28131,7 +28136,7 @@ class Handler(SimpleHTTPRequestHandler):
                         else {}
                     ),
                 })
-                schedule_server_shutdown(self.server, 0.3 if event == "restart-cleanup" else 2.0)
+                schedule_server_shutdown(self.server, 0.3 if event in QUICK_SHUTDOWN_EVENTS else 2.0)
                 return
             cancel_scheduled_shutdown_for_request(parsed.path, "POST")
             if parsed.path == "/api/choose-library-folder":

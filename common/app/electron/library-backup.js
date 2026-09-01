@@ -24,7 +24,21 @@ const AUTOMATIC_METADATA_PATHS = new Set([
   "sql_data/state.backup.json",
   "sql_data/state.backup.sqlite3",
 ].map(canonicalPathKey));
+// The server rewrites these every time it scans the library, so their contents differ after
+// merely opening the app. They still travel with the backup; they just do not count as a
+// local edit when deciding whether the Local Library is behind the backup.
+const REGENERATED_ON_SCAN = new Set([
+  "library.json",
+  "sql_data/library_index.sqlite3",
+].map(canonicalPathKey));
 const IGNORED_NAMES = new Set([".DS_Store", "Thumbs.db", "desktop.ini"]);
+const HISTORY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+const PROGRESS_INTERVAL_MS = 200;
+const WINDOWS_RESERVED_NAMES = new Set([
+  "con", "prn", "aux", "nul",
+  ...Array.from({ length: 9 }, (_, index) => `com${index + 1}`),
+  ...Array.from({ length: 9 }, (_, index) => `lpt${index + 1}`),
+]);
 const TERMINAL_JOB_STATES = new Set(["done", "failed", "moderated", "cancelled"]);
 const MANIFEST_VERSION = 1;
 
@@ -185,6 +199,22 @@ function collectFiles(root) {
   return files;
 }
 
+// Progress travels to the renderer over IPC, and one message per file means tens of thousands
+// of hops for a library this size - more than the log pane can absorb. Report on a timer and
+// always let the closing item through so the final count lands.
+function throttledProgress(progress) {
+  let lastAt = 0;
+  return (payload) => {
+    if (!progress) return;
+    const total = Number(payload.total) || 0;
+    const final = total > 0 && Number(payload.current) >= total;
+    const now = Date.now();
+    if (!final && now - lastAt < PROGRESS_INTERVAL_MS) return;
+    lastAt = now;
+    progress(payload);
+  };
+}
+
 function throwIfCancelled(signal) {
   if (signal?.aborted) throw new LibraryBackupError("Library Backup was cancelled.", "CANCELLED");
 }
@@ -246,6 +276,7 @@ async function scanLibrary(root, { previous = null, progress = null, signal = nu
   if (!pathExists(root)) return { records: new Map() };
   const files = collectFiles(root);
   const records = new Map();
+  const report = throttledProgress(progress);
   let index = 0;
   for (const filePath of files) {
     throwIfCancelled(signal);
@@ -272,7 +303,7 @@ async function scanLibrary(root, { previous = null, progress = null, signal = nu
       mtimeMs: stat.mtimeMs,
       sha256: digest,
     });
-    progress?.({ phase: "scan", message: `${phase}: ${relativePath}`, current: index, total: files.length });
+    report({ phase: "scan", message: `${phase}: ${index} of ${files.length}`, current: index, total: files.length });
   }
   return { records };
 }
@@ -308,6 +339,43 @@ function changedManifestKeys(previous, current) {
 function onlyAutomaticMetadataChanged(previous, current) {
   const changed = changedManifestKeys(previous, current);
   return changed.size > 0 && [...changed].every((key) => AUTOMATIC_METADATA_PATHS.has(key));
+}
+
+function unexpectedExternalKeys(previous, current) {
+  return [...changedManifestKeys(previous, current)].filter((key) => !AUTOMATIC_METADATA_PATHS.has(key));
+}
+
+function unsyncedChangeKeys(previous, current) {
+  return [...changedManifestKeys(previous, current)].filter((key) => !REGENERATED_ON_SCAN.has(key));
+}
+
+// Names that this computer stores happily but a Windows computer cannot recreate. The backup
+// still runs; the caller surfaces these so the folders can be renamed before the drive travels.
+function windowsPortabilityIssue(relativePath) {
+  for (const part of relativePath.split("/")) {
+    if (/[<>:"|?*]/.test(part) || /[\u0000-\u001f]/.test(part)) return `${relativePath} (character Windows cannot store)`;
+    if (/[. ]$/.test(part)) return `${relativePath} (ends with a space or period, which Windows drops)`;
+    if (WINDOWS_RESERVED_NAMES.has(part.split(".")[0].toLocaleLowerCase("en-US"))) return `${relativePath} (name reserved by Windows)`;
+  }
+  return "";
+}
+
+function windowsPortabilityIssues(manifest) {
+  const issues = [];
+  for (const record of manifest.records.values()) {
+    const issue = windowsPortabilityIssue(record.relativePath);
+    if (issue) issues.push(issue);
+  }
+  return issues.sort((a, b) => a.localeCompare(b, "en"));
+}
+
+async function fileMatchesRecord(root, record, signal) {
+  const filePath = safePath(root, record.diskRelativePath);
+  if (!pathExists(filePath)) return false;
+  const stat = fs.statSync(filePath);
+  if (!stat.isFile() || stat.size !== record.size) return false;
+  if (stat.mtimeMs === record.mtimeMs) return true;
+  return (await sha256File(filePath, signal)) === record.sha256;
 }
 
 function buildChangePlan(source, destination) {
@@ -450,7 +518,15 @@ class LibraryBackup {
     const externalFingerprint = manifestFingerprint(actualExternal);
     const localFingerprint = manifestFingerprint(actualLocal);
     const storedExternalFingerprint = storedExternal ? manifestFingerprint(storedExternal) : "";
-    const localBaselineFingerprint = localBaseline ? manifestFingerprint(localBaseline) : "";
+    // A run can copy every file into place and still fail before writing its manifests - a
+    // cleanup error, a crash, a drive pulled out mid-run. What it leaves behind looks like
+    // someone edited the drive directly, except the two libraries match each other exactly.
+    // That is a finished transfer missing its receipt, not a conflict, so it is allowed
+    // through to rewrite the record instead of locking both directions until the control
+    // folders are deleted by hand.
+    const librariesMatch = Boolean(actualLocal.records.size)
+      && unsyncedChangeKeys(actualExternal, actualLocal).length === 0;
+    const unrecordedRun = "The last run copied everything but did not record itself. This run writes the missing record.";
     let generation = storedExternal?.generation || 0;
     let externalDrift = Boolean(storedExternal && storedExternalFingerprint !== externalFingerprint);
     let warning = "";
@@ -466,16 +542,28 @@ class LibraryBackup {
       } else if (localBaseline && storedExternal && localBaseline.generation !== storedExternal.generation) {
         throw new LibraryBackupError("External Library has a newer backup. Restore it to Local Library before backing up.", "EXTERNAL_NEWER");
       } else if (externalDrift && !onlyAutomaticMetadataChanged(storedExternal, actualExternal)) {
-        if (localBaseline) {
-          throw new LibraryBackupError("External Library changed since the last restore. Restore it before backing up.", "EXTERNAL_CHANGED");
-        }
-        warning = "External Library has existing changes with no local baseline. Continuing will replace them with Local Library.";
+        // Backing up is the Local Library's turn to write. A drive that no longer matches its
+        // own record is usually the trace of a run that copied everything and then failed
+        // before recording itself - refusing here would strand both directions. The case that
+        // actually loses work, another computer having backed up something newer, is caught by
+        // the generation check above, and anything replaced below is moved to history first.
+        const drifted = unexpectedExternalKeys(storedExternal, actualExternal).length;
+        const plural = drifted === 1 ? "" : "s";
+        warning = `External Library differs from its last record in ${drifted} file${plural} - either a run that copied everything without recording itself, or work done straight on the drive. Only the changes listed here are written, and whatever they replace is kept in history.`;
       }
+    } else if (librariesMatch && (externalDrift || (localBaseline && unsyncedChangeKeys(localBaseline, actualLocal).length))) {
+      warning = unrecordedRun;
     } else {
-      if (localBaseline && localFingerprint !== localBaselineFingerprint) {
-        throw new LibraryBackupError("Local Library has changes that are not backed up. Back up to External Library first.", "LOCAL_UNSYNCED");
-      }
-      if (!localBaseline && actualLocal.records.size && localFingerprint !== externalFingerprint) {
+      if (localBaseline) {
+        const unsynced = unsyncedChangeKeys(localBaseline, actualLocal);
+        if (unsynced.length) {
+          const plural = unsynced.length === 1 ? "" : "s";
+          throw new LibraryBackupError(
+            `Local Library has ${unsynced.length} change${plural} that the backup does not have yet. Back up to External Library first.`,
+            "LOCAL_UNSYNCED",
+          );
+        }
+      } else if (actualLocal.records.size && unsyncedChangeKeys(actualExternal, actualLocal).length) {
         throw new LibraryBackupError("Local Library is not empty and has no matching backup baseline. Select an empty folder or back it up separately.", "LOCAL_BASELINE_MISSING");
       }
       if (externalDrift) generation += 1;
@@ -484,6 +572,11 @@ class LibraryBackup {
     const sourceManifest = direction === "to-external" ? actualLocal : actualExternal;
     const destinationManifest = direction === "to-external" ? actualExternal : actualLocal;
     const changes = buildChangePlan(sourceManifest, destinationManifest);
+    const portability = windowsPortabilityIssues(sourceManifest);
+    if (portability.length) {
+      const plural = portability.length === 1 ? "" : "s";
+      warning = `${warning} ${portability.length} name${plural} cannot be recreated on a Windows computer, starting with ${portability[0]}.`.trim();
+    }
     return {
       direction,
       ...context,
@@ -505,16 +598,43 @@ class LibraryBackup {
     };
   }
 
+  // The review dialog sits between analyze() and execute(), so the situation has to be checked
+  // again. Re-running the whole analysis would walk both libraries a second time - four full
+  // passes for one backup - so only the drive's ownership, its recorded generation, and the
+  // files actually named in the plan are re-read here.
+  async confirmPlan(analysis) {
+    const context = this.validate(analysis.direction);
+    const session = readJson(context.paths.session);
+    if (session.machine_id && session.machine_id !== this.machineId) throw sessionOwnerError(session);
+    const storedExternal = loadStoredManifest(context.paths.externalManifest);
+    const reviewed = analysis.storedExternal;
+    const externalMoved = Boolean(storedExternal) !== Boolean(reviewed)
+      || Boolean(storedExternal && reviewed && (
+        storedExternal.generation !== reviewed.generation
+        || manifestFingerprint(storedExternal) !== manifestFingerprint(reviewed)
+      ));
+    if (externalMoved) {
+      throw new LibraryBackupError("External Library changed after the review. Refresh and review the backup again.", "PLAN_CHANGED");
+    }
+    const report = throttledProgress(this.progress);
+    let checked = 0;
+    for (const change of analysis.changes) {
+      throwIfCancelled(this.signal);
+      const stale = (change.sourceRecord && !(await fileMatchesRecord(analysis.source, change.sourceRecord, this.signal)))
+        || (change.destinationRecord && !(await fileMatchesRecord(analysis.destination, change.destinationRecord, this.signal)));
+      if (stale) {
+        throw new LibraryBackupError("Library files changed after the review. Refresh and review the backup again.", "PLAN_CHANGED");
+      }
+      checked += 1;
+      report({ phase: "confirm", message: `Rechecking reviewed changes: ${checked} of ${analysis.changes.length}`, current: checked, total: analysis.changes.length });
+    }
+    return { ...analysis, ...context };
+  }
+
   async execute(analysis) {
     throwIfCancelled(this.signal);
-    const current = await this.analyze(analysis.direction);
-    if (
-      current.sourceFingerprint !== analysis.sourceFingerprint
-      || current.destinationFingerprint !== analysis.destinationFingerprint
-      || JSON.stringify(current.summary) !== JSON.stringify(analysis.summary)
-    ) {
-      throw new LibraryBackupError("Library files changed after the review. Refresh and review the backup again.", "PLAN_CHANGED");
-    }
+    this.emit("Rechecking the reviewed changes.", 0, 1, "confirm");
+    const current = await this.confirmPlan(analysis);
     const destinationControl = analysis.direction === "to-external" ? current.paths.externalControl : current.paths.localControl;
     const historyPath = await applyChanges(
       current.source,
@@ -523,9 +643,14 @@ class LibraryBackup {
       destinationControl,
       { progress: this.progress, signal: this.signal },
     );
+    // From here the destination already holds the new files. Stopping now would leave the
+    // libraries updated but the manifests unwritten, which locks both directions until the
+    // control folders are deleted by hand - so verification and the manifest writes below
+    // deliberately ignore the cancel signal. Comparing the destination against its own
+    // pre-change manifest also forces every file this run touched to be hashed again.
     this.emit("Verifying completed backup.", null, null, "verify");
-    const sourceAfter = await scanLibrary(current.source, { previous: current.sourceManifest, signal: this.signal });
-    const destinationAfter = await scanLibrary(current.destination, { previous: current.sourceManifest, signal: this.signal });
+    const sourceAfter = await scanLibrary(current.source, { previous: current.sourceManifest });
+    const destinationAfter = await scanLibrary(current.destination, { previous: current.destinationManifest });
     if (manifestFingerprint(sourceAfter) !== manifestFingerprint(destinationAfter)) {
       throw new LibraryBackupError("Final verification failed. Source and destination are different.", "VERIFY_FAILED");
     }
@@ -571,7 +696,31 @@ function removeTreeSafely(target, allowedParent) {
   if (!relation || relation === ".." || relation.startsWith(`..${path.sep}`) || path.isAbsolute(relation)) {
     throw new LibraryBackupError(`Refused to remove unsafe staging path: ${target}`, "UNSAFE_CLEANUP");
   }
-  fs.rmSync(resolvedTarget, { recursive: true, force: true });
+  fs.rmSync(resolvedTarget, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+}
+
+function pruneStagingRoot(controlRoot) {
+  const stagingParent = path.join(controlRoot, "staging");
+  if (!pathExists(stagingParent)) return;
+  for (const entry of fs.readdirSync(stagingParent, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    try { removeTreeSafely(path.join(stagingParent, entry.name), stagingParent); } catch (_) {}
+  }
+  try { fs.rmdirSync(stagingParent); } catch (_) {}
+}
+
+function pruneOldHistory(controlRoot) {
+  const historyParent = path.join(controlRoot, "history");
+  if (!pathExists(historyParent)) return;
+  const oldestAllowed = Date.now() - HISTORY_RETENTION_MS;
+  for (const entry of fs.readdirSync(historyParent, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const target = path.join(historyParent, entry.name);
+    try {
+      if (fs.statSync(target).mtimeMs < oldestAllowed) removeTreeSafely(target, historyParent);
+    } catch (_) {}
+  }
+  try { fs.rmdirSync(historyParent); } catch (_) {}
 }
 
 function pruneEmptyDirectories(root) {
@@ -606,6 +755,8 @@ async function applyChanges(sourceRoot, destinationRoot, changes, controlRoot, {
   if (!changes.length) return "";
   fs.mkdirSync(destinationRoot, { recursive: true });
   fs.mkdirSync(controlRoot, { recursive: true });
+  pruneStagingRoot(controlRoot);
+  pruneOldHistory(controlRoot);
   const destinationDevice = fs.statSync(destinationRoot).dev;
   const controlDevice = fs.statSync(controlRoot).dev;
   if (destinationDevice !== controlDevice) {
@@ -621,6 +772,7 @@ async function applyChanges(sourceRoot, destinationRoot, changes, controlRoot, {
     .filter((change) => change.action !== "delete")
     .sort((a, b) => copyPriority(a) - copyPriority(b) || a.relativePath.localeCompare(b.relativePath, "en"));
   const total = copyChanges.length + changes.length;
+  const report = throttledProgress(progress);
   let completed = 0;
   try {
     for (const change of copyChanges) {
@@ -630,7 +782,7 @@ async function applyChanges(sourceRoot, destinationRoot, changes, controlRoot, {
       await copyFileVerified(sourcePath, stagedPath, change.sourceRecord.sha256, signal);
       copied.push({ change, stagedPath });
       completed += 1;
-      progress?.({ phase: "copy", message: `Copy verified: ${change.relativePath}`, current: completed, total });
+      report({ phase: "copy", message: `Copy verified: ${change.relativePath}`, current: completed, total });
     }
 
     const rollback = [];
@@ -651,7 +803,7 @@ async function applyChanges(sourceRoot, destinationRoot, changes, controlRoot, {
         fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
         fs.renameSync(stagedPath, destinationPath);
         completed += 1;
-        progress?.({ phase: "apply", message: `Applied: ${change.relativePath}`, current: completed, total });
+        report({ phase: "apply", message: `Applied: ${change.relativePath}`, current: completed, total });
       }
       const deletes = changes
         .filter((change) => change.action === "delete")
@@ -667,7 +819,7 @@ async function applyChanges(sourceRoot, destinationRoot, changes, controlRoot, {
           rollback.push({ destinationPath, historyPath });
         }
         completed += 1;
-        progress?.({ phase: "apply", message: `Moved to history: ${change.relativePath}`, current: completed, total });
+        report({ phase: "apply", message: `Moved to history: ${change.relativePath}`, current: completed, total });
       }
     } catch (error) {
       for (const item of rollback.reverse()) {
@@ -683,7 +835,16 @@ async function applyChanges(sourceRoot, destinationRoot, changes, controlRoot, {
     }
     pruneEmptyDirectories(destinationRoot);
   } finally {
-    removeTreeSafely(stagingRoot, controlRoot);
+    // Clearing the staging area is housekeeping, not part of the backup. Some filesystems -
+    // exFAT on a removable drive especially - answer ENOTEMPTY for a directory whose files
+    // were just moved out of it. Letting that escape would fail a backup whose files are
+    // already in place and leave the manifests unwritten, locking both directions. Anything
+    // left behind is cleared at the start of the next run.
+    try {
+      removeTreeSafely(stagingRoot, controlRoot);
+    } catch (error) {
+      report({ phase: "apply", message: `Staging folder left for the next run: ${error.message}`, current: total, total });
+    }
     try { fs.rmdirSync(path.join(controlRoot, "staging")); } catch (_) {}
   }
   return pathExists(historyRoot) ? historyRoot : "";

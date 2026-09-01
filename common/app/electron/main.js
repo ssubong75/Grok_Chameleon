@@ -474,6 +474,8 @@ const libraryBackupAnalyses = new Map();
 let libraryBackupOperation = null;
 let libraryBackupAbortController = null;
 let libraryBackupAnalysisController = null;
+let libraryBackupServerPaused = false;
+let libraryBackupRunning = null;
 const CARD_PREVIEW_MAX_EDGE = 640;
 const CARD_PREVIEW_RENDER_REVISION = "card-640-v1";
 const THUMBNAIL_PREVIEW_MAX_EDGE = 320;
@@ -494,11 +496,25 @@ function appendLog(line) {
   } catch (_) {}
 }
 
+// Deriving this from the host name alone means it changes whenever the machine joins a network
+// that renames it, and the external drive would then look checked out by "another computer".
+// The first value is written down and reused from then on; existing drives keep working because
+// the stored value starts out as the one that was being derived before.
 function libraryBackupMachineId() {
-  return crypto.createHash("sha256")
+  const idPath = path.join(RUNTIME_DIR, "library-backup-machine-id");
+  try {
+    const stored = fs.readFileSync(idPath, "utf8").trim();
+    if (/^[0-9a-f]{32}$/.test(stored)) return stored;
+  } catch (_) {}
+  const derived = crypto.createHash("sha256")
     .update([process.platform, os.hostname(), os.homedir()].join("\0"))
     .digest("hex")
     .slice(0, 32);
+  try {
+    fs.mkdirSync(RUNTIME_DIR, { recursive: true });
+    fs.writeFileSync(idPath, `${derived}\n`, { encoding: "utf8", mode: 0o600 });
+  } catch (_) {}
+  return derived;
 }
 
 function libraryBackupPathsMatch(first, second) {
@@ -1044,12 +1060,15 @@ function serverPortOpen(timeoutMs = 300) {
   });
 }
 
-async function requestShutdown() {
+// The server treats "electron-shutdown" as the app closing for good and runs its exit chores,
+// which permanently delete unfavourited build-t2i folders and clear login sessions. Pausing the
+// server for a backup must not trigger any of that, so the caller names the occasion.
+async function requestShutdown(event = "electron-shutdown") {
   try {
     await fetchJson(`${SERVER_BASE}/api/shutdown`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ event: "electron-shutdown" }),
+      body: JSON.stringify({ event }),
       signal: AbortSignal.timeout(30000),
     });
   } catch (_) {}
@@ -1173,6 +1192,13 @@ async function exitAppNow(reason = "app-exit") {
   appTerminating = true;
   app.isQuitting = true;
   appendLog(`app exit reason=${reason}`);
+  // A backup that is midway through has already replaced files in the destination but has not
+  // written its manifests yet. Quitting there leaves both directions locked, so let it land.
+  if (libraryBackupRunning) {
+    appendLog("app exit waiting for library backup to finish");
+    try { await libraryBackupRunning; } catch (_) {}
+    appendLog("app exit library backup finished");
+  }
   await stopTotalAccountBackgroundPreparation();
   closeBridgeWindowsNow();
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -1321,7 +1347,7 @@ async function libraryBackupRuntimeStatus() {
 }
 
 async function stopServerForLibraryBackup() {
-  await requestShutdown();
+  await requestShutdown("library-backup-pause");
   for (let index = 0; index < 40; index += 1) {
     if (!(await serverPortOpen())) {
       serverProcess = null;
@@ -1417,9 +1443,14 @@ async function executeLibraryBackup(payload = {}) {
       throw new Error("A Build or Imagine job is still running. Finish it before Library Backup.");
     }
     if (touchesActiveLibrary) {
+      // Cancel is checked on both sides of the pause: the wait loop inside cannot be interrupted
+      // safely, because a half-stopped server still has to be restarted by the finally block.
+      if (libraryBackupAbortController?.signal.aborted) throw new Error("Library Backup was cancelled.");
       sendLibraryBackupProgress({ phase: "pause", message: "Pausing the library server.", current: 0, total: 1 });
       await stopServerForLibraryBackup();
       serverPaused = true;
+      libraryBackupServerPaused = true;
+      if (libraryBackupAbortController?.signal.aborted) throw new Error("Library Backup was cancelled.");
     }
     const engine = new LibraryBackup({
       localRoot: entry.localPath,
@@ -1444,6 +1475,7 @@ async function executeLibraryBackup(payload = {}) {
         appendLog(`library server restart after backup failed: ${error.stack || error.message || String(error)}`);
         dialog.showErrorBox(APP_NAME, `Library Backup finished, but the library server could not restart.\n\n${error.message || error}`);
       }
+      libraryBackupServerPaused = false;
     }
     if (libraryBackupOperation === operation) libraryBackupOperation = null;
     libraryBackupAbortController = null;
@@ -4233,7 +4265,15 @@ ipcMain.handle("grok-chameleon:library-backup-status", async (_event, payload = 
   inspectLibraryBackupPaths(payload.local_path, payload.external_path, libraryBackupMachineId())
 ));
 ipcMain.handle("grok-chameleon:library-backup-analyze", async (_event, payload = {}) => analyzeLibraryBackup(payload));
-ipcMain.handle("grok-chameleon:library-backup-execute", async (_event, payload = {}) => executeLibraryBackup(payload));
+ipcMain.handle("grok-chameleon:library-backup-execute", async (_event, payload = {}) => {
+  const running = executeLibraryBackup(payload);
+  libraryBackupRunning = running.catch(() => {});
+  try {
+    return await running;
+  } finally {
+    libraryBackupRunning = null;
+  }
+});
 ipcMain.handle("grok-chameleon:library-backup-cancel", async () => {
   libraryBackupAnalysisController?.abort();
   libraryBackupAbortController?.abort();
@@ -4433,6 +4473,12 @@ async function pollBridge() {
   if (bridgePolling) return;
   bridgePolling = true;
   while (!app.isQuitting) {
+    // The server is down on purpose while a backup runs; polling it would only log one failure
+    // per second for as long as the backup takes.
+    if (libraryBackupServerPaused) {
+      await sleep(500);
+      continue;
+    }
     try {
       const data = await fetchJson(`${SERVER_BASE}/api/native-bridge/next`, {
         method: "POST",

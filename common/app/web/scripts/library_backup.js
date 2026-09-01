@@ -35,20 +35,71 @@
     return `${amount >= 10 ? amount.toFixed(1) : amount.toFixed(2)} ${unit}`;
   }
 
+  // Every stage counts its own items from zero, so a raw percentage swings back to the start
+  // several times per run. Give each stage a slice of the bar and never move backwards.
+  const PHASE_RANGES = {
+    start: [0, 2],
+    scan: [2, 40],
+    review: [40, 42],
+    confirm: [42, 52],
+    pause: [52, 55],
+    copy: [55, 80],
+    apply: [80, 92],
+    verify: [92, 98],
+    restart: [98, 99],
+    complete: [100, 100],
+  };
+  let progressFloor = 0;
+
+  function paintProgress(percent) {
+    const value = Math.min(100, Math.max(0, Math.round(percent)));
+    progressFloor = value;
+    if (progressBar) progressBar.style.width = `${value}%`;
+    progressTrack?.setAttribute("aria-valuenow", String(value));
+  }
+
   function setProgress(current, total, phase = "") {
+    const range = PHASE_RANGES[phase];
     const maximum = Math.max(0, Number(total) || 0);
     const value = Math.max(0, Number(current) || 0);
-    const percent = maximum > 0 ? Math.min(100, Math.round((value / maximum) * 100)) : (phase === "complete" ? 100 : 0);
-    if (progressBar) progressBar.style.width = `${percent}%`;
-    progressTrack?.setAttribute("aria-valuenow", String(percent));
+    const ratio = maximum > 0 ? Math.min(1, value / maximum) : 0;
+    const percent = range
+      ? range[0] + ((range[1] - range[0]) * ratio)
+      : (maximum > 0 ? ratio * 100 : progressFloor);
+    paintProgress(Math.max(progressFloor, percent));
+  }
+
+  function resetProgress() {
+    progressFloor = 0;
+    paintProgress(0);
+  }
+
+  // Rebuilding textContent once per line is quadratic, and a first backup emits thousands of
+  // lines. Keep a bounded buffer and paint it once per frame.
+  const LOG_MAX_LINES = 400;
+  const logLines = [];
+  let logPaintHandle = 0;
+
+  function paintLog() {
+    logPaintHandle = 0;
+    log.textContent = logLines.join("\n");
+    log.scrollTop = log.scrollHeight;
   }
 
   function writeLog(message, append = true) {
     const value = String(message || "").trim();
     if (!value) return;
-    if (!append || log.textContent === "Ready.") log.textContent = value;
-    else log.textContent = `${log.textContent}\n${value}`;
-    log.scrollTop = log.scrollHeight;
+    if (!append) logLines.length = 0;
+    logLines.push(value);
+    if (logLines.length > LOG_MAX_LINES) logLines.splice(0, logLines.length - LOG_MAX_LINES);
+    if (!logPaintHandle) logPaintHandle = window.requestAnimationFrame(paintLog);
+  }
+
+  // A failed run leaves the status line red; without this the next success would still read as
+  // an error. Every status update names the state it wants.
+  function setStatus(message, state = "idle") {
+    status.textContent = String(message || "");
+    status.dataset.state = state;
   }
 
   function setBusy(value) {
@@ -59,6 +110,11 @@
     if (refresh) {
       refresh.disabled = false;
       refresh.textContent = busy ? "Cancel" : "Refresh";
+    }
+    // The library server is stopped for the length of a backup, so every other screen would
+    // fail to load its data. Keep the sidebar out of reach until it is back.
+    for (const element of document.querySelectorAll(".sidebar .nav_item, .sidebar .account-button")) {
+      element.disabled = busy;
     }
   }
 
@@ -87,25 +143,26 @@
         await refreshStatus();
       }
     } catch (error) {
-      status.textContent = friendlyError(error);
+      setStatus(friendlyError(error), "blocked");
     }
   }
 
   async function refreshStatus() {
     applyDefaultLocalPath();
     if (!native?.libraryBackupStatus) {
-      status.textContent = "Library Backup is available in the desktop app.";
+      setStatus("Library Backup is available in the desktop app.");
       return;
     }
     try {
       const result = await native.libraryBackupStatus(payload());
-      status.textContent = String(result?.message || "Select both library folders.");
-      status.dataset.state = result?.blocked ? "blocked" : result?.ready ? "ready" : "idle";
+      setStatus(
+        String(result?.message || "Select both library folders."),
+        result?.blocked ? "blocked" : result?.ready ? "ready" : "idle",
+      );
       writeLog("Folder status refreshed.", false);
-      setProgress(0, 1);
+      resetProgress();
     } catch (error) {
-      status.textContent = friendlyError(error);
-      status.dataset.state = "blocked";
+      setStatus(friendlyError(error), "blocked");
     }
   }
 
@@ -124,13 +181,14 @@
   async function run(direction) {
     if (busy || !native?.analyzeLibraryBackup || !native?.executeLibraryBackup) return;
     if (!localInput.value.trim() || !externalInput.value.trim()) {
-      status.textContent = "Select both library folders.";
+      setStatus("Select both library folders.");
       return;
     }
     setBusy(true);
-    status.textContent = "Comparing library folders…";
-    log.textContent = "Starting comparison.";
-    setProgress(0, 1);
+    currentPhase = "";
+    setStatus("Comparing library folders…");
+    writeLog("Starting comparison.", false);
+    resetProgress();
     try {
       const analysis = await native.analyzeLibraryBackup(payload(direction));
       const confirmed = await openGalleryActionDialog({
@@ -141,34 +199,46 @@
         messageBox: true,
       });
       if (!confirmed) {
-        status.textContent = "Library Backup was cancelled before any files were changed.";
+        setStatus("Library Backup was cancelled before any files were changed.");
         writeLog("Cancelled before execution.");
         return;
       }
-      status.textContent = direction === "to-external" ? "Backing up to External Library…" : "Restoring to Local Library…";
+      setStatus(direction === "to-external" ? "Backing up to External Library…" : "Restoring to Local Library…");
       const result = await native.executeLibraryBackup({ token: analysis.token });
       setProgress(1, 1, "complete");
-      status.textContent = result.changed
-        ? `Completed. ${result.changed} change${result.changed === 1 ? "" : "s"} applied and verified.`
-        : "Completed. The libraries already match.";
+      setStatus(
+        result.changed
+          ? `Completed. ${result.changed} change${result.changed === 1 ? "" : "s"} applied and verified.`
+          : "Completed. The libraries already match.",
+        "ready",
+      );
       writeLog(result.historyPath ? `Previous files saved in history: ${result.historyPath}` : "No previous files required history storage.");
-      if (typeof scanLibrary === "function") {
+      // A full rescan rewrites library.json and the card index, which would put the Local
+      // Library out of step with the baseline this run just saved. Only a restore actually
+      // changes local files, so only a restore needs one.
+      if (direction === "to-local" && typeof scanLibrary === "function") {
         try { await scanLibrary(); } catch (_) {}
       }
     } catch (error) {
       const message = friendlyError(error);
-      status.textContent = message;
-      status.dataset.state = "blocked";
+      setStatus(message, "blocked");
       writeLog(`Error: ${message}`);
-      setProgress(0, 1);
+      resetProgress();
     } finally {
       setBusy(false);
     }
   }
 
+  // Once the files are in place the run has to reach its manifest writes, so the cancel button
+  // steps aside for the closing stages rather than pretending it can still stop them.
+  const UNSTOPPABLE_PHASES = new Set(["verify", "restart", "complete"]);
+  let currentPhase = "";
+
   native?.onLibraryBackupProgress?.((event) => {
+    currentPhase = String(event.phase || "");
     writeLog(event.message);
     setProgress(event.current, event.total, event.phase);
+    if (refresh && busy) refresh.disabled = UNSTOPPABLE_PHASES.has(currentPhase);
   });
 
   localChoose?.addEventListener("click", () => choose(localInput, "Local Library"));
@@ -177,8 +247,13 @@
   toLocal?.addEventListener("click", () => run("to-local"));
   refresh?.addEventListener("click", async () => {
     if (busy) {
-      status.textContent = "Cancelling Library Backup…";
-      await native?.cancelLibraryBackup?.();
+      if (UNSTOPPABLE_PHASES.has(currentPhase)) {
+        setStatus("The backup is finishing and can no longer be cancelled.");
+        return;
+      }
+      setStatus("Cancelling Library Backup…");
+      const result = await native?.cancelLibraryBackup?.();
+      if (result && result.cancelling === false) setStatus("There was nothing left to cancel.");
       return;
     }
     await refreshStatus();
