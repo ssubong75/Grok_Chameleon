@@ -1459,7 +1459,8 @@ async function executeLibraryBackup(payload = {}) {
       signal: libraryBackupAbortController.signal,
       progress: sendLibraryBackupProgress,
     });
-    const result = await engine.execute(entry.analysis);
+    const refreshedAnalysis = await engine.refreshPlan(entry.analysis);
+    const result = await engine.execute(refreshedAnalysis);
     appendLog(`library backup complete direction=${result.direction} changed=${result.changed} generation=${result.generation}`);
     return { ok: true, ...result };
   } catch (error) {

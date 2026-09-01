@@ -23,6 +23,7 @@ const AUTOMATIC_METADATA_PATHS = new Set([
   "sql_data/state.backup.json",
   "sql_data/state.backup.sqlite3",
 ].map(canonicalPathKey));
+const AUTOMATIC_METADATA_DIRECTORIES = ["cache"].map(canonicalPathKey);
 // The server rewrites these every time it scans the library, so their contents differ after
 // merely opening the app. They still travel with the backup; they just do not count as a
 // local edit when deciding whether the Local Library is behind the backup.
@@ -425,21 +426,28 @@ function changedManifestKeys(previous, current) {
   return changed;
 }
 
+function isAutomaticMetadataKey(key) {
+  return AUTOMATIC_METADATA_PATHS.has(key)
+    || AUTOMATIC_METADATA_DIRECTORIES.some((directory) => key.startsWith(`${directory}/`));
+}
+
 // The fingerprint that raises "the drive drifted" hashes file contents, while this asks whether
 // anything worth defending actually changed - so a rewrite that only touched regenerated values
 // leaves nothing here to report. An empty set therefore means nothing of the user's moved, not
 // that the question is unanswered.
 function onlyAutomaticMetadataChanged(previous, current) {
   const changed = changedManifestKeys(previous, current);
-  return [...changed].every((key) => AUTOMATIC_METADATA_PATHS.has(key));
+  return [...changed].every(isAutomaticMetadataKey);
 }
 
 function unexpectedExternalKeys(previous, current) {
-  return [...changedManifestKeys(previous, current)].filter((key) => !AUTOMATIC_METADATA_PATHS.has(key));
+  return [...changedManifestKeys(previous, current)].filter((key) => !isAutomaticMetadataKey(key));
 }
 
 function unsyncedChangeKeys(previous, current) {
-  return [...changedManifestKeys(previous, current)].filter((key) => !REGENERATED_ON_SCAN.has(key));
+  return [...changedManifestKeys(previous, current)].filter((key) => (
+    !REGENERATED_ON_SCAN.has(key) && !isAutomaticMetadataKey(key)
+  ));
 }
 
 // Names that this computer stores happily but a Windows computer cannot recreate. The backup
@@ -597,7 +605,7 @@ class LibraryBackup {
     return { local, external, source, destination, libraryId, paths: metadataPaths(local, external, libraryId) };
   }
 
-  async analyze(direction) {
+  async analyze(direction, { previousActualExternal = null, previousActualLocal = null } = {}) {
     if (!["to-external", "to-local"].includes(direction)) {
       throw new LibraryBackupError("Unknown backup direction.", "INVALID_DIRECTION");
     }
@@ -612,14 +620,14 @@ class LibraryBackup {
 
     this.emit("Scanning External Library.", null, null, "scan");
     const actualExternal = await scanLibrary(context.external, {
-      previous: storedExternal,
+      previous: previousActualExternal || storedExternal,
       progress: this.progress,
       signal: this.signal,
       phase: "Scanning External Library",
     });
     this.emit("Scanning Local Library.", null, null, "scan");
     const actualLocal = await scanLibrary(context.local, {
-      previous: localBaseline,
+      previous: previousActualLocal || localBaseline,
       progress: this.progress,
       signal: this.signal,
       phase: "Scanning Local Library",
@@ -712,6 +720,30 @@ class LibraryBackup {
       summary: summarizeChanges(changes),
       analyzedAt: utcNow(),
     };
+  }
+
+  async refreshPlan(reviewed) {
+    const direction = String(reviewed?.direction || "");
+    if (!reviewed || !["to-external", "to-local"].includes(direction)) {
+      throw new LibraryBackupError("The backup review is invalid.", "PLAN_INVALID");
+    }
+    this.emit("Refreshing the source after pausing the library.", 0, 1, "confirm");
+    const refreshed = await this.analyze(direction, {
+      previousActualExternal: reviewed.actualExternal,
+      previousActualLocal: reviewed.actualLocal,
+    });
+    const reviewedDestination = direction === "to-external" ? reviewed.actualExternal : reviewed.actualLocal;
+    const currentDestination = direction === "to-external" ? refreshed.actualExternal : refreshed.actualLocal;
+    const unsafeDestinationChanges = [...changedManifestKeys(reviewedDestination, currentDestination)]
+      .filter((key) => !isAutomaticMetadataKey(key));
+    if (unsafeDestinationChanges.length) {
+      throw new LibraryBackupError(
+        "The destination library changed after the review. Nothing was copied - review the backup again.",
+        "PLAN_CHANGED",
+      );
+    }
+    this.emit("The current source is ready to copy.", 1, 1, "confirm");
+    return refreshed;
   }
 
   // The review dialog sits between analyze() and execute(), so the situation has to be checked

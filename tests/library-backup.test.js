@@ -207,6 +207,55 @@ test("a file added after review is rejected before the destination is changed", 
   assert.equal(fs.existsSync(path.join(external, "prompt", "added-after-review.json")), false);
 });
 
+test("Local source changes after review are included in the refreshed backup plan", async (t) => {
+  const { local, external } = tempPair(t);
+  const engine = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "mac-a" });
+  const reviewed = await engine.analyze("to-external");
+  write(path.join(local, "cache", "card-previews", "late-preview.jpg"), "late-preview");
+
+  const refreshed = await engine.refreshPlan(reviewed);
+  await engine.execute(refreshed);
+
+  assert.equal(
+    fs.readFileSync(path.join(external, "cache", "card-previews", "late-preview.jpg"), "utf8"),
+    "late-preview",
+  );
+});
+
+test("External source changes after review are included in the refreshed restore plan", async (t) => {
+  const { local, external } = tempPair(t);
+  const engine = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "mac-a" });
+  await run(engine, "to-external");
+  const reviewed = await engine.analyze("to-local");
+  write(path.join(external, "created", "late", "post.json"), "{\"title\":\"late\"}\n");
+
+  const refreshed = await engine.refreshPlan(reviewed);
+  await engine.execute(refreshed);
+
+  assert.equal(
+    fs.readFileSync(path.join(local, "created", "late", "post.json"), "utf8"),
+    "{\"title\":\"late\"}\n",
+  );
+});
+
+test("destination content changes after review are still blocked", async (t) => {
+  const { local, external } = tempPair(t);
+  const engine = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "mac-a" });
+  await run(engine, "to-external");
+  write(path.join(local, "created", "first", "image.txt"), "local-change");
+  const reviewed = await engine.analyze("to-external");
+  write(path.join(external, "created", "first", "image.txt"), "external-change-after-review");
+
+  await assert.rejects(
+    () => engine.refreshPlan(reviewed),
+    (error) => error?.code === "PLAN_CHANGED" && /destination library changed/i.test(error.message),
+  );
+  assert.equal(
+    fs.readFileSync(path.join(external, "created", "first", "image.txt"), "utf8"),
+    "external-change-after-review",
+  );
+});
+
 test("library.json user settings are protected while regenerated fields remain replaceable", async (t) => {
   const { local, external } = tempPair(t);
   const engine = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "mac-a" });
