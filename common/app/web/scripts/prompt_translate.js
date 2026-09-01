@@ -356,6 +356,7 @@ const PROMPT_TRANSLATION_DELAY_MS = 1100;
 const promptTranslationState = {
   sourceCode: "en",
   targetCode: "ko",
+  automaticPair: true,
   openSide: "",
   timer: 0,
   requestVersion: 0,
@@ -367,11 +368,28 @@ const promptTranslationState = {
   // Language pair plus the text of the translation currently on screen. A repeat of
   // that exact request has its answer already and never reaches the network.
   lastKey: "",
+  translatedAt: "",
 };
 
 function promptTranslationKey(text) {
   const { sourceCode, targetCode } = promptTranslationState;
   return `${sourceCode}|${targetCode}|${text}`;
+}
+
+function syncAutomaticPromptTranslationPair(text) {
+  if (!promptTranslationState.automaticPair) return false;
+  const hasHangul = /[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af]/u.test(String(text || ""));
+  const sourceCode = hasHangul ? "ko" : "en";
+  const targetCode = hasHangul ? "en" : "ko";
+  if (
+    promptTranslationState.sourceCode === sourceCode
+    && promptTranslationState.targetCode === targetCode
+  ) return false;
+  promptTranslationState.sourceCode = sourceCode;
+  promptTranslationState.targetCode = targetCode;
+  promptTranslationState.lastKey = "";
+  syncPromptTranslationControls();
+  return true;
 }
 
 function promptTranslationElements() {
@@ -522,11 +540,13 @@ function schedulePromptTranslation({ immediate = false, clear = true } = {}) {
   cancelPromptTranslationWork();
   const text = String(original?.value || "").trim();
   if (!text) {
+    syncAutomaticPromptTranslationPair("");
     if (translation) translation.value = "";
     promptTranslationState.lastKey = "";
     return;
   }
   if (promptTranslationState.composing) return;
+  syncAutomaticPromptTranslationPair(text);
   if (promptTranslationKey(text) === promptTranslationState.lastKey) return;
   if (clear && translation) translation.value = "";
   promptTranslationState.timer = window.setTimeout(
@@ -535,7 +555,7 @@ function schedulePromptTranslation({ immediate = false, clear = true } = {}) {
   );
 }
 
-async function translatePromptSave({ detectSource = false } = {}) {
+async function translatePromptSave({ detectSource = false, silent = false } = {}) {
   const { controls, original, translation } = promptTranslationElements();
   const text = String(original?.value || "").trim();
   if (!text) {
@@ -543,12 +563,14 @@ async function translatePromptSave({ detectSource = false } = {}) {
     original?.focus();
     return;
   }
+  if (!detectSource) syncAutomaticPromptTranslationPair(text);
   const sourceCode = detectSource ? "auto" : promptTranslationState.sourceCode;
   const targetCode = promptTranslationState.targetCode;
   if (!detectSource && sourceCode === targetCode) {
     if (translation) translation.value = text;
     promptTranslationState.lastKey = promptTranslationKey(text);
-    return;
+    promptTranslationState.translatedAt = new Date().toISOString();
+    return true;
   }
   window.clearTimeout(promptTranslationState.timer);
   promptTranslationState.timer = 0;
@@ -558,12 +580,16 @@ async function translatePromptSave({ detectSource = false } = {}) {
   promptTranslationState.controller = controller;
   controls?.setAttribute("aria-busy", "true");
   try {
-    const data = await qApi("/api/translate", {
+    const translate = window.grokChameleonNative?.translatePrompt;
+    if (typeof translate !== "function") {
+      throw new Error("Desktop translation bridge is unavailable.");
+    }
+    const data = await translate({
       text,
       source_language_code: sourceCode,
       target_language_code: targetCode,
-    }, { signal: controller.signal });
-    if (requestVersion !== promptTranslationState.requestVersion) return;
+    });
+    if (requestVersion !== promptTranslationState.requestVersion) return false;
     if (detectSource) {
       const detectedCode = normalizedDetectedPromptLanguage(data.detected_source_language_code);
       if (detectedCode) {
@@ -573,12 +599,15 @@ async function translatePromptSave({ detectSource = false } = {}) {
     }
     if (translation) translation.value = normalizeNfcText(data.translation || "");
     promptTranslationState.lastKey = promptTranslationKey(text);
+    promptTranslationState.translatedAt = new Date().toISOString();
+    return true;
   } catch (error) {
     // A pair that failed must not read as already answered, or the next edit that
     // returns to this exact text would sit there with no translation and no request.
     promptTranslationState.lastKey = "";
-    if (error?.name === "AbortError" || requestVersion !== promptTranslationState.requestVersion) return;
-    showErrorPanel("Translation failed", error?.message || "Translation failed.");
+    if (error?.name === "AbortError" || requestVersion !== promptTranslationState.requestVersion) return false;
+    if (!silent) showErrorPanel("Translation failed", error?.message || "Translation failed.");
+    return false;
   } finally {
     if (requestVersion === promptTranslationState.requestVersion) {
       promptTranslationState.controller = null;
@@ -595,6 +624,7 @@ function detectPromptTranslationLanguage() {
   }
   cancelPromptTranslationWork();
   closePromptTranslationLanguageMenu();
+  promptTranslationState.automaticPair = false;
   translatePromptSave({ detectSource: true });
 }
 
@@ -602,6 +632,7 @@ function selectPromptTranslationLanguage(code) {
   const language = PROMPT_TRANSLATION_LANGUAGE_MAP.get(String(code || ""));
   const side = promptTranslationState.openSide;
   if (!language || !["source", "target"].includes(side)) return;
+  promptTranslationState.automaticPair = false;
   const changed = promptTranslationSelectedCode(side) !== language.code;
   if (side === "source") promptTranslationState.sourceCode = language.code;
   else promptTranslationState.targetCode = language.code;
@@ -614,6 +645,7 @@ function swapPromptTranslationLanguages() {
   const { original, translation } = promptTranslationElements();
   cancelPromptTranslationWork();
   closePromptTranslationLanguageMenu();
+  promptTranslationState.automaticPair = false;
   [promptTranslationState.sourceCode, promptTranslationState.targetCode] = [
     promptTranslationState.targetCode,
     promptTranslationState.sourceCode,
@@ -626,13 +658,26 @@ function swapPromptTranslationLanguages() {
   original?.focus({ preventScroll: true });
 }
 
-function resetPromptTranslationDialog({ translate = false } = {}) {
+function resetPromptTranslationDialog({
+  translate = false,
+  sourceCode = "en",
+  targetCode = "ko",
+  automaticPair = true,
+  sourceText = "",
+  translatedAt = "",
+} = {}) {
   cancelPromptTranslationWork();
-  promptTranslationState.sourceCode = "en";
-  promptTranslationState.targetCode = "ko";
+  promptTranslationState.sourceCode = PROMPT_TRANSLATION_LANGUAGE_MAP.has(sourceCode) ? sourceCode : "en";
+  promptTranslationState.targetCode = PROMPT_TRANSLATION_LANGUAGE_MAP.has(targetCode) ? targetCode : "ko";
+  promptTranslationState.automaticPair = Boolean(automaticPair);
   promptTranslationState.openSide = "";
   promptTranslationState.composing = false;
-  promptTranslationState.lastKey = "";
+  const currentText = String(promptTranslationElements().original?.value || "").trim();
+  syncAutomaticPromptTranslationPair(currentText);
+  promptTranslationState.lastKey = sourceText.trim() === currentText && currentText
+    ? promptTranslationKey(currentText)
+    : "";
+  promptTranslationState.translatedAt = String(translatedAt || "");
   const { search } = promptTranslationElements();
   if (search) search.value = "";
   syncPromptTranslationControls();

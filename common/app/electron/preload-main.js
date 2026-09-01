@@ -13,4 +13,7 @@ contextBridge.exposeInMainWorld("grokChameleonNative", {
   cardPreview(payload) {
     return ipcRenderer.invoke("grok-chameleon:card-preview", payload || {});
   },
+  translatePrompt(payload) {
+    return ipcRenderer.invoke("grok-chameleon:translate-prompt", payload || {});
+  },
 });

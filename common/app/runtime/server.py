@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import errno
 import hashlib
 import html
 import json
@@ -300,13 +301,6 @@ NATIVE_BRIDGE_LAST_POLL_AT = 0.0
 IMAGINE_VIDEO_TERMINAL_STATUSES = {"failed", "expired", "cancelled", "canceled"}
 IMAGINE_DEBUG_RAW_PROGRESS_THRESHOLD = 90
 IMAGINE_DEBUG_LAST_EVENT_COUNT = 5
-TRANSLATION_CACHE: dict[tuple[str, str, str], dict] = {}
-TRANSLATION_STATE_LOCK = threading.Lock()
-TRANSLATION_CACHE_LIMIT = 512
-TRANSLATION_BLOCK_COOLDOWN_SECONDS = 300.0
-TRANSLATION_BLOCKED_UNTIL = 0.0
-
-
 class JobCancelled(RuntimeError):
     pass
 
@@ -20457,6 +20451,10 @@ def scan_collection_folders(root: Path) -> list[dict]:
     return sorted(collections, key=collection_sort_key)
 
 
+def prompt_metadata_path(prompt_dir: Path, file_name: str) -> Path:
+    return prompt_dir / f"{file_stem(file_name)}.prompt.json"
+
+
 def scan_prompt_files(root: Path) -> list[dict]:
     prompt_root = root / "prompt"
     if not prompt_root.exists():
@@ -20466,14 +20464,27 @@ def scan_prompt_files(root: Path) -> list[dict]:
         if not entry.is_file() or extension_for(entry.name) != "txt":
             continue
         stat = entry.stat()
-        prompts.append({
+        text = entry.read_text(encoding="utf-8", errors="replace")
+        prompt = {
             "id": file_stem(entry.name),
             "title": readable_name(entry.name),
             "file_name": entry.name,
             "path": f"prompt/{entry.name}",
-            "text": entry.read_text(encoding="utf-8", errors="replace"),
+            "text": text,
             "updated_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat().replace("+00:00", "Z"),
-        })
+        }
+        metadata = read_json(prompt_metadata_path(prompt_root, entry.name), {})
+        source_text = normalize_unicode_text(metadata.get("source_text") if isinstance(metadata, dict) else "").strip()
+        if source_text and source_text == normalize_unicode_text(text).strip():
+            prompt.update({
+                "translation": normalize_unicode_text(metadata.get("translation") or ""),
+                "translation_source_text": source_text,
+                "source_language_code": str(metadata.get("source_language_code") or "en"),
+                "target_language_code": str(metadata.get("target_language_code") or "ko"),
+                "translated_at": str(metadata.get("translated_at") or ""),
+                "translation_provider": str(metadata.get("provider") or ""),
+            })
+        prompts.append(prompt)
     return sorted(prompts, key=lambda item: str(item.get("updated_at") or ""), reverse=True)
 
 
@@ -20923,34 +20934,112 @@ def move_path_to_trash(path: Path) -> None:
     shutil.move(str(path), str(unique_trash_path(trash_dir / path.name)))
 
 
-def choose_folder_in_finder(current: str = "", prompt: str = "Select a Library folder for Grok Chameleon") -> str | None:
+def choose_folder_in_finder(
+    current: str = "",
+    prompt: str = "Select a Library folder for Grok Chameleon",
+    requested_area: tuple[int, int, int, int] | None = None,
+) -> str | None:
     current_path = Path(current).expanduser() if current else None
-    activate_app = (
-        "try\n"
-        f"tell application {applescript_string('Grok Chameleon')} to activate\n"
-        "on error\n"
-        "tell application \"Finder\" to activate\n"
-        "end try\n"
-        "delay 0.1\n"
+    script = r"""
+ObjC.import("AppKit");
+
+(() => {
+  const environment = $.NSProcessInfo.processInfo.environment;
+  const environmentValue = (name) => {
+    const value = environment.objectForKey(name);
+    return value ? ObjC.unwrap(value) : "";
+  };
+
+  const application = $.NSApplication.sharedApplication;
+  application.setActivationPolicy($.NSApplicationActivationPolicyAccessory);
+
+  const panel = $.NSOpenPanel.openPanel;
+  panel.canChooseFiles = false;
+  panel.canChooseDirectories = true;
+  panel.allowsMultipleSelection = false;
+  panel.canCreateDirectories = true;
+  panel.resolvesAliases = true;
+  panel.message = environmentValue("GROK_STUDIO_PICKER_PROMPT");
+  panel.prompt = "Select";
+
+  const currentPath = environmentValue("GROK_STUDIO_PICKER_CURRENT");
+  if (currentPath) panel.directoryURL = $.NSURL.fileURLWithPath(currentPath);
+
+  let frame = panel.frame;
+  const requestedWidth = Number(environmentValue("GROK_STUDIO_PICKER_SCREEN_WIDTH"));
+  const requestedHeight = Number(environmentValue("GROK_STUDIO_PICKER_SCREEN_HEIGHT"));
+  if (requestedWidth > 0 && requestedHeight > 0) {
+    const requestedLeft = Number(environmentValue("GROK_STUDIO_PICKER_SCREEN_LEFT"));
+    const requestedTop = Number(environmentValue("GROK_STUDIO_PICKER_SCREEN_TOP"));
+    const primaryFrame = $.NSScreen.screens.objectAtIndex(0).frame;
+    frame.origin.x = Math.round(requestedLeft + (requestedWidth - Number(frame.size.width)) / 2);
+    frame.origin.y = Math.round(
+      Number(primaryFrame.size.height)
+      - requestedTop
+      - requestedHeight
+      + (requestedHeight - Number(frame.size.height)) / 2
+    );
+  } else {
+    const visibleFrame = $.NSScreen.mainScreen.visibleFrame;
+    frame.origin.x = Math.round(
+      Number(visibleFrame.origin.x) + (Number(visibleFrame.size.width) - Number(frame.size.width)) / 2
+    );
+    frame.origin.y = Math.round(
+      Number(visibleFrame.origin.y) + (Number(visibleFrame.size.height) - Number(frame.size.height)) / 2
+    );
+  }
+  panel.setFrameDisplay(frame, false);
+
+  ObjC.registerSubclass({
+    name: "GrokChameleonPickerCenterer",
+    superclass: "NSObject",
+    methods: {
+      "recenter:": {
+        types: ["void", ["id"]],
+        implementation: function (_timer) {
+          panel.setFrameDisplay(frame, true);
+        }
+      }
+    }
+  });
+  const centerer = $.GrokChameleonPickerCenterer.alloc.init;
+  const centerTimer = $.NSTimer.timerWithTimeIntervalTargetSelectorUserInfoRepeats(
+    0.08,
+    centerer,
+    "recenter:",
+    null,
+    false
+  );
+  $.NSRunLoop.currentRunLoop.addTimerForMode(centerTimer, $.NSModalPanelRunLoopMode);
+
+  application.activateIgnoringOtherApps(true);
+  const response = panel.runModal;
+  if (response !== $.NSModalResponseOK || panel.URL === null) return "";
+  return ObjC.unwrap(panel.URL.path);
+})()
+"""
+    env = os.environ.copy()
+    env["GROK_STUDIO_PICKER_PROMPT"] = prompt
+    env["GROK_STUDIO_PICKER_CURRENT"] = (
+        str(current_path) if current_path and current_path.is_dir() else ""
     )
-    if current_path and current_path.is_dir():
-        script = (
-            activate_app +
-            f'set chosenFolder to choose folder with prompt {applescript_string(prompt)} '
-            f'default location POSIX file {applescript_string(str(current_path))}\n'
-            "return POSIX path of chosenFolder"
-        )
-    else:
-        script = (
-            activate_app +
-            f'set chosenFolder to choose folder with prompt {applescript_string(prompt)}\n'
-            "return POSIX path of chosenFolder"
-        )
-    result = subprocess.run(["osascript", "-e", script], check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=300)
+    if requested_area:
+        screen_left, screen_top, screen_width, screen_height = requested_area
+        env["GROK_STUDIO_PICKER_SCREEN_LEFT"] = str(screen_left)
+        env["GROK_STUDIO_PICKER_SCREEN_TOP"] = str(screen_top)
+        env["GROK_STUDIO_PICKER_SCREEN_WIDTH"] = str(screen_width)
+        env["GROK_STUDIO_PICKER_SCREEN_HEIGHT"] = str(screen_height)
+    result = subprocess.run(
+        ["osascript", "-l", "JavaScript", "-e", script],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=300,
+        env=env,
+    )
     if result.returncode == 0:
         return result.stdout.strip() or None
-    if "User canceled" in result.stderr or "(-128)" in result.stderr:
-        return None
     raise RuntimeError(result.stderr.strip() or "Finder folder picker failed")
 
 
@@ -20977,11 +21066,14 @@ def choose_folder_in_windows(current: str = "", description: str = "Select a Lib
     return result.stdout.strip() or None
 
 
-def choose_library_folder(current: str = "") -> str | None:
+def choose_library_folder(
+    current: str = "",
+    requested_area: tuple[int, int, int, int] | None = None,
+) -> str | None:
     if os.name == "nt":
         return choose_folder_in_windows(current)
     if sys.platform == "darwin":
-        return choose_folder_in_finder(current)
+        return choose_folder_in_finder(current, requested_area=requested_area)
     raise RuntimeError("Native folder selection is supported on Windows and macOS.")
 
 
@@ -21019,7 +21111,23 @@ def windows_explorer_window_handles() -> set[int]:
     return handles
 
 
-def center_windows_explorer_window(previous_handles: set[int] | None = None) -> None:
+def requested_screen_work_area(payload: dict) -> tuple[int, int, int, int] | None:
+    raw = payload.get("screen_work_area") if isinstance(payload, dict) else None
+    if not isinstance(raw, dict):
+        return None
+    left = safe_int(raw.get("left"), 0)
+    top = safe_int(raw.get("top"), 0)
+    width = safe_int(raw.get("width"), 0)
+    height = safe_int(raw.get("height"), 0)
+    if not (100 <= width <= 100_000 and 100 <= height <= 100_000):
+        return None
+    return left, top, width, height
+
+
+def center_windows_explorer_window(
+    previous_handles: set[int] | None = None,
+    requested_area: tuple[int, int, int, int] | None = None,
+) -> None:
     if os.name != "nt":
         return
     import ctypes
@@ -21056,7 +21164,13 @@ def center_windows_explorer_window(previous_handles: set[int] | None = None) -> 
     work_area = Rect()
     if not user32.GetWindowRect(target, ctypes.byref(window_rect)):
         return
-    if not user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(work_area), 0):
+    if requested_area:
+        area_left, area_top, area_width, area_height = requested_area
+        work_area.left = area_left
+        work_area.top = area_top
+        work_area.right = area_left + area_width
+        work_area.bottom = area_top + area_height
+    elif not user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(work_area), 0):
         return
     width = max(1, window_rect.right - window_rect.left)
     height = max(1, window_rect.bottom - window_rect.top)
@@ -21075,7 +21189,16 @@ def open_library_folder(payload: dict) -> dict:
     if not root:
         raise RuntimeError("Library path is not set.")
     ensure_library_root(root)
+    screen_area = requested_screen_work_area(payload)
     if sys.platform == "darwin":
+        if screen_area:
+            screen_left, screen_top, screen_width, screen_height = screen_area
+            screen_bounds = (
+                f"set screenBounds to {{{screen_left}, {screen_top}, "
+                f"{screen_left + screen_width}, {screen_top + screen_height}}}\n"
+            )
+        else:
+            screen_bounds = "set screenBounds to bounds of window of desktop\n"
         script = (
             f"set targetFolder to POSIX file {applescript_string(str(root))} as alias\n"
             "tell application \"Finder\"\n"
@@ -21084,7 +21207,7 @@ def open_library_folder(payload: dict) -> dict:
             "delay 0.15\n"
             "try\n"
             "set folderWindow to front window\n"
-            "set screenBounds to bounds of window of desktop\n"
+            + screen_bounds +
             "set windowBounds to bounds of folderWindow\n"
             "set windowWidth to (item 3 of windowBounds) - (item 1 of windowBounds)\n"
             "set windowHeight to (item 4 of windowBounds) - (item 2 of windowBounds)\n"
@@ -21104,7 +21227,7 @@ def open_library_folder(payload: dict) -> dict:
         subprocess.Popen(["explorer", str(root)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         threading.Thread(
             target=center_windows_explorer_window,
-            args=(previous_handles,),
+            args=(previous_handles, screen_area),
             name="center-library-explorer",
             daemon=True,
         ).start()
@@ -25587,9 +25710,26 @@ def save_prompt(payload: dict) -> dict:
     current_name = Path(str(payload.get("file_name") or "")).name
     file_name = unique_file_name_for_update(prompt_dir, title, "txt", current_name) if current_name else unique_file_name(prompt_dir, title, "txt")
     (prompt_dir / file_name).write_text(text + "\n", encoding="utf-8")
+    translation = normalize_unicode_text(payload.get("translation")).strip()
+    translation_source_text = normalize_unicode_text(payload.get("translation_source_text")).strip()
+    write_json(prompt_metadata_path(prompt_dir, file_name), {
+        "version": 1,
+        "source_file": file_name,
+        "title": title,
+        "source_text": translation_source_text if translation else "",
+        "translation": translation,
+        "source_language_code": str(payload.get("source_language_code") or "en"),
+        "target_language_code": str(payload.get("target_language_code") or "ko"),
+        "translated_at": str(payload.get("translated_at") or ""),
+        "provider": str(payload.get("provider") or "Google Translate Web"),
+    })
     if current_name and current_name != file_name:
         try:
             (prompt_dir / current_name).unlink()
+        except FileNotFoundError:
+            pass
+        try:
+            prompt_metadata_path(prompt_dir, current_name).unlink()
         except FileNotFoundError:
             pass
     return current_library_snapshot(root)
@@ -25605,126 +25745,15 @@ def delete_prompt(payload: dict) -> dict:
             (root / "prompt" / file_name).unlink()
         except FileNotFoundError:
             pass
+        try:
+            prompt_metadata_path(root / "prompt", file_name).unlink()
+        except FileNotFoundError:
+            pass
     return current_library_snapshot(root)
 
 
-def translation_cache_get(key: tuple[str, str, str]) -> dict | None:
-    with TRANSLATION_STATE_LOCK:
-        cached = TRANSLATION_CACHE.pop(key, None)
-        if cached is None:
-            return None
-        TRANSLATION_CACHE[key] = cached
-        return dict(cached)
-
-
-def translation_cache_put(key: tuple[str, str, str], value: dict) -> None:
-    with TRANSLATION_STATE_LOCK:
-        TRANSLATION_CACHE.pop(key, None)
-        TRANSLATION_CACHE[key] = dict(value)
-        while len(TRANSLATION_CACHE) > TRANSLATION_CACHE_LIMIT:
-            TRANSLATION_CACHE.pop(next(iter(TRANSLATION_CACHE)))
-
-
-def translation_block_remaining() -> int:
-    with TRANSLATION_STATE_LOCK:
-        remaining = TRANSLATION_BLOCKED_UNTIL - time.monotonic()
-    return max(0, int(remaining + 0.999))
-
-
-def start_translation_block() -> None:
-    global TRANSLATION_BLOCKED_UNTIL
-    with TRANSLATION_STATE_LOCK:
-        TRANSLATION_BLOCKED_UNTIL = time.monotonic() + TRANSLATION_BLOCK_COOLDOWN_SECONDS
-
-
-def translation_error_detail(raw: str) -> str:
-    # A throttled call comes back as Google's whole "Sorry..." HTML page. Passing that
-    # straight through put a screen of markup in the toast; keep the readable sentence.
-    text = re.sub(r"(?is)<(script|style)\b.*?</\1>", " ", raw)
-    text = re.sub(r"(?s)<[^>]*>", " ", text)
-    text = re.sub(r"\s+", " ", html.unescape(text)).strip()
-    return text[:200]
-
-
 def translate_prompt(payload: dict) -> dict:
-    text = str(payload.get("text") or "").strip()
-    if not text:
-        raise RuntimeError("Prompt content is empty.")
-    legacy_target = str(payload.get("target_language") or "Korean").strip()
-    legacy_target_codes = {"Korean": "ko", "English": "en"}
-    explicit_target = str(payload.get("target_language_code") or "").strip()
-    source_code = str(payload.get("source_language_code") or ("en" if explicit_target else "auto")).strip()
-    target_code = explicit_target or legacy_target_codes.get(legacy_target, "")
-    language_code_pattern = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z]{2,8})?$")
-    if source_code != "auto" and not language_code_pattern.fullmatch(source_code):
-        raise RuntimeError("Unsupported source translation language.")
-    if not language_code_pattern.fullmatch(target_code):
-        raise RuntimeError("Unsupported target translation language.")
-    cache_key = (source_code, target_code, text)
-    cached = translation_cache_get(cache_key)
-    if cached is not None:
-        return cached
-    blocked_for = translation_block_remaining()
-    if blocked_for > 0:
-        raise RuntimeError(
-            "Google Translate is rate limiting this network. "
-            f"Translation resumes in {blocked_for}s."
-        )
-    query = urlencode({"client": "gtx", "sl": source_code, "tl": target_code, "dt": "t"})
-    request = urllib.request.Request(
-        f"https://translate.googleapis.com/translate_a/single?{query}",
-        data=urlencode({"q": text}).encode("utf-8"),
-        headers={
-            "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
-            "User-Agent": "Grok Chameleon local translator",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            result = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = translation_error_detail(exc.read(2000).decode("utf-8", errors="replace"))
-        if exc.code in (429, 403):
-            # The endpoint throttles per IP, and every further attempt renews the block
-            # rather than shortening it. Stop asking until the cooldown has run out.
-            start_translation_block()
-            log_event(
-                f"translate_rate_limited http={exc.code} "
-                f"cooldown={int(TRANSLATION_BLOCK_COOLDOWN_SECONDS)}s"
-            )
-            raise RuntimeError(
-                f"Google Translate is rate limiting this network (HTTP {exc.code}). "
-                f"Translation resumes in {translation_block_remaining()}s."
-            ) from exc
-        raise RuntimeError(f"Google translation HTTP {exc.code}: {detail}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"Google translation network error: {exc}") from exc
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("Google translation returned an invalid response.") from exc
-    segments = result[0] if isinstance(result, list) and result and isinstance(result[0], list) else []
-    translation = "".join(
-        str(segment[0])
-        for segment in segments
-        if isinstance(segment, list) and segment and isinstance(segment[0], str)
-    ).strip()
-    if not translation:
-        raise RuntimeError("Google translation response did not contain text.")
-    detected_source_code = (
-        str(result[2]).strip()
-        if isinstance(result, list) and len(result) > 2 and isinstance(result[2], str)
-        else source_code
-    )
-    result_payload = {
-        "translation": translation,
-        "source_language_code": source_code,
-        "detected_source_language_code": detected_source_code,
-        "target_language_code": target_code,
-        "target_language": {"ko": "Korean", "en": "English"}.get(target_code, target_code),
-        "provider": "Google Translate",
-    }
-    translation_cache_put(cache_key, result_payload)
-    return result_payload
+    raise RuntimeError("Prompt translation is handled by the desktop browser bridge.")
 
 
 def save_accounts(payload: dict) -> dict:
@@ -26676,6 +26705,27 @@ def merged_post_source(posts: list[dict]) -> str:
     return "build"
 
 
+def remove_merged_source_directory(source_dir: Path) -> bool:
+    retry_delays = (0.08, 0.2, 0.5, 1.0)
+    for attempt in range(len(retry_delays) + 1):
+        try:
+            shutil.rmtree(source_dir)
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError as exc:
+            if exc.errno != errno.ENOTEMPTY:
+                raise
+            if attempt >= len(retry_delays):
+                log_event(
+                    "merge_source_cleanup_deferred "
+                    f"path={source_dir} detail={exc}"
+                )
+                return False
+            time.sleep(retry_delays[attempt])
+    return False
+
+
 def merge_selected_posts(payload: dict) -> dict:
     root = library_root()
     if not root:
@@ -26764,6 +26814,7 @@ def merge_selected_posts(payload: dict) -> dict:
             shutil.rmtree(final_dir, ignore_errors=True)
         raise
 
+    cleanup_deferred: list[str] = []
     for source_dir in source_dirs:
         if source_dir.exists() and source_dir.resolve() != final_dir.resolve():
             source_post = next(
@@ -26772,10 +26823,17 @@ def merge_selected_posts(payload: dict) -> dict:
             )
             if source_post:
                 remove_build_previews_for_items(root, source_dir, source_post.get("items") or [])
-            shutil.rmtree(source_dir)
+            if not remove_merged_source_directory(source_dir):
+                cleanup_deferred.append(source_dir.relative_to(root).as_posix())
 
     delete_library_index_paths(root, post_paths, recursive=True)
     refresh_library_index_paths(root, [final_dir.relative_to(root).as_posix()])
+    if cleanup_deferred:
+        log_event(
+            "merge_completed_with_deferred_cleanup "
+            f"target={final_dir.relative_to(root).as_posix()} "
+            f"paths={','.join(cleanup_deferred)}"
+        )
     data = current_library_snapshot(root)
     data["selected_path"] = final_dir.relative_to(root).as_posix()
     data["selected_item_id"] = media_item_key(merged_items[-1])
@@ -28056,7 +28114,10 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             cancel_scheduled_shutdown_for_request(parsed.path, "POST")
             if parsed.path == "/api/choose-library-folder":
-                selected = choose_library_folder(str(payload.get("current") or ""))
+                selected = choose_library_folder(
+                    str(payload.get("current") or ""),
+                    requested_screen_work_area(payload),
+                )
                 root = library_root()
                 if selected is None:
                     data = current_library_snapshot(root) if root else empty_snapshot()

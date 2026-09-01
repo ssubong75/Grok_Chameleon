@@ -290,7 +290,15 @@ syncResponsiveSidebarState();
 document.getElementById("folder_btn")?.addEventListener("click", async () => {
   if (library_state.apiReady) {
     if (library_state.rootPath) {
-      await qApi("/api/open-library-folder", {});
+      const activeScreen = window.screen || {};
+      await qApi("/api/open-library-folder", {
+        screen_work_area: {
+          left: Number(activeScreen.availLeft) || 0,
+          top: Number(activeScreen.availTop) || 0,
+          width: Number(activeScreen.availWidth) || 0,
+          height: Number(activeScreen.availHeight) || 0,
+        },
+      });
     } else {
       setLibraryMessage("Set Library Path first.");
     }

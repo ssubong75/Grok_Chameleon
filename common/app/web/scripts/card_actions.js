@@ -157,19 +157,6 @@
     });
   }
 
-  function reconcileSecondMainAfterCardDelete(screenId) {
-    if (screenId !== "2nd_main") return;
-    const folder = typeof selectedCollectionFolderPost === "function"
-      ? selectedCollectionFolderPost()
-      : null;
-    const remainingCards = folder && typeof secondMainPostsFor === "function"
-      ? secondMainPostsFor(folder)
-      : [];
-    if (remainingCards.length) return;
-    openScreen("collection_main", "b_collection_nav_btn");
-  }
-
-
   function downloadSelectedCardItems() {
     const posts = selectedCardPosts();
     return downloadLibraryItems(posts.flatMap((post) => post.items || []));
@@ -337,7 +324,6 @@
     }
     clearCardSelection();
     let data = null;
-    const currentScreen = screen_state.current_screen;
     const scrollState = captureLibraryCardListScroll();
     try {
       for (const post of posts) {
@@ -346,7 +332,6 @@
       }
       if (data) {
         restoreLibraryCardListScroll(scrollState);
-        reconcileSecondMainAfterCardDelete(currentScreen);
       }
     } catch (error) {
       showErrorPanel("Delete failed", error?.message || "Delete failed.");
@@ -429,8 +414,6 @@
       if (deletedCurrentPost && currentDetailType && backTarget) {
         openScreen(backTarget.screenId, backTarget.activeButtonId || "");
         restoreLibraryCardListScroll(captureLibraryCardListScroll(backTarget.screenId) || scrollState);
-      } else {
-        reconcileSecondMainAfterCardDelete(currentScreen);
       }
       toast("Deleted local item.");
     } catch (error) {

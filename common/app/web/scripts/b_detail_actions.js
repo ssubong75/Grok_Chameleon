@@ -145,9 +145,7 @@ async function deleteBuildSelectedDetailItemFromLibrary() {
     });
     const hasRemainingPost = Boolean(data?.selected_path);
     applyLibrarySnapshot(data);
-    if (hasRemainingPost) {
-      openScreen(detailScreenForType(currentDetailType), backTarget.activeButtonId || "");
-    } else {
+    if (!hasRemainingPost) {
       openScreen(backTarget.screenId, backTarget.activeButtonId || "");
     }
     toast("Deleted local item.");

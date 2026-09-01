@@ -14,7 +14,14 @@
     if (titleInput) titleInput.value = normalizeNfcText(prompt?.title || "");
     if (promptInput) promptInput.value = currentPrompt;
     if (translationInput) translationInput.value = normalizeNfcText(prompt?.translation || "");
-    resetPromptTranslationDialog({ translate: Boolean(currentPrompt) && !prompt?.translation });
+    resetPromptTranslationDialog({
+      translate: Boolean(currentPrompt) && !prompt?.translation,
+      sourceCode: prompt?.source_language_code || "en",
+      targetCode: prompt?.target_language_code || "ko",
+      automaticPair: !prompt?.translation,
+      sourceText: prompt?.translation_source_text || (prompt?.translation ? currentPrompt.trim() : ""),
+      translatedAt: prompt?.translated_at || "",
+    });
     promptSave.hidden = false;
     requestAnimationFrame(() => {
       for (const input of [promptInput, translationInput]) {

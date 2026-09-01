@@ -24,16 +24,33 @@
     return name;
   }
 
+  function promptMetadataFileName(fileName) {
+    const base = String(fileName || "").replace(/\.[^.]*$/, "");
+    return `${base}.prompt.json`;
+  }
+
   async function savePromptFromDialog() {
     const titleInput = promptSave?.querySelector(".prompt_save_title");
     const promptInput = promptSave?.querySelector(".prompt_save_original");
     const translationInput = promptSave?.querySelector(".prompt_save_translation");
     const promptText = normalizeNfcText(promptInput?.value || "").trim();
-    const translationText = normalizeNfcText(translationInput?.value || "").trim();
     if (!promptText) {
       promptInput?.focus();
       return;
     }
+    if (promptTranslationState.lastKey !== promptTranslationKey(promptText)) {
+      await translatePromptSave({ silent: true });
+    }
+    const translationText = normalizeNfcText(translationInput?.value || "").trim();
+    const translationMatches = promptTranslationState.lastKey === promptTranslationKey(promptText);
+    const translationMetadata = {
+      translation: translationText,
+      translation_source_text: translationMatches ? promptText : "",
+      source_language_code: promptTranslationState.sourceCode,
+      target_language_code: promptTranslationState.targetCode,
+      translated_at: promptTranslationState.translatedAt || "",
+      provider: "Google Translate Web",
+    };
     if (library_state.apiReady) {
       if (!library_state.rootPath) {
         await chooseLibraryPath();
@@ -44,7 +61,7 @@
         file_name: promptSave?.dataset.editFileName || "",
         title,
         text: promptText,
-        translation: translationText,
+        ...translationMetadata,
       });
       closePromptSave();
       applyLibrarySnapshot(data);
@@ -62,8 +79,20 @@
       ? await promptFileNameForSave(promptHandle, title, currentFileName)
       : await uniqueFileName(promptHandle, title, "txt");
     await writeTextFile(promptHandle, fileName, `${promptText}\n`);
+    await writeJsonFile(promptHandle, promptMetadataFileName(fileName), {
+      version: 1,
+      source_file: fileName,
+      title,
+      source_text: translationMetadata.translation_source_text,
+      translation: translationMetadata.translation,
+      source_language_code: translationMetadata.source_language_code,
+      target_language_code: translationMetadata.target_language_code,
+      translated_at: translationMetadata.translated_at,
+      provider: translationMetadata.provider,
+    });
     if (currentFileName && currentFileName !== fileName) {
       await promptHandle.removeEntry(currentFileName).catch(() => {});
+      await promptHandle.removeEntry(promptMetadataFileName(currentFileName)).catch(() => {});
     }
     closePromptSave();
     await scanLibrary();
@@ -81,6 +110,7 @@
     const promptHandle = await getOptionalDirectory(library_state.rootHandle, "prompt");
     if (!promptHandle) return;
     await promptHandle.removeEntry(fileName);
+    await promptHandle.removeEntry(promptMetadataFileName(fileName)).catch(() => {});
     await scanLibrary();
   }
 

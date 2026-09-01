@@ -43,6 +43,7 @@ promptSave?.querySelector(".prompt_language_options")?.addEventListener("click",
 });
 
 const promptOriginalInput = promptSave?.querySelector(".prompt_save_original");
+const promptTranslationInput = promptSave?.querySelector(".prompt_save_translation");
 
 // Chromium and WebKit disagree on whether compositionend precedes the final input
 // event, so both paths schedule. The debounce timer is reset on every schedule, and
@@ -62,6 +63,12 @@ promptOriginalInput?.addEventListener("input", (event) => {
   // The previous translation stays put until the new one lands. Blanking it on every
   // keystroke made the box flicker and lost a good answer the moment typing resumed.
   schedulePromptTranslation({ immediate: false, clear: false });
+});
+
+promptTranslationInput?.addEventListener("input", () => {
+  const text = String(promptOriginalInput?.value || "").trim();
+  promptTranslationState.lastKey = text ? promptTranslationKey(text) : "";
+  promptTranslationState.translatedAt = new Date().toISOString();
 });
 
 window.addEventListener("resize", () => {

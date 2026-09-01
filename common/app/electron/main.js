@@ -36,6 +36,9 @@ const IMAGINE_BRIDGE_NETWORK_RESOURCE_BUFFER_BYTES = 10 * 1024 * 1024;
 const IMAGINE_BRIDGE_NETWORK_POST_DATA_BYTES = 64 * 1024;
 const IMAGINE_BRIDGE_SCRIPT_TIMEOUT_MS = 3000;
 const IMAGINE_BRIDGE_PREPARE_TIMEOUT_MS = 30000;
+const PROMPT_TRANSLATION_PAGE_TIMEOUT_MS = 30000;
+const PROMPT_TRANSLATION_CACHE_LIMIT = 512;
+const PROMPT_TRANSLATION_BLOCK_COOLDOWN_MS = 5 * 60 * 1000;
 
 function portableFileDigest(filePath) {
   try {
@@ -458,6 +461,11 @@ const bridgeCommandQueues = new Map();
 const usageWindows = new Map();
 const totalAccountWindows = new Map();
 let selectedImagineAccountKey = "";
+let promptTranslationWindow = null;
+let promptTranslationPair = "";
+let promptTranslationQueue = Promise.resolve();
+const promptTranslationCache = new Map();
+let promptTranslationBlockedUntil = 0;
 const CARD_PREVIEW_MAX_EDGE = 640;
 const CARD_PREVIEW_RENDER_REVISION = "card-640-v1";
 const THUMBNAIL_PREVIEW_MAX_EDGE = 320;
@@ -1109,6 +1117,16 @@ function closeAccountWindowsNow() {
 function closeBridgeWindowsNow() {
   closeAccountWindowsNow();
   bridgeCommandQueues.clear();
+  if (promptTranslationWindow && !promptTranslationWindow.isDestroyed()) {
+    try {
+      promptTranslationWindow.removeAllListeners("close");
+      promptTranslationWindow.destroy();
+    } catch (_) {}
+  }
+  promptTranslationWindow = null;
+  promptTranslationPair = "";
+  promptTranslationCache.clear();
+  promptTranslationBlockedUntil = 0;
 }
 
 function shutdownServerNow(notifyServer = true) {
@@ -3818,6 +3836,217 @@ function usageCommandFromPayload(payload = {}) {
   };
 }
 
+function promptTranslationLanguageCode(value, { allowAuto = false } = {}) {
+  const code = String(value || "").trim();
+  if (allowAuto && code === "auto") return code;
+  if (!/^[A-Za-z]{2,3}(?:-[A-Za-z]{2,8})?$/.test(code)) {
+    throw new Error("Unsupported translation language.");
+  }
+  return code;
+}
+
+function promptTranslationUserAgent() {
+  const platform = process.platform === "darwin"
+    ? "Macintosh; Intel Mac OS X 10_15_7"
+    : process.platform === "win32"
+      ? "Windows NT 10.0; Win64; x64"
+      : "X11; Linux x86_64";
+  return `Mozilla/5.0 (${platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${process.versions.chrome} Safari/537.36`;
+}
+
+function createPromptTranslationWindow() {
+  if (promptTranslationWindow && !promptTranslationWindow.isDestroyed()) {
+    return promptTranslationWindow;
+  }
+  const win = new BrowserWindow({
+    show: false,
+    width: 900,
+    height: 760,
+    webPreferences: {
+      partition: "persist:grok-chameleon-translate",
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      backgroundThrottling: false,
+    },
+  });
+  win.webContents.setUserAgent(promptTranslationUserAgent());
+  win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  win.webContents.on("will-navigate", (event, url) => {
+    try {
+      if (new URL(url).hostname === "translate.google.com") return;
+    } catch (_) {}
+    event.preventDefault();
+  });
+  win.on("closed", () => {
+    if (promptTranslationWindow === win) {
+      promptTranslationWindow = null;
+      promptTranslationPair = "";
+    }
+  });
+  promptTranslationWindow = win;
+  return win;
+}
+
+async function loadPromptTranslationPair(win, sourceCode, targetCode) {
+  const pair = `${sourceCode}|${targetCode}`;
+  if (promptTranslationPair === pair && !win.webContents.isLoading()) return;
+  const url = new URL("https://translate.google.com/");
+  url.searchParams.set("sl", sourceCode);
+  url.searchParams.set("tl", targetCode);
+  url.searchParams.set("op", "translate");
+  url.searchParams.set("hl", "en");
+  await win.loadURL(url.toString(), { userAgent: promptTranslationUserAgent() });
+  promptTranslationPair = pair;
+}
+
+function rememberPromptTranslation(cacheKey, value) {
+  promptTranslationCache.delete(cacheKey);
+  promptTranslationCache.set(cacheKey, value);
+  while (promptTranslationCache.size > PROMPT_TRANSLATION_CACHE_LIMIT) {
+    promptTranslationCache.delete(promptTranslationCache.keys().next().value);
+  }
+}
+
+async function runPromptTranslation(payload = {}) {
+  const text = String(payload.text || "").trim();
+  if (!text) throw new Error("Prompt content is empty.");
+  const sourceCode = promptTranslationLanguageCode(payload.source_language_code || "auto", { allowAuto: true });
+  const targetCode = promptTranslationLanguageCode(payload.target_language_code || "ko");
+  if (sourceCode === targetCode) {
+    return {
+      translation: text,
+      source_language_code: sourceCode,
+      detected_source_language_code: sourceCode,
+      target_language_code: targetCode,
+      provider: "Google Translate Web",
+    };
+  }
+  const cacheKey = `${sourceCode}\u0000${targetCode}\u0000${text}`;
+  const cached = promptTranslationCache.get(cacheKey);
+  if (cached) {
+    promptTranslationCache.delete(cacheKey);
+    promptTranslationCache.set(cacheKey, cached);
+    return { ...cached };
+  }
+  const blockedForMs = promptTranslationBlockedUntil - Date.now();
+  if (blockedForMs > 0) {
+    throw new Error(`Google Translate is temporarily blocked. Translation resumes in ${Math.ceil(blockedForMs / 1000)}s.`);
+  }
+  const win = createPromptTranslationWindow();
+  await loadPromptTranslationPair(win, sourceCode, targetCode);
+  const result = await win.webContents.executeJavaScript(`
+    (async () => {
+      const sourceText = ${JSON.stringify(text)};
+      const targetCode = ${JSON.stringify(targetCode)};
+      const requestedSourceCode = ${JSON.stringify(sourceCode)};
+      const timeoutMs = ${PROMPT_TRANSLATION_PAGE_TIMEOUT_MS};
+      const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const deadline = Date.now() + timeoutMs;
+      let source = null;
+      while (Date.now() < deadline) {
+        source = document.querySelector('textarea[aria-label="Source text"], textarea[role="combobox"]');
+        if (source) break;
+        await pause(100);
+      }
+      if (!source) throw new Error('Google Translate source field was not found.');
+      const setValue = (value) => {
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+        if (setter) setter.call(source, value);
+        else source.value = value;
+        source.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
+        source.dispatchEvent(new Event('change', { bubbles: true }));
+      };
+      source.focus();
+      setValue('');
+      await pause(180);
+      setValue(sourceText);
+
+      const normalizedCode = (value) => String(value || '').toLowerCase().replace('_', '-');
+      const targetRoot = normalizedCode(targetCode).split('-')[0];
+      const resultText = () => {
+        const regions = Array.from(document.querySelectorAll('[role="region"]'));
+        const region = regions.find((item) => {
+          const heading = item.querySelector('h1, h2, h3, [role="heading"]');
+          return /translation results/i.test(String(heading?.textContent || ''));
+        }) || regions.find((item) => item.querySelector('[aria-label="Copy translation"]'));
+        if (!region) return '';
+        const languageNodes = Array.from(region.querySelectorAll('[lang]')).filter((node) => {
+          const lang = normalizedCode(node.getAttribute('lang'));
+          if (!(lang === normalizedCode(targetCode) || lang.split('-')[0] === targetRoot)) return false;
+          if (node.closest('button, [aria-hidden="true"]')) return false;
+          const parentLang = normalizedCode(node.parentElement?.getAttribute('lang'));
+          return !parentLang || parentLang.split('-')[0] !== targetRoot;
+        });
+        const preferred = languageNodes.find((node) => node.getAttribute('jsname') === 'jqKxS') || languageNodes[0];
+        return String(preferred?.innerText || preferred?.textContent || '').trim();
+      };
+
+      let last = '';
+      let stableReads = 0;
+      let blocked = false;
+      while (Date.now() < deadline) {
+        const pageText = String(document.body?.innerText || '');
+        const blockedPage = /^sorry\b/i.test(String(document.title || ''))
+          || /unusual traffic|automated quer(?:y|ies)|too many requests|our systems have detected/i.test(pageText)
+          || Boolean(document.querySelector('form#captcha-form, iframe[src*="recaptcha"]'));
+        if (blockedPage) {
+          blocked = true;
+          break;
+        }
+        const current = resultText();
+        if (current && !/^translating[.…]*$/i.test(current)) {
+          if (current === last) stableReads += 1;
+          else {
+            last = current;
+            stableReads = 1;
+          }
+          if (stableReads >= 3) break;
+        }
+        await pause(150);
+      }
+      if (blocked) return { blocked: true };
+      if (!last || stableReads < 3) throw new Error('Google Translate did not return translated text.');
+
+      let detectedSourceCode = requestedSourceCode;
+      if (requestedSourceCode === 'auto') {
+        const candidates = Array.from(document.querySelectorAll('[data-language-code]'));
+        const detected = candidates.find((node) => {
+          const code = String(node.getAttribute('data-language-code') || '');
+          const label = String(node.getAttribute('aria-label') || node.textContent || '');
+          return code && code !== 'auto' && /detect|detected/i.test(label);
+        }) || candidates.find((node) => {
+          const code = String(node.getAttribute('data-language-code') || '');
+          return code && code !== 'auto' && node.getAttribute('aria-selected') === 'true';
+        });
+        detectedSourceCode = String(detected?.getAttribute('data-language-code') || 'auto');
+      }
+      return { translation: last, detectedSourceCode };
+    })()
+  `, true);
+  if (result?.blocked) {
+    promptTranslationBlockedUntil = Date.now() + PROMPT_TRANSLATION_BLOCK_COOLDOWN_MS;
+    throw new Error(`Google Translate is temporarily blocked. Translation resumes in ${PROMPT_TRANSLATION_BLOCK_COOLDOWN_MS / 1000}s.`);
+  }
+  const value = {
+    translation: String(result?.translation || "").trim(),
+    source_language_code: sourceCode,
+    detected_source_language_code: String(result?.detectedSourceCode || sourceCode),
+    target_language_code: targetCode,
+    provider: "Google Translate Web",
+  };
+  if (!value.translation) throw new Error("Google Translate returned an empty translation.");
+  promptTranslationBlockedUntil = 0;
+  rememberPromptTranslation(cacheKey, value);
+  return { ...value };
+}
+
+function queuePromptTranslation(payload = {}) {
+  const task = promptTranslationQueue.then(() => runPromptTranslation(payload));
+  promptTranslationQueue = task.catch(() => {});
+  return task;
+}
+
 ipcMain.handle("grok-chameleon:warm-imagine-usage", async (_event, payload = {}) => warmUsagePage(usageCommandFromPayload(payload)));
 ipcMain.handle("grok-chameleon:activate-imagine-account", async (_event, payload = {}) => (
   activateImagineAccountTab(usageCommandFromPayload(payload))
@@ -3828,6 +4057,7 @@ ipcMain.handle("grok-chameleon:open-imagine-usage", async (_event, payload = {})
 });
 
 ipcMain.handle("grok-chameleon:card-preview", async (_event, payload = {}) => ensureCardPreview(payload));
+ipcMain.handle("grok-chameleon:translate-prompt", async (_event, payload = {}) => queuePromptTranslation(payload));
 
 async function runFetchStream(win, command) {
   const requestId = String(command.request_id || "");

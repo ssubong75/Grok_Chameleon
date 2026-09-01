@@ -370,14 +370,25 @@
       if (entry.kind !== "file" || extensionFor(entry.name) !== "txt") continue;
       const file = await entry.getFile();
       const text = await file.text();
-      prompts.push({
+      const metadata = await readJsonFile(promptHandle, `${fileBaseName(entry.name)}.prompt.json`);
+      const sourceText = normalizeNfcText(metadata?.source_text || "").trim();
+      const prompt = {
         id: fileBaseName(entry.name),
         title: readableName(entry.name),
         file_name: entry.name,
         path: `prompt/${entry.name}`,
         text,
         updated_at: new Date(file.lastModified).toISOString(),
-      });
+      };
+      if (sourceText && sourceText === normalizeNfcText(text).trim()) {
+        prompt.translation = normalizeNfcText(metadata?.translation || "");
+        prompt.translation_source_text = sourceText;
+        prompt.source_language_code = String(metadata?.source_language_code || "en");
+        prompt.target_language_code = String(metadata?.target_language_code || "ko");
+        prompt.translated_at = String(metadata?.translated_at || "");
+        prompt.translation_provider = String(metadata?.provider || "");
+      }
+      prompts.push(prompt);
     }
     return prompts.sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)));
   }
@@ -468,7 +479,16 @@
   }
 
   async function chooseLibraryPath() {
-    const apiData = await tryQApi("/api/choose-library-folder", { current: library_state.rootPath });
+    const activeScreen = window.screen || {};
+    const apiData = await tryQApi("/api/choose-library-folder", {
+      current: library_state.rootPath,
+      screen_work_area: {
+        left: Number(activeScreen.availLeft) || 0,
+        top: Number(activeScreen.availTop) || 0,
+        width: Number(activeScreen.availWidth) || 0,
+        height: Number(activeScreen.availHeight) || 0,
+      },
+    });
     if (apiData) {
       // cancelled: nothing was picked. unchanged: the folder already in use was picked again,
       // so the server left it alone -- repainting from an identical snapshot would only make
