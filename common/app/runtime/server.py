@@ -3696,6 +3696,20 @@ def imagine_liked_card_asset_ids(root: Path, account: dict, relations: dict[str,
             continue
         provenance, anchor = imagine_post_saved_identity(post)
         metadata = post.get("metadata") if isinstance(post.get("metadata"), dict) else {}
+        imagine_metadata = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
+        # A clone-batch never becomes an official collection member: Grok saves its copied
+        # asset under this account instead.  The app makes that card private-Liked after it
+        # has verified the foreign origin.  Do not let a complete *official* membership
+        # snapshot erase that independent provenance, or its descendants briefly reappear
+        # in Imagine main on the next Saved sync.
+        private_liked_scope = (
+            provenance in {"plain-liked", "cloned-liked"}
+            and str(
+                metadata.get("liked_scope")
+                or imagine_metadata.get("liked_scope")
+                or ""
+            ).strip().lower() == "foreign-origin"
+        )
         membership_ids = {
             str(value).strip()
             for value in (
@@ -3716,7 +3730,7 @@ def imagine_liked_card_asset_ids(root: Path, account: dict, relations: dict[str,
             if str(value or "").strip()
         }
         if snapshot.get("complete"):
-            if not membership_ids & liked_ids:
+            if not private_liked_scope and not membership_ids & liked_ids:
                 continue
         elif (
             provenance not in {"plain-liked", "cloned-liked"}
@@ -4772,6 +4786,7 @@ def imagine_apply_generated_relations(
     relations: dict[str, dict] | None = None,
     *,
     preserve_representative: bool = False,
+    allow_cross_conversation_relations: bool = False,
     ensure_upload_bundle: bool = True,
 ) -> dict:
     if not isinstance(post, dict):
@@ -4841,14 +4856,17 @@ def imagine_apply_generated_relations(
             or stored_imagine.get("conversation_id")
             or ""
         ).strip()
-        # Linked sources and local T2I-heart cards remain their own anchors even
-        # when Grok places a generated child in a different Saved conversation.
+        # Linked sources, local T2I-heart cards, and an owned Liked lineage remain
+        # their own anchors even when Grok places a generated child in a different
+        # Saved conversation.  The latter is determined from persistent lineage
+        # metadata rather than a particular card, asset, or conversation id.
         if (
             stored_conversation_id
             and stored_conversation_id != post_id
             and not link_source
             and not local_t2i_heart
             and not preserve_representative
+            and not allow_cross_conversation_relations
             and not record.get("upload_origin_bundle")
             and not record.get("rematerialized_source_relation")
         ):
@@ -8627,7 +8645,31 @@ def list_imagine_liked_cache(payload: dict) -> dict:
             and not legacy_private_clone
         ):
             continue
-        post = imagine_apply_generated_relations(cached_post, root, account, relations)
+        cached_imagine = (
+            cached_metadata.get("imagine")
+            if isinstance(cached_metadata.get("imagine"), dict)
+            else {}
+        )
+        # Grok's Liked collection does not retain clone-batch copies.  Their
+        # app-owned root is marked as a foreign-origin Liked card, and all
+        # persisted descendants must survive a cache refresh even if Grok saves
+        # them under a later conversation.
+        foreign_origin_liked_root = (
+            str(cached_metadata.get("saved_provenance") or "").strip().lower()
+            in {"plain-liked", "cloned-liked"}
+            and str(
+                cached_metadata.get("liked_scope")
+                or cached_imagine.get("liked_scope")
+                or ""
+            ).strip().lower() == "foreign-origin"
+        )
+        post = imagine_apply_generated_relations(
+            cached_post,
+            root,
+            account,
+            relations,
+            allow_cross_conversation_relations=foreign_origin_liked_root,
+        )
         imagine_stamp_saved_identity(post)
         post["items"] = [
             item
@@ -8648,6 +8690,7 @@ def list_imagine_liked_cache(payload: dict) -> dict:
     posts = merge_imagine_liked_lineage_with_saved_cache(
         root, account, posts, hidden_ids=hidden,
     )
+    imagine_sort_saved_by_official_order(posts)
     return {
         "ok": True,
         "posts": posts,
@@ -8818,11 +8861,6 @@ def list_imagine_liked(payload: dict) -> dict:
     # right after a clone-batch that is the handful of ids it just added, not the whole
     # collection. Fewer requests is also the point on its own; the collection listing is
     # where 403s have shown up.
-    entry_order = {
-        str(entry.get("asset_id") or "").strip(): index
-        for index, entry in enumerate(entries)
-        if str(entry.get("asset_id") or "").strip()
-    }
     ensure_imagine_state_migrated(root)
     cached_relations = imagine_state.load_generated_relations(root)
     reusable_posts: list[dict] = []
@@ -9089,9 +9127,8 @@ def list_imagine_liked(payload: dict) -> dict:
             item["metadata"] = item_metadata
         covered_asset_ids.add(asset_id)
         posts.append(imagine_stamp_saved_identity(post))
-    # A card rebuilt this pass and a card reused from the cache are both collection entries;
-    # splitting them apart is how they were fetched, not how they are ordered. Put them back
-    # in the collection's own order, which is the order the entries arrived in.
+    # A card rebuilt this pass and a card reused from the cache are both Liked entries.
+    # Combine them before lineage reconciliation and the activity sort below.
     posts.extend(reusable_posts)
 
     # clone-batch copies deliberately stay out of grok.com's Liked collection.  Older
@@ -9126,22 +9163,16 @@ def list_imagine_liked(payload: dict) -> dict:
         covered_asset_ids.update(private_item_ids)
         posts.append(private_card)
 
-    def liked_entry_position(post: dict) -> int:
-        keys = imagine_post_liked_anchor_keys(post) | {
-            imagine_item_asset_id(item)
-            for item in post.get("items") or []
-            if isinstance(item, dict) and imagine_item_asset_id(item)
-        }
-        positions = [entry_order[key] for key in keys if key in entry_order]
-        return min(positions) if positions else len(entries)
-
     # Copies grok.com files under /saved instead of the collection. Main hides them, so this
     # is the only place they can appear.
     posts.extend(imagine_foreign_origin_liked_cards(root, account, covered_asset_ids))
     posts = merge_imagine_liked_lineage_with_saved_cache(
         root, account, posts, hidden_ids=liked_hidden_ids,
     )
-    posts.sort(key=liked_entry_position)
+    # Liked follows the same card-activity order as the rest of the app.  The
+    # collection fetch order must not outrank a newer generation (including a
+    # failed/moderated one).
+    imagine_sort_saved_by_official_order(posts)
     complete = bool(membership.get("complete")) and not errors
     if complete:
         reconcile_imagine_local_hearts_with_complete_liked_membership(

@@ -181,6 +181,10 @@ function upsertImagineJob(job, options = {}) {
       noteMainGenerationActivity("imagine", "job", job.id);
     }
   }
+  const currentJob = index >= 0 ? list[index] : job;
+  const terminalFailure = ["failed", "moderated"].includes(imagineJobStatus(currentJob))
+    || isModerationError(currentJob?.error);
+  if (index < 0 || terminalFailure) noteGenerationSourcePostActivity(currentJob);
   library_state.imagineJobs = list;
   if (options.progressOnly && !imagineJobTerminal(job)) {
     updateImagineJobProgressDom(job);

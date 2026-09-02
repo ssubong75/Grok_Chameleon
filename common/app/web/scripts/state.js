@@ -192,6 +192,7 @@ document.documentElement.classList.toggle("platform-macos", isMacRenderer);
         imagine: [],
         build: [],
       },
+      recentPostActivity: new Map(),
       dismissedJobSlots: new Set(),
       imagineRemotePosts: [],
       imagineRemoteLoaded: false,
@@ -414,7 +415,11 @@ document.documentElement.classList.toggle("platform-macos", isMacRenderer);
       post?.last_activity_at,
       post?.created_at,
       post?.createdAt,
+      post?.updated_at,
+      post?.updatedAt,
       post?.timestamp,
+      post?.last_modified,
+      post?.lastModified,
     ];
     for (const item of Array.isArray(post?.items) ? post.items : []) {
       values.push(
@@ -427,7 +432,41 @@ document.documentElement.classList.toggle("platform-macos", isMacRenderer);
         item?.lastModified,
       );
     }
+    const postPath = String(post?.folder_path || "").trim();
+    if (postPath) values.push(library_state.recentPostActivity?.get(postPath));
     return Math.max(0, ...values.map(activityTimestampValue));
+  }
+
+  function noteRecentPostActivity(postPath, occurredAt = Date.now()) {
+    const path = String(postPath || "").trim();
+    if (!path) return;
+    const timestamp = activityTimestampValue(occurredAt) || Date.now();
+    const current = Number(library_state.recentPostActivity?.get(path) || 0);
+    if (!library_state.recentPostActivity) library_state.recentPostActivity = new Map();
+    if (timestamp > current) library_state.recentPostActivity.set(path, timestamp);
+  }
+
+  function generationJobActivityTimestamp(job) {
+    return Math.max(
+      activityTimestampValue(job?.updated_at),
+      activityTimestampValue(job?.updatedAt),
+      activityTimestampValue(job?.created_at),
+      activityTimestampValue(job?.createdAt),
+    );
+  }
+
+  function noteGenerationSourcePostActivity(job) {
+    const context = job?.context && typeof job.context === "object" ? job.context : {};
+    const sourcePath = String(context.source_post_path || job?.source_post_path || "").trim();
+    if (!sourcePath) return;
+    const occurredAt = generationJobActivityTimestamp(job) || Date.now();
+    noteRecentPostActivity(sourcePath, occurredAt);
+    const provider = String(
+      context.generation_provider || context.provider || job?.provider || "",
+    ).trim().toLowerCase();
+    if (provider === "build" || provider === "imagine") {
+      noteMainGenerationActivity(provider, "post", sourcePath);
+    }
   }
 
   function comparePostsByRecentActivity(left, right) {

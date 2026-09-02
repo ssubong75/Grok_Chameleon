@@ -263,6 +263,9 @@ async function refreshBuildJobs() {
     const data = await qApi("/api/build/jobs");
     const jobs = Array.isArray(data?.jobs) ? data.jobs : [];
     library_state.jobs = jobs.filter(isRenderableBuildJob);
+    [...library_state.jobs]
+      .sort((left, right) => generationJobActivityTimestamp(left) - generationJobActivityTimestamp(right))
+      .forEach(noteGenerationSourcePostActivity);
     renderSourceCards("build");
     for (const job of jobs) {
       if (!buildJobTerminal(job)) scheduleBuildJobPoll(job.id);

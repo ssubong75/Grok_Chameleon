@@ -2593,7 +2593,7 @@ async function loadImagineSavedCacheCards() {
 
 function imagineSourcePosts() {
   if (library_state.iMainView === imagineViewValue("LIKED", "liked")) {
-    return library_state.imagineLikedPosts || [];
+    return [...(library_state.imagineLikedPosts || [])].sort(comparePostsByRecentActivity);
   }
   if (library_state.iMainView === imagineViewValue("UPLOAD", "upload")) {
     return library_state.imagineUploadPosts || [];
@@ -2833,7 +2833,18 @@ function renderImagineDiscoverCards() {
   }
   const list = document.querySelector(".i_discover_card_list");
   if (!list) return;
-  const posts = filterPostsBySearch(library_state.imagineDiscoverPosts || []);
+  const discoverFeedPosts = library_state.imagineDiscoverPosts || [];
+  const discoverFeedOrder = new Map(
+    discoverFeedPosts.map((post, index) => [String(post?.folder_path || ""), index]),
+  );
+  const discoverRecentActivity = (post) => Number(
+    library_state.recentPostActivity?.get(String(post?.folder_path || "").trim()) || 0,
+  );
+  const posts = [...filterPostsBySearch(discoverFeedPosts)].sort((left, right) => (
+    discoverRecentActivity(right) - discoverRecentActivity(left)
+    || (discoverFeedOrder.get(String(left?.folder_path || "")) ?? Number.MAX_SAFE_INTEGER)
+      - (discoverFeedOrder.get(String(right?.folder_path || "")) ?? Number.MAX_SAFE_INTEGER)
+  ));
   if ((library_state.imagineDiscoverCacheLoading || library_state.imagineDiscoverLoading) && !posts.length) {
     disableVirtualCardList(IMAGINE_DISCOVER_VIRTUAL_LIST_KEY, list);
     list.replaceChildren(emptyLibraryNode("Loading . . ."));

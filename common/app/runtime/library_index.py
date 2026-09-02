@@ -342,7 +342,11 @@ def post_activity_at(post: dict) -> str:
         post.get("last_activity_at"),
         post.get("created_at"),
         post.get("createdAt"),
+        post.get("updated_at"),
+        post.get("updatedAt"),
         post.get("timestamp"),
+        post.get("last_modified"),
+        post.get("lastModified"),
     ]
     for item in post.get("items") or []:
         if not isinstance(item, dict):

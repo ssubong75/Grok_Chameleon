@@ -358,6 +358,10 @@
         noteMainGenerationActivity("build", "job", job.id);
       }
     }
+    const currentJob = index >= 0 ? library_state.jobs[index] : job;
+    const terminalFailure = ["failed", "moderated"].includes(buildJobStatus(currentJob))
+      || isModerationError(currentJob?.error);
+    if (index < 0 || terminalFailure) noteGenerationSourcePostActivity(currentJob);
     if (options.progressOnly && !buildJobTerminal(job)) {
       updateBuildJobProgressDom(job);
       return;
