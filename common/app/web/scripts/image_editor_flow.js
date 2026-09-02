@@ -92,21 +92,30 @@ function restoreImageEditorReturnPost(snapshotText, postPath, provider, returnBa
     const snapshot = JSON.parse(snapshotText);
     const screenId = String(returnBackTarget?.screenId || "");
     let normalized = null;
+    let list = "";
     if (provider === "imagine" && screenId === "i_discover_main" && typeof normalizeImagineDiscoverPosts === "function") {
-      normalized = normalizeImagineDiscoverPosts([snapshot])[0];
+      normalized = normalizeImagineDiscoverPosts([snapshot])[0] || null;
+      if (normalized) list = "discover";
     } else if (provider === "imagine" && screenId === "i_main" && typeof normalizeImagineRemotePosts === "function") {
-      normalized = normalizeImagineRemotePosts([snapshot])[0];
-    } else {
+      normalized = normalizeImagineRemotePosts([snapshot])[0] || null;
+      if (normalized) list = "remote";
+    }
+    if (!normalized) {
+      // Those two normalizers filter as well as normalize - isImagineRemoteMainPost drops a
+      // locally held Imagine post, and the hidden-item filter drops a hidden one. Rejecting the
+      // snapshot used to strand the editor return on an empty detail, so keep the plain shape
+      // and put it in a list selectedLibraryPost() actually searches.
       normalized = typeof normalizeServerPost === "function" ? normalizeServerPost(snapshot) : snapshot;
+      list = provider === "imagine" && screenId === "i_main" ? "remote" : "library";
     }
     if (!normalized || normalized.folder_path !== postPath) return null;
-    if (provider === "imagine" && screenId === "i_discover_main") {
+    if (list === "discover") {
       library_state.imagineDiscoverPosts = replaceImageEditorReturnPost(
         library_state.imagineDiscoverPosts,
         postPath,
         normalized,
       );
-    } else if (provider === "imagine" && screenId === "i_main") {
+    } else if (list === "remote") {
       library_state.imagineRemotePosts = replaceImageEditorReturnPost(
         library_state.imagineRemotePosts,
         postPath,
@@ -183,6 +192,37 @@ function openImagineDetailImageEditor() {
   openDetailImageEditor("imagine");
 }
 
+function selectImageEditorReturnPost(postPath, itemId) {
+  library_state.selectedPostPath = postPath;
+  // The identity left over from the library reload belongs to whatever was selected before the
+  // editor, and selectedLibraryPost() returns null outright when it does not match. Clear it and
+  // let the path lookup derive the identity again.
+  library_state.selectedPostIdentity = "";
+  if (itemId) library_state.selectedDetailItemId = itemId;
+}
+
+// The detail markup in index.html is placeholder content, so opening the detail screen on boot
+// paints an empty card until consumeImageEditorReturn() catches up after the library reload.
+// The snapshot the editor stashed is already available synchronously, so draw from it right
+// away and let the consume pass reconcile afterwards.
+function seedImageEditorReturnDetail() {
+  const returnPostPath = sessionStorage.getItem(IMAGE_EDITOR_RETURN_POST_KEY) || "";
+  if (!returnPostPath) return false;
+  const returnProvider = sessionStorage.getItem(IMAGE_EDITOR_RETURN_PROVIDER_KEY) || "";
+  const returnItemId = sessionStorage.getItem(IMAGE_EDITOR_RETURN_ITEM_KEY) || "";
+  const returnBackTarget = imageEditorReturnBackTarget(
+    sessionStorage.getItem(IMAGE_EDITOR_RETURN_BACK_KEY) || "",
+    returnProvider,
+  );
+  const snapshotText = sessionStorage.getItem(IMAGE_EDITOR_RETURN_POST_SNAPSHOT_KEY) || "";
+  if (!restoreImageEditorReturnPost(snapshotText, returnPostPath, returnProvider, returnBackTarget)) {
+    return false;
+  }
+  selectImageEditorReturnPost(returnPostPath, returnItemId);
+  renderDetailViews();
+  return true;
+}
+
 async function consumeImageEditorReturn() {
   const savedId = sessionStorage.getItem(IMAGE_EDITOR_SAVED_KEY) || "";
   const saveTarget = sessionStorage.getItem(IMAGE_EDITOR_SAVE_TARGET_KEY) || "";
@@ -203,16 +243,18 @@ async function consumeImageEditorReturn() {
   const returnBackTarget = imageEditorReturnBackTarget(returnBackValue, returnProvider);
   restoreImageEditorReturnContext(imageEditorReturnContext(returnContextValue));
   if (!savedId) {
-    if (restoreImageEditorReturnPost(returnPostSnapshot, returnPostPath, returnProvider, returnBackTarget)) {
-      library_state.selectedPostPath = returnPostPath;
-      if (returnItemId) library_state.selectedDetailItemId = returnItemId;
-      const detailType = returnProvider === "imagine" ? "imagine" : "build";
-      const activeButtonId = returnBackTarget.activeButtonId
-        || (detailType === "imagine" ? "i_imagine_nav_btn" : "b_build_btn");
-      screen_state.detail_back[detailType] = returnBackTarget;
-      openScreen(detailType === "imagine" ? "i_detail" : "b_detail", activeButtonId, { replaceHistory: true });
-      renderDetailViews();
-    }
+    // Re-injecting the snapshot is best effort: the library reload may already carry the post.
+    // Opening the detail must not hang on it, or a rejected snapshot leaves the placeholder
+    // markup on screen as an empty card.
+    restoreImageEditorReturnPost(returnPostSnapshot, returnPostPath, returnProvider, returnBackTarget);
+    if (!returnPostPath) return;
+    selectImageEditorReturnPost(returnPostPath, returnItemId);
+    const detailType = returnProvider === "imagine" ? "imagine" : "build";
+    const activeButtonId = returnBackTarget.activeButtonId
+      || (detailType === "imagine" ? "i_imagine_nav_btn" : "b_build_btn");
+    screen_state.detail_back[detailType] = returnBackTarget;
+    openScreen(detailType === "imagine" ? "i_detail" : "b_detail", activeButtonId, { replaceHistory: true });
+    renderDetailViews();
     return;
   }
   const { postPath, itemId } = imageEditorSavedReference(savedId);

@@ -169,6 +169,15 @@ openScreen(
   editorReturnBootTarget?.activeButtonId || "i_imagine_nav_btn",
   { replaceHistory: true },
 );
+if (editorReturnBootTarget && typeof seedImageEditorReturnDetail === "function") {
+  // Fill the detail from the editor's stashed snapshot before the first paint, so the empty
+  // placeholder card never shows. consumeImageEditorReturn() below still runs afterwards.
+  try {
+    seedImageEditorReturnDetail();
+  } catch (error) {
+    console.warn(error);
+  }
+}
 scheduleSidebarTogglePosition();
 restoreLibraryRoot().then(() => {
   restoreUiReloadState(pendingUiReloadState);

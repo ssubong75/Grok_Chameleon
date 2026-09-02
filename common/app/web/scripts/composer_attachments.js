@@ -435,10 +435,13 @@
     }
 
     function composerMediaKind(source = {}) {
-      const rawType = String(source.type || source.mime_type || source.mime || "").toLowerCase();
+      // The default only covers undefined, and selectedDetailItem() hands back null whenever the
+      // detail has no selection yet - which is exactly the state the image editor returns into.
+      const media = source || {};
+      const rawType = String(media.type || media.mime_type || media.mime || "").toLowerCase();
       if (rawType === "image" || rawType.startsWith("image/")) return "image";
       if (rawType === "video" || rawType.startsWith("video/")) return "video";
-      return mediaTypeForName(source.name || source.file || source.url || source.object_url || "");
+      return mediaTypeForName(media.name || media.file || media.url || media.object_url || "");
     }
 
     function itemMatchesSourceKey(item, sourceKey) {
@@ -645,6 +648,7 @@
     }
 
     function detailImageForComposer(post, selectedOverride = undefined) {
+      if (!post) return null;
       const selected = arguments.length >= 2 ? selectedOverride : selectedDetailItem(post);
       if (composerMediaKind(selected) === "image" && detailMediaUrlForComposer(selected, post)) return selected;
       const sourceKey = detailSourceKeyForComposerItem(selected);
