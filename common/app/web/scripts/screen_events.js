@@ -163,10 +163,21 @@ function initialScreenTargetForImageEditorReturn() {
   };
 }
 
+// Stepping back past the image editor lands on a history entry whose document the editor's
+// location.replace() destroyed, so the browser reloads instead of firing popstate. The entry
+// still carries its full state, so read the screen from it rather than dropping to the Imagine
+// main default.
+function initialScreenTargetFromHistoryState() {
+  const state = window.history?.state;
+  if (!state?.grokStudioQ || !state.screenId) return null;
+  return { screenId: state.screenId, activeButtonId: state.activeButtonId || "" };
+}
+
 const editorReturnBootTarget = initialScreenTargetForImageEditorReturn();
+const bootTarget = editorReturnBootTarget || initialScreenTargetFromHistoryState();
 openScreen(
-  editorReturnBootTarget?.screenId || screen_state.current_main,
-  editorReturnBootTarget?.activeButtonId || "i_imagine_nav_btn",
+  bootTarget?.screenId || screen_state.current_main,
+  bootTarget?.activeButtonId || "i_imagine_nav_btn",
   { replaceHistory: true },
 );
 if (editorReturnBootTarget && typeof seedImageEditorReturnDetail === "function") {
@@ -180,7 +191,12 @@ if (editorReturnBootTarget && typeof seedImageEditorReturnDetail === "function")
 }
 scheduleSidebarTogglePosition();
 restoreLibraryRoot().then(() => {
-  restoreUiReloadState(pendingUiReloadState);
+  const uiReloadRestored = restoreUiReloadState(pendingUiReloadState);
+  if (!uiReloadRestored && !editorReturnBootTarget && typeof restoreBrowserHistoryState === "function") {
+    // Same reason as initialScreenTargetFromHistoryState(): a reloaded history entry never gets
+    // a popstate, so replay its state here now that the library is loaded.
+    restoreBrowserHistoryState(window.history?.state);
+  }
   // Start the selected account's Saved/media-store preparation only after the
   // restored UI has chosen its final active account.  A first generation then
   // joins this work instead of competing with it.
