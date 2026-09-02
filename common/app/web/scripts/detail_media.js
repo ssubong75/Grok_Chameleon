@@ -384,6 +384,7 @@ function syncDetailImageFullscreenState() {
     const isImageSurface = surface.classList.contains("i_detail_media_image")
       || surface.classList.contains("b_detail_media_image");
     surface.classList.toggle("detail_image_fullscreen", isImageSurface && surface === active);
+    syncDetailThumbNavIdle(surface, surface === active);
   });
 }
 
@@ -397,6 +398,9 @@ function bindDetailImageFullscreen(surface) {
   if (!surface || surface.dataset.detailImageFullscreenBound === "true") return;
   surface.dataset.detailImageFullscreenBound = "true";
   ensureDetailImageFullscreenListener();
+  surface.addEventListener("mousemove", () => {
+    syncDetailThumbNavIdle(surface, document.fullscreenElement === surface);
+  });
   surface.addEventListener("dblclick", (event) => {
     if (event.target instanceof Element && event.target.closest("button, input, textarea, select, .video-controls")) return;
     event.preventDefault();
@@ -1392,4 +1396,93 @@ function appendMediaPreview(host, media, item, type) {
     appendCardImagePreview(host, media, preview, previewUrl, item);
     return;
   }
+}
+
+// Thumbnail navigation pinned to the media box's right edge. It walks the same thumbnails the
+// version rail shows, so it covers images and videos in both the Imagine and Build details.
+
+const DETAIL_THUMB_NAV_IDLE_MS = 2400;
+const detailThumbNavIdleTimers = new WeakMap();
+let detailThumbNavFullscreenBound = false;
+
+function detailThumbNavGlyph(direction) {
+  // The detail arrows turned 90 degrees clockwise: "<" becomes "^" and ">" becomes "v".
+  const path = direction === "prev" ? "m6 15 6-6 6 6" : "m6 9 6 6 6-6";
+  return `<svg class="detail_nav_glyph" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="${path}"></path></svg>`;
+}
+
+function detailThumbNavItems(prefix) {
+  const thumbList = document.querySelector(`.${prefix}_detail_thumb_list`);
+  if (!thumbList) return [];
+  return [...thumbList.querySelectorAll(":scope > button")].filter((thumb) => !thumb.hidden);
+}
+
+function stepDetailThumb(prefix, offset) {
+  const thumbList = document.querySelector(`.${prefix}_detail_thumb_list`);
+  // Source and split pick modes repurpose a thumbnail click, so stepping would fire that
+  // instead of moving to the next version.
+  if (thumbList?.classList.contains("source_pick_active")) return;
+  if (thumbList?.classList.contains("split_pick_active")) return;
+  const thumbs = detailThumbNavItems(prefix);
+  if (thumbs.length < 2) return;
+  const active = thumbs.findIndex((thumb) => thumb.classList.contains("active"));
+  // Cycles: stepping past the last thumbnail comes back to the first one.
+  const target = thumbs[((active < 0 ? 0 : active) + offset + thumbs.length) % thumbs.length];
+  if (!target) return;
+  target.scrollIntoView({ block: "nearest", inline: "nearest" });
+  // Reuse the version rail's own click handling instead of duplicating its job/item branches.
+  target.click();
+}
+
+function syncDetailThumbNavHost() {
+  // Only the fullscreen element's own subtree renders, and that element is the media box for
+  // images but the player for videos, so keep the nav inside whichever one is showing.
+  const active = document.fullscreenElement;
+  for (const nav of document.querySelectorAll(".detail_thumb_nav")) {
+    const media = nav.closest(".i_detail_media, .b_detail_media");
+    if (!media) continue;
+    const player = media.querySelector(".video-player");
+    const host = player && active === player ? player : media;
+    if (nav.parentElement !== host) host.append(nav);
+  }
+}
+
+function ensureDetailThumbNavFullscreenListener() {
+  if (detailThumbNavFullscreenBound) return;
+  detailThumbNavFullscreenBound = true;
+  document.addEventListener("fullscreenchange", syncDetailThumbNavHost);
+}
+
+function syncDetailThumbNavIdle(surface, fullscreenActive) {
+  // Videos ride the player's own controls-hidden class; a fullscreen image has no controls, so
+  // give it the same idle fade here.
+  if (!surface) return;
+  window.clearTimeout(detailThumbNavIdleTimers.get(surface));
+  surface.classList.remove("detail_nav_idle");
+  if (!fullscreenActive) return;
+  detailThumbNavIdleTimers.set(surface, window.setTimeout(() => {
+    surface.classList.add("detail_nav_idle");
+  }, DETAIL_THUMB_NAV_IDLE_MS));
+}
+
+function mountDetailThumbNav(prefix) {
+  const media = document.querySelector(`.${prefix}_detail_media`);
+  if (!media) return;
+  media.querySelector(".detail_thumb_nav")?.remove();
+  if (detailThumbNavItems(prefix).length < 2) return;
+  ensureDetailThumbNavFullscreenListener();
+  const nav = document.createElement("div");
+  nav.className = "detail_thumb_nav";
+  nav.innerHTML = `
+    <button class="detail_thumb_nav_btn detail_thumb_prev" type="button" aria-label="Previous thumbnail">${detailThumbNavGlyph("prev")}</button>
+    <button class="detail_thumb_nav_btn detail_thumb_next" type="button" aria-label="Next thumbnail">${detailThumbNavGlyph("next")}</button>
+  `;
+  nav.addEventListener("click", (event) => {
+    const button = event.target instanceof Element ? event.target.closest("button") : null;
+    if (!button) return;
+    event.stopPropagation();
+    stepDetailThumb(prefix, button.classList.contains("detail_thumb_prev") ? -1 : 1);
+  });
+  media.append(nav);
+  syncDetailThumbNavHost();
 }

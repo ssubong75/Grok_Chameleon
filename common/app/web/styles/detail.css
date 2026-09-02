@@ -1,4 +1,15 @@
 /* Detail screens and detail media controls */
+
+:root {
+  /* Top edge of the detail media box. `.i_detail` is an absolute box spanning
+     top:24px..bottom:150px and its stage is bottom-aligned (align-items:end), so the media
+     top sits 150px above the window bottom minus the media height. Keep this height
+     expression in sync with `.i_detail_media_shell` below. */
+  --detail-media-top: calc(100vh - 150px - min(45vw, 704px, 100vh - 226px));
+  /* The nav arrows are 47px tall and keep their bottom 27px above the media box top. */
+  --detail-nav-top: calc(var(--detail-media-top) - 74px);
+}
+
 .i_detail,
 .b_detail {
   position: relative;
@@ -36,11 +47,11 @@
 .b_detail_back,
 .i_detail_forward,
 .b_detail_forward {
-  /* Mirror the return arrow: same line, and the same clearance from the window edge that
-     it keeps from the sidebar divider. Anchoring to the media box instead made these drift
-     with its aspect ratio. */
+  /* Sides mirror the return arrow: the same clearance from the window edge that it keeps
+     from the sidebar divider. Anchoring the sides to the media box made these drift with its
+     aspect ratio, so only the vertical position follows it (see --detail-nav-top). */
   position: fixed;
-  top: var(--detail-return-top, 76px);
+  top: var(--detail-nav-top);
   z-index: 14;
   display: grid;
   place-items: center;
@@ -973,7 +984,7 @@
 .i_detail_return,
 .b_detail_return {
   position: fixed;
-  top: var(--detail-return-top, 76px);
+  top: var(--detail-nav-top);
   left: calc(var(--sidebar-width) + clamp(18px, 2vw, 30px) + 12px);
   z-index: 14;
   font-size: 18px;
@@ -1902,4 +1913,102 @@ html.platform-windows .detail_job_badge.failed .detail_job_badge_label::after {
   body .workspace.b_detail_open .b_detail_stage {
     padding-top: calc(var(--topbar-min-height) + var(--workspace-row-gap));
   }
+}
+
+/* Below 980px and in portrait the detail screen re-flows into the document, so the viewport
+   expression above no longer describes the media box. Pin the arrows to the media shell
+   itself instead - they are already its children and it is position:relative. Size stays the
+   same as on the desktop; only the clearance shrinks, because the room above is tighter. */
+@media (max-width: 980px), (max-aspect-ratio: 1/1) {
+  .i_detail_return,
+  .b_detail_return,
+  .i_detail_back,
+  .b_detail_back,
+  .i_detail_forward,
+  .b_detail_forward {
+    position: absolute;
+    top: auto;
+    bottom: calc(100% + 6px);
+  }
+
+  .i_detail_return,
+  .b_detail_return,
+  .app_shell.sidebar_collapsed .i_detail_return,
+  .app_shell.sidebar_collapsed .b_detail_return {
+    top: auto;
+    right: auto;
+    left: 0;
+  }
+
+  .i_detail_back,
+  .b_detail_back {
+    right: 40px;
+    left: auto;
+  }
+
+  .i_detail_forward,
+  .b_detail_forward {
+    right: 0;
+    left: auto;
+  }
+}
+
+/* 721-980px, and portrait above it, leave only 24-36px above the media box - not enough for
+   the 47px arrows plus their 6px clearance. Reserve 61px. Narrower widths already clear it
+   through the 106px .i_detail_stage padding in the max-width:720px block above. */
+@media (min-width: 721px) and (max-width: 980px),
+  (min-width: 721px) and (max-aspect-ratio: 1/1) {
+  body .workspace.i_detail_open .i_detail,
+  body .workspace.b_detail_open .b_detail {
+    padding-top: 37px;
+  }
+}
+
+/* Previous/next thumbnail, centred on the media box's right edge. Same size and spacing as the
+   post arrows above, but turned 90 degrees clockwise. */
+.detail_thumb_nav {
+  position: absolute;
+  top: 50%;
+  right: 12px;
+  z-index: 12;
+  display: grid;
+  align-content: space-between;
+  /* 47px button + 50px gap + 47px button. When the media box is shorter than that the gap
+     gives way instead of the buttons spilling out of its overflow:hidden box. */
+  height: min(144px, 100%);
+  transform: translateY(-50%);
+  transition: opacity 0.18s ease;
+}
+
+.detail_thumb_nav_btn {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 47px;
+  min-height: 47px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #fff;
+  line-height: 1;
+}
+
+.i_detail_media .detail_thumb_nav_btn:hover,
+.i_detail_media .detail_thumb_nav_btn:focus-visible {
+  color: var(--imagine-blue);
+}
+
+.b_detail_media .detail_thumb_nav_btn:hover,
+.b_detail_media .detail_thumb_nav_btn:focus-visible {
+  color: var(--accent);
+}
+
+/* In fullscreen the arrows come and go with the player controls; a fullscreen image has no
+   controls, so detail_nav_idle gives it the same fade. */
+.video-player.controls-hidden .detail_thumb_nav,
+.i_detail_media.detail_nav_idle .detail_thumb_nav,
+.b_detail_media.detail_nav_idle .detail_thumb_nav {
+  opacity: 0;
+  pointer-events: none;
 }

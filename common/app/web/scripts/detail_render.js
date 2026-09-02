@@ -352,6 +352,8 @@ function renderDetailViews(options = {}) {
   if (activePrefix !== "b") renderDetailView("i", imaginePost, options);
   if (activePrefix !== "i") renderDetailView("b", buildJob ? buildJobDetailPost(buildJob, post, buildJobs) : post, options);
   updateDetailPostNavigationButtons();
+  mountDetailThumbNav("i");
+  mountDetailThumbNav("b");
 }
 
 function hiddenMediaIconSvg() {
