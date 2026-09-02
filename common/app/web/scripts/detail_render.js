@@ -593,7 +593,8 @@ function syncImagineDetailToolButtons(type, item = null, post = null) {
   });
 }
 
-const imagineDetailAspectOptions = ["2:3", "3:2", "1:1", "16:9", "9:16"];
+// Same order as the composer's aspect control, minus its "Auto" entry.
+const imagineDetailAspectOptions = ["16:9", "9:16", "1:1", "2:3", "3:2", "4:3", "21:9", "5:2"];
 
 function detailAspectRatioFromLabel(label) {
   const normalized = typeof detailAspectFromValue === "function" ? detailAspectFromValue(label) : "";

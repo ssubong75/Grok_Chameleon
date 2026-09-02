@@ -228,13 +228,13 @@ function renderComposerOptions() {
       ? imagineT2iCountOptions
       : (buildImage20 ? buildImage20CountOptions : buildT2iCountOptions);
     const imageCountDefault = provider === "imagine" ? "4" : (buildImage20 ? "2" : "5");
-    setControlVisible(composerControls.aspect, !hideImagineImageToImageOptions);
+    // Aspect stays available for image-to-image as well; only the count and model controls
+    // still fold away there.
+    setControlVisible(composerControls.aspect, true);
     setControlVisible(composerControls.imageModel, showImageModel);
     setControlVisible(composerControls.resolution, isBuildImage && !buildImage20);
     setControlVisible(composerControls.count, !isImageToImage && !hideImagineImageToImageOptions);
-    if (!hideImagineImageToImageOptions) {
-      setCustomSelectOptions(composerControls.aspect, aspectOptions(provider, mode), imageAspectDefault, `${provider}:${mode}:aspect`);
-    }
+    setCustomSelectOptions(composerControls.aspect, aspectOptions(provider, mode), imageAspectDefault, `${provider}:${mode}:aspect`);
     if (showImageModel) {
       setCustomSelectOptions(
         composerControls.imageModel,

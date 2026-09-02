@@ -75,8 +75,8 @@ document.documentElement.classList.toggle("platform-macos", isMacRenderer);
     extendMaxNote: document.querySelector('[data-composer-control="extend-max-note"]'),
     videoEditNote: document.querySelector('[data-composer-control="video-edit-note"]'),
   };
-  const imageAspectOptions = ["Auto", "16:9", "9:16", "1:1", "2:3", "3:2"];
-  const buildT2iAspectOptions = ["Auto", "16:9", "9:16", "1:1", "2:3", "3:2"];
+  const imageAspectOptions = ["Auto", "16:9", "9:16", "1:1", "2:3", "3:2", "4:3", "21:9", "5:2"];
+  const buildT2iAspectOptions = ["Auto", "16:9", "9:16", "1:1", "2:3", "3:2", "4:3", "21:9", "5:2"];
   const videoAspectOptions = ["Auto", "16:9", "9:16", "1:1", "2:3", "3:2"];
   const videoModelOptions = ["M 1.5", "M 1.0"];
   const buildVideoModelOptions = ["M 1.0", "M 1.5P", "M 1.5"];
