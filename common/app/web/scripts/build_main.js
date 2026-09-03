@@ -651,6 +651,7 @@
     }
     if (prefix === "b") {
       syncBuildDetailHeartState(actionPost);
+      syncBuildDetailToolButtons(type);
     }
     const limitToSelectedJobSlot = selectedJobSlotIndex > 0 && typeof isTextToImageBuildJob === "function" && isTextToImageBuildJob(job);
     const detailJobs = limitToSelectedJobSlot

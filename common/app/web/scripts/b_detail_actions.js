@@ -199,9 +199,12 @@ async function startBuildDetailSpicyVideo(button = null) {
     return;
   }
   const post = selectedLibraryPost();
-  const item = selectedDetailItem(post);
+  const selectedItem = selectedDetailItem(post);
+  const item = detailItemType(selectedItem) === "image"
+    ? selectedItem
+    : (typeof detailImageForComposer === "function" ? detailImageForComposer(post, selectedItem) : null);
   if (!post || !item || detailItemType(item) !== "image") {
-    showErrorPanel("Spicy unavailable", "Select a Build image thumbnail.");
+    showErrorPanel("Spicy unavailable", "This Build video has no source image.");
     return;
   }
   const sourceUrl = detailMediaUrlForItem("b", item, post);

@@ -1894,9 +1894,12 @@ async function startImagineDetailSpicyVideo(button = null) {
     return;
   }
   const post = selectedLibraryPost();
-  const item = selectedDetailItem(post);
+  const selectedItem = selectedDetailItem(post);
+  const item = detailItemType(selectedItem) === "image"
+    ? selectedItem
+    : (typeof detailImageForComposer === "function" ? detailImageForComposer(post, selectedItem) : null);
   if (!post || !item || detailItemType(item) !== "image") {
-    showErrorPanel("Spicy unavailable", "Select an Imagine image thumbnail.");
+    showErrorPanel("Spicy unavailable", "This Imagine video has no source image.");
     return;
   }
   const sourcePostId = imagineActionPostIdForItem(item);
