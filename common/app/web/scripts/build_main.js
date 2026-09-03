@@ -393,6 +393,13 @@
     if (!options.skipRender) {
       renderSourceCards("build");
       renderBuildT2iViewCards();
+      // Source-backed Build jobs can also be rendered inside a Collection's
+      // second-level grid.  Removing the job from state without refreshing that
+      // grid leaves a stale failed/moderated card whose X appears to do nothing
+      // and whose body can no longer open a detail view.
+      if (screen_state.current_screen === "2nd_main" && typeof renderSecondMain === "function") {
+        renderSecondMain();
+      }
       renderDetailViews();
     }
   }
