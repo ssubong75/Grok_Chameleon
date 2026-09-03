@@ -51,6 +51,12 @@ function setComposerMode(mode, options = {}) {
   for (const tab of document.querySelectorAll(".composer_mode .tab")) {
     tab.classList.toggle("active", tab.dataset.mode === mode);
   }
+  if (
+    (screen_state.current_screen === "i_detail" || screen_state.current_screen === "b_detail")
+    && typeof syncDetailSpicyButtonForComposerMode === "function"
+  ) {
+    syncDetailSpicyButtonForComposerMode(screen_state.current_screen === "i_detail" ? "i" : "b");
+  }
   renderComposerOptions();
   if (mode === "extend") {
     prepareDetailExtendFromCurrentVideo({ resetStart: Boolean(options.resetExtendStart) });

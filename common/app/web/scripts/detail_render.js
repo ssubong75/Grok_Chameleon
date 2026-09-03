@@ -564,6 +564,15 @@ function syncBuildDetailToolButtons(type) {
   document.querySelectorAll(".b_detail_image_tool_btn").forEach((button) => {
     button.hidden = !isImage;
   });
+  syncDetailSpicyButtonForComposerMode("b", type);
+}
+
+function syncDetailSpicyButtonForComposerMode(prefix, type = "") {
+  const button = document.querySelector(`.${prefix}_detail_spicy`);
+  if (!button) return;
+  const media = document.querySelector(`.${prefix}_detail_media`);
+  const resolvedType = type || (media?.classList.contains(`${prefix}_detail_media_image`) ? "image" : "");
+  button.hidden = resolvedType !== "image" || composerState.mode !== "video";
 }
 
 function syncImagineDetailToolButtons(type, item = null, post = null) {
@@ -591,6 +600,7 @@ function syncImagineDetailToolButtons(type, item = null, post = null) {
     }
     button.hidden = !isVideo;
   });
+  syncDetailSpicyButtonForComposerMode("i", type);
 }
 
 // Same order as the composer's aspect control, minus its "Auto" entry.

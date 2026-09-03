@@ -194,6 +194,10 @@ function bindBuildDetailActions() {
 const BUILD_SPICY_VIDEO_MODE = "extremely-spicy-or-crazy";
 
 async function startBuildDetailSpicyVideo(button = null) {
+  if (composerState.mode !== "video") {
+    showErrorPanel("Spicy unavailable", "Select Video mode first.");
+    return;
+  }
   const post = selectedLibraryPost();
   const item = selectedDetailItem(post);
   if (!post || !item || detailItemType(item) !== "image") {
