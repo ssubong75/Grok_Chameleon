@@ -275,7 +275,14 @@
     const timeLabel = player.querySelector(".video-time");
     const seekTicks = player.querySelector("[data-seek-ticks]");
     const points = { a: null, b: null, hideTimer: null, volumeTimer: null };
-    const isExpanded = () => document.fullscreenElement === player;
+    // Keep fullscreen on the stable media surface. The player itself is replaced whenever a
+    // different thumbnail is selected, while the surface remains mounted for the whole detail
+    // view; using the surface therefore lets thumbnail navigation change media without leaving
+    // fullscreen.
+    const fullscreenHost = () => player.closest(".i_detail_media, .b_detail_media")
+      || document.querySelector(`.${prefix}_detail_media`)
+      || player;
+    const isExpanded = () => document.fullscreenElement === fullscreenHost();
     const isCurrentDetailPlayer = () => player.isConnected && player === currentDetailVideoPlayer();
     const isActive = () => player.isConnected && (isCurrentDetailPlayer() || isExpanded());
     let tickKey = "";
@@ -436,11 +443,13 @@
     });
     video.addEventListener("volumechange", sync);
     video.addEventListener("click", () => {
-      if (document.fullscreenElement === player) {
+      const host = fullscreenHost();
+      if (document.fullscreenElement === host) {
         document.exitFullscreen?.();
         return;
       }
-      player.requestFullscreen?.()
+      if (document.fullscreenElement) return;
+      host.requestFullscreen?.()
         .then(() => {
           player.focus({ preventScroll: true });
           if (video.paused) video.play().catch(() => {});
@@ -555,16 +564,21 @@
     }, { passive: false });
     player.addEventListener("mousemove", showControls);
     player.addEventListener("touchstart", showControls, { passive: true });
-    document.addEventListener("fullscreenchange", () => {
-      const active = document.fullscreenElement === player;
+    const syncFullscreenState = () => {
+      const active = isExpanded();
       player.classList.toggle("is-fullscreen", active);
       if (!active && !video.paused) player.classList.add("controls-hidden");
       else showControls();
       sync();
-    });
+    };
+    document.addEventListener("fullscreenchange", syncFullscreenState);
     video.preservesPitch = true;
     video.webkitPreservesPitch = true;
     video.mozPreservesPitch = true;
     player.classList.add("controls-hidden");
     sync();
+    // createDetailVideoPlayer binds before its caller appends the player to the media surface.
+    // Defer once so a player created during fullscreen thumbnail navigation receives the correct
+    // fullscreen controls state immediately.
+    queueMicrotask(syncFullscreenState);
   }

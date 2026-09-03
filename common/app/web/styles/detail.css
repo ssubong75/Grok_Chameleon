@@ -357,9 +357,9 @@
   object-fit: contain;
 }
 
-.i_detail_media_image:fullscreen,
+.i_detail_media:fullscreen,
 .i_detail_media_image.detail_image_fullscreen,
-.b_detail_media_image:fullscreen,
+.b_detail_media:fullscreen,
 .b_detail_media_image.detail_image_fullscreen {
   width: 100vw;
   height: 100vh;
@@ -2007,6 +2007,8 @@ html.platform-windows .detail_job_badge.failed .detail_job_badge_label::after {
 /* In fullscreen the arrows come and go with the player controls; a fullscreen image has no
    controls, so detail_nav_idle gives it the same fade. */
 .video-player.controls-hidden .detail_thumb_nav,
+.i_detail_media:has(> .video-player.is-fullscreen.controls-hidden) > .detail_thumb_nav,
+.b_detail_media:has(> .video-player.is-fullscreen.controls-hidden) > .detail_thumb_nav,
 .i_detail_media.detail_nav_idle .detail_thumb_nav,
 .b_detail_media.detail_nav_idle .detail_thumb_nav {
   opacity: 0;

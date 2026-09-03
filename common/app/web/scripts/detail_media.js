@@ -384,7 +384,7 @@ function syncDetailImageFullscreenState() {
     const isImageSurface = surface.classList.contains("i_detail_media_image")
       || surface.classList.contains("b_detail_media_image");
     surface.classList.toggle("detail_image_fullscreen", isImageSurface && surface === active);
-    syncDetailThumbNavIdle(surface, surface === active);
+    syncDetailThumbNavIdle(surface, isImageSurface && surface === active);
   });
 }
 
@@ -399,7 +399,9 @@ function bindDetailImageFullscreen(surface) {
   surface.dataset.detailImageFullscreenBound = "true";
   ensureDetailImageFullscreenListener();
   surface.addEventListener("mousemove", () => {
-    syncDetailThumbNavIdle(surface, document.fullscreenElement === surface);
+    const isImageSurface = surface.classList.contains("i_detail_media_image")
+      || surface.classList.contains("b_detail_media_image");
+    syncDetailThumbNavIdle(surface, isImageSurface && document.fullscreenElement === surface);
   });
   surface.addEventListener("dblclick", (event) => {
     if (event.target instanceof Element && event.target.closest("button, input, textarea, select, .video-controls")) return;
@@ -1435,15 +1437,12 @@ function stepDetailThumb(prefix, offset) {
 }
 
 function syncDetailThumbNavHost() {
-  // Only the fullscreen element's own subtree renders, and that element is the media box for
-  // images but the player for videos, so keep the nav inside whichever one is showing.
-  const active = document.fullscreenElement;
+  // The stable media box is the fullscreen host for both images and videos. Keep the navigation
+  // under that box so replacing a selected image/player never removes the fullscreen element.
   for (const nav of document.querySelectorAll(".detail_thumb_nav")) {
     const media = nav.closest(".i_detail_media, .b_detail_media");
     if (!media) continue;
-    const player = media.querySelector(".video-player");
-    const host = player && active === player ? player : media;
-    if (nav.parentElement !== host) host.append(nav);
+    if (nav.parentElement !== media) media.append(nav);
   }
 }
 
