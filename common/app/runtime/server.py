@@ -17652,7 +17652,11 @@ def imagine_video_request(payload: dict, prompt: str, request_id: str, action: s
         and isinstance(context_attachment, dict)
         and context_attachment.get("upload_origin_bundle")
     )
-    start_new_conversation = not bool(conversation_id)
+    reference_to_video = action == "i2v" and len(image_attachments) > 1
+    # The official site always starts image-based video generation in a new output
+    # conversation. Multi-image i2v uses referenceToVideo rather than imageToVideo,
+    # but follows the same conversation rule.
+    start_new_conversation = reference_to_video or not bool(conversation_id)
     direct_upload_urls: list[str] = []
     demoted_upload_references: list[dict] = []
     if action != "extend" and image_attachments:
@@ -17779,7 +17783,10 @@ def imagine_video_request(payload: dict, prompt: str, request_id: str, action: s
         references = imagine_direct_reference_urls(image_attachments, 7) if image_attachments else []
         direct_upload_urls = list(references)
         extra_references = imagine_direct_reference_urls(image_attachments[1:], 6) if len(image_attachments) > 1 else []
-        input_asset_ids = imagine_direct_input_asset_ids(image_attachments[:1], 1) if image_attachments else []
+        input_asset_ids = imagine_direct_input_asset_ids(
+            image_attachments if reference_to_video else image_attachments[:1],
+            7 if reference_to_video else 1,
+        ) if image_attachments else []
         if references:
             source = image_attachments[0]
             parent_post_id = "" if direct_upload else imagine_attachment_real_post_id(
@@ -17800,7 +17807,13 @@ def imagine_video_request(payload: dict, prompt: str, request_id: str, action: s
                 if not parent_post_id and input_asset_ids:
                     parent_post_id = input_asset_ids[0]
                 if parent_post_id:
-                    input_asset_ids = [parent_post_id]
+                    if reference_to_video:
+                        reference_asset_ids = imagine_direct_input_asset_ids(image_attachments[1:], 6)
+                        input_asset_ids = [parent_post_id, *[
+                            value for value in reference_asset_ids if value != parent_post_id
+                        ]]
+                    else:
+                        input_asset_ids = [parent_post_id]
                 if upload_origin_i2v:
                     original_post_id = parent_post_id
                 elif not original_post_id and not source_is_t2i_result:
@@ -17817,7 +17830,9 @@ def imagine_video_request(payload: dict, prompt: str, request_id: str, action: s
                 or imagine_attachment_real_post_id(source, "root_post_id", "detail_root_post_id")
                 or parent_post_id
             )
-            file_attachment_ids = [parent_post_id] if parent_post_id else []
+            # Official referenceToVideo carries every source in inputAssets and no
+            # fileAttachments. Single-image imageToVideo keeps its existing shape.
+            file_attachment_ids = [] if reference_to_video else ([parent_post_id] if parent_post_id else [])
             # grok.com's own body carries none of these, and neither does ours — the bridge
             # reads them to work out the container and input asset it passes to the site's
             # generate call. With them gone the container could not be resolved once the
@@ -17833,10 +17848,14 @@ def imagine_video_request(payload: dict, prompt: str, request_id: str, action: s
             source_aspect = attachment_aspect_ratio(source)
             if not model_config.get("aspectRatio") and source_aspect:
                 model_config["aspectRatio"] = source_aspect
-            if extra_references:
+            if reference_to_video:
+                model_config["imageReferences"] = references
+            elif extra_references:
                 model_config["imageReferences"] = extra_references
             if not input_asset_ids:
                 raise RuntimeError("Video input asset ids could not be resolved.")
+            if reference_to_video and len(input_asset_ids) < 2:
+                raise RuntimeError("Reference video needs two resolvable image asset ids.")
             source_info = {
                 "parent_post_id": parent_post_id,
                 "root_post_id": root_post_id,
@@ -17867,8 +17886,11 @@ def imagine_video_request(payload: dict, prompt: str, request_id: str, action: s
             }
             if model_config.get("aspectRatio"):
                 media_gen_video["aspectRatio"] = model_config["aspectRatio"]
-            media_gen_video["mode"] = video_generation_mode
-            media_gen_input = {"imageToVideo": media_gen_video}
+            if reference_to_video:
+                media_gen_input = {"referenceToVideo": media_gen_video}
+            else:
+                media_gen_video["mode"] = video_generation_mode
+                media_gen_input = {"imageToVideo": media_gen_video}
         else:
             referer = IMAGINE_BASE + "/imagine/saved"
             media_gen_video = {

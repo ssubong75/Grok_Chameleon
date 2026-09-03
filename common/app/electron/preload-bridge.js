@@ -3189,11 +3189,11 @@
     const conversationId = String(payload.grokChameleonConversationId || "").trim();
     const parentResponseId = String(payload.grokChameleonParentResponseId || "").trim();
     const directUpload = Boolean(payload.grokChameleonDirectUpload);
-    // Grok creates a new conversation for i2v from an image.  Reusing the image
-    // card's (or a relation-overlay's) conversation can point at the preceding
-    // extension instead, and the request is then rejected.  Only videoExtension
+    // Grok creates a new conversation for both single-image and reference-image
+    // i2v. Reusing the source card's conversation can point at the preceding
+    // generation instead, and the request is then rejected. Only videoExtension
     // continues the video conversation.
-    const imageToVideoStartsNewConversation = variant.kind === "imageToVideo";
+    const imageToVideoStartsNewConversation = ["imageToVideo", "referenceToVideo"].includes(variant.kind);
     let startNewConversation = Boolean(
       payload.grokChameleonStartNewConversation
       || directUpload
