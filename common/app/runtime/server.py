@@ -108,6 +108,7 @@ BUILD_VIDEO_PROGRESS_SMOOTH_TICKS = 6
 IMAGINE_DIRECT_FIRST_SIGNAL_SECONDS = 25
 IMAGINE_DIRECT_VIDEO_FIRST_SIGNAL_SECONDS = 14
 IMAGINE_DIRECT_I2I_MAX_WAIT_SECONDS = 14
+IMAGINE_DIRECT_I2I_SAVED_RECHECK_SECONDS = 35
 # Four-image requests measured 19.9s, 20.3s and 25.4s on 2026-08-08, so the bar is
 # sized to the slowest of them instead of parking at 99% for the last five seconds.
 # Results still finish the bar early when they arrive sooner.
@@ -18629,7 +18630,11 @@ def imagine_native_bridge_generate(
         candidate_recheck_seconds = (
             IMAGINE_DIRECT_CONFIRMED_MODERATION_FINAL_PROBE_SECONDS
             if confirmed_i2i_moderation
-            else (15 if action in {"i2i", "aspect"} or t2v_moderation_recovery else max_wait)
+            else (
+                IMAGINE_DIRECT_I2I_SAVED_RECHECK_SECONDS
+                if action == "i2i"
+                else (15 if action == "aspect" or t2v_moderation_recovery else max_wait)
+            )
         )
         recheck_started_at = time.time()
         i2i_moderation_detected_at = (
