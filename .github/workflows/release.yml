@@ -277,10 +277,7 @@ jobs:
               $packageSourceRoot = Join-Path $appRoot $autoSharedRoot
               Get-ChildItem -LiteralPath $packageSourceRoot -Recurse -File | ForEach-Object {
                 $releaseRelative = [System.IO.Path]::GetRelativePath($appRoot, $_.FullName)
-                if (
-                  $managedSourceExtensions.Contains($_.Extension)
-                  -and -not $registeredRelatives.Contains($releaseRelative)
-                ) {
+                if ($managedSourceExtensions.Contains($_.Extension) -and -not $registeredRelatives.Contains($releaseRelative)) {
                   $releaseRelative
                 }
               }
