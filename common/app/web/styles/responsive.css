@@ -1,0 +1,505 @@
+/* Responsive layout rules */
+@media (max-width: 1280px) {
+  .account_total_panel,
+  .account_selection_panel {
+    width: min(92%, 1316px);
+  }
+
+  .account_list {
+    column-gap: 192px;
+  }
+}
+
+@media (max-width: 980px) {
+  .i_detail,
+  .b_detail {
+    grid-template-columns: 1fr;
+  }
+
+  .workspace.i_detail_open .i_detail,
+  .workspace.b_detail_open .b_detail {
+    position: relative;
+    inset: auto;
+    align-items: center;
+    min-height: calc(100vh - 220px);
+    min-height: calc(100dvh - 220px);
+    padding: 12px 0 0;
+  }
+
+  .i_detail_stage,
+  .b_detail_stage {
+    align-content: center;
+    transform: none;
+  }
+
+  .i_detail_media_shell,
+  .b_detail_media_shell {
+    align-content: start;
+    gap: 10px;
+    width: 100%;
+  }
+
+  .i_detail_thumb_list,
+  .b_detail_thumb_list {
+    position: static;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, 64px);
+    order: 2;
+    justify-content: center;
+    width: 100%;
+    max-height: none;
+    padding: 0 4px;
+    overflow: visible;
+    transform: none;
+  }
+
+  .i_detail_media_wrap,
+  .b_detail_media_wrap {
+    order: 1;
+  }
+
+  .i_detail_actions,
+  .b_detail_actions {
+    position: static;
+    display: flex;
+    order: 3;
+    flex-wrap: wrap;
+    justify-content: center;
+    transform: none;
+  }
+
+  .i_detail_action,
+  .b_detail_action {
+    width: 37.6px;
+    height: 37.6px;
+    min-height: 37.6px;
+    font-size: 17.6px;
+  }
+
+  .detail_job_badge,
+  .detail_job_badge.failed {
+    flex-basis: 37.6px;
+    width: 37.6px;
+    min-width: 37.6px;
+    height: 37.6px;
+  }
+
+  .i_detail_download,
+  .b_detail_download {
+    font-size: 20px;
+  }
+
+  .i_detail_delete_icon,
+  .b_detail_delete_icon {
+    width: 17.6px;
+    height: 17.6px;
+  }
+
+  .i_detail_delete_icon::before,
+  .i_detail_delete_icon::after,
+  .b_detail_delete_icon::before,
+  .b_detail_delete_icon::after {
+    width: 17.6px;
+    height: 3.2px;
+  }
+
+  .i_detail_edit_glyph,
+  .b_detail_edit_glyph {
+    font-size: 21.12px;
+    transform: translateY(-1.6px);
+  }
+
+  .account_list {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  .account::after {
+    display: none;
+  }
+
+  .account_selection_panel {
+    width: 100%;
+  }
+
+  .account_row {
+    grid-template-columns: minmax(0, 1fr) 27px;
+  }
+
+  .account_row_imagine {
+    grid-template-columns: minmax(0, 1fr) 95px 27px;
+  }
+}
+
+@media (max-width: 1100px) {
+  .app_shell {
+    grid-template-columns: 76px 1fr;
+  }
+
+  .sidebar {
+    padding-inline: 10px;
+  }
+
+  .nav_item span:not(.nav_icon),
+  .account-copy,
+  .sidebar_search_input,
+  .sidebar_close {
+    display: none;
+  }
+
+  .nav_sub_item {
+    min-height: 42px;
+    padding: 0 12px;
+    gap: 11px;
+  }
+
+  .nav_sub_item img,
+  .nav_sub_item .nav_icon {
+    width: 20px;
+    height: 20px;
+    flex: 0 0 20px;
+    font-size: 16px;
+  }
+
+  .workspace {
+    padding-inline: 18px;
+  }
+
+  .card_list {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    overflow: auto;
+  }
+
+  .card,
+  .prompt_card {
+    height: 266px;
+  }
+
+}
+
+@media (max-width: 720px) {
+  body {
+    overflow: auto;
+  }
+
+  .app_shell {
+    display: block;
+  }
+
+  .sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 40;
+    width: 76px;
+  }
+
+  .workspace {
+    min-height: 100vh;
+    min-height: 100dvh;
+    padding: 18px 14px 130px 90px;
+    overflow: visible;
+  }
+
+  .topbar_subrow {
+    flex-wrap: wrap;
+  }
+
+  .card_list {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    height: auto;
+    min-height: 722px;
+    min-height: min(722px, calc(100dvh - 170px));
+    max-height: none;
+  }
+
+  .usage_body {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-aspect-ratio: 1/1) {
+  .workspace.i_detail_open .i_detail,
+  .workspace.b_detail_open .b_detail {
+    --detail-composer-clearance: 112px;
+    --detail-narrow-controls-height: 138px;
+    align-items: start;
+    min-height: 0;
+    max-height: calc(100vh - var(--detail-composer-clearance));
+    max-height: calc(100dvh - var(--detail-composer-clearance));
+    padding: 0 0 var(--detail-composer-clearance);
+  }
+
+  .workspace.i_detail_open .i_detail_stage,
+  .workspace.b_detail_open .b_detail_stage {
+    align-content: start;
+    align-self: start;
+    max-height: calc(100vh - var(--detail-composer-clearance));
+    max-height: calc(100dvh - var(--detail-composer-clearance));
+  }
+
+  .workspace.i_detail_open .i_detail_media_shell,
+  .workspace.b_detail_open .b_detail_media_shell {
+    align-content: start;
+    height: min(45vw, 740px, calc(100vh - var(--detail-composer-clearance) - var(--detail-narrow-controls-height)));
+    height: min(45vw, 740px, calc(100dvh - var(--detail-composer-clearance) - var(--detail-narrow-controls-height)));
+    max-height: calc(100vh - var(--detail-composer-clearance) - var(--detail-narrow-controls-height));
+    max-height: calc(100dvh - var(--detail-composer-clearance) - var(--detail-narrow-controls-height));
+  }
+
+  .collection_2nd_card_grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-aspect-ratio: 2/3) {
+  .collection_2nd_card_grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-aspect-ratio: 5/4) {
+  .account {
+    gap: 9px;
+    padding: 12px;
+  }
+
+  .account::after {
+    display: block;
+    top: 104px;
+    bottom: 19px;
+  }
+
+  .account_list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 9px 15px;
+  }
+
+  .account_total_panel,
+  .account_selection_panel {
+    width: 100%;
+  }
+
+  .account_total_panel {
+    margin-top: 5px;
+  }
+
+  .account_selection_panel {
+    margin-top: 10px;
+  }
+
+  .total_account_btn {
+    width: 64%;
+    height: 45px;
+    min-height: 45px;
+    font-size: clamp(12px, 1.3vw, 16px);
+  }
+
+  .account_column,
+  .account_column_body {
+    gap: 5px;
+  }
+
+  .account_row {
+    grid-template-columns: 46px minmax(0, 1fr) 22px;
+    gap: 5px;
+    width: 100%;
+    height: 44px;
+    min-height: 44px;
+    padding: 6px 7px;
+  }
+
+  .account_column_header {
+    width: 100%;
+    height: 44px;
+    min-height: 44px;
+    font-size: 14px;
+  }
+
+  .account_row_build,
+  .account_row_imagine {
+    grid-template-columns: 46px minmax(0, 1fr) 66px 22px;
+  }
+
+  .account_tier_control,
+  .account_tier_btn {
+    width: 46px;
+    min-width: 46px;
+  }
+
+  .account_tier_btn {
+    height: 24px;
+    min-height: 24px;
+    padding: 0 3px;
+    font-size: 9px;
+  }
+
+  .account_status_badge {
+    width: 66px;
+    min-width: 66px;
+    height: 26px;
+    padding: 0 4px;
+    font-size: 9px;
+  }
+
+  .account_row_email {
+    font-size: clamp(10px, 1.28vw, 14px);
+  }
+
+  .account_delete_btn {
+    width: 20px;
+    height: 20px;
+    font-size: 10px;
+  }
+}
+
+@media (max-aspect-ratio: 3/4) {
+  .account {
+    padding: 9px;
+  }
+
+  .account::after {
+    top: 92px;
+    bottom: 15px;
+  }
+
+  .account_list {
+    gap: 7px;
+  }
+
+  .total_account_btn {
+    height: 39px;
+    min-height: 39px;
+    font-size: 12px;
+  }
+
+  .account_column,
+  .account_column_body {
+    gap: 4px;
+  }
+
+  .account_row {
+    grid-template-columns: 37px minmax(0, 1fr) 19px;
+    gap: 3px;
+    height: 39px;
+    min-height: 39px;
+    padding: 4px 5px;
+  }
+
+  .account_column_header {
+    height: 39px;
+    min-height: 39px;
+    font-size: 10px;
+  }
+
+  .account_row_build,
+  .account_row_imagine {
+    grid-template-columns: 37px minmax(0, 1fr) 49px 19px;
+  }
+
+  .account_tier_control,
+  .account_tier_btn {
+    width: 37px;
+    min-width: 37px;
+  }
+
+  .account_tier_btn {
+    height: 22px;
+    min-height: 22px;
+    padding: 0 3px;
+    font-size: 9px;
+  }
+
+  .account_status_badge {
+    width: 49px;
+    min-width: 49px;
+    height: 22px;
+    padding: 0 3px;
+    font-size: 9px;
+  }
+
+  .account_row_email {
+    font-size: 9px;
+  }
+
+  .account_delete_btn {
+    width: 17px;
+    height: 17px;
+    font-size: 9px;
+  }
+}
+
+@media (max-aspect-ratio: 5/4) and (min-aspect-ratio: 1/1) {
+  .card_list {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .card {
+    height: 400px;
+  }
+}
+
+@media (max-aspect-ratio: 1/1) {
+  .i_main,
+  .i_unsaved_main {
+    position: relative;
+    margin-top: 9px;
+    overflow: visible;
+  }
+
+  .i_main_header,
+  .i_main_actions,
+  .i_unsaved_main_header,
+  .i_unsaved_main_actions {
+    position: static;
+  }
+
+  .i_main_header,
+  .i_unsaved_main_header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    column-gap: 10px;
+    row-gap: 0;
+    padding: 0;
+  }
+
+  .i_main_actions,
+  .i_main_right_actions,
+  .i_unsaved_main_actions,
+  .i_unsaved_main_right_actions {
+    display: contents;
+  }
+
+  .i_main_title_btn {
+    grid-column: 1;
+    justify-self: start;
+  }
+
+  #i_unsaved_title_btn {
+    grid-column: 1;
+    justify-self: start;
+  }
+
+  #i_t2i_btn,
+  #i_unsaved_refresh_btn {
+    grid-column: 2;
+    justify-self: end;
+  }
+
+  .card_list {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-aspect-ratio: 2/3) {
+  .card_list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (hover: none) {
+  .card .media-card-select-button,
+  .card .card-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}

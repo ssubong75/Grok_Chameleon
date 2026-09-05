@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Grok Studio Image Editor</title>
+    <link rel="stylesheet" href="/assets/editor.css?v=lab-v10-mac-base-20260621-01" />
+  </head>
+  <body>
+    <header class="editor-toolbar">
+      <div class="editor-title">
+        <strong>Image Editor</strong>
+      </div>
+      <div class="editor-actions">
+        <span id="editorStatus" role="status"></span>
+        <button id="closeEditorBtn" class="secondary-button" type="button">Close</button>
+        <button id="saveEditorBtn" class="save-button" type="button">Save</button>
+      </div>
+    </header>
+
+    <main class="editor-shell" aria-label="Grok Studio image editor layout preview">
+      <nav class="tool-rail" aria-label="Editor tools">
+        <button class="tool-button tool-selection" type="button" data-tool="selection" data-tooltip="Selection" aria-label="Selection">
+          <span aria-hidden="true"></span>
+        </button>
+        <button class="tool-button tool-crop" type="button" data-tool="crop" data-tooltip="Crop" aria-label="Crop">
+          <svg class="toast-icon" aria-hidden="true"><use href="#ic-crop"></use></svg>
+        </button>
+        <button class="tool-button tool-transform" type="button" data-tool="transform" data-tooltip="Transform" aria-label="Transform">
+          <span aria-hidden="true"></span>
+        </button>
+        <button class="tool-button tool-draw" type="button" data-tool="draw" data-tooltip="Draw" aria-label="Draw">
+          <svg class="toast-icon" aria-hidden="true"><use href="#ic-draw"></use></svg>
+        </button>
+        <button class="tool-button tool-eraser" type="button" data-tool="eraser" data-tooltip="Eraser" aria-label="Eraser">
+          <span aria-hidden="true"></span>
+        </button>
+        <button class="tool-button tool-shape" type="button" data-tool="shape" data-tooltip="Shape" aria-label="Shape">
+          <svg class="toast-icon" aria-hidden="true"><use href="#ic-shape"></use></svg>
+        </button>
+        <button class="tool-button tool-icon" type="button" data-tool="icon" data-tooltip="Icon" aria-label="Icon">
+          <svg class="toast-icon" aria-hidden="true"><use href="#ic-icon"></use></svg>
+        </button>
+        <button class="tool-button tool-text" type="button" data-tool="text" data-tooltip="Text" aria-label="Text">
+          <svg class="toast-icon" aria-hidden="true"><use href="#ic-text"></use></svg>
+        </button>
+        <button class="tool-button tool-filter" type="button" data-tool="filter" data-tooltip="Filter" aria-label="Filter">
+          <svg class="toast-icon" aria-hidden="true"><use href="#ic-filter"></use></svg>
+        </button>
+      </nav>
+
+      <aside class="option-panel" aria-label="Editor options">
+        <section class="option-group selection-options" data-panel="selection" aria-label="Selection options">
+          <h2>Selection</h2>
+          <div class="selection-shapes">
+            <button class="shape-choice rectangle-choice" type="button" data-selection-shape="rect" aria-label="Rectangle selection"></button>
+            <button class="shape-choice ellipse-choice" type="button" data-selection-shape="ellipse" aria-label="Ellipse selection"></button>
+          </div>
+          <button class="inverse-button" type="button" data-selection-action="inverse">Inverse</button>
+          <label class="range-control">
+            <span>Feather</span>
+            <span class="range-inputs">
+              <input type="range" min="0" max="100" value="0" data-control="selectionFeather" tabindex="-1" />
+              <input type="text" value="0" tabindex="-1" aria-label="Feather value" />
+            </span>
+          </label>
+        </section>
+        <section class="option-group" data-panel="crop" aria-label="Crop options">
+          <h2>Crop</h2>
+          <div class="crop-grid">
+            <button class="crop-choice" type="button" data-ratio="original"><svg class="toast-icon" aria-hidden="true"><use href="#ic-crop"></use></svg><span>Original</span></button>
+            <button class="crop-choice" type="button" data-ratio="custom"><svg class="toast-icon" aria-hidden="true"><use href="#ic-crop"></use></svg><span>Custom</span></button>
+            <button class="crop-choice" type="button" data-ratio="1"><svg class="toast-icon" aria-hidden="true"><use href="#ic-crop"></use></svg><span>1:1</span></button>
+            <button class="crop-choice" type="button" data-ratio="0.6666666667"><svg class="toast-icon" aria-hidden="true"><use href="#ic-crop"></use></svg><span>2:3</span></button>
+            <button class="crop-choice" type="button" data-ratio="1.5"><svg class="toast-icon" aria-hidden="true"><use href="#ic-crop"></use></svg><span>3:2</span></button>
+            <button class="crop-choice" type="button" data-ratio="0.75"><svg class="toast-icon" aria-hidden="true"><use href="#ic-crop"></use></svg><span>3:4</span></button>
+            <button class="crop-choice" type="button" data-ratio="1.3333333333"><svg class="toast-icon" aria-hidden="true"><use href="#ic-crop"></use></svg><span>4:3</span></button>
+            <button class="crop-choice" type="button" data-ratio="0.5625"><svg class="toast-icon" aria-hidden="true"><use href="#ic-crop"></use></svg><span>9:16</span></button>
+            <button class="crop-choice" type="button" data-ratio="1.7777777778"><svg class="toast-icon" aria-hidden="true"><use href="#ic-crop"></use></svg><span>16:9</span></button>
+          </div>
+          <div class="option-divider"></div>
+          <div class="option-actions">
+            <button type="button" data-crop-action="apply"><svg class="toast-icon" aria-hidden="true"><use href="#ic-apply"></use></svg><span>Apply</span></button>
+            <button type="button" data-crop-action="cancel"><svg class="toast-icon" aria-hidden="true"><use href="#ic-cancel"></use></svg><span>Cancel</span></button>
+          </div>
+        </section>
+        <section class="option-group" data-panel="transform" aria-label="Transform options">
+          <h2>Transform</h2>
+          <div class="selection-shapes compact selection-panel-control">
+            <button class="shape-choice active rectangle-choice" type="button" data-selection-shape="rect" aria-label="Rectangle transform area"></button>
+            <button class="shape-choice ellipse-choice" type="button" data-selection-shape="ellipse" aria-label="Ellipse transform area"></button>
+          </div>
+          <button class="inverse-button selection-panel-control" type="button" data-selection-action="inverse">Inverse</button>
+          <label class="range-control selection-panel-control">
+            <span>Feather</span>
+            <span class="range-inputs">
+              <input type="range" min="0" max="100" value="0" data-control="selectionFeather" tabindex="-1" />
+              <input type="text" value="0" tabindex="-1" aria-label="Transform feather value" />
+            </span>
+          </label>
+          <div class="option-divider"></div>
+          <div class="icon-pair">
+            <button type="button" data-transform="flipX"><svg class="toast-icon" aria-hidden="true"><use href="#ic-flip-x"></use></svg><span>Flip X</span></button>
+            <button type="button" data-transform="flipY"><svg class="toast-icon" aria-hidden="true"><use href="#ic-flip-y"></use></svg><span>Flip Y</span></button>
+          </div>
+          <div class="icon-pair">
+            <button type="button" data-transform="rotateLeft"><svg class="toast-icon" aria-hidden="true"><use href="#ic-rotate-counterclockwise"></use></svg><span>Rotate</span></button>
+            <button type="button" data-transform="rotateRight"><svg class="toast-icon" aria-hidden="true"><use href="#ic-rotate-clockwise"></use></svg><span>Rotate</span></button>
+          </div>
+        </section>
+        <section class="option-group" data-panel="draw" aria-label="Draw options">
+          <h2>Draw</h2>
+          <div class="icon-pair">
+            <button class="active" type="button" data-draw-mode="free"><svg class="toast-icon" aria-hidden="true"><use href="#ic-draw-free"></use></svg><span>Free</span></button>
+            <button type="button" data-draw-mode="line"><svg class="toast-icon" aria-hidden="true"><use href="#ic-draw-line"></use></svg><span>Straight</span></button>
+          </div>
+          <div class="option-divider"></div>
+          <div class="color-choice"><span class="color-dot blue" data-color-target="drawColor"></span><span>Color</span></div>
+          <div class="option-divider"></div>
+          <label class="range-control">
+            <span>Range</span>
+            <span class="range-inputs"><input type="range" min="1" max="80" value="12" data-control="drawSize" tabindex="-1" /><input type="text" value="12" tabindex="-1" /></span>
+          </label>
+          <label class="range-control">
+            <span>Opacity</span>
+            <span class="range-inputs"><input type="range" min="0" max="100" value="0" data-control="drawOpacity" tabindex="-1" /><input type="text" value="0" tabindex="-1" /></span>
+          </label>
+        </section>
+        <section class="option-group" data-panel="eraser" aria-label="Eraser options">
+          <h2>Eraser</h2>
+          <div class="selection-shapes compact">
+            <button class="eraser-choice active hard" type="button" data-eraser="hard" aria-label="Hard eraser"></button>
+            <button class="eraser-choice soft" type="button" data-eraser="soft" aria-label="Soft eraser"></button>
+          </div>
+          <div class="option-divider"></div>
+          <label class="range-control">
+            <span>Range</span>
+            <span class="range-inputs"><input type="range" min="1" max="120" value="32" data-control="eraserSize" tabindex="-1" /><input type="text" value="32" tabindex="-1" /></span>
+          </label>
+          <label class="range-control">
+            <span>Opacity</span>
+            <span class="range-inputs"><input type="range" min="0" max="100" value="0" data-control="eraserOpacity" tabindex="-1" /><input type="text" value="0" tabindex="-1" /></span>
+          </label>
+        </section>
+        <section class="option-group" data-panel="shape" aria-label="Shape options">
+          <h2>Shape</h2>
+          <div class="shape-grid">
+            <button type="button" data-shape="rect"><svg class="toast-icon" aria-hidden="true"><use href="#ic-shape-rectangle"></use></svg><span>Rectangle</span></button>
+            <button type="button" data-shape="circle"><svg class="toast-icon" aria-hidden="true"><use href="#ic-shape-circle"></use></svg><span>Circle</span></button>
+            <button type="button" data-shape="triangle"><svg class="toast-icon" aria-hidden="true"><use href="#ic-shape-triangle"></use></svg><span>Triangle</span></button>
+          </div>
+          <div class="option-divider"></div>
+          <div class="color-row"><div class="color-choice"><span class="color-dot none" data-color-target="shapeFill"></span><span>Fill</span></div><div class="color-choice"><span class="color-dot yellow" data-color-target="shapeStrokeColor"></span><span>Stroke</span></div></div>
+          <div class="option-divider"></div>
+          <label class="range-control"><span>Thickness</span><span class="range-inputs"><input type="range" min="0" max="100" value="2" data-control="shapeStroke" tabindex="-1" /><input type="text" value="2" tabindex="-1" /></span></label>
+          <label class="range-control"><span>Feather</span><span class="range-inputs"><input type="range" min="0" max="100" value="0" data-control="shapeFeather" tabindex="-1" /><input type="text" value="0" tabindex="-1" /></span></label>
+          <label class="range-control"><span>Opacity</span><span class="range-inputs"><input type="range" min="0" max="100" value="0" data-control="shapeOpacity" tabindex="-1" /><input type="text" value="0" tabindex="-1" /></span></label>
+        </section>
+        <section class="option-group" data-panel="icon" aria-label="Icon options">
+          <h2>Icon</h2>
+          <div class="icon-grid">
+            <button type="button" data-icon="arrow"><svg class="toast-icon" aria-hidden="true"><use href="#ic-icon-arrow"></use></svg><span>Arrow1</span></button>
+            <button type="button" data-icon="arrow2"><svg class="toast-icon" aria-hidden="true"><use href="#ic-icon-arrow-2"></use></svg><span>Arrow2</span></button>
+            <button type="button" data-icon="arrow3"><svg class="toast-icon" aria-hidden="true"><use href="#ic-icon-arrow-3"></use></svg><span>Arrow3</span></button>
+            <button type="button" data-icon="star"><svg class="toast-icon" aria-hidden="true"><use href="#ic-icon-star"></use></svg><span>Star1</span></button>
+            <button type="button" data-icon="star2"><svg class="toast-icon" aria-hidden="true"><use href="#ic-icon-star-2"></use></svg><span>Star2</span></button>
+            <button type="button" data-icon="polygon"><svg class="toast-icon" aria-hidden="true"><use href="#ic-icon-polygon"></use></svg><span>Polygon</span></button>
+            <button type="button" data-icon="location"><svg class="toast-icon" aria-hidden="true"><use href="#ic-icon-location"></use></svg><span>Location</span></button>
+            <button type="button" data-icon="heart"><svg class="toast-icon" aria-hidden="true"><use href="#ic-icon-heart"></use></svg><span>Heart</span></button>
+            <button type="button" data-icon="bubble"><svg class="toast-icon" aria-hidden="true"><use href="#ic-icon-bubble"></use></svg><span>Bubble1</span></button>
+            <button type="button" data-icon="bubble1">
+              <svg class="custom-svg-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.25 12.76c0 1.6 1.123 2.994 2.707 3.227 1.068.157 2.148.279 3.238.364.466.037.893.281 1.153.671L12 21l2.652-3.978c.26-.39.687-.634 1.153-.67 1.09-.086 2.17-.208 3.238-.365 1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0 0 12 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018Z" /></svg>
+              <span>Bubble2</span>
+            </button>
+            <button type="button" data-icon="bubble2">
+              <svg class="custom-svg-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2.25 12.76c0 1.6 1.123 2.994 2.707 3.227 1.087.16 2.185.283 3.293.369V21l4.076-4.076a1.526 1.526 0 0 1 1.037-.443 48.282 48.282 0 0 0 5.68-.494c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0 0 12 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018Z" /></svg>
+              <span>Bubble3</span>
+            </button>
+            <button type="button" data-icon="bubble3">
+              <svg class="custom-svg-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20.25c4.97 0 9-3.694 9-8.25s-4.03-8.25-9-8.25S3 7.444 3 12c0 2.104.859 4.023 2.273 5.48.432.447.74 1.04.586 1.641a4.483 4.483 0 0 1-.923 1.785A5.969 5.969 0 0 0 6 21c1.282 0 2.47-.402 3.445-1.087.81.22 1.668.337 2.555.337Z" /></svg>
+              <span>Bubble4</span>
+            </button>
+          </div>
+          <div class="option-divider"></div>
+          <button class="custom-icon-button" type="button" data-icon="custom">
+            <svg class="toast-icon" aria-hidden="true"><use href="#ic-icon-load"></use></svg>
+            <span>Custom icon</span>
+          </button>
+          <div class="option-divider"></div>
+          <div class="color-row"><div class="color-choice" data-icon-fill-choice><span class="color-dot yellow" data-color-target="iconFill"></span><span>Fill</span></div><div class="color-choice muted"><span class="color-dot white" data-color-target="iconStrokeColor"></span><span>Stroke</span></div></div>
+          <label class="range-control"><span>Opacity</span><span class="range-inputs"><input type="range" min="0" max="100" value="0" data-control="iconOpacity" tabindex="-1" /><input type="text" value="0" tabindex="-1" /></span></label>
+        </section>
+        <section class="option-group" data-panel="text" aria-label="Text options">
+          <h2>Text</h2>
+          <div class="font-picker">
+            <button class="fake-select" type="button" data-font-toggle><span data-font-label>Loading system fonts</span><span>⌄</span></button>
+            <div class="font-menu" data-font-menu></div>
+          </div>
+          <div class="option-divider"></div>
+          <div class="icon-pair triple">
+            <button type="button" data-text-style="bold"><svg class="toast-icon" aria-hidden="true"><use href="#ic-text-bold"></use></svg><span>Bold</span></button>
+            <button type="button" data-text-style="italic"><svg class="toast-icon" aria-hidden="true"><use href="#ic-text-italic"></use></svg><span>Italic</span></button>
+            <button type="button" data-text-style="underline"><svg class="toast-icon" aria-hidden="true"><use href="#ic-text-underline"></use></svg><span>Underline</span></button>
+          </div>
+          <div class="icon-pair triple">
+            <button type="button" data-text-align="left"><svg class="toast-icon" aria-hidden="true"><use href="#ic-text-align-left"></use></svg><span>Left</span></button>
+            <button class="active" type="button" data-text-align="center"><svg class="toast-icon" aria-hidden="true"><use href="#ic-text-align-center"></use></svg><span>Center</span></button>
+            <button type="button" data-text-align="right"><svg class="toast-icon" aria-hidden="true"><use href="#ic-text-align-right"></use></svg><span>Right</span></button>
+          </div>
+          <div class="option-divider"></div>
+          <div class="color-row"><div class="color-choice"><span class="color-dot yellow" data-color-target="textFill"></span><span>Fill</span></div><div class="color-choice"><span class="color-dot white" data-color-target="textStrokeColor"></span><span>Stroke</span></div></div>
+          <label class="range-control"><span>Text Size</span><span class="range-inputs"><input type="range" min="10" max="120" value="50" data-control="textSize" tabindex="-1" /><input type="text" value="50" tabindex="-1" /></span></label>
+          <label class="range-control"><span>Opacity</span><span class="range-inputs"><input type="range" min="0" max="100" value="0" data-control="textOpacity" tabindex="-1" /><input type="text" value="0" tabindex="-1" /></span></label>
+        </section>
+        <section class="option-group" data-panel="filter" aria-label="Filter options">
+          <h2>Filter</h2>
+          <div class="selection-shapes compact selection-panel-control">
+            <button class="shape-choice active rectangle-choice" type="button" data-selection-shape="rect" aria-label="Rectangle filter area"></button>
+            <button class="shape-choice ellipse-choice" type="button" data-selection-shape="ellipse" aria-label="Ellipse filter area"></button>
+          </div>
+          <button class="inverse-button selection-panel-control" type="button" data-selection-action="inverse">Inverse</button>
+          <label class="range-control selection-panel-control">
+            <span>Feather</span>
+            <span class="range-inputs">
+              <input type="range" min="0" max="100" value="0" data-control="selectionFeather" tabindex="-1" />
+              <input type="text" value="0" tabindex="-1" aria-label="Filter feather value" />
+            </span>
+          </label>
+          <div class="option-divider"></div>
+          <div class="filter-list">
+            <label><input type="checkbox" data-filter="grayscale" tabindex="-1" />Grayscale</label>
+            <label><input type="checkbox" data-filter="invert" tabindex="-1" />Invert</label>
+            <label><input type="checkbox" data-filter="sepia" tabindex="-1" />Sepia</label>
+            <label><input type="checkbox" data-filter="sepia2" tabindex="-1" />Sepia2</label>
+            <label><input type="checkbox" data-filter="blur" tabindex="-1" />Blur</label>
+            <label><input type="checkbox" data-filter="sharpen" tabindex="-1" />Sharpen</label>
+            <label><input type="checkbox" data-filter="emboss" tabindex="-1" />Emboss</label>
+            <label><input type="checkbox" data-filter="noiseEnabled" tabindex="-1" />Noise</label>
+            <label><input type="checkbox" data-filter="pixelate" tabindex="-1" />Pixelate</label>
+            <label><input type="checkbox" data-filter="color-filter" tabindex="-1" />Color Filter</label>
+          </div>
+          <div class="option-divider"></div>
+          <label class="range-control muted"><span>Distance</span><span class="range-inputs"><input type="range" min="0" max="100" value="0" data-filter-range="distance" tabindex="-1" /><input type="text" value="0" tabindex="-1" /></span></label>
+          <label class="range-control"><span>Brightness</span><span class="range-inputs"><input type="range" min="0" max="100" value="50" data-filter-range="brightness" tabindex="-1" /><input type="text" value="50" tabindex="-1" /></span></label>
+          <label class="range-control"><span>Noise</span><span class="range-inputs"><input type="range" min="0" max="100" value="20" data-filter-range="noise" tabindex="-1" /><input type="text" value="20" tabindex="-1" /></span></label>
+          <label class="range-control"><span>Pixelate</span><span class="range-inputs"><input type="range" min="0" max="100" value="0" data-filter-range="pixelate" tabindex="-1" /><input type="text" value="0" tabindex="-1" /></span></label>
+          <label class="range-control"><span>Threshold</span><span class="range-inputs"><input type="range" min="0" max="100" value="45" data-filter-range="threshold" tabindex="-1" /><input type="text" value="45" tabindex="-1" /></span></label>
+          <label class="range-control"><span>Tint Opacity</span><span class="range-inputs"><input type="range" min="0" max="100" value="100" data-filter-range="tintOpacity" tabindex="-1" /><input type="text" value="100" tabindex="-1" /></span></label>
+          <div class="filter-color-row">
+            <button type="button" data-filter-blend="tint"><span class="color-dot cyan" data-color-target="filterTint"></span><span>Tint</span></button>
+            <button type="button" data-filter-blend="multiply"><span class="color-dot indigo" data-color-target="filterMultiply"></span><span>Multiply</span></button>
+            <button type="button" data-filter-blend="blend"><span class="color-dot yellow" data-color-target="filterBlend"></span><span>Blend</span></button>
+          </div>
+        </section>
+      </aside>
+
+      <section class="image-workspace" aria-label="Image workspace">
+        <div class="image-stage">
+          <div class="canvas-board">
+            <div class="canvas-clip" aria-hidden="true">
+              <canvas id="imageCanvas"></canvas>
+              <img id="editorImage" alt="" />
+              <canvas id="paintCanvas"></canvas>
+            </div>
+            <div id="objectLayer" aria-hidden="true"></div>
+            <div id="selectionOverlay" aria-hidden="true"></div>
+            <div id="cropOverlay" aria-hidden="true"></div>
+            <div id="floatingToolbarLayer" aria-hidden="true"></div>
+          </div>
+        </div>
+        <aside class="right-tools" aria-label="View tools">
+          <button type="button" data-action="zoom-in" data-tooltip="Zoom In" aria-label="Zoom in" title="Zoom In"><svg class="toast-icon" aria-hidden="true"><use href="#ic-zoom-in"></use></svg></button>
+          <button type="button" data-action="zoom-out" data-tooltip="Zoom Out" aria-label="Zoom out" title="Zoom Out"><svg class="toast-icon" aria-hidden="true"><use href="#ic-zoom-out"></use></svg></button>
+          <button type="button" data-action="hand" data-tooltip="Hand" aria-label="Hand" title="Hand"><svg class="toast-icon" aria-hidden="true"><use href="#ic-hand"></use></svg></button>
+          <hr />
+          <button type="button" data-action="history" data-tooltip="History" aria-label="History" title="History"><svg class="toast-icon" aria-hidden="true"><use href="#ic-history"></use></svg></button>
+          <button type="button" data-action="undo" data-tooltip="Undo" aria-label="Undo" title="Undo"><svg class="toast-icon" aria-hidden="true"><use href="#ic-undo"></use></svg></button>
+          <button type="button" data-action="redo" data-tooltip="Redo" aria-label="Redo" title="Redo"><svg class="toast-icon" aria-hidden="true"><use href="#ic-redo"></use></svg></button>
+          <button type="button" data-action="reset" data-tooltip="Reset View" aria-label="Reset view" title="Reset View"><svg class="toast-icon" aria-hidden="true"><use href="#ic-reset"></use></svg></button>
+          <hr />
+          <button type="button" data-action="delete" data-tooltip="Delete Selection" aria-label="Delete selection" title="Delete Selection"><svg class="toast-icon" aria-hidden="true"><use href="#ic-delete"></use></svg></button>
+          <button type="button" data-action="delete-all" data-tooltip="Clear All Edits" aria-label="Clear all edits" title="Clear All Edits"><svg class="toast-icon" aria-hidden="true"><use href="#ic-delete-all"></use></svg></button>
+        </aside>
+      </section>
+    </main>
+
+    <script src="/assets/editor.js?v=lab-v10-editor-icon-export-20260628-01"></script>
+  </body>
+</html>

@@ -30,18 +30,15 @@
 - Windows 기준본의 `resources/app` 전체를 Mac 앱에 복사하거나 Mac 앱 전체를 Windows에 복사하지 않습니다. 검증된 대응 파일만 공통 소스에 반영합니다.
 - Windows에서 발견한 변경이 공통 동작이면 `common/app`에 반영하고 기존 워크플로로 두 운영체제를 같은 커밋에서 빌드합니다. Windows 전용 동작이면 공통 코드와 분리하고 Mac 구조가 유지되는지 확인합니다.
 
-## 현재 공통 소스 등록 누락 파일
+## 공통 소스 자동 등록 범위
 
-- 다음 파일은 현재 Windows와 Mac 배포본에 동일하게 존재하지만 GitHub `common/app` 및 기존 워크플로 공통 복사 목록에는 등록되어 있지 않습니다.
-- Electron·Python: `electron/preload-main.js`, `runtime/build_routes.py`
-- 이미지 편집기: `web/editor.html`, `web/assets/editor.js`, `web/assets/editor.css`
-- 웹 스크립트: `web/scripts/automation.js`, `web/scripts/b_detail_media.js`, `web/scripts/collection_utils.js`, `web/scripts/composer_submit.js`, `web/scripts/detail_common_actions.js`, `web/scripts/detail_video_player.js`, `web/scripts/dialog.js`, `web/scripts/i_detail_media.js`, `web/scripts/library_utils.js`, `web/scripts/prompt_render.js`, `web/scripts/prompt_translate.js`, `web/scripts/source_filter.js`, `web/scripts/source_render.js`
-- 스타일: `web/styles/base.css`, `web/styles/composer.css`, `web/styles/responsive.css`
-- 현재 직접 로드되지 않는 이전 파일: `web/scripts/app.js`
-- 위 파일 중 하나를 수정해야 하면 기준본만 바꾸지 않습니다. 먼저 공통/Windows 전용/Mac 전용으로 분류하고, 공통 파일이면 `common/app` 대응 파일과 기존 워크플로의 Windows 조립 목록, Mac `shared_relatives`, 게시 ZIP 검증 목록에 같은 상대 경로를 등록합니다.
-- `web/scripts/app.js`는 현재 `index.html`에서 로드되지 않으므로 수정 또는 공통 등록 전에 실제 사용 여부를 다시 확인합니다.
+- `common/app/electron/`, `common/app/runtime/`, `common/app/web/` 아래의 모든 파일은 기존 워크플로가 자동으로 찾아 Windows와 Mac 앱에 복사하고 최종 패키지와 게시된 Mac ZIP에서 다시 비교합니다.
+- 2026-09-05 기준으로 릴리스에만 있던 공통 파일 35개(코드·스타일 17개, SVG 18개)를 `common/app`에 편입했습니다. 이후 이 범위에 공통 파일을 추가할 때 워크플로 목록을 수동으로 여러 번 갱신할 필요가 없습니다.
+- Windows 또는 Mac 입력 ZIP에만 새 JavaScript, Python, HTML, CSS, SVG 파일이 생기고 `common/app`에는 없으면 빌드를 즉시 실패시켜 공통 소스 누락을 알립니다.
+- `web/scripts/app.js`는 현재 `index.html`에서 직접 로드되지 않는 이전 로더입니다. 기존 릴리스 구성을 보존하기 위해 공통 원본으로 관리하지만 새 진입점으로 사용하지 않습니다.
 - `package.json`은 Mac에만 `pack:mac` 명령이 있어 Windows와 내용이 다르므로 통째로 공통화하지 않습니다.
 - `tools/i2v_smoke_test.js`는 현재 Mac 배포본에만 있는 검증 도구이므로 Windows 공통 파일로 복사하지 않습니다.
+- `vendor/`에는 운영체제별 바이너리가 있으므로 자동 등록 범위에 포함하지 않습니다. FFmpeg 실행 파일과 라이선스는 기존 플랫폼별 목록으로 관리합니다.
 
 ## 패치 규칙
 

@@ -193,9 +193,31 @@ jobs:
             @{ Name = "ffmpeg"; Relative = "vendor\ffmpeg\ffmpeg.exe"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_FFMPEG_WIN) },
             @{ Name = "ffmpeg_license"; Relative = "vendor\ffmpeg\COPYING.LGPLv2.1"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_FFMPEG_LICENSE) }
           )
-          # The COMMON_* variables already name common; VARIANT_COMMON_DIR is redundant with
-          # a single variant but kept so a future variant only needs a new matrix entry.
           $variantRoot = Join-Path $env:GITHUB_WORKSPACE $env:VARIANT_COMMON_DIR
+          $variantAppRoot = Join-Path $variantRoot "app"
+          # The common Electron, runtime, and web trees are the source of truth. Discovering
+          # them here prevents a new shared file from being omitted from the Windows package.
+          $registeredRelatives = [System.Collections.Generic.HashSet[string]]::new(
+            [System.StringComparer]::OrdinalIgnoreCase
+          )
+          foreach ($shared in $sharedSources) {
+            [void]$registeredRelatives.Add($shared.Relative)
+          }
+          $autoSharedFiles = @(
+            foreach ($autoSharedRoot in @("electron", "runtime", "web")) {
+              Get-ChildItem -LiteralPath (Join-Path $variantAppRoot $autoSharedRoot) -Recurse -File
+            }
+          ) | Sort-Object FullName
+          foreach ($autoSharedFile in $autoSharedFiles) {
+            $relative = [System.IO.Path]::GetRelativePath($variantAppRoot, $autoSharedFile.FullName)
+            if ($registeredRelatives.Add($relative)) {
+              $sharedSources += @{
+                Name = "auto::$relative"
+                Relative = $relative
+                Source = $autoSharedFile.FullName
+              }
+            }
+          }
           foreach ($shared in $sharedSources) {
             $shared.Target = Join-Path $appRoot $shared.Relative
             $shared.Source = Join-Path $variantRoot (Join-Path "app" $shared.Relative)
@@ -244,6 +266,29 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Windows input ZIP CRC check failed." }
           & $sevenZip x -y "-o$env:GITHUB_WORKSPACE\unpack" $inputZip
           if ($LASTEXITCODE -ne 0) { throw "Windows extraction failed." }
+          $managedSourceExtensions = [System.Collections.Generic.HashSet[string]]::new(
+            [System.StringComparer]::OrdinalIgnoreCase
+          )
+          @(".js", ".py", ".html", ".css", ".svg") | ForEach-Object {
+            [void]$managedSourceExtensions.Add($_)
+          }
+          $unregisteredPackageSources = @(
+            foreach ($autoSharedRoot in @("electron", "runtime", "web")) {
+              $packageSourceRoot = Join-Path $appRoot $autoSharedRoot
+              Get-ChildItem -LiteralPath $packageSourceRoot -Recurse -File | ForEach-Object {
+                $releaseRelative = [System.IO.Path]::GetRelativePath($appRoot, $_.FullName)
+                if (
+                  $managedSourceExtensions.Contains($_.Extension)
+                  -and -not $registeredRelatives.Contains($releaseRelative)
+                ) {
+                  $releaseRelative
+                }
+              }
+            }
+          ) | Sort-Object
+          if ($unregisteredPackageSources.Count -gt 0) {
+            throw "Windows input has source files missing from common/app: $($unregisteredPackageSources -join ', ')"
+          }
           foreach ($required in @($sharedSources.Source + @(
             $state,
             $outerExe,
@@ -301,16 +346,10 @@ jobs:
             node --check $javascript.Target
             if ($LASTEXITCODE -ne 0) { throw "Windows JavaScript syntax check failed: $($javascript.Relative)" }
           }
-          python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" $targetServer
-          if ($LASTEXITCODE -ne 0) { throw "Windows server.py syntax check failed." }
-          python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" $targetLibraryIndex
-          if ($LASTEXITCODE -ne 0) { throw "Windows library_index.py syntax check failed." }
-          python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" $targetImagineState
-          if ($LASTEXITCODE -ne 0) { throw "Windows imagine_state.py syntax check failed." }
-          python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" $targetImagineAccounts
-          if ($LASTEXITCODE -ne 0) { throw "Windows imagine_accounts.py syntax check failed." }
-          python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" $targetImagineRoutes
-          if ($LASTEXITCODE -ne 0) { throw "Windows imagine_routes.py syntax check failed." }
+          foreach ($pythonSource in $sharedSources | Where-Object { $_.Relative.EndsWith(".py") }) {
+            python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" $pythonSource.Target
+            if ($LASTEXITCODE -ne 0) { throw "Windows Python syntax check failed: $($pythonSource.Relative)" }
+          }
 
           $composerText = Get-Content -Raw -LiteralPath $targetComposer
           foreach ($marker in @(
@@ -573,18 +612,13 @@ jobs:
             node --check (Join-Path $verifiedAppRoot $javascript.Relative)
             if ($LASTEXITCODE -ne 0) { throw "Packaged Windows JavaScript syntax check failed: $($javascript.Relative)" }
           }
+          foreach ($pythonSource in $sharedSources | Where-Object { $_.Relative.EndsWith(".py") }) {
+            $verifiedPython = Join-Path $verifiedAppRoot $pythonSource.Relative
+            python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" $verifiedPython
+            if ($LASTEXITCODE -ne 0) { throw "Packaged Windows Python syntax check failed: $($pythonSource.Relative)" }
+          }
           node --test (Join-Path $env:GITHUB_WORKSPACE "tests\library-backup.test.js")
           if ($LASTEXITCODE -ne 0) { throw "Library Backup tests failed on Windows." }
-          python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" (Join-Path $verifiedAppRoot "runtime\server.py")
-          if ($LASTEXITCODE -ne 0) { throw "Packaged Windows server syntax check failed." }
-          python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" (Join-Path $verifiedAppRoot "runtime\library_index.py")
-          if ($LASTEXITCODE -ne 0) { throw "Packaged Windows library index syntax check failed." }
-          python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" (Join-Path $verifiedAppRoot "runtime\imagine_state.py")
-          if ($LASTEXITCODE -ne 0) { throw "Packaged Windows imagine_state syntax check failed." }
-          python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" (Join-Path $verifiedAppRoot "runtime\imagine_accounts.py")
-          if ($LASTEXITCODE -ne 0) { throw "Packaged Windows imagine_accounts syntax check failed." }
-          python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" (Join-Path $verifiedAppRoot "runtime\imagine_routes.py")
-          if ($LASTEXITCODE -ne 0) { throw "Packaged Windows imagine_routes syntax check failed." }
           "windows-output-sha256=" + (Get-FileHash -Algorithm SHA256 -LiteralPath $outputZip).Hash.ToLowerInvariant()
 
       - name: Retain the verified Windows build
@@ -712,6 +746,41 @@ jobs:
             vendor/ffmpeg/ffmpeg
             vendor/ffmpeg/COPYING.LGPLv2.1
           )
+          # Automatically include every shared Electron, runtime, and web file so a
+          # newly added common source cannot be left behind in the Mac package.
+          while IFS= read -r discovered_relative; do
+            already_registered=false
+            for registered_relative in "${shared_relatives[@]}"; do
+              if [[ "$registered_relative" == "$discovered_relative" ]]; then
+                already_registered=true
+                break
+              fi
+            done
+            if [[ "$already_registered" == false ]]; then
+              shared_relatives+=("$discovered_relative")
+            fi
+          done < <(cd "$common_root" && find electron runtime web -type f -print | LC_ALL=C sort)
+          release_only_sources=()
+          while IFS= read -r release_relative; do
+            source_registered=false
+            for registered_relative in "${shared_relatives[@]}"; do
+              if [[ "$registered_relative" == "$release_relative" ]]; then
+                source_registered=true
+                break
+              fi
+            done
+            if [[ "$source_registered" == false ]]; then
+              release_only_sources+=("$release_relative")
+            fi
+          done < <(
+            cd "$app_root"
+            find electron runtime web -type f \( -name '*.js' -o -name '*.py' -o -name '*.html' -o -name '*.css' -o -name '*.svg' \) -print | LC_ALL=C sort
+          )
+          if (( ${#release_only_sources[@]} > 0 )); then
+            printf 'Mac input has source files missing from common/app:\n' >&2
+            printf '  %s\n' "${release_only_sources[@]}" >&2
+            exit 1
+          fi
           target="$app_root/web/scripts/composer_options.js"
           main_js="$app_root/electron/main.js"
           preload_js="$app_root/electron/preload-bridge.js"
@@ -768,6 +837,8 @@ jobs:
             cmp "$common_root/$relative" "$app_root/$relative"
             if [[ "$relative" == *.js ]]; then
               node --check "$app_root/$relative"
+            elif [[ "$relative" == *.py ]]; then
+              python3 -c 'import ast, pathlib, sys; source = pathlib.Path(sys.argv[1]); ast.parse(source.read_text(encoding="utf-8"), filename=str(source))' "$app_root/$relative"
             fi
           done
           node --test "$GITHUB_WORKSPACE/tests/library-backup.test.js"
@@ -1055,6 +1126,18 @@ jobs:
             vendor/ffmpeg/ffmpeg
             vendor/ffmpeg/COPYING.LGPLv2.1
           )
+          while IFS= read -r discovered_relative; do
+            already_registered=false
+            for registered_relative in "${shared_relatives[@]}"; do
+              if [[ "$registered_relative" == "$discovered_relative" ]]; then
+                already_registered=true
+                break
+              fi
+            done
+            if [[ "$already_registered" == false ]]; then
+              shared_relatives+=("$discovered_relative")
+            fi
+          done < <(cd "$common_root" && find electron runtime web -type f -print | LC_ALL=C sort)
           if find "$root" -type d -name '__pycache__' -print | grep -q .; then
             echo 'Python cache found before Mac packaging.' >&2
             exit 1
@@ -1105,6 +1188,8 @@ jobs:
             cmp "$common_root/$relative" "$verified_app/$relative"
             if [[ "$relative" == *.js ]]; then
               node --check "$verified_app/$relative"
+            elif [[ "$relative" == *.py ]]; then
+              python3 -c 'import ast, pathlib, sys; source = pathlib.Path(sys.argv[1]); ast.parse(source.read_text(encoding="utf-8"), filename=str(source))' "$verified_app/$relative"
             fi
           done
           python3 - "$verified_server" <<'PY'
@@ -1466,6 +1551,19 @@ jobs:
             vendor/ffmpeg/COPYING.LGPLv2.1
           )
 
+          while IFS= read -r discovered_relative; do
+            already_registered=false
+            for registered_relative in "${shared_relatives[@]}"; do
+              if [[ "$registered_relative" == "$discovered_relative" ]]; then
+                already_registered=true
+                break
+              fi
+            done
+            if [[ "$already_registered" == false ]]; then
+              shared_relatives+=("$discovered_relative")
+            fi
+          done < <(cd "$common_root" && find electron runtime web -type f -print | LC_ALL=C sort)
+
           test -d "$root"
           test -d "$main_app"
           test -d "$app_root"
@@ -1498,6 +1596,8 @@ jobs:
             cmp "$common_root/$relative" "$app_root/$relative"
             if [[ "$relative" == *.js ]]; then
               node --check "$app_root/$relative"
+            elif [[ "$relative" == *.py ]]; then
+              python3 -c 'import ast, pathlib, sys; source = pathlib.Path(sys.argv[1]); ast.parse(source.read_text(encoding="utf-8"), filename=str(source))' "$app_root/$relative"
             fi
           done
           "$python_exec" -c 'import sys; print("PUBLISHED_MAC_PYTHON_OK", sys.version_info[:3])'
