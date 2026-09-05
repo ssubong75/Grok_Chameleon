@@ -4347,16 +4347,57 @@ def imagine_ensure_upload_bundle_record(
     source_item = imagine_cache_upload_bundle_source(root, source_item, account)
     source_id = imagine_item_asset_id(source_item)
     legacy = relations.get(source_id) if source_id and isinstance(relations.get(source_id), dict) else {}
-    merged: dict[str, dict] = {}
-    for candidate in [
+    candidates = [
         item
         for record in (legacy, current)
         for item in (record.get("items") if isinstance(record.get("items"), list) else [])
-    ] + generated_items:
-        stored = imagine_relation_stored_item(candidate)
-        key = imagine_relation_item_key(stored)
-        if key and key != source_id:
-            merged[key] = stored
+    ] + generated_items
+    # Membership used to be "sits on the same card", which swept up whatever else the
+    # conversation held - clone-batch cards and their own lineages included - and the bundle
+    # then regrouped all of it into one card. Walk each item's parents instead and keep only
+    # what actually descends from the uploaded asset.
+    by_id: dict[str, dict] = {}
+    for candidate in candidates:
+        candidate_id = imagine_item_asset_id(candidate)
+        if candidate_id:
+            by_id.setdefault(candidate_id, candidate)
+
+    def descends_from_upload(item: dict) -> bool:
+        seen: set[str] = set()
+        current_item = item
+        while isinstance(current_item, dict):
+            current_id = imagine_item_asset_id(current_item)
+            if current_id:
+                if current_id in seen:
+                    return False
+                seen.add(current_id)
+            parent_ids = imagine_item_source_ids(current_item)
+            if not parent_ids:
+                return False
+            if source_id in parent_ids:
+                return True
+            current_item = next(
+                (by_id[parent_id] for parent_id in parent_ids if parent_id in by_id),
+                None,
+            )
+        return False
+
+    merged: dict[str, dict] = {}
+    for candidate in candidates:
+        key = imagine_relation_item_key(imagine_relation_stored_item(candidate))
+        if not key or key == source_id or not descends_from_upload(candidate):
+            continue
+        merged[key] = imagine_relation_stored_item(candidate)
+    if not merged:
+        # Nothing here came from the upload, so this is not a bundle. Drop a record that an
+        # earlier sweep-everything pass may have left behind.
+        if current.get("upload_origin_bundle"):
+            relations.pop(post_id, None)
+            try:
+                imagine_state.replace_generated_relations(root, relations)
+            except Exception:
+                pass
+        return None
     next_record = {
         **current,
         "account_key": imagine_account_settings_key(account),
@@ -4802,7 +4843,17 @@ def imagine_apply_generated_relations(
     conversation_id = str(post_metadata.get("conversation_id") or "").strip()
     link_source = imagine_post_is_link_source(post)
     record = relations.get(post_id) if isinstance(relations.get(post_id), dict) else None
-    if conversation_id and isinstance(relations.get(conversation_id), dict) and relations[conversation_id].get("upload_origin_bundle"):
+    # An upload bundle record is keyed by the conversation its results landed in, so looking it
+    # up by conversation alone handed it to every other card in that conversation - clone-batch
+    # cards included. They then inherited flat_only: False, which regroups by conversation, and
+    # the bundle's upload source on top. The bundle's own anchor card carries that id as its
+    # post_id, so it still finds the record above; only unrelated cards are kept out.
+    if (
+        conversation_id
+        and conversation_id == post_id
+        and isinstance(relations.get(conversation_id), dict)
+        and relations[conversation_id].get("upload_origin_bundle")
+    ):
         record = relations[conversation_id]
     if link_source and isinstance(record, dict) and record.get("upload_origin_bundle"):
         record = None
@@ -6216,13 +6267,26 @@ def merge_imagine_liked_lineage_cards(cards: list[dict]) -> list[dict]:
 
     def card_asset_ids(card: dict) -> set[str]:
         metadata = card.get("metadata") if isinstance(card.get("metadata"), dict) else {}
+        items = [item for item in card.get("items") or [] if isinstance(item, dict)]
+        held = {
+            asset_id
+            for asset_id in (imagine_item_asset_id(item) for item in items)
+            if str(asset_id or "").strip()
+        }
+        # Only the card's own roots may claim ownership. Registering every item let a card
+        # that had swallowed someone else's media lend those ids out as parents, so the next
+        # card matched on them and inherited this card's identity - and the loop below then
+        # carried that further with each pass.
+        roots = {
+            asset_id
+            for item in items
+            for asset_id in [imagine_item_asset_id(item)]
+            if str(asset_id or "").strip()
+            and not any(source_id in held for source_id in imagine_item_source_ids(item))
+        }
         return {
             str(value).strip()
-            for value in (
-                card.get("post_id"),
-                metadata.get("lineage_root_asset_id"),
-                *(imagine_item_asset_id(item) for item in card.get("items") or [] if isinstance(item, dict)),
-            )
+            for value in (card.get("post_id"), metadata.get("lineage_root_asset_id"), *roots)
             if str(value or "").strip()
         }
 

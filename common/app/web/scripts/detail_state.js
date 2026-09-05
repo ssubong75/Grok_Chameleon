@@ -106,8 +106,13 @@ function selectedDetailSourceContext(post = selectedLibraryPost()) {
   const job = screen_state.current_screen === "b_detail"
     ? (typeof selectedBuildJob === "function" ? selectedBuildJob() : null)
     : (screen_state.current_screen === "i_detail" && typeof selectedImagineJob === "function" ? selectedImagineJob() : null);
+  // Only borrow the job's source when the job belongs to the post being viewed. A job left
+  // selected from another card used to hand its own source over here, so a generation started
+  // from this card attached its result to that other card instead.
   if (
     job
+    && typeof generationJobMatchesPost === "function"
+    && generationJobMatchesPost(job, post)
     && typeof generationJobSourcePost === "function"
     && typeof generationJobSourceItem === "function"
   ) {

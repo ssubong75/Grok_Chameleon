@@ -299,7 +299,12 @@ function imaginePrimarySubmissionAttachment(attachments, mode) {
   const list = Array.isArray(attachments) ? attachments : [];
   const expectedType = mode === "extend" ? "video" : (mode === "image" || mode === "video" ? "image" : "");
   if (!expectedType) return null;
-  return list.find((attachment) => composerMediaKind(attachment) === expectedType) || null;
+  const matches = list.filter((attachment) => composerMediaKind(attachment) === expectedType);
+  // The detail screen's own media is auto-attached at the front of the list, so taking the
+  // first match handed the open card to a generation the user started from an upload. That
+  // card then anchored the upload bundle relation, which merged its whole conversation into
+  // one card and pulled the upload in as a source. A file the user picked wins.
+  return matches.find((attachment) => !attachment.detail_auto) || matches[0] || null;
 }
 
 function imagineAttachmentSubmissionContext(attachment) {
