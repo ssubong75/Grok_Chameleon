@@ -5,9 +5,18 @@
      top:24px..bottom:150px and its stage is bottom-aligned (align-items:end), so the media
      top sits 150px above the window bottom minus the media height. Keep this height
      expression in sync with `.i_detail_media_shell` below. */
-  --detail-media-top: calc(100vh - 150px - min(45vw, 704px, 100vh - 226px));
-  /* The nav arrows are 47px tall and keep their bottom 27px above the media box top. */
-  --detail-nav-top: calc(var(--detail-media-top) - 74px);
+  --detail-media-base-height: min(45vw, 704px, calc(100vh - 226px));
+  /* Height leads and the aspect ratio derives the width, up to a 1420px width. Anything wider
+     than that ratio hits the cap and gives up height instead of running off the stage. */
+  --detail-media-max-width: 1420px;
+  --detail-media-height: min(
+    var(--detail-media-base-height),
+    calc(var(--detail-media-max-width) / var(--detail-media-aspect-value, 1.7778))
+  );
+  --detail-media-top: calc(100vh - 150px - var(--detail-media-base-height));
+  /* The nav arrows are 47px tall and sit just above the media box top, which lands them on the
+     same line as the topbar back arrow the main screens show. */
+  --detail-nav-top: calc(var(--detail-media-top) - 48px);
 }
 
 .i_detail,
@@ -141,7 +150,10 @@
   display: grid;
   place-items: center;
   width: auto;
-  height: min(45vw, 704px, calc(100vh - 226px));
+  height: var(--detail-media-height);
+  /* The stage is bottom-aligned, so a shorter box would drop its top edge. Push the slack
+     below it instead and keep the top where every 16:9-or-narrower ratio sits. */
+  margin-bottom: calc(var(--detail-media-base-height) - var(--detail-media-height));
   max-width: none;
   aspect-ratio: var(--detail-media-aspect, 16 / 9);
 }

@@ -892,6 +892,13 @@
   min-width: 56px;
 }
 
+/* Nine aspect entries: 9 x 30px rows + 8 x 2px gaps + 12px padding. The shared 260px cap
+   pushed the last one behind a scroll. */
+.composer.mode_image .custom_select[data-composer-control="aspect"] .custom_select_menu,
+.composer.mode_video .custom_select[data-composer-control="aspect"] .custom_select_menu {
+  max-height: 300px;
+}
+
 .composer.mode_image .custom_select[data-composer-control="build-image-model"],
 .composer.mode_image .custom_select[data-composer-control="build-image-model"] .custom_select_btn,
 .composer.mode_image .custom_select[data-composer-control="build-image-model"] .custom_select_menu {

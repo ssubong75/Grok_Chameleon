@@ -77,7 +77,7 @@ document.documentElement.classList.toggle("platform-macos", isMacRenderer);
   };
   const imageAspectOptions = ["Auto", "16:9", "9:16", "1:1", "2:3", "3:2", "4:3", "21:9", "5:2"];
   const buildT2iAspectOptions = ["Auto", "16:9", "9:16", "1:1", "2:3", "3:2", "4:3", "21:9", "5:2"];
-  const videoAspectOptions = ["Auto", "16:9", "9:16", "1:1", "2:3", "3:2"];
+  const videoAspectOptions = ["Auto", "16:9", "9:16", "1:1", "2:3", "3:2", "4:3", "21:9", "5:2"];
   const videoModelOptions = ["M 1.5", "M 1.0"];
   const buildVideoModelOptions = ["M 1.0", "M 1.5P", "M 1.5"];
   const videoDurationOptions = ["15s", "12s", "10s", "8s", "6s", "3s"];

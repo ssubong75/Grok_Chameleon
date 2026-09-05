@@ -15,6 +15,10 @@
 }
 
 .topbar h1 {
+  /* The logo svg is sized in em, so this box lands on 65.47px and the history buttons - which
+     the nav centres with a -15.5px overhang - end up on 80.97px. Pin it to a half pixel so they
+     land on a whole one, matching the detail screens back arrow. */
+  height: 65.5px;
   margin: 0;
   font-size: 56px;
   font-weight: 860;

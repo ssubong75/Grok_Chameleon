@@ -298,6 +298,14 @@ function setDetailMediaAspect(prefix, aspect) {
   if (normalized) {
     detailLastMediaAspect = normalized;
     shell.style.setProperty("--detail-media-aspect", normalized);
+    // calc() cannot divide by "21 / 9", so publish the ratio as a plain number too. The shell
+    // height and the nav arrows above it both derive from it.
+    const [rawWidth, rawHeight] = normalized.split("/");
+    const width = Number(rawWidth);
+    const height = Number(rawHeight);
+    if (Number.isFinite(width) && Number.isFinite(height) && height > 0) {
+      document.documentElement.style.setProperty("--detail-media-aspect-value", String(width / height));
+    }
     return;
   }
 }
