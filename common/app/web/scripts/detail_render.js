@@ -571,7 +571,10 @@ function syncDetailSpicyButtonForComposerMode(prefix, type = "") {
   const button = document.querySelector(`.${prefix}_detail_spicy`);
   if (!button) return;
   const media = document.querySelector(`.${prefix}_detail_media`);
-  const resolvedType = type || (media?.classList.contains(`${prefix}_detail_media_image`) ? "image" : "");
+  const resolvedType = type
+    || (media?.classList.contains(`${prefix}_detail_media_image`)
+      ? "image"
+      : (media?.classList.contains(`${prefix}_detail_media_video`) ? "video" : ""));
   button.hidden = !["image", "video"].includes(resolvedType) || composerState.mode !== "video";
 }
 
