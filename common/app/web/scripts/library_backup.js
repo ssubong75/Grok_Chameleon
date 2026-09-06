@@ -80,6 +80,7 @@
   const LOG_MAX_LINES = 400;
   const logLines = [];
   let logPaintHandle = 0;
+  let lastProgressKey = "";
 
   function paintLog() {
     logPaintHandle = 0;
@@ -87,11 +88,16 @@
     log.scrollTop = log.scrollHeight;
   }
 
-  function writeLog(message, append = true) {
+  function writeLog(message, append = true, progressKey = "") {
     const value = String(message || "").trim();
     if (!value) return;
     if (!append) logLines.length = 0;
-    logLines.push(value);
+    if (append && progressKey && progressKey === lastProgressKey && logLines.length) {
+      logLines[logLines.length - 1] = value;
+    } else {
+      logLines.push(value);
+    }
+    lastProgressKey = progressKey;
     if (logLines.length > LOG_MAX_LINES) logLines.splice(0, logLines.length - LOG_MAX_LINES);
     if (!logPaintHandle) logPaintHandle = window.requestAnimationFrame(paintLog);
   }
@@ -263,7 +269,10 @@
 
   native?.onLibraryBackupProgress?.((event) => {
     currentPhase = String(event.phase || "");
-    writeLog(event.message);
+    // Keep one live line per operation; Local and External scans are distinct operations.
+    const operation = String(event.message || "").split(":")[0].replace(/\.$/, "");
+    const progressKey = currentPhase === "scan" ? `scan:${operation}` : currentPhase;
+    writeLog(event.message, true, progressKey);
     setProgress(event.current, event.total, event.phase);
     if (refresh && busy) refresh.disabled = UNSTOPPABLE_PHASES.has(currentPhase);
   });
