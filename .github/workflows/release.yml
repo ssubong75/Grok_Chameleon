@@ -4,12 +4,13 @@ on:
   push:
     branches:
       - main
+  deployment_status:
 
 permissions:
   contents: write
 
 concurrency:
-  group: grok-chameleon-release
+  group: grok-chameleon-${{ github.event_name == 'deployment_status' && github.event.deployment.id || 'release' }}
   cancel-in-progress: false
 
 env:
@@ -75,7 +76,42 @@ env:
   COMMON_FFMPEG_LICENSE: common/app/vendor/ffmpeg/COPYING.LGPLv2.1
 
 jobs:
+  cleanup-pages-deployment:
+    if: >-
+      github.event_name == 'deployment_status' &&
+      github.event.deployment.environment == 'github-pages' &&
+      github.event.deployment_status.state == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      deployments: write
+    steps:
+      - name: Remove the completed Pages deployment record only
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const deployment_id = context.payload.deployment.id;
+            const target = { ...context.repo, deployment_id };
+            const { data: deployment } = await github.rest.repos.getDeployment(target);
+            if (deployment.environment !== 'github-pages') {
+              throw new Error('Refusing to delete a non-Pages deployment.');
+            }
+            const { data: statuses } = await github.rest.repos.listDeploymentStatuses({
+              ...target, per_page: 1
+            });
+            if (statuses[0]?.state !== 'success') {
+              core.info('Deployment is no longer successful; leaving the record untouched.');
+              return;
+            }
+            await github.rest.repos.createDeploymentStatus({
+              ...target, state: 'inactive', auto_inactive: false,
+              description: 'Removing deployment history after successful Pages publication.'
+            });
+            await github.rest.repos.deleteDeployment(target);
+            core.info(`Removed Pages deployment record ${deployment_id}; site files are unchanged.`);
+
   build-windows:
+    if: github.event_name == 'push'
     runs-on: windows-2025
     timeout-minutes: 35
     outputs:
@@ -627,6 +663,7 @@ jobs:
           retention-days: 3
 
   build-macos:
+    if: github.event_name == 'push'
     runs-on: macos-15
     timeout-minutes: 35
     outputs:
@@ -1326,7 +1363,9 @@ jobs:
           retention-days: 3
 
   publish:
-    environment: release-update-approval
+    environment:
+      name: release-update-approval
+      deployment: false
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs:
