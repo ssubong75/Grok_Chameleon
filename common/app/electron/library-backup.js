@@ -444,10 +444,6 @@ function unexpectedExternalKeys(previous, current) {
   return [...changedManifestKeys(previous, current)].filter((key) => !isAutomaticMetadataKey(key));
 }
 
-// The destination is no longer made identical to the source: a file only the destination has,
-// and which was not present when the two sides were last equal, is work done over there and is
-// left alone. So the check is that everything the source holds arrived intact, not that the two
-// sides are indistinguishable.
 function missingFromDestination(sourceManifest, destinationManifest) {
   for (const [key, sourceRecord] of sourceManifest.records) {
     const destinationRecord = destinationManifest.records.get(key);
@@ -516,11 +512,6 @@ async function fileMatchesRecord(root, record, signal) {
   return (await sha256File(filePath, signal)) === record.sha256;
 }
 
-// This carries one side's changes to the other. A file the destination has and the source does
-// not is only deleted when it was present the last time the two sides were made equal - that is
-// what tells a file deleted here apart from a file created over there. Without that distinction
-// the library that travels loses whichever side it was not sent from, which is the opposite of
-// what moving it between machines is for. With no baseline yet, nothing is deleted.
 function buildChangePlan(source, destination, baseline = null) {
   const changes = [];
   for (const [key, sourceRecord] of [...source.records.entries()].sort(([a], [b]) => a.localeCompare(b, "en"))) {
@@ -530,86 +521,12 @@ function buildChangePlan(source, destination, baseline = null) {
       changes.push({ action: "update", relativePath: sourceRecord.relativePath, size: sourceRecord.size, sourceRecord, destinationRecord });
     }
   }
-  // A file the destination has and the source does not is only deleted when it was there the
-  // last time the two sides were made equal. That is what separates a file deleted on this side
-  // from a file created on the other one, which must not be touched.
   for (const [key, destinationRecord] of [...destination.records.entries()].sort(([a], [b]) => a.localeCompare(b, "en"))) {
     if (source.records.has(key)) continue;
     if (!baseline || !baseline.records.has(key)) continue;
     changes.push({ action: "delete", relativePath: destinationRecord.relativePath, size: destinationRecord.size, sourceRecord: null, destinationRecord });
   }
   return changes;
-}
-
-// Mirroring answers "make the other side look like this one", which is the wrong question when
-// the library travels: whatever was made on the other side is not in the source, so mirroring
-// deletes it. Sync asks a different question - what changed since the two were last the same -
-// by comparing both sides against that shared baseline. A file only one side touched moves in
-// that direction; a file both sides touched is a conflict, and the newer one wins with the
-// older kept in history, because these are media files with no way to merge their contents.
-function buildSyncPlan(baseline, local, external) {
-  const keys = new Set([...local.records.keys(), ...external.records.keys()]);
-  if (baseline) for (const key of baseline.records.keys()) keys.add(key);
-  const sameSide = (a, b) => Boolean(a) === Boolean(b) && (!a || comparableDigest(a) === comparableDigest(b));
-  const toExternal = [];
-  const toLocal = [];
-  const conflicts = [];
-  for (const key of [...keys].sort((a, b) => a.localeCompare(b, "en"))) {
-    const base = baseline ? baseline.records.get(key) || null : null;
-    const localRecord = local.records.get(key) || null;
-    const externalRecord = external.records.get(key) || null;
-    if (sameSide(localRecord, externalRecord)) continue;
-
-    const localMoved = !sameSide(localRecord, base);
-    const externalMoved = !sameSide(externalRecord, base);
-    let sendFromLocal = localMoved;
-    if (localMoved && externalMoved) {
-      // No baseline at all makes every difference look like a two-sided edit; so does a genuine
-      // one. Either way the file cannot be merged, so the newer copy is taken and the other is
-      // written to history rather than dropped.
-      sendFromLocal = (localRecord?.mtimeMs || 0) >= (externalRecord?.mtimeMs || 0);
-      conflicts.push({
-        relativePath: (localRecord || externalRecord).relativePath,
-        keeps: sendFromLocal ? "local" : "external",
-      });
-    }
-    if (sendFromLocal) {
-      if (localRecord) {
-        toExternal.push({
-          action: externalRecord ? "update" : "add",
-          relativePath: localRecord.relativePath,
-          size: localRecord.size,
-          sourceRecord: localRecord,
-          destinationRecord: externalRecord,
-        });
-      } else {
-        toExternal.push({
-          action: "delete",
-          relativePath: externalRecord.relativePath,
-          size: externalRecord.size,
-          sourceRecord: null,
-          destinationRecord: externalRecord,
-        });
-      }
-    } else if (externalRecord) {
-      toLocal.push({
-        action: localRecord ? "update" : "add",
-        relativePath: externalRecord.relativePath,
-        size: externalRecord.size,
-        sourceRecord: externalRecord,
-        destinationRecord: localRecord,
-      });
-    } else {
-      toLocal.push({
-        action: "delete",
-        relativePath: localRecord.relativePath,
-        size: localRecord.size,
-        sourceRecord: null,
-        destinationRecord: localRecord,
-      });
-    }
-  }
-  return { toExternal, toLocal, conflicts };
 }
 
 function summarizeChanges(changes) {
@@ -620,22 +537,6 @@ function summarizeChanges(changes) {
     if (change.action !== "add") summary.history_bytes += change.destinationRecord?.size || 0;
   }
   return summary;
-}
-
-function summarizeSync(plan) {
-  const toLocal = summarizeChanges(plan.toLocal);
-  const toExternal = summarizeChanges(plan.toExternal);
-  return {
-    to_local: toLocal,
-    to_external: toExternal,
-    conflicts: plan.conflicts.length,
-    add: toLocal.add + toExternal.add,
-    update: toLocal.update + toExternal.update,
-    delete: toLocal.delete + toExternal.delete,
-    copy_bytes: toLocal.copy_bytes + toExternal.copy_bytes,
-    history_bytes: toLocal.history_bytes + toExternal.history_bytes,
-    total: toLocal.total + toExternal.total,
-  };
 }
 
 function controlDirectory(root, libraryId, local = false) {
@@ -702,8 +603,6 @@ class LibraryBackup {
   }
 
   validate(direction) {
-    // Sync writes in both directions, so neither side may be conjured up the way a one-way run
-    // can create the folder it is about to fill.
     const local = ensureDirectory(this.localRoot, "Local Library", { allowMissing: direction === "to-local" });
     const external = ensureDirectory(this.externalRoot, "External Library", { allowMissing: direction === "to-external" });
     validateDistinctRoots(local, external);
@@ -719,7 +618,7 @@ class LibraryBackup {
   }
 
   async analyze(direction, { previousActualExternal = null, previousActualLocal = null } = {}) {
-    if (!["to-external", "to-local", "sync"].includes(direction)) {
+    if (!["to-external", "to-local"].includes(direction)) {
       throw new LibraryBackupError("Unknown backup direction.", "INVALID_DIRECTION");
     }
     const context = this.validate(direction);
@@ -768,15 +667,7 @@ class LibraryBackup {
     let externalDrift = Boolean(storedExternal && storedExternalFingerprint !== externalFingerprint);
     let warning = "";
 
-    if (direction === "sync") {
-      // Sync does not declare either side correct, so the guards that protect a one-way run from
-      // overwriting newer work do not apply: nothing here is overwritten without being compared
-      // against the shared baseline first. The one thing still worth refusing is another
-      // computer holding the drive, and that was checked above.
-      if (!actualLocal.records.size && !actualExternal.records.size) {
-        throw new LibraryBackupError("Both libraries are empty.", "SOURCE_EMPTY");
-      }
-    } else if (direction === "to-external") {
+    if (direction === "to-external") {
       if (session.machine_id === this.machineId) {
         if (Number(session.generation) !== generation || String(session.base_fingerprint || "") !== storedExternalFingerprint) {
           warning = "External Library moved on since this computer last took from it. Anything replaced is kept in history.";
@@ -798,12 +689,6 @@ class LibraryBackup {
     } else if (librariesMatch && (externalDrift || (localBaseline && unsyncedChangeKeys(localBaseline, actualLocal).length))) {
       warning = unrecordedRun;
     } else {
-      // Restoring is the External Library's turn to write, so local changes it does not have
-      // are reported rather than used to refuse. Refusing here inverts the stakes: the local
-      // side is often nothing but state.sqlite3 moving because the app was open, while the
-      // drive can be holding a day of work - and the advice to "back up first" would push
-      // that work out of the drive. The counts are on the review screen and anything replaced
-      // goes to history, so the choice belongs to whoever is looking at it.
       if (localBaseline) {
         const unsynced = unsyncedChangeKeys(localBaseline, actualLocal);
         if (unsynced.length) {
@@ -818,26 +703,11 @@ class LibraryBackup {
 
     const sourceManifest = direction === "to-local" ? actualExternal : actualLocal;
     const destinationManifest = direction === "to-local" ? actualLocal : actualExternal;
-    // The baseline is the last state the two sides agreed on. This computer's own copy is
-    // preferred: the drive's manifest describes the drive, while the baseline describes what
-    // this machine last took from it, which is what "changed since" has to be measured against.
-    const syncPlan = direction === "sync"
-      ? buildSyncPlan(localBaseline || storedExternal, actualLocal, actualExternal)
-      : null;
-    const changes = syncPlan
-      ? [...syncPlan.toExternal, ...syncPlan.toLocal]
-      : buildChangePlan(sourceManifest, destinationManifest, localBaseline || storedExternal);
-    const portability = syncPlan
-      ? [...new Set([...windowsPortabilityIssues(actualLocal), ...windowsPortabilityIssues(actualExternal)])].sort((a, b) => a.localeCompare(b, "en"))
-      : windowsPortabilityIssues(sourceManifest);
+    const changes = buildChangePlan(sourceManifest, destinationManifest, localBaseline || storedExternal);
+    const portability = windowsPortabilityIssues(sourceManifest);
     if (portability.length) {
       const plural = portability.length === 1 ? "" : "s";
       warning = `${warning} ${portability.length} name${plural} cannot be recreated on a Windows computer, starting with ${portability[0]}.`.trim();
-    }
-    if (syncPlan && syncPlan.conflicts.length) {
-      const count = syncPlan.conflicts.length;
-      const plural = count === 1 ? "" : "s";
-      warning = `${warning} ${count} file${plural} changed on both sides; the newer copy wins and the other is kept in history, starting with ${syncPlan.conflicts[0].relativePath}.`.trim();
     }
     return {
       direction,
@@ -855,10 +725,7 @@ class LibraryBackup {
       sourceFingerprint: manifestFingerprint(sourceManifest),
       destinationFingerprint: manifestFingerprint(destinationManifest),
       changes,
-      syncToLocal: syncPlan ? syncPlan.toLocal : [],
-      syncToExternal: syncPlan ? syncPlan.toExternal : [],
-      conflicts: syncPlan ? syncPlan.conflicts : [],
-      summary: syncPlan ? summarizeSync(syncPlan) : summarizeChanges(changes),
+      summary: summarizeChanges(changes),
       analyzedAt: utcNow(),
     };
   }
@@ -931,15 +798,7 @@ class LibraryBackup {
       }
     }
 
-    // A one-way run reads every source file from one root and every destination file from the
-    // other. Sync carries both directions at once, so each entry has to be checked against the
-    // roots that entry actually moves between.
-    const planChecks = analysis.direction === "sync"
-      ? [
-          ...analysis.syncToExternal.map((change) => ({ change, from: context.local, to: context.external })),
-          ...analysis.syncToLocal.map((change) => ({ change, from: context.external, to: context.local })),
-        ]
-      : analysis.changes.map((change) => ({ change, from: context.source, to: context.destination }));
+    const planChecks = analysis.changes.map((change) => ({ change, from: context.source, to: context.destination }));
 
     const report = throttledProgress(this.progress);
     let checked = 0;
@@ -956,58 +815,10 @@ class LibraryBackup {
     return { ...analysis, ...context };
   }
 
-  // Both halves are applied before either manifest is written, so an interruption between them
-  // leaves the pair mid-move but recorded as unchanged - the next run compares the two sides
-  // again and simply finishes what is left, rather than the state being lost.
-  async executeSync(current) {
-    const historyLocal = await applyChanges(
-      current.external,
-      current.local,
-      current.syncToLocal,
-      current.paths.localControl,
-      { progress: this.progress, signal: this.signal },
-    );
-    const historyExternal = await applyChanges(
-      current.local,
-      current.external,
-      current.syncToExternal,
-      current.paths.externalControl,
-      { progress: this.progress, signal: this.signal },
-    );
-
-    // Past this point both sides hold the merged result; stopping now would leave the manifests
-    // behind, so the verification and the writes below ignore the cancel signal. Comparing each
-    // side against its own pre-sync manifest forces every file this run touched to be re-read.
-    this.emit("Verifying completed sync.", null, null, "verify");
-    const localAfter = await scanLibrary(current.local, { previous: current.actualLocal });
-    const externalAfter = await scanLibrary(current.external, { previous: current.actualExternal });
-    if (manifestFingerprint(localAfter) !== manifestFingerprint(externalAfter)) {
-      throw new LibraryBackupError("Final verification failed. The two libraries are still different.", "VERIFY_FAILED");
-    }
-
-    const nextGeneration = (current.generation || 0) + (current.changes.length > 0 || !current.storedExternal ? 1 : 0);
-    saveStoredManifest(current.paths.externalManifest, current.libraryId, nextGeneration, externalAfter);
-    saveStoredManifest(current.paths.localBaseline, current.libraryId, nextGeneration, localAfter);
-    // The two sides are equal now, so nobody is holding the drive checked out.
-    try { fs.unlinkSync(current.paths.session); } catch (_) {}
-    this.emit("Sync completed.", 1, 1, "complete");
-    return {
-      direction: "sync",
-      generation: nextGeneration,
-      changed: current.changes.length,
-      toLocal: current.syncToLocal.length,
-      toExternal: current.syncToExternal.length,
-      conflicts: current.conflicts.length,
-      historyPath: historyExternal || historyLocal,
-      completedAt: utcNow(),
-    };
-  }
-
   async execute(analysis) {
     throwIfCancelled(this.signal);
     this.emit("Rechecking the reviewed changes.", 0, 1, "confirm");
     const current = await this.confirmPlan(analysis);
-    if (analysis.direction === "sync") return this.executeSync(current);
     const destinationControl = analysis.direction === "to-external" ? current.paths.externalControl : current.paths.localControl;
     let sourceAfter = null;
     let destinationAfter = null;
