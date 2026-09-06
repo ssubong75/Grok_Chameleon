@@ -97,7 +97,7 @@ test("External to Local creates a checkout and blocks another computer", async (
   await assert.rejects(() => other.analyze("to-local"), /another computer/i);
 });
 
-test("direct External changes during a checkout are not overwritten", async (t) => {
+test("direct External changes during a checkout are reported before anything is written", async (t) => {
   const { root, local, external } = tempPair(t);
   const first = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "mac-a" });
   await run(first, "to-external");
@@ -109,7 +109,8 @@ test("direct External changes during a checkout are not overwritten", async (t) 
   write(path.join(restored, "created", "first", "image.txt"), "local-change");
   write(path.join(external, "created", "first", "image.txt"), "external-change");
 
-  await assert.rejects(() => second.analyze("to-external"), /changed directly/i);
+  const analysis = await second.analyze("to-external");
+  assert.match(analysis.warning, /changes made outside this backup/i);
   assert.equal(fs.readFileSync(path.join(external, "created", "first", "image.txt"), "utf8"), "external-change");
 });
 
@@ -256,7 +257,7 @@ test("destination content changes after review are still blocked", async (t) => 
   );
 });
 
-test("library.json user settings are protected while regenerated fields remain replaceable", async (t) => {
+test("library.json user settings count as unsynced while regenerated fields do not", async (t) => {
   const { local, external } = tempPair(t);
   const engine = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "mac-a" });
   await run(engine, "to-external");
@@ -270,7 +271,8 @@ test("library.json user settings are protected while regenerated fields remain r
 
   library.settings = { hidden_upload_keys: ["private-item"] };
   write(libraryPath, `${JSON.stringify(library)}\n`);
-  await assert.rejects(() => engine.analyze("to-local"), (error) => error?.code === "LOCAL_UNSYNCED");
+  const settingsChanged = await engine.analyze("to-local");
+  assert.match(settingsChanged.warning, /changes? the backup does not have/i);
 });
 
 test("final verification failure rolls back every applied destination change", async (t) => {
