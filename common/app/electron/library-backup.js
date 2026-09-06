@@ -571,6 +571,8 @@ function metadataPaths(localRoot, externalRoot, libraryId, machineId = "") {
     externalControl,
     externalManifest: path.join(externalControl, "manifest.json"),
     syncBaseline: path.join(externalControl, "sync-baselines", `${machineKey}.json`),
+    postConflicts: path.join(externalControl, "post-conflicts"),
+    settingsConflicts: path.join(externalControl, "settings-conflicts"),
     session: path.join(externalControl, "session.json"),
     localControl,
     localBaseline: path.join(localControl, "baseline.json"),
@@ -636,6 +638,7 @@ function buildLibrarySettingsPlan(baselineSettings, localSettings, externalSetti
   const externalResult = cloneJson(external);
   const nextBaseline = {};
   const conflicts = [];
+  const conflictRecords = [];
   let changed = 0;
   const valueAt = (object, key) => Object.prototype.hasOwnProperty.call(object, key) ? object[key] : MISSING;
   const equal = (left, right) => left === MISSING || right === MISSING ? left === right : sameJson(left, right);
@@ -666,13 +669,14 @@ function buildLibrarySettingsPlan(baselineSettings, localSettings, externalSetti
       changed += 1;
     } else {
       // A single Sync always converges. Local is the active setting for this run.
+      conflictRecords.push({ key, local: cloneJson(localValue), external: cloneJson(externalValue) });
       put(localResult, key, localValue);
       put(externalResult, key, localValue);
       put(nextBaseline, key, localValue);
       changed += 1;
     }
   }
-  return { local: localResult, external: externalResult, nextBaseline, conflicts, changed };
+  return { local: localResult, external: externalResult, nextBaseline, conflicts, conflictRecords, changed };
 }
 
 function sameRecord(left, right) {
@@ -831,14 +835,10 @@ function mergePostJson(localPath, externalPath, relativePath, localRecord, exter
   merged.updated_at = local.updated_at || external.updated_at || utcNow();
   merged.build_favorite = Boolean(local.build_favorite || local.favorite || external.build_favorite || external.favorite);
   merged.favorite = merged.build_favorite;
-  if (Object.keys(scalarConflicts).length) {
-    merged.sync_conflicts = {
-      ...(isJsonObject(local.sync_conflicts) ? local.sync_conflicts : {}),
-      ...(isJsonObject(external.sync_conflicts) ? external.sync_conflicts : {}),
-      scalars: scalarConflicts,
-    };
-  }
-  return merged;
+  // server.py rewrites post.json from a fixed set of fields, so conflict metadata must live in
+  // the control folder rather than this file.
+  delete merged.sync_conflicts;
+  return { merged, scalarConflicts };
 }
 
 
@@ -1048,17 +1048,17 @@ class LibraryBackup {
       // Both drives may have a new post on the first run; otherwise merge only when each
       // side changed from the computer's own baseline.
       if (baseRecord && (sameRecord(localRecord, baseRecord) || sameRecord(externalRecord, baseRecord))) continue;
-      const merged = mergePostJson(
+      const mergeResult = mergePostJson(
         safePath(context.local, localRecord.diskRelativePath),
         safePath(context.external, externalRecord.diskRelativePath),
         localRecord.relativePath,
         localRecord,
         externalRecord,
       );
-      if (!merged) continue;
+      if (!mergeResult) continue;
       plan.localToExternal = plan.localToExternal.filter((change) => canonicalPathKey(change.relativePath) !== key);
       plan.externalToLocal = plan.externalToLocal.filter((change) => canonicalPathKey(change.relativePath) !== key);
-      merges.push({ relativePath: localRecord.relativePath, localRecord, externalRecord, merged });
+      merges.push({ relativePath: localRecord.relativePath, localRecord, externalRecord, ...mergeResult });
     }
     plan.merges = merges;
     const summary = summarizeSyncPlan(plan);
@@ -1331,6 +1331,14 @@ class LibraryBackup {
         fs.mkdirSync(path.dirname(externalPostHistory), { recursive: true });
         fs.copyFileSync(localPost, localPostHistory);
         fs.copyFileSync(externalPost, externalPostHistory);
+        if (Object.keys(merge.scalarConflicts || {}).length) {
+          const conflictKey = crypto.createHash("sha256").update(merge.relativePath).digest("hex").slice(0, 16);
+          writeJsonAtomic(path.join(current.paths.postConflicts, `${conflictKey}-${Date.now()}.json`), {
+            relative_path: merge.relativePath,
+            recorded_at: utcNow(),
+            scalars: merge.scalarConflicts,
+          });
+        }
         writeJsonAtomic(localPost, merge.merged);
         writeJsonAtomic(externalPost, merge.merged);
       }
@@ -1340,6 +1348,12 @@ class LibraryBackup {
       this.emit("Applying library settings changed on one drive.", 0, 1, "apply");
       writeLibrarySettings(current.local, current.settingsPlan.local);
       writeLibrarySettings(current.external, current.settingsPlan.external);
+    }
+    if (current.settingsPlan?.conflictRecords?.length) {
+      writeJsonAtomic(path.join(current.paths.settingsConflicts, `${Date.now()}.json`), {
+        recorded_at: utcNow(),
+        settings: current.settingsPlan.conflictRecords,
+      });
     }
     const conflictKeys = new Set(current.plan.conflicts.map(canonicalPathKey));
     const changedByKey = new Map();

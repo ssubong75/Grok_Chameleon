@@ -400,8 +400,8 @@ test("per-computer Sync baselines do not turn another computer's addition into a
   assert.deepEqual(bSettings, { collection_order: ["created/first"] });
 });
 
-test("Sync automatically merges a post and retains both scalar values", async (t) => {
-  const { local, external } = tempPair(t);
+test("Sync automatically merges a post and stores scalar conflicts outside post.json", async (t) => {
+  const { root, local, external } = tempPair(t);
   makeLibrary(external);
   const engine = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "computer-a" });
   let analysis = await engine.analyze("sync");
@@ -417,6 +417,19 @@ test("Sync automatically merges a post and retains both scalar values", async (t
   const externalPost = JSON.parse(fs.readFileSync(path.join(external, "created", "first", "post.json"), "utf8"));
   assert.deepEqual(localPost, externalPost);
   assert.equal(localPost.title, "local title");
-  assert.deepEqual(localPost.sync_conflicts.scalars.title, { local: "local title", external: "external title" });
+  assert.equal(localPost.sync_conflicts, undefined);
+  const controlRoot = path.join(root, ".grok-library-backup");
+  const conflictFiles = [];
+  const walk = (directory) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const entryPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) walk(entryPath);
+      else if (entry.name.endsWith(".json") && entryPath.includes(`${path.sep}post-conflicts${path.sep}`)) conflictFiles.push(entryPath);
+    }
+  };
+  walk(controlRoot);
+  assert.equal(conflictFiles.length, 1);
+  const conflict = JSON.parse(fs.readFileSync(conflictFiles[0], "utf8"));
+  assert.deepEqual(conflict.scalars.title, { local: "local title", external: "external title" });
   assert.deepEqual(localPost.items.map((item) => item.item_id).sort(), ["external-build", "local-build"]);
 });
