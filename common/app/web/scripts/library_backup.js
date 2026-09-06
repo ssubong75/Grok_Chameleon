@@ -4,8 +4,7 @@
   const externalInput = document.getElementById("library_backup_external_path");
   const localChoose = document.getElementById("library_backup_local_choose");
   const externalChoose = document.getElementById("library_backup_external_choose");
-  const toExternal = document.getElementById("library_backup_to_external");
-  const toLocal = document.getElementById("library_backup_to_local");
+  const sync = document.getElementById("library_backup_sync");
   const refresh = document.getElementById("library_backup_refresh");
   const status = document.getElementById("library_backup_status");
   const log = document.getElementById("library_backup_log");
@@ -13,10 +12,12 @@
   const progressBar = progressTrack?.querySelector("span");
   if (!localInput || !externalInput || !status || !log) return;
 
+  const EXTERNAL_DRIVE_STORAGE_KEY = "grok-chameleon:library-sync:external-drive";
+
   let busy = false;
 
   function friendlyError(error) {
-    return String(error?.message || error || "Library Backup failed.")
+    return String(error?.message || error || "Drive Sync failed.")
       .replace(/^Error invoking remote method '[^']+':\s*/i, "")
       .replace(/^Error:\s*/i, "");
   }
@@ -104,7 +105,7 @@
 
   function setBusy(value) {
     busy = Boolean(value);
-    for (const element of [localChoose, externalChoose, toExternal, toLocal]) {
+    for (const element of [localChoose, externalChoose, sync]) {
       if (element) element.disabled = busy;
     }
     if (refresh) {
@@ -131,6 +132,15 @@
     if (!localInput.value && currentRoot) localInput.value = currentRoot;
   }
 
+  function restoreExternalDrivePath() {
+    if (externalInput.value) return;
+    try { externalInput.value = String(window.localStorage.getItem(EXTERNAL_DRIVE_STORAGE_KEY) || "").trim(); } catch (_) {}
+  }
+
+  function rememberExternalDrivePath() {
+    try { window.localStorage.setItem(EXTERNAL_DRIVE_STORAGE_KEY, externalInput.value.trim()); } catch (_) {}
+  }
+
   async function choose(input, label) {
     if (!native?.chooseLibraryBackupFolder || busy) return;
     try {
@@ -140,6 +150,7 @@
       });
       if (!result?.cancelled && result?.path) {
         input.value = result.path;
+        if (input === externalInput) rememberExternalDrivePath();
         await refreshStatus();
       }
     } catch (error) {
@@ -150,13 +161,13 @@
   async function refreshStatus() {
     applyDefaultLocalPath();
     if (!native?.libraryBackupStatus) {
-      setStatus("Library Backup is available in the desktop app.");
+      setStatus("Drive Sync is available in the desktop app.");
       return;
     }
     try {
       const result = await native.libraryBackupStatus(payload());
       setStatus(
-        String(result?.message || "Select both library folders."),
+        String(result?.message || "Select both drive folders."),
         result?.blocked ? "blocked" : result?.ready ? "ready" : "idle",
       );
       writeLog("Folder status refreshed.", false);
@@ -168,6 +179,18 @@
 
   function reviewMessage(direction, analysis) {
     const summary = analysis.summary || {};
+    if (direction === "sync") {
+      const local = summary.local_to_external || {};
+      const external = summary.external_to_local || {};
+      const describe = (value) => `Add ${value.add || 0}, update ${value.update || 0}, delete ${value.delete || 0}`;
+      const warning = analysis.warning ? ` ${analysis.warning}` : "";
+      const merged = summary.merges ? ` ${summary.merges} card${summary.merges === 1 ? "" : "s"} will merge their Build results.` : "";
+      if (summary.conflicts) {
+        return `Sync found ${summary.conflicts} conflict${summary.conflicts === 1 ? "" : "s"}. Those files stay on their respective drives; all other changes will sync.${merged}${warning}`;
+      }
+      if (!summary.total && !summary.merges) return `The drives already match. Continue to record this sync state?${warning}`;
+      return `Local Drive → External Drive: ${describe(local)}. External Drive → Local Drive: ${describe(external)}.${merged} Copy ${formatBytes(summary.copy_bytes)}, history ${formatBytes(summary.history_bytes)}.${warning}`;
+    }
     const directionLabel = direction === "to-external"
       ? "Local Library → External Library"
       : "External Library → Local Library";
@@ -181,42 +204,42 @@
   async function run(direction) {
     if (busy || !native?.analyzeLibraryBackup || !native?.executeLibraryBackup) return;
     if (!localInput.value.trim() || !externalInput.value.trim()) {
-      setStatus("Select both library folders.");
+      setStatus("Select both drive folders.");
       return;
     }
     setBusy(true);
     currentPhase = "";
-    setStatus("Comparing library folders…");
+    setStatus(direction === "sync" ? "Comparing drives…" : "Comparing library folders…");
     writeLog("Starting comparison.", false);
     resetProgress();
     try {
       const analysis = await native.analyzeLibraryBackup(payload(direction));
       const confirmed = await openGalleryActionDialog({
-        title: direction === "to-external" ? "Back Up Library" : "Restore Library",
+        title: direction === "sync" ? "Drive Sync" : direction === "to-external" ? "Back Up Library" : "Restore Library",
         message: reviewMessage(direction, analysis),
-        confirmLabel: direction === "to-external" ? "Back Up" : "Restore",
+        confirmLabel: direction === "sync" ? "Sync" : direction === "to-external" ? "Back Up" : "Restore",
         cancelLabel: "Cancel",
         messageBox: true,
       });
       if (!confirmed) {
-        setStatus("Library Backup was cancelled before any files were changed.");
+        setStatus(direction === "sync" ? "Drive Sync was cancelled before any files were changed." : "Library Backup was cancelled before any files were changed.");
         writeLog("Cancelled before execution.");
         return;
       }
-      setStatus(direction === "to-external" ? "Backing up to External Library…" : "Restoring to Local Library…");
+      setStatus(direction === "sync" ? "Syncing drives…" : direction === "to-external" ? "Backing up to External Library…" : "Restoring to Local Library…");
       const result = await native.executeLibraryBackup({ token: analysis.token });
       setProgress(1, 1, "complete");
       setStatus(
         result.changed
           ? `Completed. ${result.changed} change${result.changed === 1 ? "" : "s"} applied and verified.`
-          : "Completed. The libraries already match.",
+          : direction === "sync" ? "Completed. The drives already match." : "Completed. The libraries already match.",
         "ready",
       );
       writeLog(result.historyPath ? `Previous files saved in history: ${result.historyPath}` : "No previous files required history storage.");
       // A full rescan rewrites library.json and the card index, which would put the Local
       // Library out of step with the baseline this run just saved. Only a restore actually
       // changes local files, so only a restore needs one.
-      if (direction === "to-local" && typeof scanLibrary === "function") {
+      if ((direction === "to-local" || (direction === "sync" && (analysis.summary?.external_to_local?.total || 0) > 0)) && typeof scanLibrary === "function") {
         try { await scanLibrary(); } catch (_) {}
       }
     } catch (error) {
@@ -241,17 +264,16 @@
     if (refresh && busy) refresh.disabled = UNSTOPPABLE_PHASES.has(currentPhase);
   });
 
-  localChoose?.addEventListener("click", () => choose(localInput, "Local Library"));
-  externalChoose?.addEventListener("click", () => choose(externalInput, "External Library"));
-  toExternal?.addEventListener("click", () => run("to-external"));
-  toLocal?.addEventListener("click", () => run("to-local"));
+  localChoose?.addEventListener("click", () => choose(localInput, "Local Drive"));
+  externalChoose?.addEventListener("click", () => choose(externalInput, "External Drive"));
+  sync?.addEventListener("click", () => run("sync"));
   refresh?.addEventListener("click", async () => {
     if (busy) {
       if (UNSTOPPABLE_PHASES.has(currentPhase)) {
-        setStatus("The backup is finishing and can no longer be cancelled.");
+        setStatus("The sync is finishing and can no longer be cancelled.");
         return;
       }
-      setStatus("Cancelling Library Backup…");
+      setStatus("Cancelling Drive Sync…");
       const result = await native?.cancelLibraryBackup?.();
       if (result && result.cancelling === false) setStatus("There was nothing left to cancel.");
       return;
@@ -264,4 +286,5 @@
   });
 
   applyDefaultLocalPath();
+  restoreExternalDrivePath();
 })();

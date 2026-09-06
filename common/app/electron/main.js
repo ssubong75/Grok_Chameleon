@@ -1408,7 +1408,12 @@ async function analyzeLibraryBackup(payload = {}) {
       signal: controller.signal,
       progress: sendLibraryBackupProgress,
     });
-    sendLibraryBackupProgress({ phase: "start", message: "Comparing library folders.", current: 0, total: 1 });
+    sendLibraryBackupProgress({
+      phase: "start",
+      message: String(payload.direction || "") === "sync" ? "Comparing drives." : "Comparing library folders.",
+      current: 0,
+      total: 1,
+    });
     const analysis = await engine.analyze(String(payload.direction || ""));
     const token = crypto.randomUUID();
     libraryBackupAnalyses.set(token, {
@@ -1459,12 +1464,11 @@ async function executeLibraryBackup(payload = {}) {
       signal: libraryBackupAbortController.signal,
       progress: sendLibraryBackupProgress,
     });
-    const refreshedAnalysis = await engine.refreshPlan(entry.analysis);
-    const result = await engine.execute(refreshedAnalysis);
-    appendLog(`library backup complete direction=${result.direction} changed=${result.changed} generation=${result.generation}`);
+    const result = await engine.execute(entry.analysis);
+    appendLog(`library sync complete direction=${result.direction} changed=${result.changed} generation=${result.generation}`);
     return { ok: true, ...result };
   } catch (error) {
-    appendLog(`library backup failed: ${error.stack || error.message || String(error)}`);
+    appendLog(`library sync failed: ${error.stack || error.message || String(error)}`);
     throw error;
   } finally {
     if (serverPaused) {

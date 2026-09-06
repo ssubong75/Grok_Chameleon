@@ -210,25 +210,28 @@ function mustAlwaysHash(relativePath) {
     || ALWAYS_HASH_EXTENSIONS.has(path.posix.extname(key));
 }
 
-function collectFiles(root) {
+function collectFiles(root, { includePath = null } = {}) {
   const files = [];
   const addFile = (absolutePath) => {
     const stat = fs.lstatSync(absolutePath);
     if (stat.isSymbolicLink()) {
       throw new LibraryBackupError(`Symbolic links cannot be backed up: ${absolutePath}`, "SYMLINK_NOT_SUPPORTED");
     }
-    if (stat.isFile() && !shouldIgnoreFile(path.basename(absolutePath))) files.push(absolutePath);
+    const relativePath = path.relative(root, absolutePath).split(path.sep).join("/");
+    if (stat.isFile() && !shouldIgnoreFile(path.basename(absolutePath)) && (!includePath || includePath(relativePath, false))) files.push(absolutePath);
   };
   const walk = (directory) => {
     const entries = fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name, "en"));
     for (const entry of entries) {
       if (IGNORED_NAMES.has(entry.name)) continue;
       const absolute = path.join(directory, entry.name);
+      const relativePath = path.relative(root, absolute).split(path.sep).join("/");
       if (entry.isSymbolicLink()) {
         throw new LibraryBackupError(`Symbolic links cannot be backed up: ${absolute}`, "SYMLINK_NOT_SUPPORTED");
       }
-      if (entry.isDirectory()) walk(absolute);
-      else if (entry.isFile() && !shouldIgnoreFile(entry.name)) files.push(absolute);
+      if (entry.isDirectory()) {
+        if (!includePath || includePath(relativePath, true)) walk(absolute);
+      } else if (entry.isFile() && !shouldIgnoreFile(entry.name) && (!includePath || includePath(relativePath, false))) files.push(absolute);
     }
   };
 
@@ -359,9 +362,10 @@ async function scanLibrary(root, {
   signal = null,
   phase = "Scanning",
   forceHashKeys = null,
+  includePath = null,
 } = {}) {
   if (!pathExists(root)) return { records: new Map() };
-  const files = collectFiles(root);
+  const files = collectFiles(root, { includePath });
   const records = new Map();
   const report = throttledProgress(progress);
   let index = 0;
@@ -557,11 +561,181 @@ function metadataPaths(localRoot, externalRoot, libraryId) {
   return {
     externalControl,
     externalManifest: path.join(externalControl, "manifest.json"),
+    syncBaseline: path.join(externalControl, "sync-baseline.json"),
     session: path.join(externalControl, "session.json"),
     localControl,
     localBaseline: path.join(localControl, "baseline.json"),
   };
 }
+
+// These are derived from either the remote service or the canonical card files.  Carrying a
+// cache from one computer to another makes its invalidation rules part of synchronization and
+// can make an old cache look authoritative.  Sync only the source data; the app rebuilds these.
+function isSyncSourcePath(relativePath) {
+  const key = canonicalPathKey(relativePath);
+  return key !== LIBRARY_JSON_KEY
+    && !key.startsWith("account/")
+    && !key.startsWith("cache/")
+    && !key.startsWith("previews/")
+    && !key.startsWith("sql_data/");
+}
+
+function syncManifest(manifest) {
+  const records = new Map();
+  for (const [key, record] of manifest.records) {
+    if (!isSyncSourcePath(key)) continue;
+    records.set(key, record);
+  }
+  return { records };
+}
+
+function sameRecord(left, right) {
+  return Boolean(left && right)
+    && left.sha256 === right.sha256
+    && left.size === right.size;
+}
+
+function syncChange(sourceRecord, destinationRecord) {
+  if (!sourceRecord) {
+    return destinationRecord ? {
+      action: "delete",
+      relativePath: destinationRecord.relativePath,
+      size: destinationRecord.size,
+      sourceRecord: null,
+      destinationRecord,
+    } : null;
+  }
+  return {
+    action: destinationRecord ? "update" : "add",
+    relativePath: sourceRecord.relativePath,
+    size: sourceRecord.size,
+    sourceRecord,
+    destinationRecord: destinationRecord || null,
+  };
+}
+
+// Compare the last mutually synchronized state with both drives.  A change made on just one
+// drive travels to the other; only a path changed independently on both sides is a conflict.
+function buildSyncPlan(baseline, local, external) {
+  const localToExternal = [];
+  const externalToLocal = [];
+  const conflicts = [];
+  const keys = new Set([
+    ...baseline.records.keys(),
+    ...local.records.keys(),
+    ...external.records.keys(),
+  ]);
+  for (const key of [...keys].sort((a, b) => a.localeCompare(b, "en"))) {
+    const base = baseline.records.get(key) || null;
+    const localRecord = local.records.get(key) || null;
+    const externalRecord = external.records.get(key) || null;
+    if (!base) {
+      if (localRecord && !externalRecord) localToExternal.push(syncChange(localRecord, null));
+      else if (!localRecord && externalRecord) externalToLocal.push(syncChange(externalRecord, null));
+      else if (localRecord && externalRecord && !sameRecord(localRecord, externalRecord)) {
+        conflicts.push(localRecord.relativePath);
+      }
+      continue;
+    }
+    const localChanged = !sameRecord(localRecord, base);
+    const externalChanged = !sameRecord(externalRecord, base);
+    if (!localChanged && !externalChanged) continue;
+    if (sameRecord(localRecord, externalRecord) || (!localRecord && !externalRecord)) continue;
+    if (localChanged && !externalChanged) {
+      const change = syncChange(localRecord, externalRecord);
+      if (change) localToExternal.push(change);
+      continue;
+    }
+    if (!localChanged && externalChanged) {
+      const change = syncChange(externalRecord, localRecord);
+      if (change) externalToLocal.push(change);
+      continue;
+    }
+    conflicts.push((localRecord || externalRecord || base).relativePath);
+  }
+  return { localToExternal, externalToLocal, conflicts };
+}
+
+function summarizeSyncPlan(plan) {
+  const localToExternal = summarizeChanges(plan.localToExternal);
+  const externalToLocal = summarizeChanges(plan.externalToLocal);
+  return {
+    local_to_external: localToExternal,
+    external_to_local: externalToLocal,
+    conflicts: plan.conflicts.length,
+    merges: plan.merges?.length || 0,
+    total: localToExternal.total + externalToLocal.total,
+    add: localToExternal.add + externalToLocal.add,
+    update: localToExternal.update + externalToLocal.update,
+    delete: localToExternal.delete + externalToLocal.delete,
+    copy_bytes: localToExternal.copy_bytes + externalToLocal.copy_bytes,
+    history_bytes: localToExternal.history_bytes + externalToLocal.history_bytes,
+  };
+}
+
+function readPostForSync(filePath) {
+  try {
+    const value = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function itemSyncKey(item, index) {
+  if (!item || typeof item !== "object") return `index:${index}`;
+  const id = String(item.item_id || item.id || item.file || "").trim();
+  return id ? `item:${id}` : `index:${index}`;
+}
+
+function mergePostItems(primaryItems, secondaryItems) {
+  const merged = new Map();
+  for (const [index, item] of [...primaryItems, ...secondaryItems].entries()) {
+    if (!item || typeof item !== "object") continue;
+    const key = itemSyncKey(item, index);
+    const existing = merged.get(key);
+    // Build result IDs are immutable.  Repeated IDs describe the same result, so keep every
+    // field supplied by either copy while consistently preferring the primary card's value.
+    merged.set(key, existing ? { ...item, ...existing } : { ...item });
+  }
+  return [...merged.values()];
+}
+
+function mergeJsonRecords(primary, secondary) {
+  const result = [];
+  const seen = new Set();
+  for (const value of [...primary, ...secondary]) {
+    const key = stableStringify(value);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(value);
+  }
+  return result;
+}
+
+function mergePostJson(localPath, externalPath, relativePath, localRecord, externalRecord) {
+  const local = readPostForSync(localPath);
+  const external = readPostForSync(externalPath);
+  if (!local || !external) return null;
+  // The stable content hash is only a tie breaker for scalar card metadata.  Build results and
+  // request history below are true unions, so neither drive's generated work is discarded.
+  const localPrimary = localRecord.sha256.localeCompare(externalRecord.sha256, "en") <= 0;
+  const primary = localPrimary ? local : external;
+  const secondary = localPrimary ? external : local;
+  const primaryItems = Array.isArray(primary.items) ? primary.items : [];
+  const secondaryItems = Array.isArray(secondary.items) ? secondary.items : [];
+  const primaryRequests = Array.isArray(primary.build_requests) ? primary.build_requests : [];
+  const secondaryRequests = Array.isArray(secondary.build_requests) ? secondary.build_requests : [];
+  const merged = { ...secondary, ...primary };
+  merged.items = mergePostItems(primaryItems, secondaryItems);
+  merged.build_requests = mergeJsonRecords(primaryRequests, secondaryRequests);
+  merged.folder_path = path.posix.dirname(relativePath);
+  merged.updated_at = primary.updated_at || secondary.updated_at || utcNow();
+  merged.build_favorite = Boolean(primary.build_favorite || primary.favorite || secondary.build_favorite || secondary.favorite);
+  merged.favorite = merged.build_favorite;
+  return merged;
+}
+
 
 function loadStoredManifest(filePath) {
   return manifestFromJson(readJson(filePath));
@@ -618,6 +792,7 @@ class LibraryBackup {
   }
 
   async analyze(direction, { previousActualExternal = null, previousActualLocal = null } = {}) {
+    if (direction === "sync") return this.analyzeSync();
     if (!["to-external", "to-local"].includes(direction)) {
       throw new LibraryBackupError("Unknown backup direction.", "INVALID_DIRECTION");
     }
@@ -730,8 +905,72 @@ class LibraryBackup {
     };
   }
 
+  async analyzeSync() {
+    const context = this.validate("sync");
+    const { libraryId, paths } = context;
+    const session = readJson(paths.session);
+    if (session.machine_id && session.machine_id !== this.machineId) throw sessionOwnerError(session);
+    const stored = loadStoredManifest(paths.syncBaseline);
+    validateStoredLibrary(stored, libraryId, "Drive Sync");
+    this.emit("Scanning External Drive.", null, null, "scan");
+    const external = syncManifest(await scanLibrary(context.external, {
+      progress: this.progress,
+      signal: this.signal,
+      phase: "Scanning External Drive",
+      includePath: isSyncSourcePath,
+    }));
+    this.emit("Scanning Local Drive.", null, null, "scan");
+    const local = syncManifest(await scanLibrary(context.local, {
+      progress: this.progress,
+      signal: this.signal,
+      phase: "Scanning Local Drive",
+      includePath: isSyncSourcePath,
+    }));
+    const baseline = stored || { records: new Map() };
+    const plan = buildSyncPlan(baseline, local, external);
+    const merges = [];
+    plan.conflicts = plan.conflicts.filter((relativePath) => {
+      if (path.posix.basename(relativePath) !== "post.json") return true;
+      const key = canonicalPathKey(relativePath);
+      const localRecord = local.records.get(key);
+      const externalRecord = external.records.get(key);
+      if (!localRecord || !externalRecord) return true;
+      const merged = mergePostJson(
+        safePath(context.local, localRecord.diskRelativePath),
+        safePath(context.external, externalRecord.diskRelativePath),
+        relativePath,
+        localRecord,
+        externalRecord,
+      );
+      if (!merged) return true;
+      merges.push({ relativePath, localRecord, externalRecord, merged });
+      return false;
+    });
+    plan.merges = merges;
+    const summary = summarizeSyncPlan(plan);
+    const notices = [];
+    if (plan.merges.length) notices.push(`${plan.merges.length} card${plan.merges.length === 1 ? "" : "s"} will merge Build results automatically.`);
+    if (plan.conflicts.length) notices.push(`${plan.conflicts.length} file${plan.conflicts.length === 1 ? "" : "s"} changed on both drives and will be left in place while the rest syncs.`);
+    const warning = notices.join(" ");
+    return {
+      direction: "sync",
+      ...context,
+      syncBaseline: stored,
+      baseline,
+      localManifest: local,
+      externalManifest: external,
+      localFingerprint: manifestFingerprint(local),
+      externalFingerprint: manifestFingerprint(external),
+      plan,
+      summary,
+      warning,
+      analyzedAt: utcNow(),
+    };
+  }
+
   async refreshPlan(reviewed) {
     const direction = String(reviewed?.direction || "");
+    if (direction === "sync") return this.refreshSyncPlan(reviewed);
     if (!reviewed || !["to-external", "to-local"].includes(direction)) {
       throw new LibraryBackupError("The backup review is invalid.", "PLAN_INVALID");
     }
@@ -751,6 +990,26 @@ class LibraryBackup {
       );
     }
     this.emit("The current source is ready to copy.", 1, 1, "confirm");
+    return refreshed;
+  }
+
+  async refreshSyncPlan(reviewed) {
+    if (!reviewed || reviewed.direction !== "sync") {
+      throw new LibraryBackupError("The sync review is invalid.", "PLAN_INVALID");
+    }
+    this.emit("Checking both drives for changes since the review.", 0, 1, "confirm");
+    const refreshed = await this.analyzeSync();
+    if (
+      refreshed.localFingerprint !== reviewed.localFingerprint
+      || refreshed.externalFingerprint !== reviewed.externalFingerprint
+      || manifestFingerprint(refreshed.baseline) !== manifestFingerprint(reviewed.baseline)
+    ) {
+      throw new LibraryBackupError(
+        "The drives changed after the review. Nothing was copied - review the sync again.",
+        "PLAN_CHANGED",
+      );
+    }
+    this.emit("Both drives are ready to sync.", 1, 1, "confirm");
     return refreshed;
   }
 
@@ -816,6 +1075,7 @@ class LibraryBackup {
   }
 
   async execute(analysis) {
+    if (analysis?.direction === "sync") return this.executeSync(analysis);
     throwIfCancelled(this.signal);
     this.emit("Rechecking the reviewed changes.", 0, 1, "confirm");
     const current = await this.confirmPlan(analysis);
@@ -905,6 +1165,117 @@ class LibraryBackup {
       "complete",
     );
     return { ...completion, historyPath };
+  }
+
+  async executeSync(analysis) {
+    throwIfCancelled(this.signal);
+    const current = analysis;
+    const verifyApplied = async (root, changes) => {
+      for (const change of changes) {
+        throwIfCancelled(this.signal);
+        if (!change.sourceRecord) {
+          if (pathExists(safePath(root, change.destinationRecord.diskRelativePath))) {
+            throw new LibraryBackupError(`Sync deletion did not finish: ${change.relativePath}`, "VERIFY_FAILED");
+          }
+        } else if (!(await fileMatchesRecord(root, change.sourceRecord, this.signal))) {
+          throw new LibraryBackupError(`Sync copy did not arrive intact: ${change.relativePath}`, "VERIFY_FAILED");
+        }
+      }
+    };
+    let externalHistory = "";
+    let localHistory = "";
+    if (current.plan.localToExternal.length) {
+      this.emit("Applying Local Drive changes to External Drive.", 0, 1, "apply");
+      externalHistory = await applyChanges(
+        current.local,
+        current.external,
+        current.plan.localToExternal,
+        current.paths.externalControl,
+        { progress: this.progress, signal: this.signal, verify: () => verifyApplied(current.external, current.plan.localToExternal) },
+      );
+    }
+    if (current.plan.externalToLocal.length) {
+      this.emit("Applying External Drive changes to Local Drive.", 0, 1, "apply");
+      localHistory = await applyChanges(
+        current.external,
+        current.local,
+        current.plan.externalToLocal,
+        current.paths.localControl,
+        { progress: this.progress, signal: this.signal, verify: () => verifyApplied(current.local, current.plan.externalToLocal) },
+      );
+    }
+    if (current.plan.merges.length) {
+      const historyRoot = path.join(current.paths.externalControl, "history", `sync-merge-${new Date().toISOString().replace(/[-:]/g, "").replace(/\..+/, "")}-${randomSuffix()}`);
+      for (const merge of current.plan.merges) {
+        throwIfCancelled(this.signal);
+        const localPost = safePath(current.local, merge.localRecord.diskRelativePath);
+        const externalPost = safePath(current.external, merge.externalRecord.diskRelativePath);
+        const localPostHistory = safePath(historyRoot, `local/${merge.relativePath}`);
+        const externalPostHistory = safePath(historyRoot, `external/${merge.relativePath}`);
+        fs.mkdirSync(path.dirname(localPostHistory), { recursive: true });
+        fs.mkdirSync(path.dirname(externalPostHistory), { recursive: true });
+        fs.copyFileSync(localPost, localPostHistory);
+        fs.copyFileSync(externalPost, externalPostHistory);
+        writeJsonAtomic(localPost, merge.merged);
+        writeJsonAtomic(externalPost, merge.merged);
+      }
+      externalHistory = externalHistory || historyRoot;
+    }
+    const conflictKeys = new Set(current.plan.conflicts.map(canonicalPathKey));
+    const changedByKey = new Map();
+    for (const change of [...current.plan.localToExternal, ...current.plan.externalToLocal]) {
+      changedByKey.set(canonicalPathKey(change.relativePath), change.sourceRecord || null);
+    }
+    const mergedByKey = new Map();
+    for (const merge of current.plan.merges) {
+      const serialized = `${JSON.stringify(merge.merged, null, 2)}\n`;
+      mergedByKey.set(canonicalPathKey(merge.relativePath), {
+        relativePath: merge.relativePath,
+        diskRelativePath: merge.relativePath,
+        size: Buffer.byteLength(serialized),
+        mtimeMs: Date.now(),
+        sha256: crypto.createHash("sha256").update(serialized).digest("hex"),
+      });
+    }
+    const nextRecords = new Map();
+    const keys = new Set([
+      ...current.localManifest.records.keys(),
+      ...current.externalManifest.records.keys(),
+      ...current.baseline.records.keys(),
+      ...changedByKey.keys(),
+      ...mergedByKey.keys(),
+    ]);
+    for (const key of keys) {
+      if (conflictKeys.has(key)) {
+        const previous = current.baseline.records.get(key);
+        if (previous) nextRecords.set(key, previous);
+        continue;
+      }
+      const merged = mergedByKey.get(key);
+      if (merged) {
+        nextRecords.set(key, merged);
+        continue;
+      }
+      if (changedByKey.has(key)) {
+        const changed = changedByKey.get(key);
+        if (changed) nextRecords.set(key, changed);
+        continue;
+      }
+      const localRecord = current.localManifest.records.get(key);
+      const externalRecord = current.externalManifest.records.get(key);
+      if (localRecord && externalRecord && sameRecord(localRecord, externalRecord)) nextRecords.set(key, localRecord);
+    }
+    const nextGeneration = (current.syncBaseline?.generation || 0) + 1;
+    saveStoredManifest(current.paths.syncBaseline, current.libraryId, nextGeneration, { records: nextRecords });
+    const historyPath = [externalHistory, localHistory].filter(Boolean).join("\n");
+    this.emit("Drive Sync completed.", 1, 1, "complete");
+    return {
+      direction: "sync",
+      generation: nextGeneration,
+      changed: current.summary.total,
+      completedAt: utcNow(),
+      historyPath,
+    };
   }
 }
 
@@ -1123,7 +1494,7 @@ function inspectPaths(localRoot, externalRoot, machineId) {
     local: { path: String(localRoot || ""), exists: false, library: false },
     external: { path: String(externalRoot || ""), exists: false, library: false },
     ready: false,
-    message: "Select both library folders.",
+    message: "Select both drive folders.",
   };
   for (const [key, value] of [["local", localRoot], ["external", externalRoot]]) {
     if (!value) continue;
@@ -1133,35 +1504,35 @@ function inspectPaths(localRoot, externalRoot, machineId) {
   }
   if (!localRoot || !externalRoot) return result;
   if (!result.local.exists || !result.external.exists) {
-    result.message = "One of the selected folders was not found.";
+      result.message = "One of the selected drive folders was not found.";
     return result;
   }
   try {
     validateDistinctRoots(result.local.path, result.external.path);
     const id = libraryIdentity(result.local.path) || libraryIdentity(result.external.path);
     if (!id) {
-      result.message = "Select at least one existing Chameleon library.";
+      result.message = "Select at least one existing Chameleon drive folder.";
       return result;
     }
     const otherId = result.local.library && result.external.library
       ? libraryIdentity(result.local.path) === libraryIdentity(result.external.path)
       : true;
     if (!otherId) {
-      result.message = "Local and External folders contain different libraries.";
+      result.message = "Local and External Drive folders contain different libraries.";
       return result;
     }
     const paths = metadataPaths(result.local.path, result.external.path, id);
     const session = readJson(paths.session);
     if (session.machine_id && session.machine_id !== machineId) {
-      result.message = "External Library is currently in use by another computer.";
+      result.message = "External Drive is currently in use by another computer.";
       result.blocked = true;
       return result;
     }
     result.ready = true;
     result.session_active = session.machine_id === machineId;
     result.message = result.session_active
-      ? "External Library was restored to this computer. Back up local changes when finished."
-      : "Ready to compare libraries.";
+      ? "External Drive is ready to sync with this computer."
+      : "Ready to compare drives.";
     return result;
   } catch (error) {
     result.message = error.message;
