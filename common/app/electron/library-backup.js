@@ -665,9 +665,11 @@ function buildLibrarySettingsPlan(baselineSettings, localSettings, externalSetti
       put(nextBaseline, key, externalValue);
       changed += 1;
     } else {
-      // Keep each side's value. Once the user makes them equal, a later sync records it.
-      conflicts.push(`library.json — settings.${key}`);
-      if (previous !== MISSING) put(nextBaseline, key, previous);
+      // A single Sync always converges. Local is the active setting for this run.
+      put(localResult, key, localValue);
+      put(externalResult, key, localValue);
+      put(nextBaseline, key, localValue);
+      changed += 1;
     }
   }
   return { local: localResult, external: externalResult, nextBaseline, conflicts, changed };
@@ -717,7 +719,7 @@ function buildSyncPlan(baseline, local, external) {
       if (localRecord && !externalRecord) localToExternal.push(syncChange(localRecord, null));
       else if (!localRecord && externalRecord) externalToLocal.push(syncChange(externalRecord, null));
       else if (localRecord && externalRecord && !sameRecord(localRecord, externalRecord)) {
-        conflicts.push(localRecord.relativePath);
+        localToExternal.push(syncChange(localRecord, externalRecord));
       }
       continue;
     }
@@ -735,7 +737,8 @@ function buildSyncPlan(baseline, local, external) {
       if (change) externalToLocal.push(change);
       continue;
     }
-    conflicts.push((localRecord || externalRecord || base).relativePath);
+    const change = syncChange(localRecord, externalRecord);
+    if (change) localToExternal.push(change);
   }
   return { localToExternal, externalToLocal, conflicts };
 }
@@ -799,23 +802,24 @@ function mergeJsonRecords(primary, secondary) {
   return result;
 }
 
-function postHasScalarConflict(local, external) {
+function postScalarConflicts(local, external) {
   const mergedFields = new Set(["items", "build_requests", "build_favorite", "favorite", "folder_path", "updated_at"]);
+  const conflicts = {};
   const keys = new Set([...Object.keys(local), ...Object.keys(external)]);
   for (const key of keys) {
     if (mergedFields.has(key)) continue;
-    if (!sameJson(local[key], external[key])) return true;
+    if (!sameJson(local[key], external[key])) conflicts[key] = { local: cloneJson(local[key]), external: cloneJson(external[key]) };
   }
-  return false;
+  return conflicts;
 }
 
 function mergePostJson(localPath, externalPath, relativePath, localRecord, externalRecord) {
   const local = readPostForSync(localPath);
   const external = readPostForSync(externalPath);
   if (!local || !external) return null;
-  // Build output can union safely. Other card metadata cannot: a content hash only makes an
-  // arbitrary winner deterministic, so keep that card as a visible conflict instead.
-  if (postHasScalarConflict(local, external)) return null;
+  // Build output unions safely. For a different scalar value, preserve both values in the card
+  // itself; Local remains the active value because this Sync was initiated from this computer.
+  const scalarConflicts = postScalarConflicts(local, external);
   const localItems = Array.isArray(local.items) ? local.items : [];
   const externalItems = Array.isArray(external.items) ? external.items : [];
   const localRequests = Array.isArray(local.build_requests) ? local.build_requests : [];
@@ -827,6 +831,13 @@ function mergePostJson(localPath, externalPath, relativePath, localRecord, exter
   merged.updated_at = local.updated_at || external.updated_at || utcNow();
   merged.build_favorite = Boolean(local.build_favorite || local.favorite || external.build_favorite || external.favorite);
   merged.favorite = merged.build_favorite;
+  if (Object.keys(scalarConflicts).length) {
+    merged.sync_conflicts = {
+      ...(isJsonObject(local.sync_conflicts) ? local.sync_conflicts : {}),
+      ...(isJsonObject(external.sync_conflicts) ? external.sync_conflicts : {}),
+      scalars: scalarConflicts,
+    };
+  }
   return merged;
 }
 
@@ -1029,23 +1040,26 @@ class LibraryBackup {
     );
     plan.conflicts.push(...settingsPlan.conflicts);
     const merges = [];
-    plan.conflicts = plan.conflicts.filter((relativePath) => {
-      if (path.posix.basename(relativePath) !== "post.json") return true;
-      const key = canonicalPathKey(relativePath);
-      const localRecord = local.records.get(key);
+    for (const [key, localRecord] of local.records) {
+      if (path.posix.basename(localRecord.relativePath) !== "post.json") continue;
       const externalRecord = external.records.get(key);
-      if (!localRecord || !externalRecord) return true;
+      const baseRecord = baseline.records.get(key) || null;
+      if (!localRecord || !externalRecord || sameRecord(localRecord, externalRecord)) continue;
+      // Both drives may have a new post on the first run; otherwise merge only when each
+      // side changed from the computer's own baseline.
+      if (baseRecord && (sameRecord(localRecord, baseRecord) || sameRecord(externalRecord, baseRecord))) continue;
       const merged = mergePostJson(
         safePath(context.local, localRecord.diskRelativePath),
         safePath(context.external, externalRecord.diskRelativePath),
-        relativePath,
+        localRecord.relativePath,
         localRecord,
         externalRecord,
       );
-      if (!merged) return true;
-      merges.push({ relativePath, localRecord, externalRecord, merged });
-      return false;
-    });
+      if (!merged) continue;
+      plan.localToExternal = plan.localToExternal.filter((change) => canonicalPathKey(change.relativePath) !== key);
+      plan.externalToLocal = plan.externalToLocal.filter((change) => canonicalPathKey(change.relativePath) !== key);
+      merges.push({ relativePath: localRecord.relativePath, localRecord, externalRecord, merged });
+    }
     plan.merges = merges;
     const summary = summarizeSyncPlan(plan);
     const notices = [];

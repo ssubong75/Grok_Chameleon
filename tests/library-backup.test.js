@@ -400,7 +400,7 @@ test("per-computer Sync baselines do not turn another computer's addition into a
   assert.deepEqual(bSettings, { collection_order: ["created/first"] });
 });
 
-test("Sync leaves a post with conflicting scalar metadata untouched", async (t) => {
+test("Sync automatically merges a post and retains both scalar values", async (t) => {
   const { local, external } = tempPair(t);
   makeLibrary(external);
   const engine = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "computer-a" });
@@ -410,6 +410,13 @@ test("Sync leaves a post with conflicting scalar metadata untouched", async (t) 
   write(path.join(local, "created", "first", "post.json"), JSON.stringify({ title: "local title", items: [{ item_id: "local-build" }] }));
   write(path.join(external, "created", "first", "post.json"), JSON.stringify({ title: "external title", items: [{ item_id: "external-build" }] }));
   analysis = await engine.analyze("sync");
-  assert.deepEqual(analysis.plan.merges, []);
-  assert.ok(analysis.plan.conflicts.includes("created/first/post.json"));
+  assert.equal(analysis.plan.conflicts.length, 0);
+  assert.equal(analysis.plan.merges.length, 1);
+  await engine.execute(analysis);
+  const localPost = JSON.parse(fs.readFileSync(path.join(local, "created", "first", "post.json"), "utf8"));
+  const externalPost = JSON.parse(fs.readFileSync(path.join(external, "created", "first", "post.json"), "utf8"));
+  assert.deepEqual(localPost, externalPost);
+  assert.equal(localPost.title, "local title");
+  assert.deepEqual(localPost.sync_conflicts.scalars.title, { local: "local title", external: "external title" });
+  assert.deepEqual(localPost.items.map((item) => item.item_id).sort(), ["external-build", "local-build"]);
 });
