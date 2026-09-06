@@ -1464,6 +1464,11 @@ async function executeLibraryBackup(payload = {}) {
       localRoot: entry.localPath,
       externalRoot: entry.externalPath,
       machineId: libraryBackupMachineId(),
+      pythonPath: findPython(),
+      pythonEnv: {
+        ...pythonServerEnv(),
+        ...(bundledPythonRoot(findPython()) ? { PYTHONHOME: bundledPythonRoot(findPython()) } : {}),
+      },
       signal: libraryBackupAbortController.signal,
       progress: sendLibraryBackupProgress,
     });

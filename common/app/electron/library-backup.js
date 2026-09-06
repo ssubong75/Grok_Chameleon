@@ -1,6 +1,9 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
+const { execFile } = require("node:child_process");
+const { promisify } = require("node:util");
+const runStateHelper = promisify(execFile);
 
 const CONTENT_DIRECTORIES = [
   "created",
@@ -868,7 +871,9 @@ function isTerminalJob(job) {
 }
 
 class LibraryBackup {
-  constructor({ localRoot, externalRoot, machineId, progress = null, signal = null }) {
+  constructor({ localRoot, externalRoot, machineId, progress = null, signal = null, pythonPath = "", pythonEnv = process.env }) {
+    this.pythonPath = pythonPath;
+    this.pythonEnv = pythonEnv;
     this.localRoot = path.resolve(String(localRoot || ""));
     this.externalRoot = path.resolve(String(externalRoot || ""));
     this.machineId = String(machineId || "").trim();
@@ -1400,6 +1405,19 @@ class LibraryBackup {
       if (localRecord && externalRecord && sameRecord(localRecord, externalRecord)) nextRecords.set(key, localRecord);
     }
     const nextGeneration = (current.syncBaseline?.generation || 0) + 1;
+    let stateResult = { changed: 0 };
+    const hasState = [current.local, current.external].some((root) =>
+      pathExists(path.join(root, "sql_data", "state.sqlite3")));
+    if (hasState) {
+      if (!this.pythonPath) throw new LibraryBackupError("Python is required to sync Imagine state.", "PYTHON_REQUIRED");
+      this.emit("Syncing Imagine relationships and hidden items.", 0, 1, "verify");
+      const stateBaseline = current.paths.syncBaseline.replace(/\.json$/, ".state.json");
+      const { stdout } = await runStateHelper(this.pythonPath, [
+        path.join(__dirname, "..", "runtime", "sync_state.py"),
+        current.local, current.external, stateBaseline, current.paths.externalControl,
+      ], { env: this.pythonEnv, windowsHide: true, maxBuffer: 1024 * 1024 });
+      stateResult = JSON.parse(stdout);
+    }
     saveStoredManifest(current.paths.syncBaseline, current.libraryId, nextGeneration, {
       records: nextRecords,
       librarySettings: current.settingsPlan?.nextBaseline || {},
@@ -1409,7 +1427,8 @@ class LibraryBackup {
     return {
       direction: "sync",
       generation: nextGeneration,
-      changed: current.summary.total + (current.settingsPlan?.changed || 0),
+      changed: current.summary.total + current.plan.merges.length + (current.settingsPlan?.changed || 0) + stateResult.changed,
+      stateChanged: stateResult.changed,
       completedAt: utcNow(),
       historyPath,
     };

@@ -243,7 +243,7 @@
       // A full rescan rewrites library.json and the card index, which would put the Local
       // Library out of step with the baseline this run just saved. Only a restore actually
       // changes local files, so only a restore needs one.
-      if ((direction === "to-local" || (direction === "sync" && (analysis.summary?.external_to_local?.total || 0) > 0)) && typeof scanLibrary === "function") {
+      if ((direction === "to-local" || (direction === "sync" && ((analysis.summary?.external_to_local?.total || 0) > 0 || result.stateChanged > 0))) && typeof scanLibrary === "function") {
         try { await scanLibrary(); } catch (_) {}
       }
     } catch (error) {

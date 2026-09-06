@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
+const { execFileSync } = require("node:child_process");
 
 const {
   LibraryBackup,
@@ -41,6 +42,42 @@ async function run(engine, direction) {
   const analysis = await engine.analyze(direction);
   return { analysis, result: await engine.execute(analysis) };
 }
+
+test("Sync button engine includes durable SQLite rows and a second run is settled", async (t) => {
+  const { local, external } = tempPair(t);
+  makeLibrary(external);
+  const pythonPath = process.env.SYNC_TEST_PYTHON || "python3";
+  const helper = path.resolve(__dirname, "../common/app/runtime");
+  execFileSync(pythonPath, ["-B", "-c", [
+    "import sys, sqlite3, json",
+    "from pathlib import Path",
+    "sys.path.insert(0, sys.argv[1])",
+    "import sync_state",
+    "for root, item in zip(sys.argv[2:], ('local-result','external-result')):",
+    " p=Path(root)/'sql_data/state.sqlite3'",
+    " p.parent.mkdir(parents=True,exist_ok=True)",
+    " c=sqlite3.connect(p)",
+    " sync_state.replace_rows(c,'main',{'imagine_generated_relations':{'source':{'items':[{'id':item}]}},'imagine_local_exclusions':{}})",
+    " c.commit(); c.close()",
+  ].join("\n"), helper, local, external]);
+  const engine = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "sqlite-test", pythonPath,
+    pythonEnv: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" } });
+  const first = await run(engine, "sync");
+  assert.equal(first.result.stateChanged, 1);
+  const verify = [
+    "import sys, sqlite3, json",
+    "from pathlib import Path",
+    "for root in sys.argv[1:]:",
+    " c=sqlite3.connect(Path(root)/'sql_data/state.sqlite3')",
+    " value=json.loads(c.execute('SELECT relation_json FROM imagine_generated_relations').fetchone()[0])",
+    " assert {x['id'] for x in value['items']}=={'local-result','external-result'}",
+    " c.close()",
+  ].join("\n");
+  execFileSync(pythonPath, ["-B", "-c", verify, local, external]);
+  const second = await run(engine, "sync");
+  assert.equal(second.result.stateChanged, 0);
+  assert.equal(second.result.changed, 0);
+});
 
 test("initial Local to External copies supported data and excludes runtime files", async (t) => {
   const { local, external } = tempPair(t);
