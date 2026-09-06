@@ -182,11 +182,15 @@
     if (direction === "sync") {
       const local = summary.local_to_external || {};
       const external = summary.external_to_local || {};
+      const conflicts = Array.isArray(analysis.conflicts) ? analysis.conflicts : [];
       const describe = (value) => `Add ${value.add || 0}, update ${value.update || 0}, delete ${value.delete || 0}`;
       const warning = analysis.warning ? ` ${analysis.warning}` : "";
       const merged = summary.merges ? ` ${summary.merges} card${summary.merges === 1 ? "" : "s"} will merge their Build results.` : "";
+      const conflictList = conflicts.length
+        ? `\n\nFiles left unchanged on both drives:\n${conflicts.map((filePath) => `• ${filePath}`).join("\n")}\n\nMake the intended version match on both drives, then run Sync again.`
+        : "";
       if (summary.conflicts) {
-        return `Sync found ${summary.conflicts} conflict${summary.conflicts === 1 ? "" : "s"}. Those files stay on their respective drives; all other changes will sync.${merged}${warning}`;
+        return `Sync found ${summary.conflicts} conflict${summary.conflicts === 1 ? "" : "s"}. Those files stay on their respective drives; all other changes will sync.${merged}${warning}${conflictList}`;
       }
       if (!summary.total && !summary.merges) return `The drives already match. Continue to record this sync state?${warning}`;
       return `Local Drive → External Drive: ${describe(local)}. External Drive → Local Drive: ${describe(external)}.${merged} Copy ${formatBytes(summary.copy_bytes)}, history ${formatBytes(summary.history_bytes)}.${warning}`;

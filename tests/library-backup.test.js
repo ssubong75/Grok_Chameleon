@@ -369,3 +369,47 @@ test("three cross-computer round trips preserve generations and latest content",
   assert.equal(restoredB.result.generation, 3);
   assert.equal(fs.readFileSync(path.join(localB, "created", "first", "image.txt"), "utf8"), "change-from-a");
 });
+
+test("per-computer Sync baselines do not turn another computer's addition into a deletion", async (t) => {
+  const { root, local: localA, external } = tempPair(t);
+  const localB = path.join(root, "local-b");
+  makeLibrary(localB);
+  makeLibrary(external);
+  const sync = async (localRoot, machineId) => {
+    const engine = new LibraryBackup({ localRoot, externalRoot: external, machineId });
+    const analysis = await engine.analyze("sync");
+    const result = await engine.execute(analysis);
+    return { analysis, result };
+  };
+
+  await sync(localA, "computer-a");
+  await sync(localB, "computer-b");
+  write(path.join(localA, "created", "first", "only-on-a.txt"), "from-a");
+  const localLibraryPath = path.join(localA, "library.json");
+  const localLibrary = JSON.parse(fs.readFileSync(localLibraryPath, "utf8"));
+  localLibrary.settings = { collection_order: ["created/first"] };
+  write(localLibraryPath, `${JSON.stringify(localLibrary)}\n`);
+  await sync(localA, "computer-a");
+
+  const engineB = new LibraryBackup({ localRoot: localB, externalRoot: external, machineId: "computer-b" });
+  const analysisB = await engineB.analyze("sync");
+  assert.equal(analysisB.plan.localToExternal.some((change) => change.action === "delete" && change.relativePath.endsWith("only-on-a.txt")), false);
+  await engineB.execute(analysisB);
+  assert.equal(fs.readFileSync(path.join(localB, "created", "first", "only-on-a.txt"), "utf8"), "from-a");
+  const bSettings = JSON.parse(fs.readFileSync(path.join(localB, "library.json"), "utf8")).settings;
+  assert.deepEqual(bSettings, { collection_order: ["created/first"] });
+});
+
+test("Sync leaves a post with conflicting scalar metadata untouched", async (t) => {
+  const { local, external } = tempPair(t);
+  makeLibrary(external);
+  const engine = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "computer-a" });
+  let analysis = await engine.analyze("sync");
+  await engine.execute(analysis);
+
+  write(path.join(local, "created", "first", "post.json"), JSON.stringify({ title: "local title", items: [{ item_id: "local-build" }] }));
+  write(path.join(external, "created", "first", "post.json"), JSON.stringify({ title: "external title", items: [{ item_id: "external-build" }] }));
+  analysis = await engine.analyze("sync");
+  assert.deepEqual(analysis.plan.merges, []);
+  assert.ok(analysis.plan.conflicts.includes("created/first/post.json"));
+});

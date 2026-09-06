@@ -1391,6 +1391,9 @@ function publicLibraryBackupAnalysis(token, analysis) {
     direction: analysis.direction,
     summary: analysis.summary,
     warning: analysis.warning || "",
+    // The review UI must name the files left untouched, otherwise a conflict count gives the
+    // user no way to resolve it before the next sync.
+    conflicts: Array.isArray(analysis.plan?.conflicts) ? analysis.plan.conflicts.slice(0, 100) : [],
     analyzed_at: analysis.analyzedAt,
   };
 }

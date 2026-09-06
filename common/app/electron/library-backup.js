@@ -334,6 +334,9 @@ function manifestFromJson(data) {
     libraryId: String(data.library_id || ""),
     generation: Number(data.generation) || 0,
     records,
+    librarySettings: data.library_settings && typeof data.library_settings === "object" && !Array.isArray(data.library_settings)
+      ? data.library_settings
+      : {},
   };
 }
 
@@ -344,6 +347,9 @@ function manifestToJson(libraryId, generation, manifest) {
     generation: Number(generation) || 0,
     fingerprint: manifestFingerprint(manifest),
     saved_at: utcNow(),
+    ...(manifest.librarySettings && typeof manifest.librarySettings === "object"
+      ? { library_settings: manifest.librarySettings }
+      : {}),
     files: [...manifest.records.values()]
       .sort((a, b) => a.relativePath.localeCompare(b.relativePath, "en"))
       .map((record) => ({
@@ -555,13 +561,16 @@ function controlDirectory(root, libraryId, local = false) {
   );
 }
 
-function metadataPaths(localRoot, externalRoot, libraryId) {
+function metadataPaths(localRoot, externalRoot, libraryId, machineId = "") {
   const externalControl = controlDirectory(externalRoot, libraryId, false);
   const localControl = controlDirectory(localRoot, libraryId, true);
+  // A single shared baseline makes a second computer's older checkout look like a deletion.
+  // Each computer therefore compares the USB against the state that *it* last synchronized.
+  const machineKey = crypto.createHash("sha256").update(String(machineId || "unknown")).digest("hex").slice(0, 24);
   return {
     externalControl,
     externalManifest: path.join(externalControl, "manifest.json"),
-    syncBaseline: path.join(externalControl, "sync-baseline.json"),
+    syncBaseline: path.join(externalControl, "sync-baselines", `${machineKey}.json`),
     session: path.join(externalControl, "session.json"),
     localControl,
     localBaseline: path.join(localControl, "baseline.json"),
@@ -587,6 +596,81 @@ function syncManifest(manifest) {
     records.set(key, record);
   }
   return { records };
+}
+
+function isJsonObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function cloneJson(value) {
+  return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+}
+
+function sameJson(left, right) {
+  return left === right || stableStringify(left) === stableStringify(right);
+}
+
+function readLibrarySettings(root) {
+  const library = readJson(path.join(root, "library.json"));
+  return isJsonObject(library.settings) ? cloneJson(library.settings) : {};
+}
+
+function writeLibrarySettings(root, settings) {
+  const libraryPath = path.join(root, "library.json");
+  const library = readJson(libraryPath);
+  if (!isJsonObject(library)) throw new LibraryBackupError(`Invalid library.json: ${libraryPath}`, "LIBRARY_JSON_INVALID");
+  if (sameJson(library.settings || {}, settings)) return false;
+  library.settings = cloneJson(settings);
+  writeJsonAtomic(libraryPath, library);
+  return true;
+}
+
+// library.json contains server-regenerated indexes together with user preferences.  Copying the
+// whole file would carry volatile indexes across drives, so merge each durable settings key.
+function buildLibrarySettingsPlan(baselineSettings, localSettings, externalSettings) {
+  const MISSING = Symbol("missing setting");
+  const base = isJsonObject(baselineSettings) ? baselineSettings : {};
+  const local = isJsonObject(localSettings) ? localSettings : {};
+  const external = isJsonObject(externalSettings) ? externalSettings : {};
+  const localResult = cloneJson(local);
+  const externalResult = cloneJson(external);
+  const nextBaseline = {};
+  const conflicts = [];
+  let changed = 0;
+  const valueAt = (object, key) => Object.prototype.hasOwnProperty.call(object, key) ? object[key] : MISSING;
+  const equal = (left, right) => left === MISSING || right === MISSING ? left === right : sameJson(left, right);
+  const put = (object, key, value) => {
+    if (value === MISSING) delete object[key];
+    else object[key] = cloneJson(value);
+  };
+  const keys = new Set([...Object.keys(base), ...Object.keys(local), ...Object.keys(external)]);
+  for (const key of [...keys].sort((a, b) => a.localeCompare(b, "en"))) {
+    const previous = valueAt(base, key);
+    const localValue = valueAt(local, key);
+    const externalValue = valueAt(external, key);
+    const localChanged = !equal(localValue, previous);
+    const externalChanged = !equal(externalValue, previous);
+    if (equal(localValue, externalValue)) {
+      put(localResult, key, localValue);
+      put(externalResult, key, localValue);
+      put(nextBaseline, key, localValue);
+    } else if (localChanged && !externalChanged) {
+      put(localResult, key, localValue);
+      put(externalResult, key, localValue);
+      put(nextBaseline, key, localValue);
+      changed += 1;
+    } else if (!localChanged && externalChanged) {
+      put(localResult, key, externalValue);
+      put(externalResult, key, externalValue);
+      put(nextBaseline, key, externalValue);
+      changed += 1;
+    } else {
+      // Keep each side's value. Once the user makes them equal, a later sync records it.
+      conflicts.push(`library.json — settings.${key}`);
+      if (previous !== MISSING) put(nextBaseline, key, previous);
+    }
+  }
+  return { local: localResult, external: externalResult, nextBaseline, conflicts, changed };
 }
 
 function sameRecord(left, right) {
@@ -683,9 +767,11 @@ function readPostForSync(filePath) {
 }
 
 function itemSyncKey(item, index) {
-  if (!item || typeof item !== "object") return `index:${index}`;
+  if (!item || typeof item !== "object") return `value:${stableStringify(item)}`;
   const id = String(item.item_id || item.id || item.file || "").trim();
-  return id ? `item:${id}` : `index:${index}`;
+  // item_id is present in the current data, but an index is not a cross-drive identity: the
+  // second array starts after the first one.  Identical id-less values can still deduplicate.
+  return id ? `item:${id}` : `value:${stableStringify(item)}`;
 }
 
 function mergePostItems(primaryItems, secondaryItems) {
@@ -713,25 +799,33 @@ function mergeJsonRecords(primary, secondary) {
   return result;
 }
 
+function postHasScalarConflict(local, external) {
+  const mergedFields = new Set(["items", "build_requests", "build_favorite", "favorite", "folder_path", "updated_at"]);
+  const keys = new Set([...Object.keys(local), ...Object.keys(external)]);
+  for (const key of keys) {
+    if (mergedFields.has(key)) continue;
+    if (!sameJson(local[key], external[key])) return true;
+  }
+  return false;
+}
+
 function mergePostJson(localPath, externalPath, relativePath, localRecord, externalRecord) {
   const local = readPostForSync(localPath);
   const external = readPostForSync(externalPath);
   if (!local || !external) return null;
-  // The stable content hash is only a tie breaker for scalar card metadata.  Build results and
-  // request history below are true unions, so neither drive's generated work is discarded.
-  const localPrimary = localRecord.sha256.localeCompare(externalRecord.sha256, "en") <= 0;
-  const primary = localPrimary ? local : external;
-  const secondary = localPrimary ? external : local;
-  const primaryItems = Array.isArray(primary.items) ? primary.items : [];
-  const secondaryItems = Array.isArray(secondary.items) ? secondary.items : [];
-  const primaryRequests = Array.isArray(primary.build_requests) ? primary.build_requests : [];
-  const secondaryRequests = Array.isArray(secondary.build_requests) ? secondary.build_requests : [];
-  const merged = { ...secondary, ...primary };
-  merged.items = mergePostItems(primaryItems, secondaryItems);
-  merged.build_requests = mergeJsonRecords(primaryRequests, secondaryRequests);
+  // Build output can union safely. Other card metadata cannot: a content hash only makes an
+  // arbitrary winner deterministic, so keep that card as a visible conflict instead.
+  if (postHasScalarConflict(local, external)) return null;
+  const localItems = Array.isArray(local.items) ? local.items : [];
+  const externalItems = Array.isArray(external.items) ? external.items : [];
+  const localRequests = Array.isArray(local.build_requests) ? local.build_requests : [];
+  const externalRequests = Array.isArray(external.build_requests) ? external.build_requests : [];
+  const merged = { ...local };
+  merged.items = mergePostItems(localItems, externalItems);
+  merged.build_requests = mergeJsonRecords(localRequests, externalRequests);
   merged.folder_path = path.posix.dirname(relativePath);
-  merged.updated_at = primary.updated_at || secondary.updated_at || utcNow();
-  merged.build_favorite = Boolean(primary.build_favorite || primary.favorite || secondary.build_favorite || secondary.favorite);
+  merged.updated_at = local.updated_at || external.updated_at || utcNow();
+  merged.build_favorite = Boolean(local.build_favorite || local.favorite || external.build_favorite || external.favorite);
   merged.favorite = merged.build_favorite;
   return merged;
 }
@@ -788,7 +882,7 @@ class LibraryBackup {
       direction === "to-local" ? "External Library" : "Local Library",
       direction === "to-local" ? "Local Library" : "External Library",
     );
-    return { local, external, source, destination, libraryId, paths: metadataPaths(local, external, libraryId) };
+    return { local, external, source, destination, libraryId, paths: metadataPaths(local, external, libraryId, this.machineId) };
   }
 
   async analyze(direction, { previousActualExternal = null, previousActualLocal = null } = {}) {
@@ -926,8 +1020,14 @@ class LibraryBackup {
       phase: "Scanning Local Drive",
       includePath: isSyncSourcePath,
     }));
-    const baseline = stored || { records: new Map() };
+    const baseline = stored || { records: new Map(), librarySettings: {} };
     const plan = buildSyncPlan(baseline, local, external);
+    const settingsPlan = buildLibrarySettingsPlan(
+      baseline.librarySettings,
+      readLibrarySettings(context.local),
+      readLibrarySettings(context.external),
+    );
+    plan.conflicts.push(...settingsPlan.conflicts);
     const merges = [];
     plan.conflicts = plan.conflicts.filter((relativePath) => {
       if (path.posix.basename(relativePath) !== "post.json") return true;
@@ -950,7 +1050,7 @@ class LibraryBackup {
     const summary = summarizeSyncPlan(plan);
     const notices = [];
     if (plan.merges.length) notices.push(`${plan.merges.length} card${plan.merges.length === 1 ? "" : "s"} will merge Build results automatically.`);
-    if (plan.conflicts.length) notices.push(`${plan.conflicts.length} file${plan.conflicts.length === 1 ? "" : "s"} changed on both drives and will be left in place while the rest syncs.`);
+    if (plan.conflicts.length) notices.push(`${plan.conflicts.length} file or setting${plan.conflicts.length === 1 ? "" : "s"} changed on both drives and will be left in place while the rest syncs.`);
     const warning = notices.join(" ");
     return {
       direction: "sync",
@@ -962,6 +1062,7 @@ class LibraryBackup {
       localFingerprint: manifestFingerprint(local),
       externalFingerprint: manifestFingerprint(external),
       plan,
+      settingsPlan,
       summary,
       warning,
       analyzedAt: utcNow(),
@@ -1221,6 +1322,11 @@ class LibraryBackup {
       }
       externalHistory = externalHistory || historyRoot;
     }
+    if (current.settingsPlan?.changed) {
+      this.emit("Applying library settings changed on one drive.", 0, 1, "apply");
+      writeLibrarySettings(current.local, current.settingsPlan.local);
+      writeLibrarySettings(current.external, current.settingsPlan.external);
+    }
     const conflictKeys = new Set(current.plan.conflicts.map(canonicalPathKey));
     const changedByKey = new Map();
     for (const change of [...current.plan.localToExternal, ...current.plan.externalToLocal]) {
@@ -1266,13 +1372,16 @@ class LibraryBackup {
       if (localRecord && externalRecord && sameRecord(localRecord, externalRecord)) nextRecords.set(key, localRecord);
     }
     const nextGeneration = (current.syncBaseline?.generation || 0) + 1;
-    saveStoredManifest(current.paths.syncBaseline, current.libraryId, nextGeneration, { records: nextRecords });
+    saveStoredManifest(current.paths.syncBaseline, current.libraryId, nextGeneration, {
+      records: nextRecords,
+      librarySettings: current.settingsPlan?.nextBaseline || {},
+    });
     const historyPath = [externalHistory, localHistory].filter(Boolean).join("\n");
     this.emit("Drive Sync completed.", 1, 1, "complete");
     return {
       direction: "sync",
       generation: nextGeneration,
-      changed: current.summary.total,
+      changed: current.summary.total + (current.settingsPlan?.changed || 0),
       completedAt: utcNow(),
       historyPath,
     };
