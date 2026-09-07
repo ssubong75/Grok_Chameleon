@@ -7014,6 +7014,10 @@ def imagine_recover_missing_direct_upload_conversation_cards(
                     "confirmed_deleted": conversation_id in deleted_conversation_ids,
                     "error": str(exc)[:400],
                 })
+                if not imagine_error_is_confirmed_not_found(exc):
+                    for pending in futures:
+                        pending.cancel()
+                    raise RuntimeError("Imagine Saved refresh incomplete; previous cards retained.") from exc
                 continue
             post = imagine_saved_post_from_conversation(
                 {"conversationId": conversation_id},
@@ -7336,6 +7340,39 @@ def imagine_saved_display_cache_path(root: Path, account: dict) -> Path:
     return path
 
 
+def restore_imagine_display_relations(posts: list[dict], root: Path, account: dict) -> list[dict]:
+    """Overlay durable, account-owned lineage without querying the remote service."""
+    ensure_imagine_state_migrated(root)
+    account_key = imagine_account_settings_key(account)
+    relations = {
+        key: record for key, record in imagine_state.load_generated_relations(root).items()
+        if isinstance(record, dict) and account_key
+        and str(record.get("account_key") or "").strip().lower() == account_key
+    }
+    excluded = imagine_pending_delete_ids(root, account) | imagine_local_exclusion_ids(root, account)
+    restored = []
+    for original in posts:
+        post = json.loads(json.dumps(original))
+        post_id = str(post.get("post_id") or "").strip()
+        if post_id in excluded:
+            continue
+        record = relations.get(post_id)
+        if record and str(record.get("source_post_path") or "") == str(post.get("folder_path") or ""):
+            imagine_apply_generated_relations(
+                post, root, account, relations,
+                preserve_representative=True,
+                allow_cross_conversation_relations=True,
+                ensure_upload_bundle=False,
+            )
+        post["items"] = [
+            item for item in post.get("items") or []
+            if imagine_item_asset_id(item) not in excluded
+        ]
+        if post["items"]:
+            restored.append(post)
+    return restored
+
+
 def list_imagine_saved_display_cache(payload: dict) -> dict:
     root = library_root()
     if not root:
@@ -7367,7 +7404,7 @@ def list_imagine_saved_display_cache(payload: dict) -> dict:
         "ok": True,
         "source": "saved_display_cache",
         "found": True,
-        "posts": normalize_json_unicode(posts),
+        "posts": normalize_json_unicode(restore_imagine_display_relations(posts, root, account)),
         "updated_at": str(data.get("updated_at") or ""),
         "imagine": {
             "id": account.get("id") or "",
@@ -7654,6 +7691,10 @@ def list_imagine_saved(payload: dict) -> dict:
                         "conversation_id": conversation_id,
                         "error": str(exc)[:400],
                     })
+                    if not imagine_error_is_confirmed_not_found(exc):
+                        for pending in futures:
+                            pending.cancel()
+                        raise RuntimeError("Imagine Saved refresh incomplete; previous cards retained.") from exc
     ensure_imagine_state_migrated(root)
     relations = imagine_state.load_generated_relations(root)
     hidden_bundle_asset_ids = imagine_hidden_bundle_asset_ids(relations)

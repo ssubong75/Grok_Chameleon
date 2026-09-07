@@ -1956,7 +1956,13 @@
 
   function hasFinalStoreMediaEvent(event, expectedType) {
     if (!event) return false;
-    if (event?.moderated === true && !isTerminalModerationEvent(event, expectedType)) return false;
+    // A URL can be a progressive preview (including an HTTP -part-0 image).
+    // Do not stop listening before the later terminal moderation/success frame.
+    // Moderation is handled by the dedicated verdict branch, never as media success.
+    if (event.moderated === true) return false;
+    const progress = Number(event.progress);
+    if (event.grokChameleonTerminalResponse !== true
+      && !(Number.isFinite(progress) && progress >= 100)) return false;
     const url = expectedType === "video" ? event.videoUrl : event.imageUrl;
     if (!url) return false;
     return expectedType !== "image" || !isTemporaryImageUrl(url);
