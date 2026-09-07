@@ -109,6 +109,8 @@ function createPendingBuildJob(prompt, preview, sourcePostPath, sourceItemId) {
       source_item_id: sourceItemId || "",
       preview_url: preview?.url || "",
       preview_type: preview?.type || "",
+      aspect_ratio: preview?.aspect_ratio || "",
+      display_aspect_auto: Boolean(preview?.display_aspect_auto),
     },
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
@@ -322,6 +324,16 @@ async function submitBuildComposer() {
         type: composerState.mode === "video" || composerState.mode === "extend" || composerState.mode === "video_edit" ? "video" : "image",
       };
     const requestOptions = composerRequestOptions();
+    await Promise.all(lockedAttachments.map((attachment) => ensureComposerAttachmentDataUrl(attachment)));
+    const chosenAspect = String(requestOptions.aspect_ratio || "").trim();
+    preview.display_aspect_auto = !chosenAspect || chosenAspect.toLowerCase() === "auto";
+    preview.aspect_ratio = preview.display_aspect_auto ? "" : chosenAspect;
+    if (preview.display_aspect_auto && composerMediaKind(primarySource) === "image") {
+      const dimensions = await readComposerImageDimensions(
+        primarySource.data_url || primarySource.source_url || primarySource.preview_url,
+      );
+      preview.aspect_ratio = dimensions.aspect_ratio || composerAttachmentAspectForItem(primarySource) || "";
+    }
     if (shouldCreatePendingBuildDetailJob(sourcePostPath)) {
       pendingJob = createPendingBuildJob(prompt, preview, sourcePostPath, sourceItemId);
       upsertBuildJob(pendingJob);
@@ -330,7 +342,6 @@ async function submitBuildComposer() {
         focusJobThumb: true,
       });
     }
-    await Promise.all(lockedAttachments.map((attachment) => ensureComposerAttachmentDataUrl(attachment)));
     const attachments = lockedAttachments.map(composerSubmissionAttachment);
     if ((composerState.mode === "extend" || composerState.mode === "video_edit") && !hasVideoAttachment(attachments)) {
       throw new Error(composerState.mode === "video_edit" ? "Video Edit needs one source video." : "Extend needs one source video.");
@@ -346,6 +357,7 @@ async function submitBuildComposer() {
       attachments,
       preview_url: preview.url,
       preview_type: preview.type,
+      display_aspect_ratio: preview.aspect_ratio,
       source_post_path: sourcePostPath,
       source_item_id: sourceItemId,
     });

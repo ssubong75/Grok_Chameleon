@@ -334,11 +334,16 @@ function imagineImageAspectFromAttachment(attachment) {
   if (!source) return Promise.resolve("");
   return new Promise((resolve) => {
     const image = new Image();
+    let settled = false;
     const finish = (aspect = "") => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
       image.onload = null;
       image.onerror = null;
       resolve(aspect);
     };
+    const timer = window.setTimeout(() => finish(""), 5000);
     image.onload = () => {
       const width = Number(image.naturalWidth || 0);
       const height = Number(image.naturalHeight || 0);
@@ -357,6 +362,18 @@ async function imagineAttachmentsWithMeasuredImageAspects(attachments) {
     const measuredAspect = await imagineImageAspectFromAttachment(attachment);
     return measuredAspect ? { ...attachment, aspect_ratio: measuredAspect } : attachment;
   }));
+}
+
+function imagineReducedImageAspect(attachment) {
+  const value = String(attachment?.aspect_ratio || attachment?.aspectRatio || "");
+  const match = value.match(/^(\d+(?:\.\d+)?)\s*[:/]\s*(\d+(?:\.\d+)?)$/);
+  if (!match) return "";
+  const width = Math.round(Number(match[1]));
+  const height = Math.round(Number(match[2]));
+  if (!(width > 0 && height > 0)) return "";
+  let a = width, b = height;
+  while (b) [a, b] = [b, a % b];
+  return `${width / a}:${height / a}`;
 }
 
 function createPendingImagineJob(prompt, preview, sourcePostPath, sourceItemId) {
@@ -937,14 +954,6 @@ async function submitImagineComposer() {
       throw new Error("Select an Imagine video thumbnail.");
     }
     const requestOptions = composerRequestOptions();
-    if (shouldCreatePendingImagineDetailJob(lockedSourcePostPath)) {
-      pendingJob = createPendingImagineJob(prompt, lockedPreview, lockedSourcePostPath, lockedSourceItemId);
-      upsertImagineJob(pendingJob);
-      selectImagineJob(pendingJob.id, {
-        keepDetailPost: true,
-        focusJobThumb: true,
-      });
-    }
     await Promise.all(lockedAttachments.map((attachment) => ensureComposerAttachmentDataUrl(attachment)));
     let attachments = lockedAttachments.map(composerSubmissionAttachment);
     attachments = await imagineAttachmentsWithMeasuredImageAspects(attachments);
@@ -958,35 +967,21 @@ async function submitImagineComposer() {
     }
     if (composerState.mode === "video" && !requestOptions.aspect_ratio) {
       const sourceImage = attachments.find((attachment) => composerMediaKind(attachment) === "image");
-      if (sourceImage) {
-        const imageSource = String(sourceImage.data_url || sourceImage.source_url || "").trim();
-        if (imageSource) {
-          requestOptions.aspect_ratio = await new Promise((resolve) => {
-            const image = new Image();
-            image.onload = () => {
-              const width = Number(image.naturalWidth || 0);
-              const height = Number(image.naturalHeight || 0);
-              if (!width || !height) {
-                resolve("");
-                return;
-              }
-              const gcd = (left, right) => {
-                let a = Math.round(Math.abs(left));
-                let b = Math.round(Math.abs(right));
-                while (b) [a, b] = [b, a % b];
-                return a || 1;
-              };
-              const divisor = gcd(width, height);
-              resolve(`${Math.round(width / divisor)}:${Math.round(height / divisor)}`);
-            };
-            image.onerror = () => resolve("");
-            image.src = imageSource;
-          });
-        }
-      }
+      if (sourceImage) requestOptions.aspect_ratio = imagineReducedImageAspect(sourceImage);
     }
     const primarySourceAttachment = imaginePrimarySubmissionAttachment(attachments, composerState.mode);
     const preview = lockedPreview;
+    preview.aspect_ratio = requestOptions.aspect_ratio
+      || primarySourceAttachment?.aspect_ratio || primarySourceAttachment?.aspectRatio
+      || preview.aspect_ratio || "";
+    if (shouldCreatePendingImagineDetailJob(lockedSourcePostPath)) {
+      pendingJob = createPendingImagineJob(prompt, preview, lockedSourcePostPath, lockedSourceItemId);
+      upsertImagineJob(pendingJob);
+      selectImagineJob(pendingJob.id, {
+        keepDetailPost: true,
+        focusJobThumb: true,
+      });
+    }
     const attachmentSourcePostPath = String(primarySourceAttachment?.detail_post_path || "").trim();
     const sourcePostPath = attachmentSourcePostPath;
     const attachmentSourceItemId = imagineAttachmentSubmissionItemId(primarySourceAttachment);

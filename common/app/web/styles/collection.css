@@ -391,6 +391,7 @@
   opacity: 0.35;
 }
 
+.collection_1st_card.drop-target,
 .collection_2nd_slot.drop-target,
 .collection_2nd_card.drop-target {
   border-color: var(--accent);

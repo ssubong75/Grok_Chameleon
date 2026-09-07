@@ -25610,7 +25610,10 @@ def build_job_context(payload: dict) -> dict:
         source_item_id = next((str(item.get("detail_item_id") or "").strip() for item in attachments if item.get("detail_item_id")), "")
     context_mode = "t2i" if mode == "image" and not image_attachments else ("i2i" if mode == "image" else mode)
     aspect_ratio = normalize_aspect_ratio_value(options.get("aspect_ratio") or options.get("aspect"))
-    if not aspect_ratio and context_mode in {"i2i", "i2v", "extend", "video_edit"}:
+    display_aspect_auto = not bool(aspect_ratio)
+    if not aspect_ratio and context_mode in {"i2i", "i2v", "video", "extend", "video_edit"}:
+        aspect_ratio = normalize_aspect_ratio_value(payload.get("display_aspect_ratio"))
+    if not aspect_ratio and context_mode in {"i2i", "i2v", "video", "extend", "video_edit"}:
         aspect_ratio = payload_source_aspect_ratio(payload, "image") or payload_source_aspect_ratio(payload, "video")
     return {
         "provider": "build",
@@ -25622,6 +25625,7 @@ def build_job_context(payload: dict) -> dict:
         "source_item_id": source_item_id,
         "aspect_ratio": aspect_ratio,
         "resolution": str(options.get("resolution") or ""),
+        "display_aspect_auto": display_aspect_auto,
         "quality": str(options.get("quality") or options.get("image_quality") or ""),
         "count": str(options.get("count") or ""),
         "scroll_continuation": bool(payload.get("scroll_continuation")),
@@ -27789,6 +27793,11 @@ def save_composer_uploads(payload: dict) -> dict:
             "size": len(raw),
             "upload_hash": upload_hash,
         }
+        if payload.get("provider") == "build" and media_type == "image":
+            width = safe_int(file_payload.get("width"), 0)
+            height = safe_int(file_payload.get("height"), 0)
+            if width > 0 and height > 0:
+                item.update(width=width, height=height, aspect_ratio=f"{width}:{height}")
         rel_folder = folder.relative_to(root).as_posix()
         post = {
             "post_id": folder_name,

@@ -583,6 +583,23 @@
   }
 
 
+  function bindBuildAutoPreviewAspect(prefix, media, job) {
+    if (generationJobProvider(job) !== "build" || !job?.context?.display_aspect_auto
+      || detailAspectFromValue(job.context.aspect_ratio)) return;
+    const image = media.querySelector("img.detail_generation_media");
+    if (!image) return;
+    const update = () => {
+      // A late image load must not resize a different job or its finished result.
+      if (!media.contains(image) || !media.classList.contains("has_generation")) return;
+      if (!(image.naturalWidth > 0 && image.naturalHeight > 0)) return;
+      const aspect = `${image.naturalWidth} / ${image.naturalHeight}`;
+      job.context.aspect_ratio = aspect;
+      setDetailMediaAspect(prefix, aspect);
+    };
+    image.addEventListener("load", update, { once: true });
+    if (image.complete) update();
+  }
+
   async function cancelBuildJobFromUi(jobId) {
     const id = String(jobId || "");
     if (!id) return;
@@ -813,6 +830,7 @@
       </div>
     `;
     renderJobBadges();
+    bindBuildAutoPreviewAspect(prefix, media, job);
     media.querySelector(".detail_generation_cancel")?.addEventListener("click", () => {
       cancelGenerationJobFromUi(job);
     });

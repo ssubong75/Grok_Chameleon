@@ -297,6 +297,47 @@
   }
 
 
+  let collectionCategoryMovePending = false;
+
+  async function moveCollectionCardToCategory(postPath, categoryPath) {
+    if (collectionCategoryMovePending || !postPath || !categoryPath) return;
+    const source = library_state.collections.find((category) => (
+      collectionDirectPosts(category).some((post) => post.folder_path === postPath)
+    ));
+    const target = library_state.collections.find((category) => category.path === categoryPath);
+    if (!source || !target || source.path === target.path) return;
+    if (!library_state.apiReady) {
+      setLibraryMessage("Move needs the local app launcher.");
+      return;
+    }
+    collectionCategoryMovePending = true;
+    try {
+      const data = await qApi("/api/collection/move-post", {
+        post_path: postPath, collection_path: categoryPath, target_parent_path: "",
+      });
+      // Retire the old path, including stale indexed pages started before this move.
+      applyLibrarySnapshot({ ...data, deleted_paths: [...(data.deleted_paths || []), postPath] });
+      library_state.collectionDraftLayout = null;
+      collectionFolderGridStablePosts = collectionFolderGridStablePosts.filter((post) => (
+        post.folder_path !== postPath && !String(post.folder_path || "").startsWith(`${postPath}/`)
+      ));
+      for (const category of library_state.collections) {
+        if (category.path === source.path || category.path === target.path) {
+          category.indexed_loaded = false;
+          category.indexed_loading = false;
+        }
+      }
+      library_state.selectedItems?.delete(postPath);
+      library_state.selectedCollectionPath = categoryPath;
+      library_state.collectionSort = collectionSortModeFor(categoryPath);
+      replaceCurrentBrowserHistoryState();
+      renderCollectionFolders();
+      toast("Moved to category.");
+    } finally {
+      collectionCategoryMovePending = false;
+    }
+  }
+
   async function reorderCollectionPrimary(draggedPath, targetPath) {
     if (!draggedPath || !targetPath || draggedPath === targetPath) return;
     const collections = sortedCollections();
@@ -422,12 +463,27 @@
       });
       card.addEventListener("dragend", () => card.classList.remove("dragging"));
       card.addEventListener("dragover", (event) => {
-        if (!dataTransferHasType(event, "application/x-grok-q-collection")) return;
+        const itemDrag = dataTransferHasType(event, "application/x-grok-q-collection-post");
+        if (!itemDrag && !dataTransferHasType(event, "application/x-grok-q-collection")) return;
+        if (itemDrag && library_state.draggingCollectionPostPath?.startsWith(`${collection.path}/`)) return;
         event.preventDefault();
         event.dataTransfer.dropEffect = "move";
+        if (itemDrag) card.classList.add("drop-target");
+      });
+      card.addEventListener("dragleave", (event) => {
+        if (!event.relatedTarget || !card.contains(event.relatedTarget)) card.classList.remove("drop-target");
       });
       card.addEventListener("drop", (event) => {
         event.preventDefault();
+        event.stopPropagation();
+        card.classList.remove("drop-target");
+        const itemPath = event.dataTransfer.getData("application/x-grok-q-collection-post");
+        if (itemPath) {
+          library_state.draggingCollectionPostPath = "";
+          moveCollectionCardToCategory(itemPath, collection.path)
+            .catch((error) => showErrorPanel("Move failed", error?.message || "Move failed."));
+          return;
+        }
         reorderCollectionPrimary(
           event.dataTransfer.getData("application/x-grok-q-collection"),
           collection.path,
@@ -615,6 +671,8 @@
           card.addEventListener("dragend", () => {
             library_state.draggingCollectionPostPath = "";
             card.classList.remove("dragging");
+            document.querySelectorAll(".collection_1st_card.drop-target")
+              .forEach((node) => node.classList.remove("drop-target"));
           });
           return applyCollectionGridRenderData(card, key, hash);
         },

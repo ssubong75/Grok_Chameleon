@@ -755,8 +755,35 @@
       return payload;
     }
 
+    async function readComposerImageDimensions(url) {
+      if (!url) return {};
+      return new Promise((resolve) => {
+        const image = new Image();
+        let settled = false;
+        const finish = (value) => {
+          if (settled) return;
+          settled = true;
+          window.clearTimeout(timer);
+          image.onload = image.onerror = null;
+          resolve(value);
+        };
+        const timer = window.setTimeout(() => finish({}), 5000);
+        image.onload = () => {
+          const width = image.naturalWidth;
+          const height = image.naturalHeight;
+          finish(width > 0 && height > 0 ? {
+            width, height, aspect_ratio: `${width}:${height}`,
+          } : {});
+        };
+        image.onerror = () => finish({});
+        image.src = url;
+      });
+    }
+
     async function saveComposerUploadAttachment(file, dataUrl, type) {
       if (!library_state.apiReady) return null;
+      const dimensions = composerState.provider === "build" && type.startsWith("image/")
+        ? await readComposerImageDimensions(dataUrl) : {};
       const data = await qApi("/api/uploads/save", {
         provider: composerState.provider,
         files: [{
@@ -764,6 +791,7 @@
           type,
           size: file.size,
           data_url: dataUrl,
+          ...dimensions,
         }],
       });
       applyLibrarySnapshot(data);
