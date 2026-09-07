@@ -55,12 +55,21 @@ function postHasBuildLocalMedia(post) {
   return items.some(isBuildLocalMediaItem);
 }
 
+function buildUploadSourceVisible(post) {
+  if (post?.build_job_failed) return true;
+  return (library_state.jobs || []).some((job) => (
+    generationJobProvider(job) === "build"
+    && !["done", "cancelled", "canceled"].includes(buildJobStatus(job))
+    && generationJobMatchesPost(job, post)
+  ));
+}
+
 function isBuildPost(post) {
   if (isCollectionContainerPost(post)) return false;
   if (post.area === "collection") return postHasBuildLocalMedia(post);
   if (post.area === "upload") {
     return postHasBuildLocalMedia(post)
-      && (library_state.jobs || []).some((job) => generationJobMatchesPost(job, post));
+      && buildUploadSourceVisible(post);
   }
   if (post.source === "imagine") return false;
   if (!(post.source === "build" || post.area === "created")) return false;
@@ -90,7 +99,11 @@ function buildSourcePosts() {
       // valid in the new scope. If it could not start, do not expose the previous scope.
       if (library_state.indexedBuildKey !== indexedBuildQueryKey()) return [];
     }
-    const indexedPosts = library_state.indexedBuildPosts || [];
+    // Cached pages may still contain the upload card shown while a job ran.
+    // Recheck it at render time, including pages that arrived after completion.
+    const indexedPosts = (library_state.indexedBuildPosts || []).filter((post) => (
+      post?.area !== "upload" || buildUploadSourceVisible(post)
+    ));
     const byPath = new Map(indexedPosts.map((post) => [post?.folder_path, post]));
     for (const post of library_state.posts.filter(isSessionBuildT2iPost)) {
       if (post?.folder_path) byPath.set(post.folder_path, post);
