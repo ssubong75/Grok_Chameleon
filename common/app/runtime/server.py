@@ -26,6 +26,7 @@ import urllib.error
 import urllib.request
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -26706,7 +26707,7 @@ def remote_imagine_item_url(item: dict) -> str:
     return ""
 
 
-def write_imagine_remote_url_to_file(url: str, target: Path, account: dict, kind: str = "image") -> dict:
+def write_imagine_remote_url_to_file(url: str, target: Path, account: dict, kind: str = "image", timeout: int = 300) -> dict:
     download_started_at = time.monotonic()
     raw_url = imagine_remote_url(imagine_unwrap_remote_proxy(url))
     if not raw_url:
@@ -26728,7 +26729,7 @@ def write_imagine_remote_url_to_file(url: str, target: Path, account: dict, kind
         }
     headers = imagine_remote_media_headers(account, kind)
     request = urllib.request.Request(raw_url, headers=headers, method="GET")
-    with urllib.request.urlopen(request, timeout=300) as response:
+    with urllib.request.urlopen(request, timeout=timeout) as response:
         bytes_written = 0
         with target.open("wb") as handle:
             while True:
@@ -26748,7 +26749,7 @@ def write_imagine_remote_url_to_file(url: str, target: Path, account: dict, kind
         }
 
 
-def copy_imagine_remote_item_to_directory(root: Path, item: dict, target_dir: Path, account: dict, index: int = 0) -> dict:
+def copy_imagine_remote_item_to_directory(root: Path, item: dict, target_dir: Path, account: dict, index: int = 0, download_timeout: int = 300) -> dict:
     media_url = remote_imagine_item_url(item)
     if not media_url:
         raise RuntimeError("Remote media URL was not found.")
@@ -26771,7 +26772,7 @@ def copy_imagine_remote_item_to_directory(root: Path, item: dict, target_dir: Pa
         "url": media_url,
     })
     try:
-        download_metadata = write_imagine_remote_url_to_file(media_url, part_file, account, media_type)
+        download_metadata = write_imagine_remote_url_to_file(media_url, part_file, account, media_type, timeout=download_timeout)
         actual_bytes = part_file.stat().st_size if part_file.is_file() else 0
         expected_bytes = safe_int(download_metadata.get("expected_bytes"), 0)
         valid, validation = media_container_validation(part_file, media_type)
@@ -26819,6 +26820,8 @@ def copy_imagine_remote_item_to_directory(root: Path, item: dict, target_dir: Pa
             "part_removed": not part_file.exists(),
             "error": str(exc)[:1000],
         })
+        if isinstance(exc, urllib.error.HTTPError):
+            raise RuntimeError(f"Media download failed for asset {candidate_id}: HTTP {exc.code}") from exc
         raise
 
     item_id = item.get("item_id") or item.get("id") or target_file.stem or f"imagine-{index + 1}"
@@ -26918,6 +26921,91 @@ def list_reference_posts(payload: dict) -> dict:
     return {"ok": True, "posts": sorted(posts, key=library_index.post_activity_at, reverse=True)}
 
 
+def reference_local_media_index(root: Path) -> dict:
+    """Index durable card files and explicit copy relationships, never generation lineage."""
+    files, links = {}, {}
+
+    def link(left, right):
+        left, right = str(left or "").strip().lower(), str(right or "").strip().lower()
+        if left and right:
+            links.setdefault(left, set()).add(right)
+            links.setdefault(right, set()).add(left)
+
+    settings = read_json(root / "library.json", {}).get("settings") or {}
+    for mapping in (settings.get("imagine_clone_asset_map") or {}).values():
+        if not isinstance(mapping, dict):
+            continue
+        for origin, record in mapping.items():
+            if isinstance(record, dict):
+                link(record.get("source_asset_id") or record.get("sourceAssetId") or origin,
+                     record.get("asset_id") or record.get("assetId"))
+    for area in ("레퍼런스", "created", "upload", "collection"):
+        parent = root / area
+        if not parent.is_dir():
+            continue
+        for metadata_file in parent.rglob("post.json"):
+            if not metadata_file.resolve().is_relative_to(root.resolve()):
+                continue
+            post = read_json(metadata_file, {})
+            if not isinstance(post, dict):
+                continue
+            for item in post.get("items") or []:
+                if not isinstance(item, dict):
+                    continue
+                identity = str(item.get("item_id") or item.get("id") or imagine_item_asset_id(item) or "").strip().lower()
+                if not identity:
+                    continue
+                link(identity, imagine_post_clone_source_id({"items": [item]}))
+                name = str(item.get("file") or "")
+                if not name:
+                    continue
+                try:
+                    file = safe_join(metadata_file.parent, name)
+                    if not file.resolve().is_relative_to(root.resolve()) or not file.is_file():
+                        continue
+                    files.setdefault(identity, []).append(file)
+                except (OSError, ValueError, RuntimeError):
+                    continue
+    return {"files": files, "links": links}
+
+
+def reuse_reference_local_media(root: Path, item: dict, staged: Path, index: dict) -> dict | None:
+    identity = str(item.get("item_id") or item.get("id") or imagine_item_asset_id(item) or "").strip().lower()
+    pending = [identity, imagine_post_clone_source_id({"items": [item]}).lower()]
+    visited = set()
+    kind = str(item.get("type") or "image").lower()
+    while pending:
+        current = pending.pop(0)
+        if not current or current in visited:
+            continue
+        visited.add(current)
+        pending.extend(index["links"].get(current, ()))
+        for source in index["files"].get(current, ()):
+            destination = None
+            try:
+                valid, _ = media_container_validation(source, kind)
+                if not valid:
+                    continue
+                destination = unique_path(staged / source.name)
+                shutil.copyfile(source, destination)
+                valid, _ = media_container_validation(destination, kind)
+                if not valid:
+                    destination.unlink(missing_ok=True)
+                    continue
+                copied = {**item, "file": destination.name, "url": ""}
+                for key in ("object_url", "thumbnail", "thumbnail_url", "poster", "poster_url"):
+                    copied.pop(key, None)
+                imagine_debug_event("reference_local_media_reused", {
+                    "asset_id": identity, "matched_asset_id": current,
+                    "source": str(source.resolve().relative_to(root.resolve())),
+                })
+                return serializable_media_item(copied)
+            except (OSError, ValueError, RuntimeError):
+                if destination is not None:
+                    destination.unlink(missing_ok=True)
+    return None
+
+
 def save_imagine_post_to_reference(payload: dict) -> dict:
     """Keep Liked untouched; commit a complete local card, merging repeat saves by item ID."""
     root = library_root()
@@ -26939,7 +27027,7 @@ def save_imagine_post_to_reference(payload: dict) -> dict:
     target.parent.mkdir(parents=True, exist_ok=True)
     cache = root / "cache"
     cache.mkdir(parents=True, exist_ok=True)
-    with COLLECTION_MOVE_LOCK, build_post_save_lock(target):
+    with COLLECTION_MOVE_LOCK, build_post_save_lock(target), ExitStack() as save_locks:
         existing = read_json(target / "post.json", None)
         if target.exists() and not isinstance(existing, dict):
             raise RuntimeError("The Reference folder already exists without valid card metadata.")
@@ -26947,6 +27035,8 @@ def save_imagine_post_to_reference(payload: dict) -> dict:
         merged = [dict(item) for item in existing.get("items") or [] if isinstance(item, dict)]
         by_key = {reference_item_key(item): index for index, item in enumerate(merged)}
         new_files = []
+        unavailable = {}
+        local_media_index = None
         with tempfile.TemporaryDirectory(prefix="reference-save-", dir=cache) as temporary:
             staged = Path(temporary) / "card"
             staged.mkdir()
@@ -26962,13 +27052,56 @@ def save_imagine_post_to_reference(payload: dict) -> dict:
                     local_file = safe_join(target, str(previous["file"]))
                     if local_file.is_file() and local_file.stat().st_size > 0:
                         continue
-                copied = copy_imagine_remote_item_to_directory(root, item, staged, account, index)
+                if local_media_index is None:
+                    local_media_index = reference_local_media_index(root)
+                copied = reuse_reference_local_media(root, item, staged, local_media_index)
+                if copied is None:
+                    try:
+                        copied = copy_imagine_remote_item_to_directory(root, item, staged, account, index)
+                    except (RuntimeError, urllib.error.URLError, TimeoutError) as exc:
+                        unavailable[key] = {"item_id": str(item.get("item_id") or item.get("id") or ""), "error": str(exc)}
+                        continue
                 if previous_index is None:
                     by_key[key] = len(merged)
                     merged.append(copied)
                 else:
                     merged[previous_index] = copied
                 new_files.append(copied)
+            if unavailable:
+                available = [item for item in merged if reference_item_key(item) in seen and reference_item_key(item) not in unavailable]
+                if not available:
+                    raise RuntimeError(next(iter(unavailable.values()))["error"])
+                # This exceptional save gets its own stable card; never alter the original card.
+                staged_ids = {id(item) for item in new_files}
+                for item in available:
+                    if id(item) not in staged_ids:
+                        local_file = safe_join(target, str(item["file"]))
+                        staged_file = unique_path(staged / local_file.name)
+                        shutil.copyfile(local_file, staged_file)
+                        item["file"] = staged_file.name
+                card_id = f"{card_id}-available"
+                target = safe_join(root, f"레퍼런스/{card_id}")
+                save_locks.enter_context(build_post_save_lock(target))
+                existing = read_json(target / "post.json", None)
+                if target.exists() and not isinstance(existing, dict):
+                    raise RuntimeError("The separate Reference folder has no valid card metadata.")
+                existing = existing or {}
+                merged = [dict(item) for item in existing.get("items") or [] if isinstance(item, dict)]
+                by_key = {reference_item_key(item): index for index, item in enumerate(merged)}
+                new_files = []
+                for item in available:
+                    previous_index = by_key.get(reference_item_key(item))
+                    if previous_index is not None:
+                        previous = merged[previous_index]
+                        if previous.get("file"):
+                            file = safe_join(target, str(previous["file"]))
+                            if file.is_file() and media_container_validation(file, str(item.get("type") or "image"))[0]:
+                                continue
+                        merged[previous_index] = item
+                    else:
+                        by_key[reference_item_key(item)] = len(merged)
+                        merged.append(item)
+                    new_files.append(item)
             metadata = {
                 **post_json_from_post(
                     source, post_id=card_id, source="imagine", folder_path=f"레퍼런스/{card_id}",
@@ -27003,7 +27136,8 @@ def save_imagine_post_to_reference(payload: dict) -> dict:
                     raise
         refresh_library_index_paths(root, [f"레퍼런스/{card_id}"])
         post = post_from_folder(root, target, indexed_post_context(f"레퍼런스/{card_id}"))
-        return {"ok": True, "post": post, "saved_count": len(new_files)}
+        return {"ok": True, "post": post, "saved_count": len(new_files),
+                "separate_card": bool(unavailable), "unavailable_items": list(unavailable.values())}
 
 
 def copy_imagine_remote_post_to_collection(payload: dict, item_only: bool = False) -> dict:
@@ -27148,8 +27282,8 @@ def representative_for_merged_items(items: list[dict]) -> str:
 
 def merge_target_parent(root: Path, payload: dict) -> tuple[Path, str | None]:
     target_path = str(payload.get("target_path") or "created").strip("/")
-    if target_path == "created":
-        target_parent = root / "created"
+    if target_path in {"created", "레퍼런스"}:
+        target_parent = safe_join(root, target_path)
         target_parent.mkdir(parents=True, exist_ok=True)
         return target_parent, None
 

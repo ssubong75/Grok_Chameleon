@@ -59,12 +59,30 @@ function saveLikedCardsToReference(posts) {
 async function performLikedReferenceSave(posts, rootPath) {
   if (!library_state.apiReady) throw new Error("Reference saving needs the local app launcher.");
   let saved = 0;
+  let separate = 0;
+  let unavailable = 0;
+  const failures = [];
   try {
     toast("Saving to Reference . . .");
     for (const post of posts) {
       if (library_state.rootPath !== rootPath) throw new Error("Library path changed during saving.");
-      const data = await qApi("/api/reference/save", { source_post: post });
+      let data;
+      try {
+        data = await qApi("/api/reference/save", { source_post: post });
+        if (!data.post || data.post.area !== "reference" || !data.post.folder_path) {
+          throw new Error("The server did not return a saved local card.");
+        }
+      } catch (error) {
+        if (library_state.rootPath !== rootPath) throw new Error("Library path changed during saving.");
+        const id = post.post_id || post.folderName || post.folder_path || "Unknown card";
+        failures.push(`${id}: ${error?.message || "Reference save failed."}`);
+        continue;
+      }
       saved += 1;
+      if (data.separate_card) {
+        separate += 1;
+        unavailable += (data.unavailable_items || []).length;
+      }
       // Invalidate an older list request so it cannot remove the newly saved card.
       referenceLoadEpoch += 1;
       if (library_state.rootPath !== rootPath) throw new Error("Library path changed during saving.");
@@ -77,7 +95,10 @@ async function performLikedReferenceSave(posts, rootPath) {
       }
     }
     renderReferenceCards();
-    toast(`Saved ${saved} card${saved === 1 ? "" : "s"} to Reference.`);
+    if (failures.length) {
+      throw new Error(`${failures.length} card(s) failed. Other cards were processed.\n\n${failures.join("\n\n")}`);
+    }
+    toast(`Saved ${saved} card${saved === 1 ? "" : "s"} to Reference.${separate ? ` ${separate} saved separately; ${unavailable} unavailable item(s) excluded.` : ""}`);
   } catch (error) {
     renderReferenceCards();
     throw new Error(`${saved ? `${saved} card(s) saved. ` : ""}${error?.message || "Reference save failed."}`);

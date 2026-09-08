@@ -66,6 +66,23 @@ test('two saves run in order and failure does not block the next card', async ()
   assert.deepEqual(calls, ['card', 'second']);
 });
 
+test('a failed card in one Reference batch does not stop later cards', async () => {
+  const calls = [];
+  const h = harness((route, payload) => {
+    calls.push(payload.source_post.post_id);
+    if (payload.source_post.post_id === 'blocked') return Promise.reject(new Error('Media download failed for asset asset-401: HTTP 401'));
+    return Promise.resolve({ post: { ...local, post_id: payload.source_post.post_id, folder_path: `레퍼런스/${payload.source_post.post_id}` } });
+  });
+  const result = h.context.saveLikedCardsToReference([
+    { ...card, post_id: 'first' },
+    { ...card, post_id: 'blocked' },
+    { ...card, post_id: 'last' },
+  ]);
+  await assert.rejects(result, /1 card\(s\) failed\. Other cards were processed\.[\s\S]*asset-401/);
+  assert.deepEqual(calls, ['first', 'blocked', 'last']);
+  assert.deepEqual(Array.from(h.state.posts, (post) => post.folder_path), ['레퍼런스/first', '레퍼런스/last']);
+});
+
 test('Liked card, bulk and detail entry points save whole cards; Imagine and Discover keep Collection routing', () => {
   const h = harness();
   const moved = [];
@@ -98,4 +115,26 @@ test('Reference main and its local detail use Build and local media', () => {
   assert.equal(h.context.providerForScreen('reference_main', 'reference_nav_btn'), 'build');
   assert.equal(h.context.providerForScreen('b_detail', 'reference_nav_btn'), 'build');
   assert.equal(h.context.bDetailMediaUrl({ object_url: '/media/local.png', media_url: 'https://example.test/remote.png' }), '/media/local.png');
+});
+
+test('Reference merge goes straight to Reference; Build merge still opens the destination picker', async () => {
+  const code = read('card_actions.js');
+  const start = code.indexOf('  async function mergeSelectedCardItems()');
+  const end = code.indexOf('  function postRootFolderDeleteBlocked', start);
+  for (const area of ['reference', 'created']) {
+    let picked = 0;
+    let request;
+    const context = vm.createContext({
+      selectedCardPosts: () => [1, 2].map((id) => ({ area, folder_path: `${area}/${id}` })),
+      library_state: { apiReady: true, selectedItems: new Set(['1', '2']) },
+      openMergeDestinationDialog: async () => { picked++; return 'collection/test'; },
+      qApi: async (endpoint, payload) => { request = { endpoint, payload }; return {}; },
+      applyLibrarySnapshot() {}, toast() {},
+    });
+    vm.runInContext(code.slice(start, end), context);
+    await context.mergeSelectedCardItems();
+    assert.equal(picked, area === 'reference' ? 0 : 1);
+    assert.equal(request.payload.target_path, area === 'reference' ? '레퍼런스' : 'collection/test');
+    assert.equal(context.library_state.selectedItems.size, 0);
+  }
 });

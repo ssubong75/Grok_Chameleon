@@ -11,6 +11,8 @@ import shutil
 from types import SimpleNamespace
 import unittest
 import unicodedata
+import urllib.error
+from contextlib import ExitStack
 from urllib.parse import unquote
 
 SOURCE = Path(__file__).resolve().parents[1] / "common/app/runtime/server.py"
@@ -49,7 +51,7 @@ class ReferenceTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(data))
         self.scope = dict(
-            Path=Path, tempfile=tempfile, os=os, unquote=unquote, library_root=lambda: self.root,
+            Path=Path, tempfile=tempfile, os=os, shutil=shutil, urllib=urllib, ExitStack=ExitStack, unquote=unquote, library_root=lambda: self.root,
             COLLECTION_MOVE_LOCK=threading.Lock(),
             build_post_save_lock=lambda target: threading.Lock(),
             normalize_unicode_text=lambda value: unicodedata.normalize('NFC', value),
@@ -57,6 +59,8 @@ class ReferenceTests(unittest.TestCase):
             remote_imagine_item_url=lambda item: item.get('source_url') or item.get('url', ''),
             active_imagine_account=lambda *args: {'id': 'account'},
             copy_imagine_remote_item_to_directory=download,
+            imagine_debug_event=lambda *args: None,
+            media_container_validation=lambda path, kind: (path.read_bytes() != b'broken', {}),
             read_json=read_json, write_json=write_json, safe_join=safe_join,
             unique_path=unique_path, now_iso=lambda: '2026-09-08T00:00:00Z',
             safe_int=lambda value, default=0: int(value or default),
@@ -67,7 +71,8 @@ class ReferenceTests(unittest.TestCase):
         )
         names = {'reference_item_key', 'save_imagine_post_to_reference', 'remote_imagine_payload_post',
                  'safe_name', 'post_json_from_post', 'indexed_post_context', 'ensure_library_root',
-                 'copy_imagine_remote_post_to_collection', 'build_append_target'}
+                 'copy_imagine_remote_post_to_collection', 'build_append_target',
+                 'reference_local_media_index', 'reuse_reference_local_media', 'imagine_post_clone_source_id'}
         nodes = [n for n in TREE.body if isinstance(n, ast.FunctionDef) and n.name in names]
         exec(compile(ast.Module(body=nodes, type_ignores=[]), str(SOURCE), 'exec'), self.scope)
         self.source = {'post_id': 'card-123', 'source': 'imagine', 'area': 'imagine_remote',
@@ -100,11 +105,60 @@ class ReferenceTests(unittest.TestCase):
         self.assertEqual(len(list((self.root / '레퍼런스').iterdir())), 1)
         self.assertEqual(len(self.metadata()['items']), 3)
 
-    def test_download_failure_publishes_no_partial_new_card(self):
-        self.fail_id = 'two'
+    def test_another_card_reuses_original_and_downloads_only_new_results(self):
+        self.save()
+        self.downloaded.clear()
+        self.fail_id = 'one'
+        self.source['post_id'] = 'other-account-card'
+        self.source['account_id'] = 'other-account'
+        self.source['items'] = [self.source['items'][0], {'item_id': 'new-result', 'type': 'image', 'url': 'https://example.test/new'}]
+        self.save()
+        target = self.root / '레퍼런스/other-account-card'
+        self.assertEqual(self.downloaded, ['new-result'])
+        self.assertEqual((target / 'one.png').read_bytes(), b'one')
+        self.assertEqual(len(json.loads((target / 'post.json').read_text())['items']), 2)
+
+    def test_explicit_clone_map_reuses_local_copy_across_accounts(self):
+        self.save()
+        (self.root / 'library.json').write_text(json.dumps({'settings': {'imagine_clone_asset_map': {
+            'other-account': {'original': {'asset_id': 'one', 'source_asset_id': 'original'}}}}}))
+        self.downloaded.clear()
+        self.fail_id = 'original'
+        self.source['post_id'] = 'clone-card'
+        self.source['items'] = [{'item_id': 'original', 'type': 'image', 'url': 'https://example.test/dead'}]
+        self.save()
+        self.assertEqual(self.downloaded, [])
+        self.assertEqual((self.root / '레퍼런스/clone-card/one.png').read_bytes(), b'one')
+
+    def test_generation_parent_is_not_an_equivalent_original(self):
+        self.source['items'][0]['source_item_id'] = 'missing-original'
+        self.source['items'][0]['original_post_id'] = 'missing-original'
+        self.save()
+        self.source['post_id'] = 'must-fail'
+        self.source['items'] = [{'item_id': 'missing-original', 'type': 'image', 'url': 'https://example.test/dead'}]
+        self.fail_id = 'missing-original'
         with self.assertRaisesRegex(RuntimeError, 'download failed'):
             self.save()
+        self.assertFalse((self.root / '레퍼런스/must-fail').exists())
+
+    def test_corrupt_local_file_falls_back_to_download(self):
+        self.save()
+        (self.root / '레퍼런스/card-123/one.png').write_bytes(b'broken')
+        self.downloaded.clear()
+        self.source['post_id'] = 'repair-card'
+        self.source['items'] = self.source['items'][:1]
+        self.save()
+        self.assertEqual(self.downloaded, ['one'])
+
+    def test_missing_original_saves_available_results_as_separate_card(self):
+        self.fail_id = 'two'
+        result = self.save()
+        self.assertTrue(result['separate_card'])
+        self.assertEqual(result['unavailable_items'][0]['item_id'], 'two')
         self.assertFalse((self.root / '레퍼런스/card-123').exists())
+        self.assertEqual((self.root / '레퍼런스/card-123-available/one.png').read_bytes(), b'one')
+        self.assertEqual(self.save()['saved_count'], 0)
+        self.assertEqual(len(list((self.root / '레퍼런스').iterdir())), 1)
         self.assertEqual(list((self.root / 'cache').iterdir()), [])
 
     def test_failed_update_keeps_existing_metadata_and_media(self):
@@ -112,10 +166,12 @@ class ReferenceTests(unittest.TestCase):
         before = self.metadata()
         self.source['items'] += [{'item_id': id, 'url': 'https://example.test/' + id} for id in ['three', 'four']]
         self.fail_id = 'four'
-        with self.assertRaises(RuntimeError):
-            self.save()
+        result = self.save()
+        self.assertTrue(result['separate_card'])
         self.assertEqual(self.metadata(), before)
         self.assertFalse((self.root / '레퍼런스/card-123/three.png').exists())
+        separate = json.loads((self.root / '레퍼런스/card-123-available/post.json').read_text())
+        self.assertEqual([i['item_id'] for i in separate['items']], ['one', 'two', 'three'])
 
     def test_filename_collisions_and_duplicate_items(self):
         self.source['items'][0]['filename'] = 'same.png'

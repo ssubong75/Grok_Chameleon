@@ -345,7 +345,9 @@
 
 
   async function mergeSelectedCardItems() {
-    const selectedPaths = selectedCardPosts()
+    const selectedPosts = selectedCardPosts();
+    const referenceMerge = selectedPosts.length > 0 && selectedPosts.every((post) => post.area === "reference");
+    const selectedPaths = selectedPosts
       .map((post) => String(post?.folder_path || "").trim())
       .filter(Boolean);
     if (selectedPaths.length < 2) {
@@ -356,11 +358,11 @@
       setLibraryMessage("Merge needs the local app launcher.");
       return;
     }
-    if (typeof openMergeDestinationDialog !== "function") {
+    if (!referenceMerge && typeof openMergeDestinationDialog !== "function") {
       showErrorPanel("Merge unavailable", "The destination picker is unavailable.");
       return;
     }
-    const targetPath = await openMergeDestinationDialog({
+    const targetPath = referenceMerge ? "레퍼런스" : await openMergeDestinationDialog({
       postPaths: selectedPaths,
     });
     if (!targetPath) return;
