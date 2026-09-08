@@ -82,8 +82,9 @@ with tempfile.TemporaryDirectory(prefix='grok-reference-smoke-') as temporary:
         raise RuntimeError('Imagine HTTP 404: Conversation was not found')
     server.imagine_conversation_detail = deleted_detail
     def owned_orphan(url, *args, **kwargs):
-        assert url == '/rest/assets/deleted-result'
-        return {'ownerUserId': 'test-owner', 'sourceConversationId': 'deleted-conversation',
+        assert url in {'/rest/assets/deleted-result', '/rest/assets/kept-result'}
+        conversation = 'kept-conversation' if url.endswith('/kept-result') else 'deleted-conversation'
+        return {'ownerUserId': 'test-owner', 'sourceConversationId': conversation,
                 'createTime': '2020-01-01T00:00:00Z', 'mimeType': 'video/mp4'}
     server.imagine_get_json = owned_orphan
     try:
@@ -96,6 +97,34 @@ with tempfile.TemporaryDirectory(prefix='grok-reference-smoke-') as temporary:
         assert server.imagine_state.local_exclusion_ids(library, account_key) == {'deleted-result'}
         assert not server.imagine_state.local_exclusion_ids(library, 'other-account')
         assert server.imagine_prune_deleted_upload_conversations(library, test_account, {'kept-conversation'}) == set()
+        # Same asset survives under another conversation: remove only the stale edge.
+        stale = {'account_key': account_key, 'upload_origin_bundle': True,
+                 'source_post_id': 'old-conversation',
+                 'items': [{'item_id': 'shared-result', 'conversation_id': 'old-conversation'},
+                           {'item_id': 'kept-result', 'conversation_id': 'kept-conversation'}]}
+        live = {**stale, 'source_post_id': 'new-conversation',
+                'items': [{'item_id': 'shared-result', 'conversation_id': 'new-conversation'}]}
+        server.imagine_state.upsert_generated_relation(library, 'old-conversation', stale)
+        server.imagine_state.upsert_generated_relation(library, 'new-conversation', live)
+        def shared_asset(url, *args, **kwargs):
+            if url.endswith('/shared-result'):
+                return {'ownerUserId': 'test-owner', 'sourceConversationId': 'new-conversation',
+                        'createTime': '2020-01-01T00:00:00Z'}
+            return owned_orphan(url, *args, **kwargs)
+        server.imagine_get_json = shared_asset
+        def stale_detail(conversation, *args):
+            assert conversation == 'old-conversation'
+            raise RuntimeError('Imagine HTTP 404: Conversation was not found')
+        server.imagine_conversation_detail = stale_detail
+        detached = set()
+        assert server.imagine_prune_deleted_upload_conversations(
+            library, test_account, {'kept-conversation', 'new-conversation'}, detached,
+        ) == set()
+        assert detached == {'old-conversation'}
+        remaining = server.imagine_state.load_generated_relations(library)
+        assert [i['item_id'] for i in remaining['old-conversation']['items']] == ['kept-result']
+        assert remaining['new-conversation']['items'] == live['items']
+        assert 'shared-result' not in server.imagine_state.local_exclusion_ids(library, account_key)
     finally:
         for name, function in originals.items():
             setattr(server, name, function)

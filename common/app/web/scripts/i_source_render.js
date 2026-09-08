@@ -1621,13 +1621,15 @@ function releaseImagineGeneratedSavedSyncForDeletedItems(items = []) {
   return true;
 }
 
-function removeImagineConfirmedDeletedPendingItems(posts, assetIds) {
-  if (!assetIds?.size) return Array.isArray(posts) ? posts : [];
+function removeImagineConfirmedDeletedPendingItems(posts, assetIds, conversationIds = new Set()) {
+  if (!assetIds?.size && !conversationIds.size) return Array.isArray(posts) ? posts : [];
   return (posts || []).map((post) => {
     const previousItems = Array.isArray(post?.items) ? post.items : [];
     const items = previousItems.filter((item) => {
       const assetId = imagineSavedItemAssetId(item);
-      return !assetId || !assetIds.has(assetId);
+      const conversationId = String(item?.conversation_id || item?.metadata?.conversation_id
+        || item?.metadata?.imagine?.conversation_id || item?.root_post_id || "").trim();
+      return (!assetId || !assetIds.has(assetId)) && !conversationIds.has(conversationId);
     });
     if (items.length === previousItems.length) return post;
     if (!items.length || items.every(imagineSavedItemIsUploadSource)) return null;
@@ -1656,11 +1658,13 @@ function applyImagineConfirmedDeletedPendingAssets(data) {
       .map((value) => String(value || "").trim())
       .filter(Boolean),
   );
-  if (!assetIds.size) return;
+  const conversationIds = new Set(data?.detached_conversation_ids || []);
+  if (!assetIds.size && !conversationIds.size) return;
   releaseImagineGeneratedSavedSyncForDeletedItems([...assetIds]);
   library_state.imagineRemotePosts = removeImagineConfirmedDeletedPendingItems(
     library_state.imagineRemotePosts,
     assetIds,
+    conversationIds,
   );
   library_state.imagineLikedPosts = removeImagineConfirmedDeletedPendingItems(
     library_state.imagineLikedPosts,
@@ -2038,7 +2042,11 @@ function applyImagineSavedOfficialPage(data, { replacesList = false } = {}) {
   applyImagineLikedExclusionSnapshot(data, imaginePendingSavedAccountId());
   collectImagineSavedOfficialAssetIds(data, imaginePendingSavedAccountId());
   const remotePosts = normalizeImagineRemotePosts(
-    Array.isArray(data.posts) ? data.posts : [],
+    removeImagineConfirmedDeletedPendingItems(
+      Array.isArray(data.posts) ? data.posts : [],
+      new Set(data?.confirmed_deleted_pending_asset_ids || []),
+      new Set(data?.detached_conversation_ids || []),
+    ),
   );
   const currentPosts = (library_state.imagineRemotePosts || [])
     .filter((post) => !imagineSavedPostIsPending(post));
@@ -2088,8 +2096,10 @@ function combineImagineSavedOfficialPages(pages) {
   const completedPage = pages.at(-1) || {};
   const officialAssetIds = new Set();
   const confirmedDeletedPendingAssetIds = new Set();
+  const detachedConversationIds = new Set();
   const posts = [];
   for (const page of pages || []) {
+    for (const id of page?.detached_conversation_ids || []) detachedConversationIds.add(id);
     for (const post of Array.isArray(page?.posts) ? page.posts : []) posts.push(post);
     for (const assetId of Array.isArray(page?.official_asset_ids) ? page.official_asset_ids : []) {
       const value = String(assetId || "").trim();
@@ -2107,6 +2117,7 @@ function combineImagineSavedOfficialPages(pages) {
     posts,
     official_asset_ids: [...officialAssetIds],
     confirmed_deleted_pending_asset_ids: [...confirmedDeletedPendingAssetIds],
+    detached_conversation_ids: [...detachedConversationIds],
     next_cursor: "",
     has_more: false,
   };

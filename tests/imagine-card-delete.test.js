@@ -82,3 +82,22 @@ test('confirmed deleted upload result removes only the empty generated card', ()
   assert.deepEqual(Array.from(filtered[0].items, (i) => i.item_id), ['upload', 'survivor']);
   assert.equal(filtered[1], posts[2]);
 });
+
+test('dead conversation is removed without removing the same asset in a live conversation', () => {
+  const source = read('i_source_render.js');
+  const start = source.indexOf('function removeImagineConfirmedDeletedPendingItems(');
+  const end = source.indexOf('function applyImagineConfirmedDeletedPendingAssets(', start);
+  const context = vm.createContext({
+    imagineSavedItemAssetId: (i) => i.item_id,
+    imagineSavedItemIsUploadSource: (i) => i.role === 'source',
+    representativeItem: (items) => items.at(-1),
+  });
+  vm.runInContext(source.slice(start, end), context);
+  const posts = [
+    { items: [{ item_id: 'same-image', conversation_id: 'deleted' }] },
+    { items: [{ item_id: 'same-image', metadata: { imagine: { conversation_id: 'live' } } }] },
+  ];
+  const filtered = context.removeImagineConfirmedDeletedPendingItems(posts, new Set(), new Set(['deleted']));
+  assert.equal(filtered.length, 1);
+  assert.equal(filtered[0], posts[1]);
+});

@@ -6867,12 +6867,13 @@ def cache_imagine_remote_posts(
 
 def imagine_prune_deleted_upload_conversations(
     root: Path, account: dict, live_conversation_ids: set[str],
+    detached_conversation_ids: set[str] | None = None,
 ) -> set[str]:
-    """Check complete upload bundles too; a surviving upload is not a live generation.
+    """Reconcile owned upload results independently of their conversation's lifetime.
 
-    Run once on the first live Saved page, never from cache painting. A conversation
-    404 alone is not enough: the exact result asset must name this account as owner
-    and that conversation as its own (not merely its root/parent conversation).
+    Exact asset 404/410 removes a result even from a live conversation. A missing
+    conversation with a surviving asset removes only its stale association when
+    the asset names a different conversation. Never run during cache painting.
     """
     account_key = imagine_account_settings_key(account)
     owner = imagine_current_owner_user_id(account)
@@ -6891,7 +6892,17 @@ def imagine_prune_deleted_upload_conversations(
                 continue
             asset_id = imagine_item_asset_id(item)
             conversation_id = imagine_relation_conversation_id(item)
-            if asset_id and conversation_id and asset_id not in excluded and conversation_id not in live_conversation_ids:
+            metadata = item.get("metadata") or {}
+            imagine = metadata.get("imagine") or {}
+            item_owner = str(metadata.get("owner_user_id") or imagine.get("owner_user_id") or "")
+            if item_owner and item_owner != owner:
+                continue
+            if metadata.get("external_reference") or imagine.get("external_reference"):
+                continue
+            created = parse_iso_time(item.get("created_at") or item.get("createTime"))
+            if created and (datetime.now(timezone.utc) - created).total_seconds() < 120:
+                continue
+            if asset_id and conversation_id and asset_id not in excluded:
                 candidates.setdefault(conversation_id, set()).add(asset_id)
 
     for post in cached:
@@ -6909,14 +6920,11 @@ def imagine_prune_deleted_upload_conversations(
         ):
             collect(record.get("items") or [])
 
-    def confirm(conversation_id: str) -> set[str]:
-        try:
-            imagine_conversation_detail(conversation_id, account, 5)
-            return set()
-        except Exception as exc:
-            if not imagine_error_is_confirmed_not_found(exc):
-                return set()
+    def confirm(conversation_id: str) -> tuple[set[str], set[str]]:
+        # A live conversation may still contain a deleted result. Check the exact
+        # assets independently; conversely, an asset 404 must not be ignored.
         deleted: set[str] = set()
+        owned_assets: list[tuple[str, dict]] = []
         for asset_id in candidates[conversation_id]:
             try:
                 response = imagine_get_json(f"/rest/assets/{quote(asset_id, safe='')}", account, timeout=5)
@@ -6925,22 +6933,56 @@ def imagine_prune_deleted_upload_conversations(
                 # A just-created conversation may not be readable yet.
                 if not created or (datetime.now(timezone.utc) - created).total_seconds() < 120:
                     continue
-                if (
-                    imagine_asset_owner_user_id(asset) == owner
-                    and str(asset.get("sourceConversationId") or asset.get("conversationId") or "").strip() == conversation_id
-                    and not imagine_asset_upload_only(asset)
-                ):
+                if imagine_asset_owner_user_id(asset) != owner or imagine_asset_upload_only(asset):
+                    continue
+                if asset.get("isDeleted") is True:
                     deleted.add(asset_id)
-            except Exception:
-                # An inaccessible asset cannot prove ownership. Keep it for a later pass.
+                else:
+                    owned_assets.append((asset_id, asset))
+            except Exception as exc:
+                if imagine_error_is_confirmed_not_found(exc):
+                    deleted.add(asset_id)
+                # Authorization failures, throttling and timeouts are not deletions.
                 continue
-        return deleted
+        if not owned_assets or conversation_id in live_conversation_ids:
+            return deleted, set()
+        try:
+            imagine_conversation_detail(conversation_id, account, 5)
+            return deleted, set()
+        except Exception as exc:
+            if not imagine_error_is_confirmed_not_found(exc):
+                return deleted, set()
+        detached = set()
+        for asset_id, asset in owned_assets:
+            asset_conversation = str(asset.get("sourceConversationId") or asset.get("conversationId") or "").strip()
+            if asset_conversation == conversation_id:
+                deleted.add(asset_id)
+            elif asset_conversation:
+                # The same media survives in another conversation: forget only the
+                # dead association, never exclude the asset from Saved or Liked.
+                detached.add(conversation_id)
+        return deleted, detached
 
     deleted: set[str] = set()
+    detached: set[str] = set()
     if candidates:
-        with ThreadPoolExecutor(max_workers=min(8, len(candidates))) as executor:
-            for result in executor.map(confirm, candidates):
+        with ThreadPoolExecutor(max_workers=min(4, len(candidates))) as executor:
+            for result, stale_links in executor.map(confirm, candidates):
                 deleted.update(result)
+                detached.update(stale_links)
+    if detached:
+        remove_imagine_generated_relation_state(root, conversation_ids=detached, account_key=account_key)
+        for post in cached:
+            if imagine_post_saved_identity(post)[0] != "normal-saved":
+                continue
+            filtered = imagine_filter_deleted_conversation_posts([post], detached)
+            if not filtered:
+                remove_imagine_remote_cache_post_keys(root, account, {imagine_remote_cache_post_key(post)}, allowed_provenances={"normal-saved"})
+            elif filtered != [post]:
+                cache_imagine_remote_posts(root, account, filtered)
+        prune_imagine_saved_display_cache(root, account, detached, set())
+        if detached_conversation_ids is not None:
+            detached_conversation_ids.update(detached)
     if not deleted:
         return set()
     # Remember only result ids, never the shared upload id. This also prevents orphan
@@ -7180,7 +7222,16 @@ def imagine_filter_deleted_conversation_posts(
             )
             if str(value or "").strip()
         }
-        if metadata.get("relation_only_card") is True and post_conversation_ids & deleted_conversations:
+        if (
+            metadata.get("relation_only_card") is True
+            and post_conversation_ids & deleted_conversations
+            and not any(
+                not imagine_item_is_upload_source(item)
+                and imagine_relation_conversation_id(item) not in deleted_conversations
+                and imagine_item_asset_id(item) not in deleted_assets
+                for item in post.get("items") or [] if isinstance(item, dict)
+            )
+        ):
             continue
         items = [
             item
@@ -7798,9 +7849,11 @@ def list_imagine_saved(payload: dict) -> dict:
                         raise RuntimeError("Imagine Saved refresh incomplete; previous cards retained.") from exc
     ensure_imagine_state_migrated(root)
     deleted_upload_result_ids: set[str] = set()
+    detached_upload_conversation_ids: set[str] = set()
     if not cursor:
         deleted_upload_result_ids = imagine_prune_deleted_upload_conversations(
             root, account, {key for key, value in details.items() if value},
+            detached_upload_conversation_ids,
         )
     relations = imagine_state.load_generated_relations(root)
     hidden_bundle_asset_ids = imagine_hidden_bundle_asset_ids(relations)
@@ -8175,6 +8228,7 @@ def list_imagine_saved(payload: dict) -> dict:
         imagine_hidden_scope_posts(list(saved_groups.values()), hidden_remote_ids)
     )
     posts = imagine_filter_liked_scope_posts(list(saved_groups.values()), hidden_remote_ids)
+    posts = imagine_filter_deleted_conversation_posts(posts, detached_upload_conversation_ids, deleted_upload_result_ids)
     posts = merge_imagine_saved_lineage_cards(posts)
     posts = imagine_filter_liked_scope_posts(posts, hidden_remote_ids)
     # Keep the public Saved-page order intact here.  The renderer first collects every
@@ -8308,6 +8362,7 @@ def list_imagine_saved(payload: dict) -> dict:
         # Pending results survive a temporarily lagging Saved list.  The renderer may
         # discard them only after exact-asset or ownership-verified conversation deletion.
         "confirmed_deleted_pending_asset_ids": sorted(confirmed_deleted_pending_asset_ids | deleted_upload_result_ids),
+        "detached_conversation_ids": sorted(detached_upload_conversation_ids),
         "liked_exclusion": imagine_liked_exclusion_payload(root, account, relations),
         "imagine": {
             "id": account.get("id") or "",
@@ -10215,7 +10270,9 @@ def remove_imagine_generated_relation_state(
     asset_ids: set[str] | None = None,
     group_ids: set[str] | None = None,
     account_key: str = "",
+    conversation_ids: set[str] | None = None,
 ) -> None:
+    remove_conversations = {str(value).strip() for value in (conversation_ids or set()) if str(value).strip()}
     remove_assets = {
         str(value).strip()
         for value in (asset_ids or set())
@@ -10226,7 +10283,7 @@ def remove_imagine_generated_relation_state(
         for value in (group_ids or set())
         if str(value).strip()
     }
-    if not remove_assets and not remove_groups:
+    if not remove_assets and not remove_groups and not remove_conversations:
         return
     ensure_imagine_state_migrated(root)
     with IMAGINE_RELATION_STATE_LOCK:
@@ -10289,7 +10346,7 @@ def remove_imagine_generated_relation_state(
                     str(metadata.get("conversation_id") or "").strip(),
                     str(imagine.get("conversation_id") or "").strip(),
                 }
-                if (item_asset_keys & remove_assets) or (item_group_keys & remove_groups):
+                if (item_asset_keys & remove_assets) or (item_group_keys & (remove_groups | remove_conversations)):
                     changed = True
                     continue
                 items.append(item)

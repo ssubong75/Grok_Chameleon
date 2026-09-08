@@ -71,6 +71,7 @@ class UploadDeletionTests(unittest.TestCase):
             prune_imagine_remote_cache_assets=lambda root, account, ids: pruned.append(set(ids)),
             remove_imagine_remote_cache_post_keys=lambda *a, **k: None,
             prune_imagine_saved_display_cache=lambda *a: None,
+            cache_imagine_remote_posts=lambda *a: None,
             imagine_debug_event=lambda *a: None,
         )
         return scope, records, posts, excluded, conversation_calls, asset_calls, pruned
@@ -92,7 +93,7 @@ class UploadDeletionTests(unittest.TestCase):
 
     def test_live_forbidden_timeout_foreign_new_or_wrong_conversation_is_preserved(self):
         cases = [dict(status='200'), dict(status='403'), dict(status='503'),
-                 dict(status='timeout'), dict(owner='foreign'), dict(asset_conversation='different'), dict(created=''),
+                 dict(status='timeout'), dict(owner='foreign'), dict(created=''),
                  dict(created=datetime.now(timezone.utc).isoformat())]
         for case in cases:
             with self.subTest(case=case):
@@ -101,6 +102,60 @@ class UploadDeletionTests(unittest.TestCase):
                 self.assertEqual(scope['imagine_prune_deleted_upload_conversations'](Path('/unused'), {}, {'live'}), set())
                 self.assertEqual(records, original)
                 self.assertFalse(excluded)
+
+    def test_deleted_asset_is_removed_even_when_conversation_is_live(self):
+        for status in ('200', '404'):
+            with self.subTest(conversation=status):
+                scope, records, posts, excluded, *rest = self.harness(status=status)
+                original_get = scope['imagine_get_json']
+                def get(url, *args, **kwargs):
+                    if url.endswith('/result'):
+                        raise RuntimeError('Imagine HTTP 404: Asset not found')
+                    return original_get(url, *args, **kwargs)
+                scope['imagine_get_json'] = get
+                deleted = scope['imagine_prune_deleted_upload_conversations'](Path('/unused'), {}, {'live', 'dead'})
+                self.assertEqual(deleted, {'result'})
+                self.assertEqual(excluded, {'result'})
+                self.assertEqual([i['item_id'] for i in records['bundle']['items']], ['survivor'])
+
+    def test_dead_association_does_not_delete_asset_in_another_conversation(self):
+        scope, records, posts, excluded, *rest = self.harness(asset_conversation='different')
+        records['live-copy'] = {'account_key': 'account', 'upload_origin_bundle': True,
+                                'items': [{'item_id': 'result', 'conversation_id': 'different'}]}
+        detached = set()
+        deleted = scope['imagine_prune_deleted_upload_conversations'](Path('/unused'), {}, {'live', 'different'}, detached)
+        self.assertEqual(deleted, set())
+        self.assertEqual(excluded, set())
+        self.assertEqual(detached, {'dead'})
+        self.assertEqual([i['item_id'] for i in records['bundle']['items']], ['survivor'])
+        self.assertEqual(records['live-copy']['items'][0]['item_id'], 'result')
+        self.assertEqual(records['other']['items'][0]['item_id'], 'result')
+
+    def test_asset_authorization_and_network_errors_are_not_deletions(self):
+        for status in ('403', '429', '503', 'timeout'):
+            scope, records, posts, excluded, *rest = self.harness()
+            original = copy.deepcopy(records)
+            def get(*args, **kwargs):
+                raise RuntimeError('Imagine HTTP ' + status)
+            scope['imagine_get_json'] = get
+            self.assertEqual(scope['imagine_prune_deleted_upload_conversations'](Path('/unused'), {}, set()), set())
+            self.assertEqual(records, original)
+            self.assertFalse(excluded)
+
+    def test_new_result_is_not_checked_during_upstream_propagation(self):
+        scope, records, posts, excluded, calls, assets, *rest = self.harness()
+        records['bundle']['items'][0]['created_at'] = datetime.now(timezone.utc).isoformat()
+        scope['imagine_prune_deleted_upload_conversations'](Path('/unused'), {}, {'live'})
+        self.assertNotIn('/rest/assets/result', assets)
+        self.assertFalse(excluded)
+
+    def test_deleted_root_conversation_keeps_other_live_children(self):
+        scope, *rest = self.harness()
+        post = {'metadata': {'relation_only_card': True, 'conversation_id': 'dead'},
+                'items': [{'item_id': 'removed', 'conversation_id': 'dead'},
+                          {'item_id': 'kept', 'conversation_id': 'live'}]}
+        filtered = scope['imagine_filter_deleted_conversation_posts']([post], {'dead'})
+        self.assertEqual([i['item_id'] for i in filtered[0]['items']], ['kept'])
 
     def test_last_result_removes_main_card_but_not_upload_only_entry(self):
         scope, records, posts, *rest = self.harness()
