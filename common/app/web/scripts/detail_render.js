@@ -670,7 +670,21 @@ function renderDetailView(prefix, post, options = {}) {
     renderBuildJobDetailView(prefix, post, options);
     return;
   }
-  if (!post?.items?.length) return;
+  if (!post?.items?.length) {
+    // A refresh can remove the selected card while this view is still open.
+    // Never leave its old interactive thumbnails or media on screen.
+    media.querySelectorAll("video, audio").forEach((element) => element.pause());
+    thumbList.replaceChildren();
+    media.replaceChildren();
+    if (meta) meta.textContent = "";
+    if (modelName) modelName.textContent = "";
+    if (providerBadge) providerBadge.hidden = true;
+    if (modelBadge) modelBadge.hidden = true;
+    if (prefix === "i") syncImagineDetailHeartState(null, null);
+    return;
+  }
+  if (providerBadge) providerBadge.hidden = false;
+  if (modelBadge) modelBadge.hidden = false;
   const preserveThumbScroll = Boolean(options.preserveThumbScroll);
   const previousThumbScrollTop = preserveThumbScroll ? thumbList.scrollTop : 0;
   const selectedItem = selectedDetailItem(post);

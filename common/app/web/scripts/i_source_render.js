@@ -1518,6 +1518,26 @@ let imagineGeneratedSavedSyncRefreshAttempt = 0;
 let imagineGeneratedSavedSyncRestoredFromStorage = false;
 let imagineSavedDisplayCacheWrite = Promise.resolve();
 let imagineSavedDisplayCacheWriteRevision = 0;
+const imagineSavedMembershipByAccount = new Map();
+
+function filterImagineSavedMembership(posts, conversationIds) {
+  if (!conversationIds) return posts;
+  return (posts || []).flatMap((post) => {
+    if (imagineSavedPostProvenance(post) !== "normal-saved" || imagineSavedPostIsPending(post)) return [post];
+    const items = post.items || [];
+    const keptResults = items.filter((item) => {
+      if (imagineSavedItemIsUploadSource(item)) return false;
+      const id = String(item.conversation_id || item.metadata?.conversation_id
+        || item.metadata?.imagine?.conversation_id || item.root_post_id || "").trim();
+      return conversationIds.has(id) || item.metadata?.saved_sync_pending === true;
+    });
+    if (!keptResults.length) return [];
+    const kept = items.filter((item) => imagineSavedItemIsUploadSource(item) || keptResults.includes(item));
+    const representative = representativeItem(kept, { ...post, items: kept }) || kept.at(-1);
+    return [{ ...post, items: kept, representative_item: representative,
+      representative: representative?.url || representative?.remote_url || representative?.item_id || "" }];
+  });
+}
 
 function imaginePendingSavedAccountId() {
   return String(activeImagineSavedAccount()?.id || account_state.imagine?.active_id || "").trim();
@@ -1566,6 +1586,7 @@ function saveImagineSavedDisplayCache() {
     ));
   const revision = ++imagineSavedDisplayCacheWriteRevision;
   const snapshot = JSON.parse(JSON.stringify(posts));
+  const membership = imagineSavedMembershipByAccount.get(accountId);
   // Serialize writes. A slower, older refresh must never overwrite a newer completed view.
   imagineSavedDisplayCacheWrite = imagineSavedDisplayCacheWrite
     .catch(() => {})
@@ -1574,6 +1595,7 @@ function saveImagineSavedDisplayCache() {
       await qApi("/api/imagine/saved/display-cache/save", {
         account_id: accountId,
         posts: snapshot,
+        ...(membership ? { saved_membership_complete: true, saved_conversation_ids: [...membership] } : {}),
       });
     })
     .catch((error) => console.warn("Imagine display cache save failed", error));
@@ -2038,6 +2060,9 @@ function collectImagineSavedOfficialAssetIds(data, accountId) {
 }
 
 function applyImagineSavedOfficialPage(data, { replacesList = false } = {}) {
+  if (data.saved_membership_complete === true && Array.isArray(data.saved_conversation_ids)) {
+    imagineSavedMembershipByAccount.set(imaginePendingSavedAccountId(), new Set(data.saved_conversation_ids));
+  }
   applyImagineConfirmedDeletedPendingAssets(data);
   applyImagineLikedExclusionSnapshot(data, imaginePendingSavedAccountId());
   collectImagineSavedOfficialAssetIds(data, imaginePendingSavedAccountId());
@@ -2087,8 +2112,17 @@ function applyImagineSavedOfficialPage(data, { replacesList = false } = {}) {
       scheduleImagineGeneratedSavedSyncRefresh();
     }
   }
+  if (data.saved_membership_complete === true) {
+    library_state.imagineRemotePosts = filterImagineSavedMembership(
+      library_state.imagineRemotePosts,
+      imagineSavedMembershipByAccount.get(imaginePendingSavedAccountId()),
+    );
+  }
   if (data.has_more === false) saveImagineSavedDisplayCache();
   syncImagineRemotePostsIntoLibrary();
+  if (screen_state.current_screen === "i_detail" && typeof renderDetailViews === "function") {
+    renderDetailViews({ activeOnly: true });
+  }
   renderImagineSourceCards();
 }
 
@@ -2097,8 +2131,10 @@ function combineImagineSavedOfficialPages(pages) {
   const officialAssetIds = new Set();
   const confirmedDeletedPendingAssetIds = new Set();
   const detachedConversationIds = new Set();
+  const savedConversationIds = new Set();
   const posts = [];
   for (const page of pages || []) {
+    for (const id of page?.saved_conversation_ids || []) savedConversationIds.add(id);
     for (const id of page?.detached_conversation_ids || []) detachedConversationIds.add(id);
     for (const post of Array.isArray(page?.posts) ? page.posts : []) posts.push(post);
     for (const assetId of Array.isArray(page?.official_asset_ids) ? page.official_asset_ids : []) {
@@ -2118,6 +2154,9 @@ function combineImagineSavedOfficialPages(pages) {
     official_asset_ids: [...officialAssetIds],
     confirmed_deleted_pending_asset_ids: [...confirmedDeletedPendingAssetIds],
     detached_conversation_ids: [...detachedConversationIds],
+    saved_conversation_ids: [...savedConversationIds],
+    saved_membership_complete: completedPage.has_more === false
+      && pages.length > 0 && pages.every((page) => Array.isArray(page.saved_conversation_ids)),
     next_cursor: "",
     has_more: false,
   };

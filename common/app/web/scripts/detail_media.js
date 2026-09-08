@@ -864,7 +864,11 @@ function removeUnavailableImagineItem(postPath, url, host = null, assetId = "") 
       });
       if (remaining.length === items.length) return [post];
       changed = true;
-      if (!remaining.length) return [];
+      if (!remaining.length || (
+        typeof imagineSavedItemIsUploadSource === "function"
+        && items.some((item) => !imagineSavedItemIsUploadSource(item))
+        && remaining.every(imagineSavedItemIsUploadSource)
+      )) return [];
       const representative = representativeItem(remaining, { ...post, items: remaining }) || remaining[0];
       const nextPost = normalizeServerPost({
         ...post,
@@ -892,6 +896,8 @@ function removeUnavailableImagineItem(postPath, url, host = null, assetId = "") 
     library_state.selectedDetailItemId = mediaItemKey(keptPost.representative_item || keptPost.items[0]);
   }
   if (typeof syncImagineRemotePostsIntoLibrary === "function") syncImagineRemotePostsIntoLibrary();
+  if (typeof persistImaginePendingSavedPosts === "function") persistImaginePendingSavedPosts();
+  if (typeof saveImagineSavedDisplayCache === "function") saveImagineSavedDisplayCache();
   host?.remove?.();
   window.setTimeout(() => {
     if (
@@ -964,10 +970,8 @@ function handleUnavailableImagineRemoteMedia(host, item, url, postPath) {
     cache: "no-store",
   }).then((response) => {
     const status = Number(response.status);
-    // Grok answers 403 — not 404 — for an asset that was deleted upstream, so a card
-    // pointing at one would otherwise sit there showing an empty preview forever. 403
-    // can also be a transient permission blip, so the server re-checks the asset before
-    // it prunes anything.
+    // Preview errors alone do not authorize deletion. Wait for the server's exact
+    // asset check and durable cleanup, and honor a keep/error response.
     if (![403, 404, 410].includes(status)) return false;
     const { assetId, accountId } = missingImagineAssetIdentity(item, key);
     const cleanup = assetId
@@ -977,7 +981,9 @@ function handleUnavailableImagineRemoteMedia(host, item, url, postPath) {
         status,
       }).catch(() => null)
       : Promise.resolve(null);
-    return cleanup.then(() => removeUnavailableImagineItem(path, key, host, assetId));
+    return cleanup.then((result) => result?.action === "pruned"
+      ? removeUnavailableImagineItem(path, key, host, assetId)
+      : false);
   }).catch(() => false).finally(() => {
     missingImagineRemoteMediaChecks.delete(key);
   });

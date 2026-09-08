@@ -7494,6 +7494,42 @@ def imagine_saved_display_cache_path(root: Path, account: dict) -> Path:
     return path
 
 
+def imagine_saved_membership(root: Path, account: dict) -> set[str] | None:
+    """Only a completed Saved listing can establish membership, never /rest/assets."""
+    key = "imagine_saved_membership_v1:" + imagine_account_settings_key(account)
+    try:
+        data = json.loads(imagine_state.metadata_value(root, key) or "null")
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("complete") is not True or not isinstance(data.get("conversation_ids"), list):
+        return None
+    return {str(value).strip() for value in data["conversation_ids"] if str(value).strip()}
+
+
+def imagine_filter_saved_membership(posts: list[dict], conversation_ids: set[str] | None) -> list[dict]:
+    if conversation_ids is None:
+        return posts
+    visible = []
+    for post in posts:
+        if imagine_post_saved_identity(post)[0] != "normal-saved":
+            visible.append(post)
+            continue
+        items = [item for item in post.get("items") or [] if isinstance(item, dict)]
+        kept_results = [
+            item for item in items
+            if not imagine_item_is_upload_source(item)
+            and (imagine_relation_conversation_id(item) in conversation_ids
+                 or (item.get("metadata") or {}).get("saved_sync_pending") is True)
+        ]
+        if not kept_results:
+            continue
+        kept_items = [item for item in items if imagine_item_is_upload_source(item) or item in kept_results]
+        representative = imagine_representative_item(kept_items) or kept_items[-1]
+        visible.append({**post, "items": kept_items, "representative_item": representative,
+                        "representative": representative.get("url") or representative.get("remote_url") or representative.get("item_id") or ""})
+    return visible
+
+
 def restore_imagine_display_relations(posts: list[dict], root: Path, account: dict) -> list[dict]:
     """Overlay durable, account-owned lineage without querying the remote service."""
     ensure_imagine_state_migrated(root)
@@ -7518,13 +7554,8 @@ def restore_imagine_display_relations(posts: list[dict], root: Path, account: di
                 allow_cross_conversation_relations=True,
                 ensure_upload_bundle=False,
             )
-        post["items"] = [
-            item for item in post.get("items") or []
-            if imagine_item_asset_id(item) not in excluded
-        ]
-        if post["items"]:
-            restored.append(post)
-    return restored
+        restored.extend(imagine_filter_deleted_conversation_posts([post], set(), excluded))
+    return imagine_filter_saved_membership(restored, imagine_saved_membership(root, account))
 
 
 def list_imagine_saved_display_cache(payload: dict) -> dict:
@@ -7580,7 +7611,21 @@ def save_imagine_saved_display_cache(payload: dict) -> dict:
         raise RuntimeError("Imagine display cache posts are required.")
     if len(supplied_posts) > 5000:
         raise RuntimeError("Imagine display cache is too large.")
+    # The renderer sends this only after collecting every successful Saved page.
+    # A failed/partial refresh must never replace the last complete membership.
+    if payload.get("saved_membership_complete") is True:
+        ids = payload.get("saved_conversation_ids")
+        if not isinstance(ids, list) or len(ids) > 100000 or not all(isinstance(value, str) for value in ids):
+            raise RuntimeError("Invalid complete Saved membership.")
+        imagine_state.set_metadata_value(
+            root, "imagine_saved_membership_v1:" + imagine_account_settings_key(account),
+            json.dumps({"complete": True, "conversation_ids": sorted(set(ids)), "updated_at": now_iso()}),
+        )
     posts = [post for post in supplied_posts if imagine_saved_display_post_allowed(post)]
+    # A delayed browser snapshot must not resurrect a confirmed deletion.
+    excluded = imagine_pending_delete_ids(root, account) | imagine_local_exclusion_ids(root, account)
+    posts = imagine_filter_deleted_conversation_posts(posts, set(), excluded)
+    posts = imagine_filter_saved_membership(posts, imagine_saved_membership(root, account))
     write_json(imagine_saved_display_cache_path(root, account), {
         "version": IMAGINE_SAVED_DISPLAY_CACHE_VERSION,
         "updated_at": now_iso(),
@@ -7742,7 +7787,7 @@ def list_imagine_saved_cache(payload: dict) -> dict:
     posts = merge_imagine_saved_lineage_cards(posts)
     posts = imagine_filter_liked_scope_posts(posts, hidden_remote_ids)
     imagine_sort_saved_by_official_order(posts)
-    normalized_posts = normalize_json_unicode(posts)
+    normalized_posts = normalize_json_unicode(imagine_filter_saved_membership(posts, imagine_saved_membership(root, account)))
     return {
         "ok": True,
         "source": "saved_cache",
@@ -7876,6 +7921,7 @@ def list_imagine_saved(payload: dict) -> dict:
     # to the renderer below are deliberately enriched with this app's generated-relations
     # overlay, so their items cannot prove that Grok's Saved list has caught up yet.
     official_asset_ids: set[str] = set()
+    saved_list_asset_ids: set[str] = set()
     deleted_conversation_ids: set[str] = set()
     posts = []
 
@@ -7923,6 +7969,8 @@ def list_imagine_saved(payload: dict) -> dict:
         conversation_id = str(conversation.get("conversationId") or "")
         post = imagine_saved_post_from_conversation(conversation, details.get(conversation_id, {}), account)
         if post:
+            saved_list_asset_ids.update(imagine_item_asset_id(item) for item in post.get("items") or []
+                                        if isinstance(item, dict) and imagine_item_asset_id(item))
             official_asset_ids.update({
                 imagine_item_asset_id(item)
                 for item in post.get("items") or []
@@ -8358,11 +8406,13 @@ def list_imagine_saved(payload: dict) -> dict:
         "sync_token": sync_token,
         # This deliberately excludes generated-relation overlays.  The renderer uses it to
         # decide when an optimistic result may become a confirmed Saved item.
-        "official_asset_ids": sorted(official_asset_ids),
+        "official_asset_ids": sorted(saved_list_asset_ids),
         # Pending results survive a temporarily lagging Saved list.  The renderer may
         # discard them only after exact-asset or ownership-verified conversation deletion.
         "confirmed_deleted_pending_asset_ids": sorted(confirmed_deleted_pending_asset_ids | deleted_upload_result_ids),
         "detached_conversation_ids": sorted(detached_upload_conversation_ids),
+        "saved_conversation_ids": [str(row.get("conversationId")) for row in raw_conversations
+                                   if isinstance(row, dict) and row.get("conversationId")],
         "liked_exclusion": imagine_liked_exclusion_payload(root, account, relations),
         "imagine": {
             "id": account.get("id") or "",
@@ -11764,20 +11814,18 @@ def discard_missing_imagine_asset(payload: dict) -> dict:
     asset_id = imagine_delete_target_id(payload)
     if not asset_id:
         raise RuntimeError("Imagine asset id is required.")
-    # A 403 on the media host means "deleted upstream" often enough to act on, but not
-    # always — a permission blip looks identical. Ask the asset API directly before
-    # pruning, and leave the card alone if the asset is still there.
-    if status == 403:
-        try:
-            imagine_get_json(f"/rest/assets/{quote(asset_id, safe='')}", account, timeout=5)
-        except Exception as exc:
-            imagine_debug_event("missing_asset_403_confirmed", {
-                "asset_id": asset_id,
-                "error": str(exc)[:200],
-            })
-        else:
-            imagine_debug_event("missing_asset_403_still_present", {"asset_id": asset_id})
-            return {"ok": True, "asset_id": asset_id, "action": "kept", "status": status}
+    # A missing preview (even 404) does not prove that the asset itself is gone.
+    # Only an exact 404/410 or an explicit deletion flag authorizes durable removal.
+    try:
+        response = imagine_get_json(f"/rest/assets/{quote(asset_id, safe='')}", account, timeout=5)
+        asset = response.get("asset", response)
+        confirmed_deleted = asset.get("isDeleted") is True
+    except Exception as exc:
+        confirmed_deleted = imagine_error_is_confirmed_not_found(exc)
+    if not confirmed_deleted:
+        return {"ok": True, "asset_id": asset_id, "action": "kept", "status": status}
+    account_key = imagine_account_settings_key(account)
+    imagine_state.add_local_exclusions(root, account_key, {asset_id}, reason="remote_asset_deleted")
     update_imagine_local_heart_posts(
         root,
         account,
@@ -11791,15 +11839,16 @@ def discard_missing_imagine_asset(payload: dict) -> dict:
         remove={asset_id},
     )
     remove_imagine_clone_asset_map_clone_ids(root, account, {asset_id})
-    remove_imagine_generated_relation_state(root, asset_ids={asset_id})
+    remove_imagine_generated_relation_state(root, asset_ids={asset_id}, account_key=account_key)
     prune_imagine_remote_cache_assets(root, account, {asset_id})
+    prune_imagine_saved_display_cache(root, account, set(), {asset_id})
     invalidate_imagine_saved_media_keys_cache(account)
     imagine_debug_event("missing_asset_pruned", {
         "account_id": str(account.get("id") or ""),
         "asset_id": asset_id,
         "status": status,
     })
-    return {"ok": True, "asset_id": asset_id, "status": status}
+    return {"ok": True, "asset_id": asset_id, "action": "pruned", "status": status}
 
 
 def delete_imagine_asset_metadata(payload: dict) -> dict:
