@@ -575,6 +575,7 @@ function scheduleVirtualCardList(listKey) {
 function scheduleScreenVirtualCardList(screenId) {
   const listKey = {
     b_main: "build-main",
+    reference_main: "reference-main",
     i_main: "imagine-main",
     i_discover_main: "imagine-discover",
     i_unsaved_main: "imagine-unsaved",

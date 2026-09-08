@@ -1125,7 +1125,7 @@ def local_exclusion_ids(root: Path, account_key: str) -> set[str]:
             """
             SELECT asset_id
             FROM imagine_local_exclusions
-            WHERE account_key = ?
+            WHERE account_key = ? AND reason != 'moved_to_collection'
             """,
             (str(account_key),),
         ).fetchall()

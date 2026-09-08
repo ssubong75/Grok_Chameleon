@@ -399,7 +399,7 @@ def _item_has_build_media(item: dict) -> bool:
 
 
 def _is_build_visible(post: dict) -> bool:
-    if _is_collection_container(post):
+    if _is_collection_container(post) or post.get("area") == "reference":
         return False
     area = str(post.get("area") or "")
     source = str(post.get("source") or "")

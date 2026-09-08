@@ -1,5 +1,6 @@
 // Composer provider and mode switching
 function providerForScreen(screenId, activeButtonId = "") {
+  if (screenId === "reference_main" || activeButtonId === "reference_nav_btn") return "build";
   if (screenId.startsWith("i_") || activeButtonId.startsWith("i_")) return "imagine";
   if (screenId.startsWith("b_") || screenId === "collection_main" || screenId === "2nd_main" || activeButtonId.startsWith("b_")) return "build";
   return "";

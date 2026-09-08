@@ -9,6 +9,7 @@ const CONTENT_DIRECTORIES = [
   "created",
   "upload",
   "collection",
+  "레퍼런스",
   "prompt",
   "account",
   "cache",

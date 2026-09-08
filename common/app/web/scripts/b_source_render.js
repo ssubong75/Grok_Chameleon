@@ -65,6 +65,7 @@ function buildUploadSourceVisible(post) {
 }
 
 function isBuildPost(post) {
+  if (post?.area === "reference") return false;
   if (isCollectionContainerPost(post)) return false;
   if (post.area === "collection") return postHasBuildLocalMedia(post);
   if (post.area === "upload") {

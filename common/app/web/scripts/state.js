@@ -13,6 +13,7 @@ document.documentElement.classList.toggle("platform-macos", isMacRenderer);
     const screenIds = [
       "i_main",
       "b_main",
+      "reference_main",
       "b_t2i_view_main",
       "search_main",
       "i_discover_main",
@@ -30,6 +31,7 @@ document.documentElement.classList.toggle("platform-macos", isMacRenderer);
       "i_discover_nav_btn",
       "b_build_btn",
       "b_collection_nav_btn",
+      "reference_nav_btn",
       "prompt_main_btn",
       "account_usage_btn",
       "library_backup_btn",

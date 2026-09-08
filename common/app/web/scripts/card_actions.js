@@ -113,6 +113,7 @@
   }
 
   function libraryCardListElementForScreen(screenId = screen_state.current_screen) {
+    if (screenId === "reference_main") return document.querySelector(".reference_card_list");
     if (screenId === "b_main") return document.querySelector(".b_card_list");
     if (screenId === "b_t2i_view_main") return document.querySelector(".b_t2i_view_card_list");
     if (screenId === "i_main") return document.querySelector(".i_card_list");
@@ -124,7 +125,7 @@
   }
 
   function libraryCardListUsesDocumentScroll(screenId) {
-    return ["b_main", "i_main", "i_unsaved_main", "i_discover_main", "2nd_main"].includes(screenId)
+    return ["b_main", "i_main", "i_unsaved_main", "i_discover_main", "2nd_main", "reference_main"].includes(screenId)
       && typeof virtualCardListUsesDocumentScroll === "function"
       && virtualCardListUsesDocumentScroll();
   }
@@ -202,7 +203,7 @@
     const posts = selectedCardPosts().filter((post) => (
       unsavedOnly
         ? isSelectedImagineUnsavedPost(post)
-        : post?.source === "imagine" && post?.area === "imagine_remote"
+        : post?.source === "imagine" && (post?.remote || post?.area === "imagine_remote")
     ));
     if (!posts.length) {
       showErrorPanel("Move unavailable", "Select one or more Imagine cards.");

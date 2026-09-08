@@ -204,13 +204,16 @@ function finishBuildJob(job) {
         library_state.selectedDetailItemId = job.result.selected_item_id;
         renderDetailViews();
       }
-      const backTarget = { screenId: "b_main", activeButtonId: "b_build_btn" };
+      const referenceResult = String(job.result.selected_path || "").normalize("NFC").startsWith("레퍼런스/");
+      const backTarget = referenceResult
+        ? { screenId: "reference_main", activeButtonId: "reference_nav_btn" }
+        : { screenId: "b_main", activeButtonId: "b_build_btn" };
       if (typeof captureLibraryCardListScroll === "function") {
-        const scrollState = captureLibraryCardListScroll("b_main");
+        const scrollState = captureLibraryCardListScroll(backTarget.screenId);
         if (scrollState) backTarget.scrollState = scrollState;
       }
       screen_state.detail_back.build = backTarget;
-      openScreen("b_detail", "b_build_btn");
+      openScreen("b_detail", backTarget.activeButtonId);
       const completedMode = String(job.context?.mode || "").toLowerCase();
       const completedFromImage = Boolean(job.context?.source_item_id);
       if (

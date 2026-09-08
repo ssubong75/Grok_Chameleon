@@ -47,6 +47,7 @@
     <script src="./scripts/prompt_account.js?v=20260815-sync1" defer></script>
     <script src="./scripts/collection_utils.js" defer></script>
     <script src="./scripts/collection_actions.js" defer></script>
+    <script src="./scripts/reference.js" defer></script>
     <script src="./scripts/composer_attachments.js" defer></script>
     <script src="./scripts/detail_events.js" defer></script>
     <script src="./scripts/composer_events.js" defer></script>
@@ -90,12 +91,17 @@
               <span>Collection</span>
             </button>
             <div class="nav_spacer" aria-hidden="true"></div>
-            <button id="prompt_main_btn" class="nav_item" type="button">
-              <span class="nav_icon" aria-hidden="true">P</span>
+            <button id="reference_nav_btn" class="nav_item" type="button" aria-label="Reference">
+              <span class="nav_icon reference_nav_icon" aria-hidden="true">R</span>
+              <span>Reference</span>
+            </button>
+            <button id="prompt_main_btn" class="nav_item nav_sub_item" type="button">
+              <span class="nav_icon suit_nav_icon" aria-hidden="true">♠</span>
               <span>Prompt</span>
             </button>
-            <button id="search_btn" class="nav_item nav_sub_item search_btn" type="button">
-              <img src="./assets/icons/search.svg" alt="" />
+            <div class="nav_spacer" aria-hidden="true"></div>
+            <button id="search_btn" class="nav_item search_btn" type="button">
+              <span class="nav_icon search_nav_icon" aria-hidden="true"></span>
               <span>Search</span>
             </button>
             <input id="searchInput" class="sidebar_search_input" type="search" placeholder="" aria-label="Search" />
@@ -210,6 +216,16 @@
               </div>
             </header>
           <section class="card_list b_card_list" aria-label="Build media">
+
+          </section>
+        </section>
+
+        <section id="reference_main" class="b_main reference_main" hidden aria-label="Reference main">
+          <header class="b_main_header">
+            <h2>Reference</h2>
+            <p>0 items</p>
+          </header>
+          <section class="card_list reference_card_list" aria-label="Reference media">
 
           </section>
         </section>

@@ -227,7 +227,6 @@
         if (itemKey) payload.item_key = itemKey;
         data = await qApi(endpoint, payload);
         applyLibrarySnapshot(data);
-        if (remoteImagineSource) removeMovedImagineSourceFromMain(source);
       }
       if (typeof syncImagineRemotePostsIntoLibrary === "function") syncImagineRemotePostsIntoLibrary();
       if (typeof saveImagineSavedDisplayCache === "function") saveImagineSavedDisplayCache();
@@ -461,6 +460,12 @@
         )) === index;
       });
     const sourcePost = sourcePosts[0] || null;
+    if (isLikedReferenceSaveContext(sourcePosts)) {
+      saveLikedCardsToReference(sourcePosts).catch((error) => (
+        showErrorPanel("Reference save failed", error?.message || "Reference save failed.")
+      ));
+      return;
+    }
     if (!sourcePost) {
       setLibraryMessage("Select a post to move.");
       return;

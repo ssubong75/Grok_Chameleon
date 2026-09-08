@@ -126,6 +126,10 @@ async function refreshCurrentMainView() {
     if (typeof refreshBuildJobs === "function") await refreshBuildJobs();
     return;
   }
+  if (screenId === "reference_main") {
+    await loadReferenceCards();
+    return;
+  }
   if (screenId === "collection_main") {
     await refreshLocalLibrarySnapshot();
     renderCollectionFolders();
@@ -249,6 +253,11 @@ document.getElementById("b_t2i_view_back_btn")?.addEventListener("click", () => 
   renderSourceCards("build");
 });
 
+document.getElementById("reference_nav_btn")?.addEventListener("click", () => {
+  clearSidebarSearchQuery();
+  openScreen("reference_main", "reference_nav_btn");
+});
+
 document.getElementById("prompt_main_btn")?.addEventListener("click", () => {
   clearSidebarSearchQuery();
   openScreen("prompt_main", "prompt_main_btn");
@@ -337,6 +346,7 @@ const sidebarActiveButtonIdForCurrentScreen = () => {
   if (screen_state.current_screen === "i_discover_main") return "i_discover_nav_btn";
   if (screen_state.current_screen === "b_main" || screen_state.current_screen === "b_t2i_view_main") return screen_state.current_b_nav_btn || "b_build_btn";
   if (screen_state.current_screen === "collection_main" || screen_state.current_screen === "2nd_main") return "b_collection_nav_btn";
+  if (screen_state.current_screen === "reference_main") return "reference_nav_btn";
   if (screen_state.current_screen === "prompt_main") return "prompt_main_btn";
   if (screen_state.current_screen === "usage") return "account_usage_btn";
   if (screen_state.current_screen === "i_detail") return screen_state.current_i_nav_btn || "i_imagine_nav_btn";
@@ -375,7 +385,8 @@ const applySearchQuery = () => {
       ? (nextScreen === "i_discover_main"
         ? "i_discover_nav_btn"
         : screen_state.current_i_nav_btn || "i_imagine_nav_btn")
-      : (nextScreen.startsWith("b_") ? screen_state.current_b_nav_btn || "b_build_btn" : sidebarActiveButtonIdForCurrentScreen());
+      : (nextScreen === "reference_main" ? "reference_nav_btn"
+        : nextScreen.startsWith("b_") ? screen_state.current_b_nav_btn || "b_build_btn" : sidebarActiveButtonIdForCurrentScreen());
     openScreen(nextScreen, nextButton);
   }
   renderSourceCards("build");

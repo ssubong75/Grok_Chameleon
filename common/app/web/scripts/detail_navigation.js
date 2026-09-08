@@ -59,6 +59,7 @@ function detailPostSequence(detailType = detailTypeForScreen()) {
         : buildMainPostVisible,
     ));
   }
+  if (target.screenId === "reference_main") return uniquePostsByPath(referencePosts());
   if (target.screenId === "b_t2i_view_main") {
     return uniquePostsByPath(library_state.posts.filter(
       typeof isSessionBuildT2iPost === "function" ? isSessionBuildT2iPost : isBuildT2iPost,

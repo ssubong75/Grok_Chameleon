@@ -72,7 +72,7 @@ function syncResponsiveCardHeight() {
   if (!landscapeTwoRowGrid && aspectRatio > 1) return;
 
   const list = [...document.querySelectorAll(
-    ".i_card_list, .b_card_list, .b_t2i_view_card_list, .search_card_list, .i_discover_card_list, .i_unsaved_card_list, .second_main_card_list",
+    ".i_card_list, .b_card_list, .reference_card_list, .b_t2i_view_card_list, .search_card_list, .i_discover_card_list, .i_unsaved_card_list, .second_main_card_list",
   )].find((candidate) => !candidate.closest("[hidden]") && candidate.getBoundingClientRect().height > 0);
   if (!list) return;
 

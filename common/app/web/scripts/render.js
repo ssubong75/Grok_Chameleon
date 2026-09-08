@@ -7,6 +7,7 @@ function renderLibrary() {
   renderCollectionFolders();
   renderSecondMain();
   renderPromptCards();
+  renderReferenceCards();
   if (typeof renderSearchResults === "function" && screen_state.current_screen === "search_main") renderSearchResults();
   renderAccounts();
   if (typeof renderComposerAttachments === "function") renderComposerAttachments();

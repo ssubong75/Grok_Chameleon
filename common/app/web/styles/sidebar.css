@@ -433,9 +433,25 @@ html.sidebar_toggle_placed .sidebar_toggle {
 #prompt_main_btn:hover span,
 #prompt_main_btn.active span,
 #prompt_main_btn:hover .nav_icon,
-#prompt_main_btn.active .nav_icon,
+#prompt_main_btn.active .nav_icon {
+  color: var(--prompt-teal);
+}
+
 #search_btn:hover span,
 #search_btn.active span {
+  color: #b47cff;
+}
+
+.search_nav_icon {
+  background-color: currentColor;
+  -webkit-mask: url("../assets/icons/search.svg") center / contain no-repeat;
+  mask: url("../assets/icons/search.svg") center / contain no-repeat;
+}
+
+#reference_nav_btn:hover span,
+#reference_nav_btn.active span,
+#reference_nav_btn:hover .nav_icon,
+#reference_nav_btn.active .nav_icon {
   color: var(--prompt-teal);
 }
 
@@ -444,11 +460,6 @@ html.sidebar_toggle_placed .sidebar_toggle {
 #i_link_btn:hover .nav_icon,
 #i_link_btn.active .nav_icon {
   color: #b47cff;
-}
-
-#search_btn:hover img,
-#search_btn.active img {
-  filter: brightness(0) saturate(100%) invert(78%) sepia(82%) saturate(490%) hue-rotate(116deg) brightness(89%) contrast(88%);
 }
 
 .app_shell.sidebar_collapsed .sidebar .nav_item,

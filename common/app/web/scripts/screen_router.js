@@ -49,7 +49,7 @@ function openScreen(screenId, activeButtonId = "", options = {}) {
     button.classList.toggle("active", button.id === activeButtonId);
   }
 
-  if (["i_main", "i_discover_main", "b_main", "b_t2i_view_main", "collection_main", "2nd_main"].includes(screenId)) {
+  if (["i_main", "i_discover_main", "b_main", "b_t2i_view_main", "collection_main", "2nd_main", "reference_main"].includes(screenId)) {
     screen_state.current_main = screenId;
   }
 
@@ -65,6 +65,10 @@ function openScreen(screenId, activeButtonId = "", options = {}) {
     syncDetailAttachmentForComposerTray().catch((error) => console.warn(error));
   }
   if (screenId === "2nd_main") renderSecondMain();
+  if (screenId === "reference_main") {
+    renderReferenceCards();
+    loadReferenceCards().catch((error) => showErrorPanel("Reference load failed", error.message));
+  }
   if (screenId === "i_detail" || screenId === "b_detail") syncComposerPromptFromDetail();
   if (screenId === "i_detail" || screenId === "b_detail") playActiveDetailVideoIfSelected();
   if (screenId === "i_detail" || screenId === "b_detail") updateDetailPostNavigationButtons();

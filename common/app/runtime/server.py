@@ -60,7 +60,7 @@ except Exception:
 
 
 WEB_ROOT = APP_ROOT / "web"
-LIBRARY_FOLDERS = ("created", "upload", "collection", "prompt", "account")
+LIBRARY_FOLDERS = ("created", "upload", "collection", "prompt", "account", "레퍼런스")
 IMAGE_EXTS = {"avif", "gif", "jpeg", "jpg", "png", "webp"}
 VIDEO_EXTS = {"m4v", "mov", "mp4", "webm"}
 THUMB_EXTS = ("jpg", "jpeg", "png", "webp")
@@ -7399,7 +7399,6 @@ def list_imagine_saved_display_cache(payload: dict) -> dict:
         for post in data.get("posts") or []
         if imagine_saved_display_post_allowed(post)
     ]
-    posts = filter_imagine_posts_moved_to_collection(root, account, posts)
     return {
         "ok": True,
         "source": "saved_display_cache",
@@ -7428,7 +7427,6 @@ def save_imagine_saved_display_cache(payload: dict) -> dict:
     if len(supplied_posts) > 5000:
         raise RuntimeError("Imagine display cache is too large.")
     posts = [post for post in supplied_posts if imagine_saved_display_post_allowed(post)]
-    posts = filter_imagine_posts_moved_to_collection(root, account, posts)
     write_json(imagine_saved_display_cache_path(root, account), {
         "version": IMAGINE_SAVED_DISPLAY_CACHE_VERSION,
         "updated_at": now_iso(),
@@ -8071,7 +8069,6 @@ def list_imagine_saved(payload: dict) -> dict:
     posts = imagine_filter_liked_scope_posts(list(saved_groups.values()), hidden_remote_ids)
     posts = merge_imagine_saved_lineage_cards(posts)
     posts = imagine_filter_liked_scope_posts(posts, hidden_remote_ids)
-    posts = filter_imagine_posts_moved_to_collection(root, account, posts)
     # Keep the public Saved-page order intact here.  The renderer first collects every
     # page, then calculates each card's latest activity and sorts the complete snapshot
     # once; sorting this fragment would make the upstream order meaningless before that.
@@ -20060,7 +20057,7 @@ def build_preview_source(root: Path, source: Path) -> bool:
         rel = source.resolve().relative_to(root.resolve())
     except ValueError:
         return False
-    return bool(rel.parts and rel.parts[0] in {"created", "collection"})
+    return bool(rel.parts and rel.parts[0] in {"created", "collection", "레퍼런스"})
 
 
 def preview_key_for_source(
@@ -21007,6 +21004,7 @@ def scan_library_unlocked(root: Path) -> dict:
     posts = [
         *scan_created_area(root, "created"),
         *scan_created_area(root, "upload"),
+        *scan_created_area(root, "레퍼런스", "reference"),
         *[post for collection in collections for post in collection.get("posts", [])],
     ]
     posts = sorted(posts, key=library_index.post_activity_at, reverse=True)
@@ -21112,9 +21110,9 @@ def delete_library_index_paths(root: Path, paths: list[str], *, recursive: bool 
 def indexed_post_context(rel_path: str) -> dict | None:
     normalized = str(rel_path or "").replace("\\", "/").strip("/")
     parts = normalized.split("/") if normalized else []
-    if len(parts) < 2 or parts[0] not in {"created", "upload", "collection"}:
+    if len(parts) < 2 or parts[0] not in {"created", "upload", "collection", "레퍼런스"}:
         return None
-    area = parts[0]
+    area = "reference" if parts[0] == "레퍼런스" else parts[0]
     return {
         "area": area,
         "path": normalized,
@@ -26904,6 +26902,110 @@ def existing_remote_collection_post(target_parent: Path, source_post: dict, item
     return None
 
 
+def reference_item_key(item: dict) -> str:
+    identity = item.get("item_id") or item.get("id") or imagine_item_asset_id(item)
+    if not identity:
+        identity = remote_imagine_item_url(item)
+    return f"{item.get('type') or 'image'}:{identity}" if identity else ""
+
+
+def list_reference_posts(payload: dict) -> dict:
+    root = library_root()
+    if not root:
+        return {"ok": True, "posts": []}
+    with COLLECTION_MOVE_LOCK:
+        posts = scan_created_area(root, "레퍼런스", "reference")
+    return {"ok": True, "posts": sorted(posts, key=library_index.post_activity_at, reverse=True)}
+
+
+def save_imagine_post_to_reference(payload: dict) -> dict:
+    """Keep Liked untouched; commit a complete local card, merging repeat saves by item ID."""
+    root = library_root()
+    if not root:
+        raise RuntimeError("Library path is not set.")
+    source = remote_imagine_payload_post(payload)
+    if not source:
+        raise RuntimeError("Select an Imagine Liked card.")
+    card_id = normalize_unicode_text(str(source.get("post_id") or source.get("folderName") or "")).strip()
+    if not card_id or card_id in {".", ".."} or safe_name(card_id) != card_id or unquote(card_id) != card_id:
+        raise RuntimeError("The card has no valid ID.")
+    items = [dict(item) for item in source.get("items") or [] if isinstance(item, dict)]
+    if not items or any(not reference_item_key(item) for item in items):
+        raise RuntimeError("The card has no complete media information.")
+    account = active_imagine_account(root, str(source.get("account_id") or ""))
+    if not account:
+        raise RuntimeError("Select or capture the Imagine account for this card first.")
+    target = safe_join(root, f"레퍼런스/{card_id}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    cache = root / "cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    with COLLECTION_MOVE_LOCK, build_post_save_lock(target):
+        existing = read_json(target / "post.json", None)
+        if target.exists() and not isinstance(existing, dict):
+            raise RuntimeError("The Reference folder already exists without valid card metadata.")
+        existing = existing or {}
+        merged = [dict(item) for item in existing.get("items") or [] if isinstance(item, dict)]
+        by_key = {reference_item_key(item): index for index, item in enumerate(merged)}
+        new_files = []
+        with tempfile.TemporaryDirectory(prefix="reference-save-", dir=cache) as temporary:
+            staged = Path(temporary) / "card"
+            staged.mkdir()
+            seen = set()
+            for index, item in enumerate(items):
+                key = reference_item_key(item)
+                if key in seen:
+                    continue
+                seen.add(key)
+                previous_index = by_key.get(key)
+                previous = merged[previous_index] if previous_index is not None else None
+                if previous and previous.get("file"):
+                    local_file = safe_join(target, str(previous["file"]))
+                    if local_file.is_file() and local_file.stat().st_size > 0:
+                        continue
+                copied = copy_imagine_remote_item_to_directory(root, item, staged, account, index)
+                if previous_index is None:
+                    by_key[key] = len(merged)
+                    merged.append(copied)
+                else:
+                    merged[previous_index] = copied
+                new_files.append(copied)
+            metadata = {
+                **post_json_from_post(
+                    source, post_id=card_id, source="imagine", folder_path=f"레퍼런스/{card_id}",
+                    collection=None, items=merged,
+                    representative=representative_for_merged_items(merged),
+                    favorite=False, build_favorite=False,
+                ),
+                **existing,
+                "items": [serializable_media_item(item) for item in merged],
+                "representative": existing.get("representative") or representative_for_merged_items(merged),
+                "updated_at": now_iso(),
+            }
+            if not target.exists():
+                write_json(staged / "post.json", metadata)
+                os.replace(staged, target)
+            else:
+                installed = []
+                try:
+                    for item in new_files:
+                        staged_file = staged / item["file"]
+                        final_file = unique_path(target / item["file"])
+                        os.replace(staged_file, final_file)
+                        installed.append(final_file)
+                        item["file"] = final_file.name
+                    metadata["items"] = [serializable_media_item(item) for item in merged]
+                    metadata["representative"] = existing.get("representative") or representative_for_merged_items(merged)
+                    write_json(staged / "post.json", metadata)
+                    os.replace(staged / "post.json", target / "post.json")
+                except Exception:
+                    for file in installed:
+                        file.unlink(missing_ok=True)
+                    raise
+        refresh_library_index_paths(root, [f"레퍼런스/{card_id}"])
+        post = post_from_folder(root, target, indexed_post_context(f"레퍼런스/{card_id}"))
+        return {"ok": True, "post": post, "saved_count": len(new_files)}
+
+
 def copy_imagine_remote_post_to_collection(payload: dict, item_only: bool = False) -> dict:
     root = library_root()
     if not root:
@@ -26937,12 +27039,6 @@ def copy_imagine_remote_post_to_collection(payload: dict, item_only: bool = Fals
             data["selected_item_id"] = media_item_key(existing_items[-1] if existing_items else {})
             data["selected_collection_path"] = collection_path
             data["selected_collection_post_path"] = target_parent_path or existing_path
-            data["imagine_moved_ids"] = sorted(hide_imagine_source_moved_to_collection(
-                root,
-                account,
-                source_post,
-                items,
-            ))
             return data
 
         # Name the folder after the asset id, not the title. An Imagine card's title is its
@@ -26994,12 +27090,6 @@ def copy_imagine_remote_post_to_collection(payload: dict, item_only: bool = Fals
         data["selected_item_id"] = media_item_key(copied_items[-1] if copied_items else {})
         data["selected_collection_path"] = collection_path
         data["selected_collection_post_path"] = target_parent_path or post_json["folder_path"]
-        data["imagine_moved_ids"] = sorted(hide_imagine_source_moved_to_collection(
-            root,
-            account,
-            source_post,
-            items,
-        ))
         return data
 
 
@@ -27118,8 +27208,8 @@ def merge_selected_posts(payload: dict) -> dict:
         post = find_post(snapshot, path)
         if not post:
             raise RuntimeError("Selected post was not found.")
-        if post.get("area") not in {"created", "collection", "upload"}:
-            raise RuntimeError("Only local Build or Collection cards can be merged.")
+        if post.get("area") not in {"created", "collection", "upload", "reference"}:
+            raise RuntimeError("Only local cards can be merged.")
         post_dir = safe_join(root, post.get("folder_path") or "")
         if not post_dir.is_dir():
             raise RuntimeError("Selected post folder was not found.")
@@ -27267,7 +27357,7 @@ def move_post_to_collection(payload: dict) -> dict:
     collection_path = str(payload.get("collection_path") or "")
     merge_path = str(payload.get("merge_path") or "")
     target_parent_path = str(payload.get("target_parent_path") or "")
-    if not post or post.get("area") not in {"created", "collection", "upload"}:
+    if not post or post.get("area") not in {"created", "collection", "upload", "reference"}:
         if remote_imagine_payload_post(payload):
             return copy_imagine_remote_post_to_collection(payload, item_only=False)
         raise RuntimeError("Select a local post.")
@@ -27331,7 +27421,7 @@ def move_item_to_collection(payload: dict) -> dict:
     selected_key = str(payload.get("item_key") or "")
     merge_path = str(payload.get("merge_path") or "")
     target_parent_path = str(payload.get("target_parent_path") or "")
-    if not post or post.get("area") not in {"created", "collection", "upload"}:
+    if not post or post.get("area") not in {"created", "collection", "upload", "reference"}:
         if remote_imagine_payload_post(payload):
             return copy_imagine_remote_post_to_collection(payload, item_only=True)
         raise RuntimeError("Select a local post.")
@@ -27413,7 +27503,7 @@ def split_library_item(payload: dict) -> dict:
     snapshot = current_library_snapshot(root)
     post = find_post(snapshot, str(payload.get("post_path") or ""))
     selected_key = str(payload.get("item_key") or "")
-    if not post or post.get("area") not in {"created", "collection", "upload"}:
+    if not post or post.get("area") not in {"created", "collection", "upload", "reference"}:
         raise RuntimeError("Select a local post.")
     items = post.get("items") or []
     if len(items) <= 1:
@@ -27497,7 +27587,7 @@ def editor_source_from_payload(root: Path, payload: dict) -> tuple[dict, dict | 
     post = find_post(snapshot, post_path)
     if not post:
         raise RuntimeError("Editor source post was not found.")
-    if post.get("area") not in {"created", "collection", "upload"}:
+    if post.get("area") not in {"created", "collection", "upload", "reference"}:
         raise RuntimeError("This item cannot be edited here.")
     post_dir = safe_join(root, post.get("folder_path") or "")
     if not post_dir.is_dir():
@@ -28016,6 +28106,8 @@ POST_JSON_ROUTES = {
     "/api/library/download-items": download_library_items,
     "/api/library/merge-posts": merge_selected_posts,
     "/api/collection/move-post": move_post_to_collection,
+    "/api/reference/list": list_reference_posts,
+    "/api/reference/save": save_imagine_post_to_reference,
     "/api/collection/move-item": move_item_to_collection,
 }
 
