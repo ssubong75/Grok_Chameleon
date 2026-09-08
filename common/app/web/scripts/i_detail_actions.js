@@ -1030,28 +1030,54 @@ async function deleteImagineCardAssets(post, items) {
 }
 
 async function deleteImagineCardConversation(post, items) {
-  const deletedItems = (items || []).filter(Boolean);
-  const representative = representativeItem(deletedItems, post) || deletedItems[0] || null;
-  const payload = imagineConversationDeletePayloadForPost({
-    ...post,
-    items: deletedItems,
-  });
-  if (!payload) {
-    throw new Error("This Imagine card has no deletion target.");
+  const groups = new Map();
+  const assetOnly = [];
+  const deletedItems = [];
+  const failures = [];
+  for (const item of (items || []).filter(Boolean)) {
+    // External originals belong to their owner; only remove our local alias for those.
+    if (isImagineExternalReferenceItem(post, item)) {
+      assetOnly.push(item);
+      continue;
+    }
+    const payload = imagineDeletePayloadForItem(post, item);
+    if (!payload) {
+      failures.push(new Error("This Imagine item has no deletion target."));
+      continue;
+    }
+    if (isImagineLinkSourcePost(post, item) && imagineLinkCardHasOwnedClone(post, [item])) {
+      payload.conversation_id = "";
+    }
+    const key = JSON.stringify([payload.account_id || "", payload.conversation_id || payload.asset_id]);
+    if (!groups.has(key)) groups.set(key, { payload, items: [] });
+    groups.get(key).items.push(item);
   }
-  // A copied Liked card can carry an asset id in the old conversation-id slot.
-  // Resolve the copy's real conversation on the server before deleting the card.
-  if (isImagineLinkSourcePost(post, representative) && imagineLinkCardHasOwnedClone(post, deletedItems)) {
-    payload.conversation_id = "";
+  for (const group of groups.values()) {
+    try {
+      await qApi("/api/imagine/conversation/delete", group.payload);
+      deletedItems.push(...group.items);
+    } catch (error) {
+      if (isImagineConversationDeleteFallbackError(error)) {
+        const result = await deleteImagineCardAssets(post, group.items);
+        deletedItems.push(...result.deletedItems);
+        failures.push(...result.failures);
+      } else {
+        failures.push(error);
+      }
+    }
   }
-  const data = await qApi("/api/imagine/conversation/delete", payload);
+  if (assetOnly.length) {
+    const result = await deleteImagineCardAssets(post, assetOnly);
+    deletedItems.push(...result.deletedItems);
+    failures.push(...result.failures);
+  }
   if (typeof releaseImagineGeneratedSavedSyncForDeletedItems === "function") {
     releaseImagineGeneratedSavedSyncForDeletedItems(deletedItems);
   }
   return {
     deletedItems,
-    failures: [],
-    data,
+    failures,
+    data: { ok: failures.length === 0 },
     action: "conversation-delete",
   };
 }
@@ -1241,6 +1267,9 @@ async function deleteImagineCardPost(post, button = null, { skipConfirm = false 
     if (result.deletedItems.length) toast("Deleted Imagine post.");
     if (result.failures.length) {
       restore();
+      if (result.deletedItems.length) {
+        removeImagineItemsFromPost(post, result.deletedItems, { keepListScreen: true, screenId, scrollTop });
+      }
       showErrorPanel(
         "Delete failed",
         `${result.failures.length} media item(s) could not be deleted. ${result.failures[0]?.message || ""}`.trim(),

@@ -33,6 +33,11 @@ with tempfile.TemporaryDirectory(prefix='grok-reference-smoke-') as temporary:
     original_active_account = server.active_imagine_account
     server.active_imagine_account = lambda *args: {'id': 'test-only', 'email': 'test@example.invalid'}
     png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII='
+    thumbnail_stage = sandbox / 'thumbnail-stage'
+    thumbnail_stage.mkdir()
+    thumbnail = server.stage_reference_thumbnail(library, {'item_id': 'video', 'thumbnail_url': 'data:image/png;base64,' + png}, {'type': 'video'}, thumbnail_stage, {})
+    assert thumbnail.read_bytes() == base64.b64decode(png)
+    assert thumbnail.name == 'preview_image.png'
     source = {'post_id': 'test-card', 'source': 'imagine', 'area': 'imagine_remote', 'remote': True,
               'liked': True, 'account_id': 'test-only', 'items': [
                   {'item_id': key, 'type': 'image', 'url': 'data:image/png;base64,' + png}
@@ -59,6 +64,41 @@ with tempfile.TemporaryDirectory(prefix='grok-reference-smoke-') as temporary:
         folder, relative = server.build_append_target(library, mode, [{'detail_post_path': '레퍼런스/test-card'}])
         assert folder == library / '레퍼런스/test-card'
     assert server.imagine_state.local_exclusion_ids(library, 'test-only') == set()
+    # Exercise deletion reconciliation with the actual SQLite store, entirely in sandbox.
+    test_account = {'id': 'delete-test', 'email': 'delete@example.invalid'}
+    account_key = server.imagine_account_settings_key(test_account)
+    relation = {'account_key': account_key, 'upload_origin_bundle': True,
+                'source_post_id': 'deleted-conversation', 'upload_source_asset_id': 'kept-upload',
+                'items': [{'item_id': 'deleted-result', 'conversation_id': 'deleted-conversation'},
+                          {'item_id': 'kept-result', 'conversation_id': 'kept-conversation'}]}
+    server.imagine_state.upsert_generated_relation(library, 'deleted-conversation', relation)
+    foreign = {**relation, 'account_key': 'other-account'}
+    server.imagine_state.upsert_generated_relation(library, 'foreign-record', foreign)
+    originals = {name: getattr(server, name) for name in
+                 ['imagine_current_owner_user_id', 'imagine_conversation_detail', 'imagine_get_json']}
+    server.imagine_current_owner_user_id = lambda account: 'test-owner'
+    def deleted_detail(conversation, *args):
+        assert conversation == 'deleted-conversation'
+        raise RuntimeError('Imagine HTTP 404: Conversation was not found')
+    server.imagine_conversation_detail = deleted_detail
+    def owned_orphan(url, *args, **kwargs):
+        assert url == '/rest/assets/deleted-result'
+        return {'ownerUserId': 'test-owner', 'sourceConversationId': 'deleted-conversation',
+                'createTime': '2020-01-01T00:00:00Z', 'mimeType': 'video/mp4'}
+    server.imagine_get_json = owned_orphan
+    try:
+        deleted = server.imagine_prune_deleted_upload_conversations(library, test_account, {'kept-conversation'})
+        assert deleted == {'deleted-result'}
+        remaining = server.imagine_state.load_generated_relations(library)
+        assert [i['item_id'] for i in remaining['deleted-conversation']['items']] == ['kept-result']
+        assert remaining['deleted-conversation']['upload_source_asset_id'] == 'kept-upload'
+        assert remaining['foreign-record']['items'] == foreign['items']
+        assert server.imagine_state.local_exclusion_ids(library, account_key) == {'deleted-result'}
+        assert not server.imagine_state.local_exclusion_ids(library, 'other-account')
+        assert server.imagine_prune_deleted_upload_conversations(library, test_account, {'kept-conversation'}) == set()
+    finally:
+        for name, function in originals.items():
+            setattr(server, name, function)
     if '--serve' not in sys.argv[2:]:
         another = copy.deepcopy(source)
         another['post_id'] = 'another-account-card'

@@ -1630,7 +1630,7 @@ function removeImagineConfirmedDeletedPendingItems(posts, assetIds) {
       return !assetId || !assetIds.has(assetId);
     });
     if (items.length === previousItems.length) return post;
-    if (!items.length) return null;
+    if (!items.length || items.every(imagineSavedItemIsUploadSource)) return null;
     const metadata = post?.metadata && typeof post.metadata === "object"
       ? { ...post.metadata }
       : {};

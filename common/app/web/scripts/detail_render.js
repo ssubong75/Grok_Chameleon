@@ -475,6 +475,7 @@ function detailThumbButtonForItem(prefix, item, post, options = {}) {
         const showCachedPreview = (resolvedUrl) => {
           if (!fill.isConnected || !resolvedUrl) return;
           fill.classList.remove("detail_thumb_video_preview");
+          fill.classList.add("detail_thumb_preview");
           fill.replaceChildren();
           fill.style.backgroundImage = `url("${resolvedUrl}")`;
         };

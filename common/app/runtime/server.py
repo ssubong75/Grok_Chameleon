@@ -6865,6 +6865,105 @@ def cache_imagine_remote_posts(
     )
 
 
+def imagine_prune_deleted_upload_conversations(
+    root: Path, account: dict, live_conversation_ids: set[str],
+) -> set[str]:
+    """Check complete upload bundles too; a surviving upload is not a live generation.
+
+    Run once on the first live Saved page, never from cache painting. A conversation
+    404 alone is not enough: the exact result asset must name this account as owner
+    and that conversation as its own (not merely its root/parent conversation).
+    """
+    account_key = imagine_account_settings_key(account)
+    owner = imagine_current_owner_user_id(account)
+    if not account_key or not owner:
+        return set()
+    cached = library_index.query_imagine_remote_posts(
+        root, account_key, offset=0, limit=5000,
+    ).get("posts") or []
+    relations = imagine_state.load_generated_relations(root)
+    excluded = imagine_local_exclusion_ids(root, account)
+    candidates: dict[str, set[str]] = {}
+
+    def collect(items: list[dict]) -> None:
+        for item in items:
+            if not isinstance(item, dict) or imagine_item_is_upload_source(item):
+                continue
+            asset_id = imagine_item_asset_id(item)
+            conversation_id = imagine_relation_conversation_id(item)
+            if asset_id and conversation_id and asset_id not in excluded and conversation_id not in live_conversation_ids:
+                candidates.setdefault(conversation_id, set()).add(asset_id)
+
+    for post in cached:
+        if not isinstance(post, dict) or imagine_post_saved_identity(post)[0] != "normal-saved":
+            continue
+        items = post.get("items") or []
+        if any(imagine_item_is_upload_source(item) for item in items if isinstance(item, dict)):
+            collect(items)
+    for record in relations.values():
+        if (
+            isinstance(record, dict)
+            and record.get("upload_origin_bundle") is True
+            and not record.get("liked_source_relation")
+            and str(record.get("account_key") or "").strip().lower() == account_key
+        ):
+            collect(record.get("items") or [])
+
+    def confirm(conversation_id: str) -> set[str]:
+        try:
+            imagine_conversation_detail(conversation_id, account, 5)
+            return set()
+        except Exception as exc:
+            if not imagine_error_is_confirmed_not_found(exc):
+                return set()
+        deleted: set[str] = set()
+        for asset_id in candidates[conversation_id]:
+            try:
+                response = imagine_get_json(f"/rest/assets/{quote(asset_id, safe='')}", account, timeout=5)
+                asset = response.get("asset", response)
+                created = parse_iso_time(asset.get("createTime") or asset.get("createdAt"))
+                # A just-created conversation may not be readable yet.
+                if not created or (datetime.now(timezone.utc) - created).total_seconds() < 120:
+                    continue
+                if (
+                    imagine_asset_owner_user_id(asset) == owner
+                    and str(asset.get("sourceConversationId") or asset.get("conversationId") or "").strip() == conversation_id
+                    and not imagine_asset_upload_only(asset)
+                ):
+                    deleted.add(asset_id)
+            except Exception:
+                # An inaccessible asset cannot prove ownership. Keep it for a later pass.
+                continue
+        return deleted
+
+    deleted: set[str] = set()
+    if candidates:
+        with ThreadPoolExecutor(max_workers=min(8, len(candidates))) as executor:
+            for result in executor.map(confirm, candidates):
+                deleted.update(result)
+    if not deleted:
+        return set()
+    # Remember only result ids, never the shared upload id. This also prevents orphan
+    # assets still returned by Grok from reconstructing the card on the next refresh.
+    imagine_state.add_local_exclusions(root, account_key, deleted, reason="remote_conversation_deleted")
+    remove_imagine_generated_relation_state(root, asset_ids=deleted, account_key=account_key)
+    prune_imagine_remote_cache_assets(root, account, deleted)
+    empty_card_keys = {
+        imagine_remote_cache_post_key(post)
+        for post in cached
+        if isinstance(post, dict)
+        and imagine_post_saved_identity(post)[0] == "normal-saved"
+        and not imagine_filter_deleted_conversation_posts([post], set(), deleted)
+    }
+    remove_imagine_remote_cache_post_keys(root, account, empty_card_keys, allowed_provenances={"normal-saved"})
+    prune_imagine_saved_display_cache(root, account, set(), deleted)
+    imagine_debug_event("upload_deleted_results_pruned", {
+        "account_id": str(account.get("id") or ""), "asset_ids": sorted(deleted),
+        "checked_conversations": len(candidates),
+    })
+    return deleted
+
+
 def imagine_missing_direct_upload_conversation_candidates(
     assets: list[dict],
     *,
@@ -7092,7 +7191,10 @@ def imagine_filter_deleted_conversation_posts(
                 and imagine_relation_conversation_id(item) not in deleted_conversations
             )
         ]
-        if not items:
+        if not items or (
+            len(items) < len(post.get("items") or [])
+            and all(imagine_item_is_upload_source(item) for item in items)
+        ):
             continue
         post["items"] = items
         representative = imagine_representative_item(items) or items[-1]
@@ -7695,6 +7797,11 @@ def list_imagine_saved(payload: dict) -> dict:
                             pending.cancel()
                         raise RuntimeError("Imagine Saved refresh incomplete; previous cards retained.") from exc
     ensure_imagine_state_migrated(root)
+    deleted_upload_result_ids: set[str] = set()
+    if not cursor:
+        deleted_upload_result_ids = imagine_prune_deleted_upload_conversations(
+            root, account, {key for key, value in details.items() if value},
+        )
     relations = imagine_state.load_generated_relations(root)
     hidden_bundle_asset_ids = imagine_hidden_bundle_asset_ids(relations)
     pending_delete_ids = imagine_pending_delete_ids(root, account)
@@ -8199,8 +8306,8 @@ def list_imagine_saved(payload: dict) -> dict:
         # decide when an optimistic result may become a confirmed Saved item.
         "official_asset_ids": sorted(official_asset_ids),
         # Pending results survive a temporarily lagging Saved list.  The renderer may
-        # discard them only after this exact-asset 404/410 confirmation.
-        "confirmed_deleted_pending_asset_ids": sorted(confirmed_deleted_pending_asset_ids),
+        # discard them only after exact-asset or ownership-verified conversation deletion.
+        "confirmed_deleted_pending_asset_ids": sorted(confirmed_deleted_pending_asset_ids | deleted_upload_result_ids),
         "liked_exclusion": imagine_liked_exclusion_payload(root, account, relations),
         "imagine": {
             "id": account.get("id") or "",
@@ -10107,6 +10214,7 @@ def remove_imagine_generated_relation_state(
     *,
     asset_ids: set[str] | None = None,
     group_ids: set[str] | None = None,
+    account_key: str = "",
 ) -> None:
     remove_assets = {
         str(value).strip()
@@ -10130,6 +10238,9 @@ def remove_imagine_generated_relation_state(
                 changed = True
                 continue
             record = dict(raw_record)
+            if account_key and str(record.get("account_key") or "").strip().lower() != account_key:
+                next_relations[source_id] = raw_record
+                continue
             record_group_keys = {
                 str(source_id).strip(),
                 str(record.get("source_post_id") or "").strip(),
@@ -27006,6 +27117,37 @@ def reuse_reference_local_media(root: Path, item: dict, staged: Path, index: dic
     return None
 
 
+def stage_reference_thumbnail(root: Path, source: dict, item: dict, staged: Path, account: dict) -> Path | None:
+    if str(item.get("type") or "").lower() != "video":
+        return None
+    metadata = source.get("metadata") if isinstance(source.get("metadata"), dict) else {}
+    imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
+    url = str(source.get("thumbnail_url") or source.get("poster_url")
+              or metadata.get("thumbnail_url") or imagine.get("thumbnail_url") or "")
+    if not url:
+        return None
+    temporary = unique_path(staged / "preview_image.part")
+    try:
+        parsed = urlparse(url)
+        if parsed.path == "/api/media" and not parsed.netloc:
+            local = safe_join(root, parse_qs(parsed.query).get("path", [""])[0])
+            shutil.copyfile(local, temporary)
+        else:
+            write_imagine_remote_url_to_file(url, temporary, account, "image", timeout=15)
+        valid, details = media_container_validation(temporary, "image")
+        if not valid:
+            raise RuntimeError("Invalid thumbnail image.")
+        final = unique_path(staged / f"preview_image.{details.get('extension') or 'jpg'}")
+        os.replace(temporary, final)
+        return final
+    except Exception as exc:
+        temporary.unlink(missing_ok=True)
+        imagine_debug_event("reference_thumbnail_unavailable", {
+            "asset_id": str(source.get("item_id") or ""), "error": str(exc)[:300],
+        })
+        return None
+
+
 def save_imagine_post_to_reference(payload: dict) -> dict:
     """Keep Liked untouched; commit a complete local card, merging repeat saves by item ID."""
     root = library_root()
@@ -27102,6 +27244,21 @@ def save_imagine_post_to_reference(payload: dict) -> dict:
                         by_key[reference_item_key(item)] = len(merged)
                         merged.append(item)
                     new_files.append(item)
+            thumbnail_updates = []
+            source_items = {reference_item_key(item): item for item in items}
+            for item in merged:
+                original = source_items.get(reference_item_key(item))
+                if not original or str(item.get("type") or "") != "video":
+                    continue
+                if item.get("thumbnail"):
+                    thumbnail = safe_join(target, str(item["thumbnail"]))
+                    if thumbnail.is_file() and media_container_validation(thumbnail, "image")[0]:
+                        continue
+                thumbnail = stage_reference_thumbnail(root, original, item, staged, account)
+                if thumbnail:
+                    item["thumbnail"] = thumbnail.name
+                    item.pop("thumbnail_url", None)
+                    thumbnail_updates.append(item)
             metadata = {
                 **post_json_from_post(
                     source, post_id=card_id, source="imagine", folder_path=f"레퍼런스/{card_id}",
@@ -27126,6 +27283,12 @@ def save_imagine_post_to_reference(payload: dict) -> dict:
                         os.replace(staged_file, final_file)
                         installed.append(final_file)
                         item["file"] = final_file.name
+                    for item in thumbnail_updates:
+                        staged_file = staged / item["thumbnail"]
+                        final_file = unique_path(target / item["thumbnail"])
+                        os.replace(staged_file, final_file)
+                        installed.append(final_file)
+                        item["thumbnail"] = final_file.name
                     metadata["items"] = [serializable_media_item(item) for item in merged]
                     metadata["representative"] = existing.get("representative") or representative_for_merged_items(merged)
                     write_json(staged / "post.json", metadata)

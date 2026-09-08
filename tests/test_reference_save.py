@@ -13,7 +13,7 @@ import unittest
 import unicodedata
 import urllib.error
 from contextlib import ExitStack
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse, parse_qs
 
 SOURCE = Path(__file__).resolve().parents[1] / "common/app/runtime/server.py"
 TREE = ast.parse(SOURCE.read_text())
@@ -27,6 +27,12 @@ class ReferenceTests(unittest.TestCase):
         self.downloaded = []
         self.refreshed = []
         self.fail_id = None
+        self.thumbnail_downloads = []
+        def download_thumbnail(url, target, account, kind, timeout):
+            self.thumbnail_downloads.append(url)
+            if url == 'https://example.test/missing-poster':
+                raise RuntimeError('HTTP 404')
+            target.write_bytes(b'poster')
         def download(root, item, target, account, index):
             self.downloaded.append(item['item_id'])
             if item['item_id'] == self.fail_id:
@@ -61,6 +67,7 @@ class ReferenceTests(unittest.TestCase):
             copy_imagine_remote_item_to_directory=download,
             imagine_debug_event=lambda *args: None,
             media_container_validation=lambda path, kind: (path.read_bytes() != b'broken', {}),
+            urlparse=urlparse, parse_qs=parse_qs, write_imagine_remote_url_to_file=download_thumbnail,
             read_json=read_json, write_json=write_json, safe_join=safe_join,
             unique_path=unique_path, now_iso=lambda: '2026-09-08T00:00:00Z',
             safe_int=lambda value, default=0: int(value or default),
@@ -72,7 +79,7 @@ class ReferenceTests(unittest.TestCase):
         names = {'reference_item_key', 'save_imagine_post_to_reference', 'remote_imagine_payload_post',
                  'safe_name', 'post_json_from_post', 'indexed_post_context', 'ensure_library_root',
                  'copy_imagine_remote_post_to_collection', 'build_append_target',
-                 'reference_local_media_index', 'reuse_reference_local_media', 'imagine_post_clone_source_id'}
+                 'reference_local_media_index', 'reuse_reference_local_media', 'imagine_post_clone_source_id', 'stage_reference_thumbnail'}
         nodes = [n for n in TREE.body if isinstance(n, ast.FunctionDef) and n.name in names]
         exec(compile(ast.Module(body=nodes, type_ignores=[]), str(SOURCE), 'exec'), self.scope)
         self.source = {'post_id': 'card-123', 'source': 'imagine', 'area': 'imagine_remote',
@@ -95,6 +102,23 @@ class ReferenceTests(unittest.TestCase):
         self.assertEqual(self.downloaded, ['one', 'two'])
         self.assertEqual(self.refreshed, ['레퍼런스/card-123'])
         self.assertEqual(len(self.metadata()['items']), 2)
+
+    def test_video_thumbnail_is_saved_locally_and_added_on_repeat_save(self):
+        self.source['items'] = [{'item_id': 'video', 'type': 'video', 'url': 'https://example.test/video'}]
+        self.save()
+        self.source['items'][0]['thumbnail_url'] = 'https://example.test/poster'
+        self.save()
+        item = self.metadata()['items'][0]
+        self.assertEqual((self.root / '레퍼런스/card-123' / item['thumbnail']).read_bytes(), b'poster')
+        self.assertEqual(self.downloaded, ['video'])
+        self.save()
+        self.assertEqual(self.thumbnail_downloads, ['https://example.test/poster'])
+
+    def test_unavailable_thumbnail_does_not_block_saved_video(self):
+        self.source['items'] = [{'item_id': 'video', 'type': 'video', 'url': 'https://example.test/video', 'thumbnail_url': 'https://example.test/missing-poster'}]
+        self.save()
+        self.assertEqual(self.metadata()['items'][0]['item_id'], 'video')
+        self.assertFalse(self.metadata()['items'][0].get('thumbnail'))
 
     def test_repeat_save_and_added_media_preserve_existing_files(self):
         self.save()
