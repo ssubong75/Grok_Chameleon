@@ -12095,11 +12095,12 @@ def _like_imagine_media_post(payload: dict) -> dict:
                 "post_id": visit_post_id,
                 "url": imagine_post_page_url(str(target.get("visit_url") or ""), visit_post_id),
             })
-    external_ids = {
+    external_clone_ids = list(dict.fromkeys(
         target["id"]
         for target in targets
         if target.get("external_reference")
-    }
+    ))
+    external_ids = set(external_clone_ids)
     clone_result = {"cloned": [], "failed": []}
     cloned_sources: set[str] = set()
     cloned_liked_posts: list[dict] = []
@@ -12130,7 +12131,7 @@ def _like_imagine_media_post(payload: dict) -> dict:
                     break
         if not primary_id:
             primary_id = next((t.get("id") for t in targets if t.get("id") in external_ids), sorted(external_ids)[0])
-        clone_result = imagine_clone_external_assets(account, external_ids)
+        clone_result = imagine_clone_external_assets(account, external_clone_ids)
         if clone_result.get("failed"):
             raise RuntimeError(
                 clone_result.get("error")
@@ -12503,8 +12504,13 @@ def imagine_collection_asset_entries(account: dict, limit: int = 100) -> list[di
 # app but Grok never knew about it, so it vanished on any other device and could not be
 # used as a real generation source. Grok still exposes the clone endpoint its own site
 # once used, which copies the asset into this account and opens a conversation for it.
-def imagine_clone_external_assets(account: dict, asset_ids: set[str]) -> dict:
-    wanted = sorted({str(value).strip() for value in asset_ids if str(value or "").strip()})
+def imagine_clone_external_assets(account: dict, asset_ids: list[str] | tuple[str, ...] | set[str]) -> dict:
+    # The clone-batch response can be read back in parallel. Preserve the card's item
+    # sequence here, rather than letting a set or completion timing decide thumbnail order.
+    values = sorted(asset_ids) if isinstance(asset_ids, set) else asset_ids
+    wanted = list(dict.fromkeys(
+        str(value).strip() for value in values if str(value or "").strip()
+    ))
     if not wanted:
         return {"cloned": [], "failed": []}
     try:
@@ -12534,6 +12540,10 @@ def imagine_clone_external_assets(account: dict, asset_ids: set[str]) -> dict:
             "media_type": str(asset.get("mimeType") or ""),
             "media_url": imagine_asset_primary_media_url(asset) or "",
         })
+    wanted_order = {asset_id: index for index, asset_id in enumerate(wanted)}
+    cloned.sort(key=lambda entry: wanted_order.get(
+        str(entry.get("source_asset_id") or "").strip(), len(wanted_order)
+    ))
     imagine_debug_event("external_asset_cloned", {
         "account_id": str(account.get("id") or ""),
         "requested": wanted,
@@ -12576,6 +12586,15 @@ def imagine_normalize_external_clone_records(entries: object) -> list[dict]:
             ).strip(),
         })
     return records
+
+
+def imagine_clone_batch_item_order(records: object) -> dict[str, int]:
+    """Return the persisted clone-batch item order, indexed by owned asset id."""
+    return {
+        str(record.get("asset_id") or "").strip(): index
+        for index, record in enumerate(imagine_normalize_external_clone_records(records))
+        if str(record.get("asset_id") or "").strip()
+    }
 
 
 def imagine_clone_asset_map_key(value: object) -> str:
@@ -12901,6 +12920,17 @@ def imagine_group_external_clone_batch_cards(cards: list[dict]) -> list[dict]:
             group["records"][asset_id]
             for asset_id in group["records"]
         ]
+        clone_order = imagine_clone_batch_item_order(ordered_records)
+        items = [
+            item
+            for _, item in sorted(
+                enumerate(items),
+                key=lambda entry: (
+                    clone_order.get(imagine_item_asset_id(entry[1]), len(clone_order)),
+                    entry[0],
+                ),
+            )
+        ]
         card_metadata.update({
             "cloned_copy": True,
             "clone_lineage_normalized": True,
@@ -12930,6 +12960,8 @@ def imagine_group_external_clone_batch_cards(cards: list[dict]) -> list[dict]:
                 "cloned_from_asset_id": str(record.get("source_asset_id") or "").strip(),
                 "liked": True,
             }
+            if item_id in clone_order:
+                stamps["clone_batch_order"] = clone_order[item_id]
             item_metadata.update(stamps)
             item_imagine.update(stamps)
             item_metadata["imagine"] = item_imagine
@@ -12964,6 +12996,7 @@ def imagine_fold_external_clone_batch_cards(
     """
     records = imagine_normalize_external_clone_records(entries)
     records_by_clone_id = {record["asset_id"]: record for record in records}
+    clone_order = imagine_clone_batch_item_order(records)
     if not records_by_clone_id:
         return []
     hidden_ids = imagine_pending_delete_ids(root, account) | imagine_local_exclusion_ids(root, account)
@@ -13063,6 +13096,16 @@ def imagine_fold_external_clone_batch_cards(
             ]
         if not kept_items:
             continue
+        kept_items = [
+            item
+            for _, item in sorted(
+                enumerate(kept_items),
+                key=lambda entry: (
+                    clone_order.get(imagine_item_asset_id(entry[1]), len(clone_order)),
+                    entry[0],
+                ),
+            )
+        ]
         clone_record = records_by_clone_id.get(asset_id, {})
         batch_id = str(clone_record.get("conversation_id") or "").strip()
         metadata = dict(post.get("metadata") or {}) if isinstance(post.get("metadata"), dict) else {}
@@ -13096,6 +13139,8 @@ def imagine_fold_external_clone_batch_cards(
                     "cloned_copy": True,
                     "cloned_from_asset_id": str(item_clone_record.get("source_asset_id") or "").strip(),
                 })
+            if item_id in clone_order:
+                stamps["clone_batch_order"] = clone_order[item_id]
             item_metadata.update(stamps)
             item_imagine.update(stamps)
             item_metadata["imagine"] = item_imagine

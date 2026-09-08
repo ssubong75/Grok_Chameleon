@@ -130,6 +130,14 @@ function detailItemRoleRank(item) {
   return type === "image" && /(original|source|start|input|parent)/.test(role) ? 0 : 1;
 }
 
+function detailCloneBatchOrder(item) {
+  const metadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
+  const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
+  const value = metadata.clone_batch_order ?? imagine.clone_batch_order;
+  const order = Number(value);
+  return Number.isInteger(order) && order >= 0 ? order : null;
+}
+
 function detailItemLooksLikeTransientInput(item) {
   return false;
 }
@@ -168,6 +176,11 @@ function detailOrderedItems(post) {
   return [...detailVisibleItems(post)]
     .map((item, index) => ({ item, index }))
     .sort((a, b) => {
+      const cloneOrderA = detailCloneBatchOrder(a.item);
+      const cloneOrderB = detailCloneBatchOrder(b.item);
+      if (cloneOrderA !== null && cloneOrderB !== null && cloneOrderA !== cloneOrderB) {
+        return cloneOrderA - cloneOrderB;
+      }
       return (
         detailItemRoleRank(a.item) - detailItemRoleRank(b.item)
         || detailItemTimeValue(a.item, a.index) - detailItemTimeValue(b.item, b.index)

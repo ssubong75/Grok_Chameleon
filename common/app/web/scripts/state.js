@@ -85,7 +85,7 @@ document.documentElement.classList.toggle("platform-macos", isMacRenderer);
   const videoDurationOptions = ["15s", "12s", "10s", "8s", "6s", "3s"];
   const imagineVideoDurationOptions = ["15s", "12s", "10s", "6s", "3s"];
   const extensionDurationOptions = ["10s", "8s", "6s", "3s"];
-  const imagineExtensionDurationOptions = ["10s", "6s"];
+  const imagineExtensionDurationOptions = ["10s", "6s", "3s"];
   const imageResolutionOptions = ["2K", "1K"];
   const buildT2iResolutionOptions = ["2K", "1K"];
   const buildImageModelOptions = ["M 2.0", "M 1.5"];
