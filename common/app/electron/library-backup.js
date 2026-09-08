@@ -9,7 +9,7 @@ const CONTENT_DIRECTORIES = [
   "created",
   "upload",
   "collection",
-  "레퍼런스",
+  "reference",
   "prompt",
   "account",
   "cache",
@@ -117,6 +117,76 @@ function writeJsonAtomic(filePath, value) {
   } finally {
     try { fs.unlinkSync(temporary); } catch (_) {}
   }
+}
+
+function referenceFolderTimestamp(metadata, fallbackMs = Date.now()) {
+  const value = [metadata?.reference_saved_at, metadata?.updated_at, metadata?.created_at]
+    .map((item) => String(item || "").trim())
+    .find(Boolean);
+  const date = new Date(value || fallbackMs);
+  const safeDate = Number.isNaN(date.getTime()) ? new Date(fallbackMs) : date;
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Seoul",
+    year: "2-digit",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(safeDate).filter((part) => part.type !== "literal").map((part) => [part.type, part.value]));
+  return `${parts.year}${parts.month}${parts.day}-${parts.hour}${parts.minute}${parts.second}`;
+}
+
+function uniqueReferenceDirectory(parent, metadata, fallbackMs) {
+  const stem = referenceFolderTimestamp(metadata, fallbackMs);
+  let candidate = path.join(parent, stem);
+  let suffix = 2;
+  while (pathExists(candidate)) {
+    candidate = path.join(parent, `${stem}-${String(suffix).padStart(2, "0")}`);
+    suffix += 1;
+  }
+  return candidate;
+}
+
+// This runs before every backup/sync scan, so both drives use the same canonical paths.
+// It renames only card directories and post.json.folder_path; post_id and media filenames stay intact.
+function migrateReferenceStorage(root) {
+  const legacyEntry = fs.readdirSync(root, { withFileTypes: true })
+    .find((entry) => entry.isDirectory() && entry.name.normalize("NFC") === "레퍼런스");
+  const legacyRoot = legacyEntry ? path.join(root, legacyEntry.name) : path.join(root, "레퍼런스");
+  const referenceRoot = path.join(root, "reference");
+  fs.mkdirSync(referenceRoot, { recursive: true });
+  if (!pathExists(legacyRoot)) return;
+  if (!fs.statSync(legacyRoot).isDirectory()) {
+    throw new LibraryBackupError(`Reference migration path is not a folder: ${legacyRoot}`, "REFERENCE_MIGRATION_INVALID");
+  }
+  for (const entry of fs.readdirSync(legacyRoot, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name, "en"))) {
+    if (!entry.isDirectory()) {
+      if (entry.name === ".DS_Store" || entry.name.startsWith("._")) {
+        fs.unlinkSync(path.join(legacyRoot, entry.name));
+        continue;
+      }
+      throw new LibraryBackupError(`Reference migration found a non-card file: ${entry.name}`, "REFERENCE_MIGRATION_INVALID");
+    }
+    const source = path.join(legacyRoot, entry.name);
+    const postPath = path.join(source, "post.json");
+    const metadata = readJson(postPath);
+    if (!isJsonObject(metadata)) {
+      throw new LibraryBackupError(`Reference migration needs valid post.json: ${entry.name}`, "REFERENCE_MIGRATION_INVALID");
+    }
+    const target = uniqueReferenceDirectory(referenceRoot, metadata, fs.statSync(source).mtimeMs);
+    fs.renameSync(source, target);
+    try {
+      metadata.folder_path = `reference/${path.basename(target)}`;
+      metadata.reference_saved_at ||= metadata.updated_at || metadata.created_at || utcNow();
+      writeJsonAtomic(path.join(target, "post.json"), metadata);
+    } catch (error) {
+      try { fs.renameSync(target, source); } catch (_) {}
+      throw error;
+    }
+  }
+  try { fs.rmdirSync(legacyRoot); } catch (_) {}
 }
 
 function snapshotJsonFiles(filePaths) {
@@ -891,6 +961,8 @@ class LibraryBackup {
     const local = ensureDirectory(this.localRoot, "Local Library", { allowMissing: direction === "to-local" });
     const external = ensureDirectory(this.externalRoot, "External Library", { allowMissing: direction === "to-external" });
     validateDistinctRoots(local, external);
+    migrateReferenceStorage(local);
+    migrateReferenceStorage(external);
     const source = direction === "to-local" ? external : local;
     const destination = direction === "to-local" ? local : external;
     const libraryId = validateLibraryPair(

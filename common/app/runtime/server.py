@@ -61,7 +61,10 @@ except Exception:
 
 
 WEB_ROOT = APP_ROOT / "web"
-LIBRARY_FOLDERS = ("created", "upload", "collection", "prompt", "account", "레퍼런스")
+REFERENCE_DIRECTORY = "reference"
+LEGACY_REFERENCE_DIRECTORY = "레퍼런스"
+REFERENCE_STORAGE_TIMEZONE = timezone(timedelta(hours=9))
+LIBRARY_FOLDERS = ("created", "upload", "collection", "prompt", "account", REFERENCE_DIRECTORY)
 IMAGE_EXTS = {"avif", "gif", "jpeg", "jpg", "png", "webp"}
 VIDEO_EXTS = {"m4v", "mov", "mp4", "webm"}
 THUMB_EXTS = ("jpg", "jpeg", "png", "webp")
@@ -709,6 +712,90 @@ def sorted_entries(path: Path) -> list[Path]:
         return sorted(path.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower()))
     except OSError:
         return []
+
+
+def reference_storage_folder_stem(metadata: dict | None, fallback_timestamp: float | None = None) -> str:
+    metadata = metadata if isinstance(metadata, dict) else {}
+    value = next((
+        str(metadata.get(key) or "").strip()
+        for key in ("reference_saved_at", "updated_at", "created_at")
+        if str(metadata.get(key) or "").strip()
+    ), "")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00")) if value else None
+        if parsed is not None and parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+    except ValueError:
+        parsed = None
+    if parsed is None:
+        parsed = datetime.fromtimestamp(fallback_timestamp, timezone.utc) if fallback_timestamp else datetime.now(timezone.utc)
+    return parsed.astimezone(REFERENCE_STORAGE_TIMEZONE).strftime("%y%m%d-%H%M%S")
+
+
+def unique_reference_storage_directory(parent: Path, metadata: dict | None, fallback_timestamp: float | None = None) -> Path:
+    stem = reference_storage_folder_stem(metadata, fallback_timestamp)
+    candidate = parent / stem
+    suffix = 2
+    while candidate.exists():
+        candidate = parent / f"{stem}-{suffix:02d}"
+        suffix += 1
+    return candidate
+
+
+def find_reference_card_directory(parent: Path, post_id: str) -> Path | None:
+    wanted = str(post_id or "").strip()
+    if not wanted:
+        return None
+    for candidate in sorted_entries(parent):
+        if not candidate.is_dir():
+            continue
+        metadata = read_json(candidate / "post.json", None)
+        if isinstance(metadata, dict) and str(metadata.get("post_id") or "").strip() == wanted:
+            return candidate
+    return None
+
+
+def migrate_reference_storage(root: Path) -> None:
+    """Move the legacy Korean reference tree to timestamp-named English folders.
+
+    Media files and post_id values deliberately do not change: only the card directory and
+    its stored folder_path are renamed, so repeat-save detection and card relationships stay
+    stable across the migration.
+    """
+    legacy_root = next((
+        entry for entry in sorted_entries(root)
+        if entry.is_dir() and normalize_unicode_text(entry.name) == LEGACY_REFERENCE_DIRECTORY
+    ), root / LEGACY_REFERENCE_DIRECTORY)
+    reference_root = root / REFERENCE_DIRECTORY
+    reference_root.mkdir(parents=True, exist_ok=True)
+    if not legacy_root.is_dir():
+        return
+    for source in sorted_entries(legacy_root):
+        if not source.is_dir():
+            if source.name == ".DS_Store" or source.name.startswith("._"):
+                source.unlink(missing_ok=True)
+                continue
+            raise RuntimeError(f"Reference migration found a non-card file: {source.name}")
+        metadata = read_json(source / "post.json", None)
+        if not isinstance(metadata, dict):
+            raise RuntimeError(f"Reference migration needs valid post.json: {source.name}")
+        target = unique_reference_storage_directory(reference_root, metadata, source.stat().st_mtime)
+        original_metadata = dict(metadata)
+        try:
+            os.replace(source, target)
+            metadata["folder_path"] = f"{REFERENCE_DIRECTORY}/{target.name}"
+            metadata.setdefault("reference_saved_at", str(
+                original_metadata.get("updated_at") or original_metadata.get("created_at") or now_iso()
+            ))
+            write_json(target / "post.json", metadata)
+        except Exception:
+            if target.exists() and not source.exists():
+                os.replace(target, source)
+            raise
+    try:
+        legacy_root.rmdir()
+    except OSError:
+        pass
 
 
 def default_library_json() -> dict:
@@ -1440,6 +1527,7 @@ def ensure_library_root(root: Path) -> None:
     root.mkdir(parents=True, exist_ok=True)
     for folder in LIBRARY_FOLDERS:
         (root / folder).mkdir(parents=True, exist_ok=True)
+    migrate_reference_storage(root)
     library_path = root / "library.json"
     if not library_path.exists():
         write_json(library_path, default_library_json())
@@ -20340,7 +20428,7 @@ def build_preview_source(root: Path, source: Path) -> bool:
         rel = source.resolve().relative_to(root.resolve())
     except ValueError:
         return False
-    return bool(rel.parts and rel.parts[0] in {"created", "collection", "레퍼런스"})
+    return bool(rel.parts and rel.parts[0] in {"created", "collection", REFERENCE_DIRECTORY})
 
 
 def preview_key_for_source(
@@ -21287,7 +21375,7 @@ def scan_library_unlocked(root: Path) -> dict:
     posts = [
         *scan_created_area(root, "created"),
         *scan_created_area(root, "upload"),
-        *scan_created_area(root, "레퍼런스", "reference"),
+        *scan_created_area(root, REFERENCE_DIRECTORY, REFERENCE_DIRECTORY),
         *[post for collection in collections for post in collection.get("posts", [])],
     ]
     posts = sorted(posts, key=library_index.post_activity_at, reverse=True)
@@ -21393,9 +21481,9 @@ def delete_library_index_paths(root: Path, paths: list[str], *, recursive: bool 
 def indexed_post_context(rel_path: str) -> dict | None:
     normalized = str(rel_path or "").replace("\\", "/").strip("/")
     parts = normalized.split("/") if normalized else []
-    if len(parts) < 2 or parts[0] not in {"created", "upload", "collection", "레퍼런스"}:
+    if len(parts) < 2 or parts[0] not in {"created", "upload", "collection", REFERENCE_DIRECTORY}:
         return None
-    area = "reference" if parts[0] == "레퍼런스" else parts[0]
+    area = parts[0]
     return {
         "area": area,
         "path": normalized,
@@ -27198,8 +27286,9 @@ def list_reference_posts(payload: dict) -> dict:
     root = library_root()
     if not root:
         return {"ok": True, "posts": []}
+    ensure_library_root(root)
     with COLLECTION_MOVE_LOCK:
-        posts = scan_created_area(root, "레퍼런스", "reference")
+        posts = scan_created_area(root, REFERENCE_DIRECTORY, REFERENCE_DIRECTORY)
     return {"ok": True, "posts": sorted(posts, key=library_index.post_activity_at, reverse=True)}
 
 
@@ -27221,7 +27310,7 @@ def reference_local_media_index(root: Path) -> dict:
             if isinstance(record, dict):
                 link(record.get("source_asset_id") or record.get("sourceAssetId") or origin,
                      record.get("asset_id") or record.get("assetId"))
-    for area in ("레퍼런스", "created", "upload", "collection"):
+    for area in (REFERENCE_DIRECTORY, "created", "upload", "collection"):
         parent = root / area
         if not parent.is_dir():
             continue
@@ -27324,6 +27413,7 @@ def save_imagine_post_to_reference(payload: dict) -> dict:
     root = library_root()
     if not root:
         raise RuntimeError("Library path is not set.")
+    ensure_library_root(root)
     source = remote_imagine_payload_post(payload)
     if not source:
         raise RuntimeError("Select an Imagine Liked card.")
@@ -27336,7 +27426,11 @@ def save_imagine_post_to_reference(payload: dict) -> dict:
     account = active_imagine_account(root, str(source.get("account_id") or ""))
     if not account:
         raise RuntimeError("Select or capture the Imagine account for this card first.")
-    target = safe_join(root, f"레퍼런스/{card_id}")
+    reference_saved_at = now_iso()
+    reference_root = root / REFERENCE_DIRECTORY
+    target = find_reference_card_directory(reference_root, card_id)
+    if target is None:
+        target = unique_reference_storage_directory(reference_root, {"reference_saved_at": reference_saved_at})
     target.parent.mkdir(parents=True, exist_ok=True)
     cache = root / "cache"
     cache.mkdir(parents=True, exist_ok=True)
@@ -27393,7 +27487,9 @@ def save_imagine_post_to_reference(payload: dict) -> dict:
                         shutil.copyfile(local_file, staged_file)
                         item["file"] = staged_file.name
                 card_id = f"{card_id}-available"
-                target = safe_join(root, f"레퍼런스/{card_id}")
+                target = find_reference_card_directory(reference_root, card_id)
+                if target is None:
+                    target = unique_reference_storage_directory(reference_root, {"reference_saved_at": reference_saved_at})
                 save_locks.enter_context(build_post_save_lock(target))
                 existing = read_json(target / "post.json", None)
                 if target.exists() and not isinstance(existing, dict):
@@ -27432,7 +27528,7 @@ def save_imagine_post_to_reference(payload: dict) -> dict:
                     thumbnail_updates.append(item)
             metadata = {
                 **post_json_from_post(
-                    source, post_id=card_id, source="imagine", folder_path=f"레퍼런스/{card_id}",
+                    source, post_id=card_id, source="imagine", folder_path=f"{REFERENCE_DIRECTORY}/{target.name}",
                     collection=None, items=merged,
                     representative=representative_for_merged_items(merged),
                     favorite=False, build_favorite=False,
@@ -27440,6 +27536,8 @@ def save_imagine_post_to_reference(payload: dict) -> dict:
                 **existing,
                 "items": [serializable_media_item(item) for item in merged],
                 "representative": existing.get("representative") or representative_for_merged_items(merged),
+                "folder_path": f"{REFERENCE_DIRECTORY}/{target.name}",
+                "reference_saved_at": str(existing.get("reference_saved_at") or reference_saved_at),
                 "updated_at": now_iso(),
             }
             if not target.exists():
@@ -27468,8 +27566,9 @@ def save_imagine_post_to_reference(payload: dict) -> dict:
                     for file in installed:
                         file.unlink(missing_ok=True)
                     raise
-        refresh_library_index_paths(root, [f"레퍼런스/{card_id}"])
-        post = post_from_folder(root, target, indexed_post_context(f"레퍼런스/{card_id}"))
+        reference_path = f"{REFERENCE_DIRECTORY}/{target.name}"
+        refresh_library_index_paths(root, [reference_path])
+        post = post_from_folder(root, target, indexed_post_context(reference_path))
         return {"ok": True, "post": post, "saved_count": len(new_files),
                 "separate_card": bool(unavailable), "unavailable_items": list(unavailable.values())}
 
@@ -27620,8 +27719,8 @@ def merge_target_parent(root: Path, payload: dict) -> tuple[Path, str | None]:
         target_parent = root / "created"
         target_parent.mkdir(parents=True, exist_ok=True)
         return target_parent, None
-    if target_path == "레퍼런스":
-        target_parent = safe_join(root, target_path)
+    if target_path in {REFERENCE_DIRECTORY, LEGACY_REFERENCE_DIRECTORY}:
+        target_parent = root / REFERENCE_DIRECTORY
         target_parent.mkdir(parents=True, exist_ok=True)
         return target_parent, None
 
