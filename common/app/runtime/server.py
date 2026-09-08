@@ -12921,6 +12921,19 @@ def imagine_group_external_clone_batch_cards(cards: list[dict]) -> list[dict]:
             for asset_id in group["records"]
         ]
         clone_order = imagine_clone_batch_item_order(ordered_records)
+        clone_replacements = {
+            str(record.get("source_asset_id") or "").strip(): str(record.get("asset_id") or "").strip()
+            for record in ordered_records
+            if str(record.get("source_asset_id") or "").strip()
+            and str(record.get("asset_id") or "").strip()
+        }
+        # A direct clone lookup leaves a video pointing at the foreign parent.  The cloned
+        # parent is in this same batch, so reconnect it before this cached card reaches the
+        # detail view.  This also repairs cards cached before clone_batch_order existed.
+        items = [
+            imagine_rebind_cloned_item_sources(item, clone_replacements)
+            for item in items
+        ]
         items = [
             item
             for _, item in sorted(
@@ -13044,6 +13057,10 @@ def imagine_fold_external_clone_batch_cards(
         for asset_id, clone_record in records_by_clone_id.items()
         if clone_record.get("source_asset_id")
     }
+    clone_replacements = {
+        source_asset_id: clone_asset_id
+        for clone_asset_id, source_asset_id in origin_by_clone_id.items()
+    }
     items_by_clone_id = {
         record["asset_id"]: [
             item for item in record["post"].get("items") or [] if isinstance(item, dict)
@@ -13090,12 +13107,15 @@ def imagine_fold_external_clone_batch_cards(
                     swapped_items.append(item)
                 pending_items = next_pending
             kept_items = swapped_items
-            kept_items = [
-                imagine_rebind_cloned_item_sources(item, replacement_by_origin_id)
-                for item in kept_items
-            ]
         if not kept_items:
             continue
+        # A copied child may have arrived without its foreign parent in the direct response.
+        # Rebind against the complete clone-batch map, not only against replacements that
+        # happened to be visible in that one response.
+        kept_items = [
+            imagine_rebind_cloned_item_sources(item, clone_replacements)
+            for item in kept_items
+        ]
         kept_items = [
             item
             for _, item in sorted(

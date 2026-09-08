@@ -138,6 +138,26 @@ function detailCloneBatchOrder(item) {
   return Number.isInteger(order) && order >= 0 ? order : null;
 }
 
+function detailItemIdentityIds(item) {
+  const metadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
+  const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
+  return [...new Set([
+    item?.item_id, item?.asset_id, item?.post_id,
+    metadata.asset_id, metadata.official_asset_id, metadata.cloned_from_asset_id, metadata.official_clone_source_asset_id,
+    imagine.asset_id, imagine.post_id, imagine.official_asset_id, imagine.cloned_from_asset_id, imagine.official_clone_source_asset_id,
+  ].map(value => String(value || "").trim()).filter(Boolean))];
+}
+
+function detailItemParentIds(item) {
+  const metadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
+  const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
+  return [...new Set([
+    item?.source_item_id, item?.parent_post_id, item?.original_post_id,
+    metadata.source_item_id, metadata.parent_post_id, metadata.original_post_id,
+    imagine.source_item_id, imagine.parent_post_id, imagine.original_post_id,
+  ].map(value => String(value || "").trim()).filter(Boolean))];
+}
+
 function detailItemLooksLikeTransientInput(item) {
   return false;
 }
@@ -173,7 +193,7 @@ function detailItemTimeValue(item, fallbackIndex = 0) {
 }
 
 function detailOrderedItems(post) {
-  return [...detailVisibleItems(post)]
+  const entries = [...detailVisibleItems(post)]
     .map((item, index) => ({ item, index }))
     .sort((a, b) => {
       const cloneOrderA = detailCloneBatchOrder(a.item);
@@ -186,8 +206,29 @@ function detailOrderedItems(post) {
         || detailItemTimeValue(a.item, a.index) - detailItemTimeValue(b.item, b.index)
         || a.index - b.index
       );
-    })
-    .map(({ item }) => item);
+    });
+  const entryByIdentity = new Map();
+  for (const entry of entries) {
+    for (const identity of detailItemIdentityIds(entry.item)) {
+      if (!entryByIdentity.has(identity)) entryByIdentity.set(identity, entry);
+    }
+  }
+  const ordered = [];
+  const visited = new Set();
+  const visiting = new Set();
+  const visit = (entry) => {
+    if (visited.has(entry) || visiting.has(entry)) return;
+    visiting.add(entry);
+    for (const parentId of detailItemParentIds(entry.item)) {
+      const parent = entryByIdentity.get(parentId);
+      if (parent) visit(parent);
+    }
+    visiting.delete(entry);
+    visited.add(entry);
+    ordered.push(entry.item);
+  };
+  for (const entry of entries) visit(entry);
+  return ordered;
 }
 
 function detailDefaultSelectedItem(post) {
