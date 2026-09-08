@@ -83,7 +83,7 @@ document.documentElement.classList.toggle("platform-macos", isMacRenderer);
   const videoModelOptions = ["M 1.5", "M 1.0"];
   const buildVideoModelOptions = ["M 1.0", "M 1.5P", "M 1.5"];
   const videoDurationOptions = ["15s", "12s", "10s", "8s", "6s", "3s"];
-  const imagineVideoDurationOptions = ["15s", "12s", "10s", "6s"];
+  const imagineVideoDurationOptions = ["15s", "12s", "10s", "6s", "3s"];
   const extensionDurationOptions = ["10s", "8s", "6s", "3s"];
   const imagineExtensionDurationOptions = ["10s", "6s"];
   const imageResolutionOptions = ["2K", "1K"];
