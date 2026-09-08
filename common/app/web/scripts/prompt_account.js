@@ -527,7 +527,7 @@
   let imagineSelectionQueue = Promise.resolve();
 
   function selectAccount(provider, id) {
-    if (provider !== "imagine") return performSelectAccount(provider, id);
+    // Both providers can change Imagine now; serialize the entire linked selection.
     const task = imagineSelectionQueue.then(
       () => performSelectAccount(provider, id),
       () => performSelectAccount(provider, id),
@@ -537,39 +537,48 @@
   }
 
   async function performSelectAccount(provider, id) {
-    const previousId = provider === "imagine" ? String(account_state.imagine.active_id || "") : "";
-    const nextId = String(id || "");
-    const imagineAccountChanged = provider === "imagine" && previousId !== nextId;
-    if (provider === "imagine" && !imagineAccountChanged) {
-      setComposerProvider(provider);
-      renderAccounts();
-      activateImagineAccountTab(nextId);
-      return;
-    }
-    if (library_state.apiReady) {
-      const data = await qApi(provider === "imagine" ? "/api/imagine/select" : "/api/accounts/select", { id });
-      applyAccountSnapshot(data);
-      sortAccountCardsByPriority(provider);
-      if (imagineAccountChanged) {
-        clearImagineAccountScopedCache(nextId);
-      }
-      setComposerProvider(provider);
-      renderAccounts();
-      if (provider === "imagine") activateImagineAccountTab(nextId);
-      return;
-    }
+    if (!["build", "imagine"].includes(provider)) return;
     const store = account_state[provider];
     const account = store.accounts.find((entry) => entry.id === id);
     if (!account) return;
-    store.active_id = id;
-    sortAccountCardsByPriority(provider);
-    await persistAccountFiles();
-    if (imagineAccountChanged) {
-      clearImagineAccountScopedCache(nextId);
+    if (provider === "build" && isDeniedBuildAccount(account)) {
+      throw new Error("Denied Build account cannot be selected.");
     }
-    setComposerProvider(provider);
-    renderAccounts();
-    if (provider === "imagine") activateImagineAccountTab(nextId);
+    const other = provider === "build" ? "imagine" : "build";
+    const email = String(account.email || "").trim().toLowerCase();
+    const matches = email ? account_state[other].accounts.filter((entry) => (
+      String(entry.email || "").trim().toLowerCase() === email
+    )) : [];
+    const linked = matches.length === 1 ? matches[0] : null;
+    const usable = linked && !(other === "build" && isDeniedBuildAccount(linked));
+    const previousImagineId = String(account_state.imagine.active_id || "");
+    const selections = [[provider, id], ...(usable ? [[other, linked.id]] : [])];
+    try {
+      for (const [targetProvider, targetId] of selections) {
+        if (account_state[targetProvider].active_id === targetId) continue;
+        if (library_state.apiReady) {
+          const data = await qApi(targetProvider === "imagine" ? "/api/imagine/select" : "/api/accounts/select", { id: targetId });
+          applyAccountSnapshot(data);
+        } else {
+          account_state[targetProvider].active_id = targetId;
+        }
+        sortAccountCardsByPriority(targetProvider);
+      }
+      if (!library_state.apiReady) await persistAccountFiles();
+      if (!usable) {
+        toast(matches.length > 1 ? "Matching accounts are ambiguous; other selection unchanged."
+          : linked ? "Matching Build account is unavailable; selection unchanged."
+          : "No matching account registered; other selection unchanged.");
+      }
+    } finally {
+      // Keep the UI/cache consistent even if the second provider request fails.
+      const nextImagineId = String(account_state.imagine.active_id || "");
+      const imagineChanged = previousImagineId !== nextImagineId;
+      if (imagineChanged) clearImagineAccountScopedCache(nextImagineId);
+      setComposerProvider(provider);
+      renderAccounts();
+      if (imagineChanged || provider === "imagine") activateImagineAccountTab(nextImagineId);
+    }
   }
 
   async function deleteAccount(provider, id) {
