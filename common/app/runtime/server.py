@@ -27282,7 +27282,11 @@ def representative_for_merged_items(items: list[dict]) -> str:
 
 def merge_target_parent(root: Path, payload: dict) -> tuple[Path, str | None]:
     target_path = str(payload.get("target_path") or "created").strip("/")
-    if target_path in {"created", "레퍼런스"}:
+    if target_path == "created":
+        target_parent = root / "created"
+        target_parent.mkdir(parents=True, exist_ok=True)
+        return target_parent, None
+    if target_path == "레퍼런스":
         target_parent = safe_join(root, target_path)
         target_parent.mkdir(parents=True, exist_ok=True)
         return target_parent, None
