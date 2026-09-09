@@ -17,7 +17,7 @@
   let busy = false;
 
   function friendlyError(error) {
-    return String(error?.message || error || "Drive Sync failed.")
+    return String(error?.message || error || "Library Sync failed.")
       .replace(/^Error invoking remote method '[^']+':\s*/i, "")
       .replace(/^Error:\s*/i, "");
   }
@@ -167,7 +167,7 @@
   async function refreshStatus() {
     applyDefaultLocalPath();
     if (!native?.libraryBackupStatus) {
-      setStatus("Drive Sync is available in the desktop app.");
+      setStatus("Library Sync is available in the desktop app.");
       return;
     }
     try {
@@ -225,14 +225,14 @@
     try {
       const analysis = await native.analyzeLibraryBackup(payload(direction));
       const confirmed = await openGalleryActionDialog({
-        title: direction === "sync" ? "Drive Sync" : direction === "to-external" ? "Back Up Library" : "Restore Library",
+        title: direction === "sync" ? "Library Sync" : direction === "to-external" ? "Back Up Library" : "Restore Library",
         message: reviewMessage(direction, analysis),
         confirmLabel: direction === "sync" ? "Sync" : direction === "to-external" ? "Back Up" : "Restore",
         cancelLabel: "Cancel",
         messageBox: true,
       });
       if (!confirmed) {
-        setStatus(direction === "sync" ? "Drive Sync was cancelled before any files were changed." : "Library Backup was cancelled before any files were changed.");
+        setStatus(direction === "sync" ? "Library Sync was cancelled before any files were changed." : "Library Backup was cancelled before any files were changed.");
         writeLog("Cancelled before execution.");
         return;
       }
@@ -246,10 +246,9 @@
         "ready",
       );
       writeLog(result.historyPath ? `Previous files saved in history: ${result.historyPath}` : "No previous files required history storage.");
-      // A full rescan rewrites library.json and the card index, which would put the Local
-      // Library out of step with the baseline this run just saved. Only a restore actually
-      // changes local files, so only a restore needs one.
-      if ((direction === "to-local" || (direction === "sync" && ((analysis.summary?.external_to_local?.total || 0) > 0 || result.stateChanged > 0))) && typeof scanLibrary === "function") {
+      // Verified completion intentionally invalidates the card index. Rebuild this app's
+      // active library after the server restarts so copied collection folders appear now.
+      if (result.index_invalidated && typeof scanLibrary === "function") {
         try { await scanLibrary(); } catch (_) {}
       }
     } catch (error) {
@@ -286,7 +285,7 @@
         setStatus("The sync is finishing and can no longer be cancelled.");
         return;
       }
-      setStatus("Cancelling Drive Sync…");
+      setStatus("Cancelling Library Sync…");
       const result = await native?.cancelLibraryBackup?.();
       if (result && result.cancelling === false) setStatus("There was nothing left to cancel.");
       return;

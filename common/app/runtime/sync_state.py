@@ -6,6 +6,13 @@ import sys
 import time
 import uuid
 from pathlib import Path
+
+# The packaged Windows Python runs in isolated mode, so it does not automatically add the
+# script directory to sys.path. Keep this helper able to import its sibling runtime module.
+RUNTIME_DIRECTORY = str(Path(__file__).resolve().parent)
+if RUNTIME_DIRECTORY not in sys.path:
+    sys.path.insert(0, RUNTIME_DIRECTORY)
+
 import imagine_state
 
 TABLES = {

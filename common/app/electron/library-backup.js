@@ -20,20 +20,15 @@ const STATE_FILES = new Set([
   "state.backup.sqlite3",
   "state.backup.json",
   "imagine_state.sqlite3",
-  "library_index.sqlite3",
 ]);
 const AUTOMATIC_METADATA_PATHS = new Set([
-  "sql_data/library_index.sqlite3",
   "sql_data/state.backup.json",
   "sql_data/state.backup.sqlite3",
 ].map(canonicalPathKey));
 const AUTOMATIC_METADATA_DIRECTORIES = ["cache"].map(canonicalPathKey);
-// The server rewrites these every time it scans the library, so their contents differ after
-// merely opening the app. They still travel with the backup; they just do not count as a
-// local edit when deciding whether the Local Library is behind the backup.
-const REGENERATED_ON_SCAN = new Set([
-  "sql_data/library_index.sqlite3",
-].map(canonicalPathKey));
+// The card index is a cache. It is never copied between libraries because it can otherwise
+// describe an earlier version of the card folders on the destination computer.
+const LIBRARY_INDEX_INVALIDATION_FILE = ".library-index-rebuild.json";
 // library.json is rewritten on every scan, but only these fields are what the scan puts back.
 // The rest of the file - collection order, sort, hidden uploads, and any setting added later -
 // is the user's and cannot be recovered by scanning, so it is compared like any other content.
@@ -539,9 +534,7 @@ function missingFromDestination(sourceManifest, destinationManifest) {
 }
 
 function unsyncedChangeKeys(previous, current) {
-  return [...changedManifestKeys(previous, current)].filter((key) => (
-    !REGENERATED_ON_SCAN.has(key) && !isAutomaticMetadataKey(key)
-  ));
+  return [...changedManifestKeys(previous, current)].filter((key) => !isAutomaticMetadataKey(key));
 }
 
 // Names that this computer stores happily but a Windows computer cannot recreate. The backup
@@ -1094,7 +1087,7 @@ class LibraryBackup {
     const session = readJson(paths.session);
     if (session.machine_id && session.machine_id !== this.machineId) throw sessionOwnerError(session);
     const stored = loadStoredManifest(paths.syncBaseline);
-    validateStoredLibrary(stored, libraryId, "Drive Sync");
+    validateStoredLibrary(stored, libraryId, "Library Sync");
     this.emit("Scanning External Drive.", null, null, "scan");
     const external = syncManifest(await scanLibrary(context.external, {
       progress: this.progress,
@@ -1351,13 +1344,16 @@ class LibraryBackup {
       destinationControl,
       { progress: this.progress, signal: this.signal, verify: finalizeCompletedBackup },
     );
+    // Only invalidate after final copy verification and durable manifest writes. Invalidating
+    // first would let a scan rebuild from the old folders while the transfer is still running.
+    invalidateLibraryIndexes([current.source, current.destination]);
     this.emit(
       analysis.direction === "to-external" ? "Backup to External Library completed." : "Restore to Local Library completed.",
       1,
       1,
       "complete",
     );
-    return { ...completion, historyPath };
+    return { ...completion, historyPath, index_invalidated: true };
   }
 
   async executeSync(analysis) {
@@ -1495,8 +1491,11 @@ class LibraryBackup {
       records: nextRecords,
       librarySettings: current.settingsPlan?.nextBaseline || {},
     });
+    // The card index is intentionally excluded from sync. Mark both copies stale only after
+    // the synced files and their baseline are complete, then let each app rebuild locally.
+    invalidateLibraryIndexes([current.local, current.external]);
     const historyPath = [externalHistory, localHistory].filter(Boolean).join("\n");
-    this.emit("Drive Sync completed.", 1, 1, "complete");
+    this.emit("Library Sync completed.", 1, 1, "complete");
     return {
       direction: "sync",
       generation: nextGeneration,
@@ -1504,6 +1503,7 @@ class LibraryBackup {
       stateChanged: stateResult.changed,
       completedAt: utcNow(),
       historyPath,
+      index_invalidated: true,
     };
   }
 }
@@ -1563,6 +1563,41 @@ function pruneEmptyDirectories(root) {
   for (const name of CONTENT_DIRECTORIES) {
     const top = path.join(root, name);
     prune(top, top);
+  }
+}
+
+function invalidateLibraryIndex(root) {
+  const stateDirectory = safePath(root, "sql_data");
+  fs.mkdirSync(stateDirectory, { recursive: true });
+  writeJsonAtomic(safePath(root, `sql_data/${LIBRARY_INDEX_INVALIDATION_FILE}`), {
+    version: 1,
+    invalidated_at: utcNow(),
+  });
+  for (const fileName of [
+    "library_index.sqlite3",
+    "library_index.sqlite3-journal",
+    "library_index.sqlite3-wal",
+    "library_index.sqlite3-shm",
+  ]) {
+    try {
+      fs.unlinkSync(safePath(root, `sql_data/${fileName}`));
+    } catch (error) {
+      // A different computer may still have its local cache open. The marker makes Python
+      // ignore that cache on its next request even when Windows will not release the file yet.
+      if (!["ENOENT", "EBUSY", "EPERM"].includes(error?.code)) throw error;
+    }
+  }
+}
+
+function invalidateLibraryIndexes(roots) {
+  const seen = new Set();
+  for (const root of roots) {
+    if (!root) continue;
+    const resolved = path.resolve(root);
+    const key = process.platform === "win32" ? resolved.toLocaleLowerCase("en-US") : resolved;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    invalidateLibraryIndex(resolved);
   }
 }
 

@@ -10,10 +10,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-SCHEMA_VERSION = 8
+# Version 9 deliberately rebuilds legacy card listings once. Earlier caches can predate a
+# folder deletion or a collection copied from another computer, so preserving their rows would
+# make an already-deleted card remain visible on Build Main.
+SCHEMA_VERSION = 9
 LIST_SUMMARY_VERSION = 2
 STATE_DIRECTORY = "sql_data"
 DATABASE_FILENAME = "library_index.sqlite3"
+INVALIDATION_FILENAME = ".library-index-rebuild.json"
 _LOCKS_GUARD = threading.Lock()
 _LOCKS: dict[str, threading.RLock] = {}
 
@@ -22,6 +26,10 @@ def database_path(root: Path) -> Path:
     path = Path(root) / STATE_DIRECTORY / DATABASE_FILENAME
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def invalidation_path(root: Path) -> Path:
+    return Path(root) / STATE_DIRECTORY / INVALIDATION_FILENAME
 
 
 def _lock_for(root: Path) -> threading.RLock:
@@ -695,9 +703,15 @@ def rebuild(
                 except FileNotFoundError:
                     pass
             rebuild_once()
+        try:
+            invalidation_path(root).unlink()
+        except FileNotFoundError:
+            pass
 
 
 def ready(root: Path) -> bool:
+    if invalidation_path(root).is_file():
+        return False
     path = database_path(root)
     if not path.is_file():
         return False
@@ -713,16 +727,9 @@ def ready(root: Path) -> bool:
                 "SELECT value FROM index_metadata WHERE key = 'list_summary_version'"
             ).fetchone()
         if version and str(version["value"]) != str(SCHEMA_VERSION):
-            with _lock_for(root):
-                with _connection(root, write=True) as connection:
-                    _create_schema(connection)
-            with _connection(root) as connection:
-                version = connection.execute(
-                    "SELECT value FROM index_metadata WHERE key = 'schema_version'"
-                ).fetchone()
-                complete = connection.execute(
-                    "SELECT value FROM index_metadata WHERE key = 'complete'"
-                ).fetchone()
+            # Updating the metadata in place would preserve stale library_posts. The caller
+            # sees False and runs scan_library(), which rebuilds those rows from real folders.
+            return False
         return bool(
             version
             and complete

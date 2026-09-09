@@ -63,6 +63,42 @@ test("Reference cards and their media sync both directions and settle", async (t
   assert.equal(next.plan.merges.length, 0);
 });
 
+test("Library Sync invalidates both card indexes after verified files are in place", async (t) => {
+  const { local, external } = tempPair(t);
+  makeLibrary(external);
+  write(path.join(local, "collection", "new-folder", "card", "post.json"), "{\"title\":\"new\"}\n");
+  const engine = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "index-reset-test" });
+  const { result } = await run(engine, "sync");
+
+  assert.equal(result.index_invalidated, true);
+  assert.equal(fs.existsSync(path.join(external, "collection", "new-folder", "card", "post.json")), true);
+  for (const root of [local, external]) {
+    assert.equal(fs.existsSync(path.join(root, "sql_data", "library_index.sqlite3")), false);
+    assert.equal(fs.existsSync(path.join(root, "sql_data", ".library-index-rebuild.json")), true);
+  }
+  const next = await engine.analyze("sync");
+  assert.equal(next.plan.localToExternal.length, 0);
+  assert.equal(next.plan.externalToLocal.length, 0);
+});
+
+test("a legacy card index is rejected so Build Main rebuilds from disk", async (t) => {
+  const { root } = tempPair(t);
+  const pythonPath = process.env.SYNC_TEST_PYTHON || "python3";
+  const helper = path.resolve(__dirname, "../common/app/runtime");
+  execFileSync(pythonPath, ["-B", "-c", [
+    "import sqlite3, sys",
+    "from pathlib import Path",
+    "sys.path.insert(0, sys.argv[1])",
+    "import library_index",
+    "root = Path(sys.argv[2])",
+    "library_index.rebuild(root, [], [], updated_at='2026-09-09T00:00:00Z')",
+    "assert library_index.ready(root)",
+    "with sqlite3.connect(root / 'sql_data' / library_index.DATABASE_FILENAME) as connection:",
+    " connection.execute(\"UPDATE index_metadata SET value = '8' WHERE key = 'schema_version'\")",
+    "assert not library_index.ready(root)",
+  ].join("\n"), helper, root]);
+});
+
 test("Sync button engine includes durable SQLite rows and a second run is settled", async (t) => {
   const { local, external } = tempPair(t);
   makeLibrary(external);
@@ -104,10 +140,14 @@ test("initial Local to External copies supported data and excludes runtime files
   const engine = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "mac-a" });
   const { analysis, result } = await run(engine, "to-external");
 
-  assert.equal(analysis.summary.add, 6);
+  assert.equal(analysis.summary.add, 5);
   assert.equal(result.generation, 1);
+  assert.equal(result.index_invalidated, true);
   assert.equal(fs.readFileSync(path.join(external, "account", "build.json"), "utf8"), "{\"accounts\":[1]}\n");
   assert.equal(fs.readFileSync(path.join(external, "cache", "preview.bin"), "utf8"), "cached-preview");
+  assert.equal(fs.existsSync(path.join(external, "sql_data", "library_index.sqlite3")), false);
+  assert.equal(fs.existsSync(path.join(local, "sql_data", ".library-index-rebuild.json")), true);
+  assert.equal(fs.existsSync(path.join(external, "sql_data", ".library-index-rebuild.json")), true);
   assert.equal(fs.existsSync(path.join(external, "runtime_data")), false);
 });
 

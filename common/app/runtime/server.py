@@ -21318,12 +21318,34 @@ def current_library_snapshot(root: Path) -> dict:
     return indexed
 
 
+def indexed_collection_headers_match_disk(root: Path, collections: list[dict]) -> bool:
+    """Reject a legacy card index when its top-level collection list is stale."""
+    collection_root = root / "collection"
+    try:
+        disk_paths = {
+            normalize_unicode_text(f"collection/{entry.name}")
+            for entry in collection_root.iterdir()
+            if entry.is_dir()
+        } if collection_root.exists() else set()
+    except OSError:
+        # A temporarily unavailable removable drive must not make us discard its last index.
+        return True
+    indexed_paths = {
+        normalize_unicode_text(str(collection.get("path") or "").strip().strip("/"))
+        for collection in collections
+        if isinstance(collection, dict) and str(collection.get("path") or "").strip()
+    }
+    return disk_paths == indexed_paths
+
+
 def startup_library_snapshot(root: Path | None = None) -> dict:
     root = root or library_root()
     if not root:
         return empty_snapshot()
     indexed = indexed_library_snapshot(root)
     if indexed:
+        if not indexed_collection_headers_match_disk(root, indexed.get("collections") or []):
+            return scan_library(root)
         indexed["scan_pending"] = False
         return indexed
     library = merge_library_json(read_json(root / "library.json", {}))
