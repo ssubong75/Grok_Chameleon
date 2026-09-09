@@ -46,16 +46,16 @@ async function run(engine, direction) {
 test("Reference cards and their media sync both directions and settle", async (t) => {
   const { local, external } = tempPair(t);
   makeLibrary(external);
-  write(path.join(local, "레퍼런스", "local-card", "post.json"), JSON.stringify({ post_id: "local-card", items: [{ item_id: "local", file: "local.png" }] }));
-  write(path.join(local, "레퍼런스", "local-card", "local.png"), "local image");
-  write(path.join(external, "레퍼런스", "external-card", "post.json"), JSON.stringify({ post_id: "external-card", items: [{ item_id: "external", file: "external.mp4" }] }));
-  write(path.join(external, "레퍼런스", "external-card", "external.mp4"), "external video");
+  write(path.join(local, "reference", "local-card", "post.json"), JSON.stringify({ post_id: "local-card", items: [{ item_id: "local", file: "local.png" }] }));
+  write(path.join(local, "reference", "local-card", "local.png"), "local image");
+  write(path.join(external, "reference", "external-card", "post.json"), JSON.stringify({ post_id: "external-card", items: [{ item_id: "external", file: "external.mp4" }] }));
+  write(path.join(external, "reference", "external-card", "external.mp4"), "external video");
   const engine = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "reference-test" });
   await run(engine, "sync");
   for (const root of [local, external]) {
-    assert.equal(fs.readFileSync(path.join(root, "레퍼런스", "local-card", "local.png"), "utf8"), "local image");
-    assert.equal(fs.readFileSync(path.join(root, "레퍼런스", "external-card", "external.mp4"), "utf8"), "external video");
-    assert.equal(JSON.parse(fs.readFileSync(path.join(root, "레퍼런스", "external-card", "post.json"))).post_id, "external-card");
+    assert.equal(fs.readFileSync(path.join(root, "reference", "local-card", "local.png"), "utf8"), "local image");
+    assert.equal(fs.readFileSync(path.join(root, "reference", "external-card", "external.mp4"), "utf8"), "external video");
+    assert.equal(JSON.parse(fs.readFileSync(path.join(root, "reference", "external-card", "post.json"))).post_id, "external-card");
   }
   const next = await engine.analyze("sync");
   assert.equal(next.plan.localToExternal.length, 0);
