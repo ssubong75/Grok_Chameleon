@@ -37,13 +37,18 @@ class CacheRecoveryTests(unittest.TestCase):
                 self.assertFalse(options['ensure_upload_bundle'])
                 self.assertTrue(options['allow_cross_conversation_relations'])
                 post['items'].extend(copy.deepcopy(records['source']['items']))
-            scope = functions('restore_imagine_display_relations',
+            scope = functions('restore_imagine_display_relations', 'imagine_filter_deleted_conversation_posts',
                 ensure_imagine_state_migrated=lambda root: None,
                 imagine_account_settings_key=lambda account: 'account',
                 imagine_state=SimpleNamespace(load_generated_relations=lambda root: relations),
                 imagine_pending_delete_ids=lambda root, account: set(),
                 imagine_local_exclusion_ids=lambda root, account: {'hidden'},
                 imagine_item_asset_id=lambda item: item['item_id'],
+                imagine_item_is_upload_source=lambda item: False,
+                imagine_relation_conversation_id=lambda item: '',
+                imagine_representative_item=lambda items: items[-1] if items else None,
+                imagine_saved_membership=lambda *args: None,
+                imagine_filter_saved_membership=lambda posts, membership: posts,
                 imagine_apply_generated_relations=merge)
             result = scope['restore_imagine_display_relations'](posts, Path('/unused'), {})
             self.assertEqual([i['item_id'] for i in result[0]['items']], expected)

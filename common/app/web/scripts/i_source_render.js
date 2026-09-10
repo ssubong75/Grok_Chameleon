@@ -1393,61 +1393,61 @@ function reconcileImagineLikedLineagePosts(posts) {
   });
   if (active.length < 2) return active;
 
-  const ownerByAssetId = new Map();
   const ownerByCard = new Map();
-  const cardAssetIds = (card) => new Set([
-    card?.post_id,
-    card?.metadata?.lineage_root_asset_id,
-    ...(card?.items || []).map(imagineSavedItemAssetId),
-  ].map((value) => String(value || "").trim()).filter(Boolean));
-  const rememberOwner = (index, owner, { replaceAssets = false } = {}) => {
-    ownerByCard.set(index, owner);
-    for (const assetId of cardAssetIds(active[index])) {
-      if (replaceAssets || !ownerByAssetId.has(assetId)) ownerByAssetId.set(assetId, owner);
-    }
-  };
-
+  const seeds = new Map();
+  const heldByCard = [];
+  const childrenByAsset = new Map();
   active.forEach((card, index) => {
+    const held = new Set((card.items || []).map(imagineSavedItemAssetId).filter(Boolean));
+    heldByCard.push(held);
+    const referenced = new Set([...held, ...(card.items || []).flatMap(imagineSavedItemSourceIds)]);
+    for (const assetId of referenced) {
+      if (!childrenByAsset.has(assetId)) childrenByAsset.set(assetId, new Set());
+      childrenByAsset.get(assetId).add(index);
+    }
     const provenance = imagineSavedPostProvenance(card);
     const anchor = imagineSavedCardAnchor(card);
     if (["plain-liked", "cloned-liked"].includes(provenance) && anchor) {
-      rememberOwner(index, { provenance, anchor });
+      seeds.set(index, { provenance, anchor });
     }
   });
-  if (!ownerByCard.size) return active;
-
-  let changed = true;
-  while (changed) {
-    changed = false;
-    active.forEach((card, index) => {
-      const currentOwner = ownerByCard.get(index);
-      const sourceOwners = [];
-      for (const item of card.items || []) {
-        for (const sourceId of imagineSavedItemSourceIds(item)) {
-          const owner = ownerByAssetId.get(sourceId);
-          if (owner) sourceOwners.push(owner);
+  if (!seeds.size) return active;
+  // The same bounded asset-edge traversal as the server: cyclic cached references must
+  // never keep changing ownership and freeze the renderer.
+  const parents = active.map((_, index) => index);
+  const find = (value) => {
+    let index = value;
+    while (parents[index] !== index) {
+      parents[index] = parents[parents[index]];
+      index = parents[index];
+    }
+    return index;
+  };
+  const reached = new Set(seeds.keys());
+  const queue = [...reached];
+  for (const index of queue) {
+    for (const assetId of heldByCard[index]) {
+      for (const child of childrenByAsset.get(assetId) || []) {
+        const left = find(index), right = find(child);
+        if (left !== right) parents[Math.max(left, right)] = Math.min(left, right);
+        if (!reached.has(child)) {
+          reached.add(child);
+          queue.push(child);
         }
       }
-      // A copied i2i -> i2v card carries both its own immediate parent and that parent's
-      // shared ancestor. Ignore its own match so the common copied root joins the direct
-      // i2v branch as one Liked card.
-      const owner = sourceOwners.find((candidate) => (
-        candidate.provenance !== currentOwner?.provenance || candidate.anchor !== currentOwner?.anchor
-      ));
-      if (!owner || (owner.provenance === currentOwner?.provenance && owner.anchor === currentOwner?.anchor)) return;
-      const metadata = card.metadata && typeof card.metadata === "object" ? card.metadata : {};
-      card.metadata = {
-        ...metadata,
-        saved_provenance: owner.provenance,
-        saved_anchor_id: owner.anchor,
-        liked_lineage_owner_anchor: owner.anchor,
-        liked: true,
-      };
-      card.liked = true;
-      card.favorite = true;
-      rememberOwner(index, owner, { replaceAssets: true });
-      changed = true;
+    }
+  }
+  const seedByGroup = new Map();
+  const seedOrder = (index) => [
+    active[index]?.metadata?.official_clone_assets?.length ? "0" : "1",
+    seeds.get(index).provenance, seeds.get(index).anchor,
+  ].join("\u001f");
+  [...seeds.keys()].sort((a, b) => seedOrder(a) < seedOrder(b) ? -1 : seedOrder(a) > seedOrder(b) ? 1 : a - b)
+    .forEach((index) => {
+      if (!seedByGroup.has(find(index))) seedByGroup.set(find(index), index);
     });
+  for (const index of reached) {
+    ownerByCard.set(index, seeds.get(seedByGroup.get(find(index))));
   }
 
   const membersByOwner = new Map();
@@ -1460,6 +1460,10 @@ function reconcileImagineLikedLineagePosts(posts) {
     membersByOwner.get(key).push(index);
   });
   return Array.from(membersByOwner.values()).map((memberIndexes) => {
+    if (reached.has(memberIndexes[0])) {
+      const anchorIndex = seedByGroup.get(find(memberIndexes[0]));
+      memberIndexes = [anchorIndex, ...memberIndexes.filter((index) => index !== anchorIndex)];
+    }
     const anchor = active[memberIndexes[0]];
     if (memberIndexes.length === 1) return anchor;
     const knownItemIds = new Set();
@@ -2600,6 +2604,7 @@ async function loadImagineSavedCacheCards() {
   try {
     let data = await qApi("/api/imagine/saved/display-cache", { account_id: accountId });
     if (!imagineAccountResponseIsCurrent(accountId, requestEpoch, data)) return;
+    applyImagineLikedExclusionSnapshot(data, accountId);
     let cachedPosts = normalizeImagineRemotePosts(Array.isArray(data?.posts) ? data.posts : []);
     // The display cache is the previous complete, reconciled screen. If it is not available
     // yet, migrate once from the legacy page-fragment cache and let the live read create it.

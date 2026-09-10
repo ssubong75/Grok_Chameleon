@@ -1241,6 +1241,34 @@ def replace_imagine_discover_posts(
     return len(normalized_records)
 
 
+def transform_imagine_remote_posts(root: Path, account_keys: list[str], transform) -> int:
+    """Update cached item metadata without changing membership, order or sync tokens."""
+    keys = sorted({str(key).strip().lower() for key in account_keys if str(key).strip()})
+    if not keys or not (Path(root) / STATE_DIRECTORY / DATABASE_FILENAME).is_file():
+        return 0
+    changed = 0
+    with _lock_for(root):
+        with _connection(root, write=True) as connection:
+            placeholders = ",".join("?" for _ in keys)
+            rows = connection.execute(
+                f"SELECT account_key, post_key, post_json FROM imagine_remote_posts WHERE account_key IN ({placeholders})",
+                keys,
+            ).fetchall()
+            for row in rows:
+                post = _json_dict(row["post_json"])
+                if not post:
+                    continue
+                updated = transform(post)
+                if updated == post:
+                    continue
+                connection.execute(
+                    "UPDATE imagine_remote_posts SET post_json = ? WHERE account_key = ? AND post_key = ?",
+                    (json.dumps(updated, ensure_ascii=False, separators=(",", ":")), row["account_key"], row["post_key"]),
+                )
+                changed += 1
+    return changed
+
+
 def upsert_imagine_remote_posts(
     root: Path,
     account_key: str,

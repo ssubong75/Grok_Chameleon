@@ -63,7 +63,7 @@ test("Reference cards and their media sync both directions and settle", async (t
   assert.equal(next.plan.merges.length, 0);
 });
 
-test("Library Sync invalidates both card indexes after verified files are in place", async (t) => {
+test("Library Sync marks both card indexes stale without deleting their Imagine cache", async (t) => {
   const { local, external } = tempPair(t);
   makeLibrary(external);
   write(path.join(local, "collection", "new-folder", "card", "post.json"), "{\"title\":\"new\"}\n");
@@ -73,7 +73,7 @@ test("Library Sync invalidates both card indexes after verified files are in pla
   assert.equal(result.index_invalidated, true);
   assert.equal(fs.existsSync(path.join(external, "collection", "new-folder", "card", "post.json")), true);
   for (const root of [local, external]) {
-    assert.equal(fs.existsSync(path.join(root, "sql_data", "library_index.sqlite3")), false);
+    assert.equal(fs.existsSync(path.join(root, "sql_data", "library_index.sqlite3")), true);
     assert.equal(fs.existsSync(path.join(root, "sql_data", ".library-index-rebuild.json")), true);
   }
   const next = await engine.analyze("sync");

@@ -26,8 +26,9 @@ const AUTOMATIC_METADATA_PATHS = new Set([
   "sql_data/state.backup.sqlite3",
 ].map(canonicalPathKey));
 const AUTOMATIC_METADATA_DIRECTORIES = ["cache"].map(canonicalPathKey);
-// The card index is a cache. It is never copied between libraries because it can otherwise
-// describe an earlier version of the card folders on the destination computer.
+// The card index is local to each computer and is never copied between libraries.  Its
+// ``library_posts`` tables must be rebuilt after a sync, but the same SQLite database also
+// holds the account-scoped Imagine Liked cache.  Do not delete the database to rebuild cards.
 const LIBRARY_INDEX_INVALIDATION_FILE = ".library-index-rebuild.json";
 // library.json is rewritten on every scan, but only these fields are what the scan puts back.
 // The rest of the file - collection order, sort, hidden uploads, and any setting added later -
@@ -1344,8 +1345,9 @@ class LibraryBackup {
       destinationControl,
       { progress: this.progress, signal: this.signal, verify: finalizeCompletedBackup },
     );
-    // Only invalidate after final copy verification and durable manifest writes. Invalidating
-    // first would let a scan rebuild from the old folders while the transfer is still running.
+    // Only mark local card listings stale after final copy verification and durable manifest
+    // writes. The server rebuilds its card tables from disk on next use while retaining each
+    // computer's account-scoped Imagine cache.
     invalidateLibraryIndexes([current.source, current.destination]);
     this.emit(
       analysis.direction === "to-external" ? "Backup to External Library completed." : "Restore to Local Library completed.",
@@ -1491,8 +1493,8 @@ class LibraryBackup {
       records: nextRecords,
       librarySettings: current.settingsPlan?.nextBaseline || {},
     });
-    // The card index is intentionally excluded from sync. Mark both copies stale only after
-    // the synced files and their baseline are complete, then let each app rebuild locally.
+    // The card index is intentionally excluded from sync. Mark only the local card listing
+    // stale after the files and baseline are complete; never remove Imagine Liked cache rows.
     invalidateLibraryIndexes([current.local, current.external]);
     const historyPath = [externalHistory, localHistory].filter(Boolean).join("\n");
     this.emit("Library Sync completed.", 1, 1, "complete");
@@ -1573,20 +1575,6 @@ function invalidateLibraryIndex(root) {
     version: 1,
     invalidated_at: utcNow(),
   });
-  for (const fileName of [
-    "library_index.sqlite3",
-    "library_index.sqlite3-journal",
-    "library_index.sqlite3-wal",
-    "library_index.sqlite3-shm",
-  ]) {
-    try {
-      fs.unlinkSync(safePath(root, `sql_data/${fileName}`));
-    } catch (error) {
-      // A different computer may still have its local cache open. The marker makes Python
-      // ignore that cache on its next request even when Windows will not release the file yet.
-      if (!["ENOENT", "EBUSY", "EPERM"].includes(error?.code)) throw error;
-    }
-  }
 }
 
 function invalidateLibraryIndexes(roots) {

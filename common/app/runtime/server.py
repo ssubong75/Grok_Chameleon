@@ -3128,6 +3128,7 @@ def imagine_relation_stored_item(item: dict) -> dict:
             "conversation_id", "response_id", "parent_response_id",
             "request_id", "action", "aspect_ratio", "bundle_local_path",
             "bundle_source_snapshot", "official_upload_source",
+            "official_lineage", "cloned_from_asset_id", "cloned_source_asset_id",
         )
         if imagine.get(key) not in (None, "")
     }
@@ -3760,6 +3761,7 @@ def imagine_update_complete_liked_membership_snapshot(
 def imagine_liked_card_asset_ids(root: Path, account: dict, relations: dict[str, dict]) -> set[str]:
     snapshot = imagine_liked_membership_snapshot(root, account)
     liked_ids = set(snapshot.get("ids") or [])
+    liked_ids.update(imagine_known_clone_asset_ids(root, account))
     try:
         liked_cached = library_index.query_imagine_remote_posts(
             root,
@@ -4048,7 +4050,7 @@ def imagine_foreign_origin_asset_ids(
     mine = str(owner_user_id or "").strip()
     parent_by_asset: dict[str, str] = {}
     held_ids: set[str] = set()
-    foreign: set[str] = set(imagine_account_setting_ids(root, "imagine_cloned_asset_ids", account))
+    foreign: set[str] = imagine_known_clone_asset_ids(root, account)
     for post in posts or []:
         if not isinstance(post, dict):
             continue
@@ -4057,6 +4059,8 @@ def imagine_foreign_origin_asset_ids(
             if not asset_id or imagine_item_is_public_sample(item):
                 continue
             held_ids.add(asset_id)
+            if imagine_item_clone_record(item):
+                foreign.add(asset_id)
             parent_id = imagine_item_source_id(item)
             if parent_id:
                 parent_by_asset[asset_id] = parent_id
@@ -4190,7 +4194,7 @@ def imagine_hide_generated_results_for_cloned_source(
 ) -> None:
     if not root or not account or not generated_items:
         return
-    cloned_ids = imagine_account_setting_ids(root, "imagine_cloned_asset_ids", account)
+    cloned_ids = imagine_known_clone_asset_ids(root, account)
     if not cloned_ids:
         return
     # A Liked copy counts as a link source, so generating from one re-uploads the image and
@@ -4984,9 +4988,23 @@ def imagine_apply_generated_relations(
                 source_item["official_upload_source"] = True
                 existing_items.insert(0, source_item)
     existing_keys = {imagine_relation_item_key(item) for item in existing_items}
+    # A legacy record can contain a result from another source card. Once Grok has
+    # supplied that result's real edge, record membership cannot override its ancestry.
+    reachable = {imagine_item_asset_id(item) for item in existing_items}
+    pending = [item for item in record.get("items") or [] if isinstance(item, dict)]
+    changed = True
+    while changed:
+        changed = False
+        for candidate in pending:
+            candidate_id = imagine_item_asset_id(candidate)
+            if candidate_id not in reachable and set(imagine_item_source_ids(candidate)) & reachable:
+                reachable.add(candidate_id)
+                changed = True
     local_t2i_heart = imagine_post_is_local_t2i_heart(post)
     for stored in record.get("items") if isinstance(record.get("items"), list) else []:
         if not isinstance(stored, dict):
+            continue
+        if imagine_item_official_lineage(stored) and imagine_item_asset_id(stored) not in reachable:
             continue
         if ({imagine_relation_item_key(stored), imagine_item_asset_id(stored)} & deleted_relation_asset_ids):
             continue
@@ -5334,6 +5352,12 @@ def imagine_conversation_asset_item(
         "generated_action": str(media_gen.get("action") or ""),
         "official_upload_source": is_upload,
     }
+    clone_source_id = str(aux_keys.get("duplicated_from_asset_id") or aux_keys.get("duplicatedFromAssetId") or "").strip()
+    if clone_source_id and clone_source_id != asset_id:
+        imagine_metadata["cloned_from_asset_id"] = clone_source_id
+    official_lineage = imagine_official_asset_lineage(asset, conversation_id)
+    if official_lineage:
+        imagine_metadata["official_lineage"] = official_lineage
     metadata = {
         "asset_id": asset_id,
         "response_id": response_id,
@@ -5763,6 +5787,102 @@ def imagine_item_source_ids(item: dict) -> list[str]:
 
 def imagine_item_source_id(item: dict) -> str:
     return next(iter(imagine_item_source_ids(item)), "")
+
+
+def imagine_official_asset_lineage(asset: dict, conversation_id: str = "") -> dict:
+    """Read generation edges, never infer them from the card currently holding an asset."""
+    asset_id = str(asset.get("assetId") or asset.get("id") or "").strip()
+    generation = imagine_conversation_media_gen(asset)
+    parents = generation.get("input_assets") or imagine_asset_reference_source_ids(asset)
+    if not parents:
+        parents = [asset.get("parentPostId") or asset.get("originalPostId") or ""]
+    parents = list(dict.fromkeys(str(value).strip() for value in parents
+                                if str(value or "").strip() and str(value).strip() != asset_id))
+    # An absent input field is not evidence of a root (partial asset responses are common).
+    if not asset_id or (not parents and generation.get("action") != "textToImage"):
+        return {}
+    aux = asset.get("auxKeys") if isinstance(asset.get("auxKeys"), dict) else {}
+    return {"asset_id": asset_id, "source_ids": parents,
+            "conversation_id": str(asset.get("sourceConversationId") or asset.get("conversationId") or conversation_id or ""),
+            "cloned_from_asset_id": str(aux.get("duplicated_from_asset_id") or aux.get("duplicatedFromAssetId") or ""),
+            "transport": "conversation" if conversation_id else "asset"}
+
+
+def imagine_item_official_lineage(item: dict) -> dict:
+    evidence = ((item.get("metadata") or {}).get("imagine") or {}).get("official_lineage")
+    return evidence if (isinstance(evidence, dict)
+                        and evidence.get("asset_id") == imagine_item_asset_id(item)
+                        and isinstance(evidence.get("source_ids"), list)) else {}
+
+
+def imagine_apply_official_item_lineage(item: dict, evidence: dict) -> dict:
+    if not evidence or evidence.get("asset_id") != imagine_item_asset_id(item):
+        return item
+    result = dict(item)
+    metadata = dict(item.get("metadata") or {})
+    imagine = dict(metadata.get("imagine") or {})
+    result["metadata"] = metadata
+    metadata["imagine"] = imagine
+    source_id = next(iter(evidence["source_ids"]), "")
+    # Clone remapping is a display alias, not a change to the official generation edge.
+    alias = str(imagine.get("cloned_source_asset_id") or metadata.get("cloned_source_asset_id")
+                or item.get("cloned_source_asset_id") or "")
+    parent = imagine_item_source_id(item) if source_id and alias == source_id else source_id
+    for holder in (result, metadata, imagine):
+        for key in ("source_item_id", "parent_post_id", "original_post_id"):
+            holder[key] = parent
+        if alias != source_id:
+            holder.pop("cloned_source_asset_id", None)
+        if evidence.get("conversation_id"):
+            holder["conversation_id"] = evidence["conversation_id"]
+        # These fields used to retain another card's identity on a recovered child.
+        if "root_post_id" in holder and evidence.get("conversation_id"):
+            holder["root_post_id"] = evidence["conversation_id"]
+    imagine["official_lineage"] = dict(evidence)
+    return result
+
+
+def imagine_reconcile_official_lineage_cards(cards: list[dict], evidence: dict | None = None) -> list[dict]:
+    cards = [card for card in cards if isinstance(card, dict)]
+    known = dict(evidence or {})
+    for card in cards:
+        for item in card.get("items") or []:
+            found = imagine_item_official_lineage(item)
+            key = imagine_item_asset_id(item)
+            if found and (key not in known or (found.get("transport") == "asset"
+                                              and known[key].get("transport") != "asset")):
+                known[key] = found
+    output = []
+    for card in cards:
+        updated = dict(card)
+        updated["items"] = [imagine_apply_official_item_lineage(item, known.get(imagine_item_asset_id(item), {}))
+                            for item in card.get("items") or []]
+        representative_id = imagine_item_asset_id(card.get("representative_item") or {})
+        representative = next((item for item in updated["items"] if imagine_item_asset_id(item) == representative_id), None)
+        if representative:
+            updated["representative_item"] = representative
+        output.append(updated)
+    return output
+
+
+def imagine_reconcile_official_lineage_state(root: Path, account: dict, evidence: dict) -> None:
+    """Correct existing relation/cache edges from a normal live response; no extra requests."""
+    if not evidence:
+        return
+    account_key = imagine_account_settings_key(account)
+    with IMAGINE_RELATION_STATE_LOCK:
+        for key, record in imagine_state.load_generated_relations(root).items():
+            if str(record.get("account_key") or "").strip().lower() != account_key:
+                continue
+            if not any(imagine_item_asset_id(item) in evidence for item in record.get("items") or []):
+                continue
+            updated = imagine_reconcile_official_lineage_cards([record], evidence)[0]
+            if updated != record:
+                imagine_state.upsert_generated_relation(root, key, updated)
+    library_index.transform_imagine_remote_posts(
+        root, [account_key, imagine_liked_cache_account_key(account)],
+        lambda post: imagine_reconcile_official_lineage_cards([post], evidence)[0],
+    )
 
 
 def imagine_rebind_cloned_item_sources(item: dict, replacements: dict[str, str]) -> dict:
@@ -6351,82 +6471,53 @@ def merge_imagine_liked_lineage_cards(cards: list[dict]) -> list[dict]:
     if len(active) < 2:
         return active
 
-    owner_by_asset_id: dict[str, tuple[str, str]] = {}
     owner_by_card: dict[int, tuple[str, str]] = {}
-
-    def card_asset_ids(card: dict) -> set[str]:
-        metadata = card.get("metadata") if isinstance(card.get("metadata"), dict) else {}
-        items = [item for item in card.get("items") or [] if isinstance(item, dict)]
-        held = {
-            asset_id
-            for asset_id in (imagine_item_asset_id(item) for item in items)
-            if str(asset_id or "").strip()
-        }
-        # Only the card's own roots may claim ownership. Registering every item let a card
-        # that had swallowed someone else's media lend those ids out as parents, so the next
-        # card matched on them and inherited this card's identity - and the loop below then
-        # carried that further with each pass.
-        roots = {
-            asset_id
-            for item in items
-            for asset_id in [imagine_item_asset_id(item)]
-            if str(asset_id or "").strip()
-            and not any(source_id in held for source_id in imagine_item_source_ids(item))
-        }
-        return {
-            str(value).strip()
-            for value in (card.get("post_id"), metadata.get("lineage_root_asset_id"), *roots)
-            if str(value or "").strip()
-        }
-
-    def remember_owner(index: int, owner: tuple[str, str], *, replace_assets: bool = False) -> None:
-        owner_by_card[index] = owner
-        for asset_id in card_asset_ids(active[index]):
-            if replace_assets:
-                owner_by_asset_id[asset_id] = owner
-            else:
-                owner_by_asset_id.setdefault(asset_id, owner)
-
+    seeds: dict[int, tuple[str, str]] = {}
+    held_by_card: list[set[str]] = []
+    children_by_asset: dict[str, set[int]] = {}
     for index, card in enumerate(active):
+        held = {
+            imagine_item_asset_id(item) for item in card.get("items") or []
+            if isinstance(item, dict) and imagine_item_asset_id(item)
+        }
+        held_by_card.append(held)
+        for asset_id in held:
+            children_by_asset.setdefault(asset_id, set()).add(index)
+        for item in card.get("items") or []:
+            for source_id in imagine_item_source_ids(item):
+                children_by_asset.setdefault(source_id, set()).add(index)
         provenance, anchor = imagine_post_saved_identity(card)
-        if provenance not in {"plain-liked", "cloned-liked"} and not imagine_post_is_link_source(card):
-            continue
-        if anchor:
-            remember_owner(index, (provenance, anchor))
-    if not owner_by_card:
+        if anchor and (provenance in {"plain-liked", "cloned-liked"} or imagine_post_is_link_source(card)):
+            seeds[index] = (provenance, anchor)
+    if not seeds:
         return active
-
-    changed = True
-    while changed:
-        changed = False
-        for index, card in enumerate(active):
-            current_owner = owner_by_card.get(index)
-            source_owners = [
-                owner_by_asset_id[source_id]
-                for item in card.get("items") or []
-                if isinstance(item, dict)
-                for source_id in imagine_item_source_ids(item)
-                if source_id in owner_by_asset_id
-            ]
-            # A card can contain its own immediate source and that source's parent. Ignore
-            # the self match so a copied i2i -> i2v branch reaches its shared root.
-            owner = next((candidate for candidate in source_owners if candidate != current_owner), None)
-            if not owner or owner == current_owner:
-                continue
-            provenance, anchor = owner
-            metadata = card.get("metadata") if isinstance(card.get("metadata"), dict) else {}
-            metadata.update({
-                "saved_provenance": provenance,
-                "saved_anchor_id": anchor,
-                "liked_lineage_owner_anchor": anchor,
-                "liked": True,
-            })
-            card["metadata"] = metadata
-            card["liked"] = True
-            card["favorite"] = True
-            imagine_stamp_saved_identity(card)
-            remember_owner(index, owner, replace_assets=True)
-            changed = True
+    # Walk each card once and union proven parent/child edges. Reassigning owners until
+    # "unchanged" oscillated forever when two cached cards referenced each other's family.
+    parents = list(range(len(active)))
+    def find(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+    reached = set(seeds)
+    queue = list(seeds)
+    for index in queue:
+        for asset_id in held_by_card[index]:
+            for child in sorted(children_by_asset.get(asset_id, set())):
+                left, right = find(index), find(child)
+                if left != right:
+                    parents[max(left, right)] = min(left, right)
+                if child not in reached:
+                    reached.add(child)
+                    queue.append(child)
+    seed_by_group: dict[int, int] = {}
+    def seed_order(index: int) -> tuple:
+        metadata = active[index].get("metadata") or {}
+        return (not bool(metadata.get("official_clone_assets")), seeds[index], index)
+    for index in sorted(seeds, key=seed_order):
+        seed_by_group.setdefault(find(index), index)
+    for index in reached:
+        owner_by_card[index] = seeds[seed_by_group[find(index)]]
 
     # Never use the generic Saved recovery merger here: it may fall back to a shared
     # conversation/order, while Liked grouping must use explicit parent IDs only.
@@ -6438,6 +6529,9 @@ def merge_imagine_liked_lineage_cards(cards: list[dict]) -> list[dict]:
 
     merged_cards: list[dict] = []
     for member_indexes in members_by_owner.values():
+        if member_indexes[0] in reached:
+            anchor_index = seed_by_group[find(member_indexes[0])]
+            member_indexes = [anchor_index, *[index for index in member_indexes if index != anchor_index]]
         anchor = active[member_indexes[0]]
         if len(member_indexes) == 1:
             merged_cards.append(anchor)
@@ -6458,6 +6552,12 @@ def merge_imagine_liked_lineage_cards(cards: list[dict]) -> list[dict]:
         metadata = anchor.get("metadata") if isinstance(anchor.get("metadata"), dict) else {}
         if owner:
             metadata.update({"saved_provenance": owner[0], "saved_anchor_id": owner[1]})
+        clone_records = imagine_normalize_external_clone_records([
+            record for index in member_indexes
+            for record in (active[index].get("metadata") or {}).get("official_clone_assets", [])
+        ])
+        if clone_records:
+            metadata["official_clone_assets"] = clone_records
         metadata["saved_anchor_aliases"] = sorted({
             imagine_post_saved_identity(active[index])[1]
             for index in member_indexes
@@ -6507,7 +6607,43 @@ def merge_imagine_liked_lineage_with_saved_cache(
         ]
         if card["items"]:
             saved_cards.append(card)
-    merged = merge_imagine_liked_lineage_cards([*liked_cards, *saved_cards])
+    clone_records = list(imagine_clone_asset_map(root, account).values())
+    # Restore generated children by their media-parent edge, not by the current card's
+    # post_id: regrouping changes that id, so post-id overlays changed families on each load.
+    reached = {record["asset_id"] for record in clone_records}
+    reached.update(
+        imagine_item_asset_id(item) for card in liked_cards for item in card.get("items") or []
+        if isinstance(item, dict) and imagine_item_asset_id(item)
+    )
+    account_key = imagine_account_settings_key(account)
+    relation_items: dict[str, dict] = {}
+    for record in imagine_state.load_generated_relations(root).values():
+        if not isinstance(record, dict) or str(record.get("account_key") or "").strip().lower() != account_key:
+            continue
+        deleted = set(record.get("source_deleted_asset_ids") or []) | blocked
+        for stored in record.get("items") or []:
+            asset_id = imagine_item_asset_id(stored)
+            if asset_id and asset_id not in deleted:
+                relation_items.setdefault(asset_id, stored)
+    relation_cards: list[dict] = []
+    changed = True
+    while changed:
+        changed = False
+        for asset_id, stored in list(relation_items.items()):
+            if asset_id not in reached and not (set(imagine_item_source_ids(stored)) & reached):
+                continue
+            item = imagine_relation_materialized_item(stored, account, root)
+            relation_cards.append({
+                "post_id": asset_id, "folder_path": f"imagine_saved/{asset_id}",
+                "items": [item], "metadata": {"flat_only": True, "saved_provenance": "normal-saved"},
+            })
+            reached.add(asset_id)
+            del relation_items[asset_id]
+            changed = True
+    recovered = imagine_group_external_clone_batch_cards(
+        [*liked_cards, *saved_cards, *relation_cards], clone_records,
+    )
+    merged = merge_imagine_liked_lineage_cards(recovered)
     return [
         card for card in merged
         if imagine_post_saved_identity(card)[0] in {"plain-liked", "cloned-liked"}
@@ -6902,6 +7038,11 @@ def imagine_remote_cache_records(posts: list[dict]) -> list[dict]:
             "asset_ids": sorted(asset_ids),
             "post": normalize_json_unicode(post),
         })
+    # An old alias can now be another valid card's current key after a batch is split or
+    # regrouped. Never let migration cleanup delete a row being saved in this same update.
+    live_keys = {record["post_key"] for record in records}
+    for record in records:
+        record["legacy_post_keys"] = [key for key in record["legacy_post_keys"] if key not in live_keys]
     return records
 
 
@@ -7672,11 +7813,16 @@ def list_imagine_saved_display_cache(payload: dict) -> dict:
         for post in data.get("posts") or []
         if imagine_saved_display_post_allowed(post)
     ]
+    # The display cache is loaded before the Liked view.  Return the persisted, explicit
+    # Liked ownership set with it so a restart cannot briefly put those cards in Main.
+    ensure_imagine_state_migrated(root)
+    relations = imagine_state.load_generated_relations(root)
     return {
         "ok": True,
         "source": "saved_display_cache",
         "found": True,
         "posts": normalize_json_unicode(restore_imagine_display_relations(posts, root, account)),
+        "liked_exclusion": imagine_liked_exclusion_payload(root, account, relations),
         "updated_at": str(data.get("updated_at") or ""),
         "imagine": {
             "id": account.get("id") or "",
@@ -7981,6 +8127,13 @@ def list_imagine_saved(payload: dict) -> dict:
                             pending.cancel()
                         raise RuntimeError("Imagine Saved refresh incomplete; previous cards retained.") from exc
     ensure_imagine_state_migrated(root)
+    official_lineage = {}
+    for conversation_id, detail in details.items():
+        for response in detail.get("responses") or []:
+            for asset in response.get("fileAttachmentAssetMetadata") or []:
+                evidence = imagine_official_asset_lineage(asset, conversation_id)
+                if evidence:
+                    official_lineage[evidence["asset_id"]] = evidence
     deleted_upload_result_ids: set[str] = set()
     detached_upload_conversation_ids: set[str] = set()
     if not cursor:
@@ -8097,6 +8250,16 @@ def list_imagine_saved(payload: dict) -> dict:
         else imagine_get_json("/rest/assets?" + urlencode(asset_query), account, timeout=20)
     )
     assets = asset_data.get("assets") if isinstance(asset_data.get("assets"), list) else []
+    for asset in assets:
+        if not isinstance(asset, dict) or asset.get("isDeleted"):
+            continue
+        evidence = imagine_official_asset_lineage(asset)
+        if evidence:
+            official_lineage[evidence["asset_id"]] = evidence
+    imagine_reconcile_official_lineage_state(root, account, official_lineage)
+    relations = imagine_state.load_generated_relations(root)
+    posts = imagine_reconcile_official_lineage_cards(posts, official_lineage)
+    local_heart_posts = imagine_reconcile_official_lineage_cards(local_heart_posts, official_lineage)
     # An asset already sitting on a card must not stand up a second one, and this is the set
     # that stops it -- but it only ever saw the conversations of the page in hand. A sweep
     # hands the conversations out on one page and the assets on another, so by the time the
@@ -9025,7 +9188,11 @@ def list_imagine_liked_cache(payload: dict) -> dict:
     )
     hidden = imagine_pending_delete_ids(root, account) | imagine_local_exclusion_ids(root, account)
     ensure_imagine_state_migrated(root)
-    relations = imagine_state.load_generated_relations(root)
+    relations = {
+        key: record for key, record in imagine_state.load_generated_relations(root).items()
+        if isinstance(record, dict)
+        and str(record.get("account_key") or "").strip().lower() == imagine_account_settings_key(account)
+    }
     posts: list[dict] = []
     for cached_post in cached.get("posts") or []:
         if not isinstance(cached_post, dict):
@@ -9049,31 +9216,8 @@ def list_imagine_liked_cache(payload: dict) -> dict:
             and not legacy_private_clone
         ):
             continue
-        cached_imagine = (
-            cached_metadata.get("imagine")
-            if isinstance(cached_metadata.get("imagine"), dict)
-            else {}
-        )
-        # Grok's Liked collection does not retain clone-batch copies.  Their
-        # app-owned root is marked as a foreign-origin Liked card, and all
-        # persisted descendants must survive a cache refresh even if Grok saves
-        # them under a later conversation.
-        foreign_origin_liked_root = (
-            str(cached_metadata.get("saved_provenance") or "").strip().lower()
-            in {"plain-liked", "cloned-liked"}
-            and str(
-                cached_metadata.get("liked_scope")
-                or cached_imagine.get("liked_scope")
-                or ""
-            ).strip().lower() == "foreign-origin"
-        )
-        post = imagine_apply_generated_relations(
-            cached_post,
-            root,
-            account,
-            relations,
-            allow_cross_conversation_relations=foreign_origin_liked_root,
-        )
+        # Relations are restored below across the complete family, using asset-parent ids.
+        post = json.loads(json.dumps(cached_post))
         imagine_stamp_saved_identity(post)
         post["items"] = [
             item
@@ -9090,7 +9234,6 @@ def list_imagine_liked_cache(payload: dict) -> dict:
         posts.append(post)
     # Cache-first paint runs before the live Liked response.  Apply the same clone-batch fold
     # here so an older per-asset cache cannot flash three cards after an app restart.
-    posts = imagine_group_external_clone_batch_cards(posts)
     posts = merge_imagine_liked_lineage_with_saved_cache(
         root, account, posts, hidden_ids=hidden,
     )
@@ -9132,10 +9275,9 @@ def imagine_foreign_origin_liked_cards(
     )
     if not foreign_ids:
         return []
-    cards = merge_imagine_saved_lineage_cards(
-        imagine_group_external_clone_batch_cards(
-            imagine_hidden_scope_posts(cached_posts, foreign_ids)
-        )
+    cards = imagine_group_external_clone_batch_cards(
+        imagine_hidden_scope_posts(cached_posts, foreign_ids),
+        list(imagine_clone_asset_map(root, account).values()),
     )
     derived: list[dict] = []
     for card in cards:
@@ -9144,7 +9286,7 @@ def imagine_foreign_origin_liked_cards(
             for item in card.get("items") or []
             if isinstance(item, dict) and imagine_item_asset_id(item)
         }
-        if not item_ids or item_ids & covered_asset_ids:
+        if not item_ids or item_ids <= covered_asset_ids:
             # Already standing as a real collection card; a second one would be a duplicate.
             continue
         owner_user_id = remember_imagine_owner_user_id(account)
@@ -11226,6 +11368,13 @@ def imagine_unsaved_post_from_asset(asset: dict, account: dict) -> dict | None:
             },
         },
     }
+    aux_keys = asset.get("auxKeys") if isinstance(asset.get("auxKeys"), dict) else {}
+    clone_source_id = str(aux_keys.get("duplicated_from_asset_id") or aux_keys.get("duplicatedFromAssetId") or "").strip()
+    if clone_source_id and clone_source_id != asset_id:
+        item["metadata"]["imagine"]["cloned_from_asset_id"] = clone_source_id
+    official_lineage = imagine_official_asset_lineage(asset)
+    if official_lineage:
+        item["metadata"]["imagine"]["official_lineage"] = official_lineage
     return {
         "post_id": asset_id,
         "source": "imagine",
@@ -12685,6 +12834,27 @@ def imagine_clone_batch_item_order(records: object) -> dict[str, int]:
     }
 
 
+def imagine_item_clone_record(item: dict) -> dict | None:
+    """Keep each official copy, not only the latest copy for an original in settings."""
+    if not isinstance(item, dict):
+        return None
+    asset_id = imagine_item_asset_id(item)
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    imagine = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
+    source_id = next((str(holder.get("cloned_from_asset_id") or "").strip()
+                      for holder in (item, metadata, imagine) if holder.get("cloned_from_asset_id")), "")
+    conversation_id = str(item.get("conversation_id") or imagine.get("conversation_id")
+                          or metadata.get("conversation_id") or "").strip()
+    if not asset_id or not source_id or source_id == asset_id or not conversation_id:
+        return None
+    return {
+        "asset_id": asset_id, "source_asset_id": source_id, "conversation_id": conversation_id,
+        "response_id": str(item.get("response_id") or imagine.get("response_id") or ""),
+        "media_type": str(item.get("mime_type") or ""),
+        "media_url": str(item.get("remote_url") or metadata.get("remote_url") or imagine.get("media_url") or item.get("url") or ""),
+    }
+
+
 def imagine_clone_asset_map_key(value: object) -> str:
     return str(value or "").strip().lower()
 
@@ -12722,6 +12892,13 @@ def imagine_clone_asset_map(root: Path | None, account: dict) -> dict[str, dict]
             "media_url": str(raw_record.get("media_url") or raw_record.get("mediaUrl") or raw_record.get("url") or "").strip(),
         }
     return mapping
+
+
+def imagine_known_clone_asset_ids(root: Path | None, account: dict) -> set[str]:
+    """Both persisted clone ledgers are account-local evidence, even after an index rebuild."""
+    return set(imagine_account_setting_ids(root, "imagine_cloned_asset_ids", account)) | {
+        record["asset_id"] for record in imagine_clone_asset_map(root, account).values()
+    }
 
 
 def update_imagine_clone_asset_map(root: Path, account: dict, entries: object) -> dict[str, dict]:
@@ -12931,7 +13108,9 @@ def prepare_imagine_clone_asset_map(payload: dict) -> dict:
     }
 
 
-def imagine_group_external_clone_batch_cards(cards: list[dict]) -> list[dict]:
+def imagine_group_external_clone_batch_cards(
+    cards: list[dict], clone_records: list[dict] | None = None,
+) -> list[dict]:
     """Fold only the copies returned by one clone-batch into its one Liked card.
 
     ``clone-batch`` gives every returned asset the conversation it opened for that one copy
@@ -12939,40 +13118,110 @@ def imagine_group_external_clone_batch_cards(cards: list[dict]) -> list[dict]:
     Those are transport records, not separate cards.  Keep this rule strictly scoped to the
     clone-batch records saved with the post; normal Saved cards never enter this function.
     """
+    # A rebuilt remote index no longer carries official_clone_assets on each card. Recover
+    # those exact batches from the durable account-local map, not from arbitrary Saved
+    # conversations or liked booleans. Include explicitly parented later generations too.
+    # Correct all duplicate representations before collecting edges. Otherwise a stale
+    # Liked row can add a false parent even when the Saved response has the real one.
+    cards = imagine_reconcile_official_lineage_cards(cards)
+    records_by_batch: dict[str, dict[str, dict]] = {}
+    batch_by_asset: dict[str, str] = {}
+    # The service can copy the same original in several batches. Its per-asset origin
+    # wins over the one-original/one-copy settings map and incomplete legacy card records.
+    record_sets = [[record] for card in cards or [] if isinstance(card, dict)
+                   for item in card.get("items") or []
+                   if (record := imagine_item_clone_record(item))]
+    record_sets.extend([
+        imagine_normalize_external_clone_records((card.get("metadata") or {}).get("official_clone_assets"))
+        for card in cards or [] if isinstance(card, dict)
+    ])
+    record_sets.extend([[record] for record in imagine_normalize_external_clone_records(clone_records)])
+    for records in record_sets:
+        for record in records:
+            asset_id = record["asset_id"]
+            if asset_id in batch_by_asset:
+                continue
+            batch_id = record["conversation_id"] or "assets:" + ",".join(sorted(
+                value["asset_id"] for value in records
+            ))
+            batch_by_asset[asset_id] = batch_id
+            records_by_batch.setdefault(batch_id, {})[asset_id] = record
+    source_ids_by_asset: dict[str, set[str]] = {}
+    for card in cards or []:
+        if not isinstance(card, dict):
+            continue
+        for item in card.get("items") or []:
+            if isinstance(item, dict) and imagine_item_asset_id(item):
+                source_ids_by_asset.setdefault(imagine_item_asset_id(item), set()).update(
+                    imagine_item_source_ids(item)
+                )
+    # Legacy upload bundles kept a local snapshot of the foreign image beside the owned
+    # copy. After splitting transport rows that snapshot became an empty standalone Liked
+    # card. Substitute it only when this exact recorded batch still holds the actual copy.
+    snapshot_copies: dict[tuple[str, str], str] = {}
+    for batch_id, records in records_by_batch.items():
+        for record in records.values():
+            if record["asset_id"] in source_ids_by_asset:
+                snapshot_copies[(batch_id, record["source_asset_id"])] = record["asset_id"]
+    # Ownership only grows. Unrelated roots and ambiguous cross-batch edges stay separate.
+    changed = True
+    while changed:
+        changed = False
+        for asset_id, sources in source_ids_by_asset.items():
+            if asset_id in batch_by_asset:
+                continue
+            owners = {batch_by_asset[source] for source in sources if source in batch_by_asset}
+            if len(owners) == 1:
+                batch_by_asset[asset_id] = next(iter(owners))
+                changed = True
     grouped: dict[str, dict] = {}
     passthrough: list[tuple[int, dict]] = []
     for index, candidate in enumerate(cards or []):
         if not isinstance(candidate, dict):
             continue
         metadata = candidate.get("metadata") if isinstance(candidate.get("metadata"), dict) else {}
-        records = imagine_normalize_external_clone_records(metadata.get("official_clone_assets"))
-        if not records:
-            passthrough.append((index, candidate))
-            continue
-        records_by_batch: dict[str, list[dict]] = {}
-        for record in records:
-            # clone-batch normally supplies one shared conversation.  A missing value still
-            # belongs only to this one recorded batch, never to a broad conversation group.
-            batch_id = str(record.get("conversation_id") or "").strip()
-            if not batch_id:
-                batch_id = "assets:" + ",".join(sorted(
-                    str(value.get("asset_id") or "").strip() for value in records
-                ))
-            records_by_batch.setdefault(batch_id, []).append(record)
-        for batch_id, batch_records in records_by_batch.items():
-            record_by_asset_id = {
-                str(record.get("asset_id") or "").strip(): record
-                for record in batch_records
-                if str(record.get("asset_id") or "").strip()
-            }
-            batch_asset_ids = set(record_by_asset_id)
-            matching_items = [
-                item
-                for item in candidate.get("items") or []
-                if isinstance(item, dict) and imagine_item_asset_id(item) in batch_asset_ids
-            ]
-            if not matching_items:
+        snapshot_batch = str(metadata.get("clone_batch_id") or metadata.get("conversation_id") or "").strip()
+        replaced_snapshot = False
+        items_by_batch: dict[str, list[dict]] = {}
+        remaining_items: list[dict] = []
+        for item in candidate.get("items") or []:
+            if not isinstance(item, dict):
                 continue
+            item_metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            asset_id = imagine_item_asset_id(item)
+            if (
+                metadata.get("upload_origin_bundle")
+                and str(metadata.get("upload_source_asset_id") or "") == asset_id
+                and item_metadata.get("bundle_source_snapshot") is True
+                and (snapshot_batch, asset_id) in snapshot_copies
+            ):
+                replaced_snapshot = True
+                continue
+            batch_id = batch_by_asset.get(imagine_item_asset_id(item))
+            if batch_id:
+                items_by_batch.setdefault(batch_id, []).append(item)
+            else:
+                remaining_items.append(item)
+        if not items_by_batch:
+            if not replaced_snapshot:
+                passthrough.append((index, candidate))
+            elif remaining_items:
+                remaining = dict(candidate)
+                remaining["items"] = remaining_items
+                representative = imagine_representative_item(remaining_items) or remaining_items[-1]
+                remaining["representative_item"] = representative
+                remaining["representative"] = representative.get("url") or representative.get("remote_url") or representative.get("item_id") or ""
+                passthrough.append((index, remaining))
+            continue
+        if remaining_items:
+            remaining = dict(candidate)
+            remaining["items"] = remaining_items
+            representative = imagine_representative_item(remaining_items) or remaining_items[-1]
+            remaining["representative_item"] = representative
+            remaining["representative"] = representative.get("url") or representative.get("remote_url") or representative.get("item_id") or ""
+            passthrough.append((index, remaining))
+        for batch_id, matching_items in items_by_batch.items():
+            batch_records = list(records_by_batch[batch_id].values())
             group_key = f"clone-batch\x1f{batch_id}"
             group = grouped.setdefault(group_key, {
                 "index": index,
@@ -13056,11 +13305,12 @@ def imagine_group_external_clone_batch_cards(cards: list[dict]) -> list[dict]:
                 dict(item_metadata.get("imagine") or {})
                 if isinstance(item_metadata.get("imagine"), dict) else {}
             )
-            stamps = {
-                "cloned_copy": True,
-                "cloned_from_asset_id": str(record.get("source_asset_id") or "").strip(),
-                "liked": True,
-            }
+            stamps = {"liked": True}
+            if record:
+                stamps.update({
+                    "cloned_copy": True,
+                    "cloned_from_asset_id": str(record.get("source_asset_id") or "").strip(),
+                })
             if item_id in clone_order:
                 stamps["clone_batch_order"] = clone_order[item_id]
             item_metadata.update(stamps)
