@@ -647,16 +647,23 @@ function metadataPaths(localRoot, externalRoot, libraryId, machineId = "") {
   };
 }
 
-// These are derived from either the remote service or the canonical card files.  Carrying a
-// cache from one computer to another makes its invalidation rules part of synchronization and
-// can make an old cache look authoritative.  Sync only the source data; the app rebuilds these.
+// Include portable accounts and original cards. Leave caches, previews and runtime profiles
+// on each drive; library settings and durable SQLite rows use their existing semantic merge.
 function isSyncSourcePath(relativePath) {
   const key = canonicalPathKey(relativePath);
   return key !== LIBRARY_JSON_KEY
-    && !key.startsWith("account/")
+    && key !== "cache"
     && !key.startsWith("cache/")
+    && key !== "previews"
     && !key.startsWith("previews/")
+    && key !== "runtime_data"
+    && !key.startsWith("runtime_data/")
     && !key.startsWith("sql_data/");
+}
+
+function isOriginalCardPath(relativePath) {
+  return ["created", "upload", "collection", "reference", "prompt"]
+    .includes(canonicalPathKey(relativePath).split("/")[0]);
 }
 
 function syncManifest(manifest) {
@@ -1131,13 +1138,18 @@ class LibraryBackup {
     // population, not thousands of individual deletions. Old receipts live outside the
     // library folder and can survive deleting that folder. Apply this decision to files,
     // settings and durable SQLite rows together; never reuse only part of the old base.
+    // Accounts/caches may survive clearing the card folders or be recreated by startup.
+    // Their presence must not disable the cleared-drive preservation rule.
+    const localCardKeys = new Set([...local.records.keys()].filter(isOriginalCardPath));
+    const externalCardKeys = new Set([...external.records.keys()].filter(isOriginalCardPath));
+    const baselineCardKeys = [...(stored?.records.keys() || [])].filter(isOriginalCardPath);
     const initialize = !pathExists(path.join(context.local, "library.json"))
       || !pathExists(path.join(context.external, "library.json"))
-      || (local.records.size === 0 && external.records.size > 0)
-      || (external.records.size === 0 && local.records.size > 0)
-      || Boolean(stored?.records.size && (
-        ![...stored.records.keys()].some((key) => local.records.has(key))
-        || ![...stored.records.keys()].some((key) => external.records.has(key))
+      || (localCardKeys.size === 0 && externalCardKeys.size > 0)
+      || (externalCardKeys.size === 0 && localCardKeys.size > 0)
+      || Boolean(baselineCardKeys.length && (
+        !baselineCardKeys.some((key) => localCardKeys.has(key))
+        || !baselineCardKeys.some((key) => externalCardKeys.has(key))
       ));
     const baseline = !initialize && stored ? stored : { records: new Map(), librarySettings: {} };
     const plan = buildSyncPlan(baseline, local, external);
@@ -1149,6 +1161,7 @@ class LibraryBackup {
     plan.conflicts.push(...settingsPlan.conflicts);
     const merges = [];
     for (const [key, localRecord] of local.records) {
+      if (!isOriginalCardPath(key)) continue;
       if (path.posix.basename(localRecord.relativePath) !== "post.json") continue;
       const externalRecord = external.records.get(key);
       const baseRecord = baseline.records.get(key) || null;

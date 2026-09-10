@@ -43,6 +43,54 @@ async function run(engine, direction) {
   return { analysis, result: await engine.execute(analysis) };
 }
 
+test("accounts sync both ways while caches, previews, runtime and Imagine indexes stay local", async (t) => {
+  const { local, external } = tempPair(t);
+  makeLibrary(external);
+  const engine = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "portable-folders" });
+  const first = await run(engine, "sync");
+  // Simulate a receipt created before accounts were included.
+  const baselineFile = first.analysis.paths.syncBaseline;
+  const baseline = JSON.parse(fs.readFileSync(baselineFile));
+  const previousCount = baseline.files.length;
+  baseline.files = baseline.files.filter((record) => !/^(account|cache|previews)\//.test(record.relative_path));
+  assert.ok(baseline.files.length < previousCount);
+  write(baselineFile, JSON.stringify(baseline));
+  for (const folder of ["account", "cache", "previews"]) {
+    write(path.join(local, folder, "from-local.json"), '{"side":"local"}');
+    write(path.join(external, folder, "from-external.json"), '{"side":"external"}');
+  }
+  write(path.join(local, "runtime_data", "macos", "settings.json"), "local runtime");
+  write(path.join(external, "runtime_data", "macos", "settings.json"), "external runtime");
+  const { analysis } = await run(engine, "sync");
+  assert.equal([...analysis.localManifest.records.keys()].some((key) => key.startsWith("runtime_data/")), false);
+  for (const folder of ["account"]) {
+    for (const root of [local, external]) {
+      assert.equal(fs.readFileSync(path.join(root, folder, "from-local.json"), "utf8"), '{"side":"local"}');
+      assert.equal(fs.readFileSync(path.join(root, folder, "from-external.json"), "utf8"), '{"side":"external"}');
+    }
+    write(path.join(external, folder, "from-local.json"), '{"updated":true}');
+    fs.unlinkSync(path.join(local, folder, "from-external.json"));
+  }
+  await run(engine, "sync");
+  for (const folder of ["account"]) {
+    for (const root of [local, external]) {
+      assert.equal(fs.readFileSync(path.join(root, folder, "from-local.json"), "utf8"), '{"updated":true}');
+      assert.equal(fs.existsSync(path.join(root, folder, "from-external.json")), false);
+    }
+  }
+  assert.equal(fs.readFileSync(path.join(local, "runtime_data", "macos", "settings.json"), "utf8"), "local runtime");
+  assert.equal(fs.readFileSync(path.join(external, "runtime_data", "macos", "settings.json"), "utf8"), "external runtime");
+  assert.equal(fs.readFileSync(path.join(local, "sql_data", "library_index.sqlite3"), "utf8"), "index-data");
+  for (const folder of ["cache", "previews"]) {
+    assert.equal(fs.readFileSync(path.join(local, folder, "from-local.json"), "utf8"), '{"side":"local"}');
+    assert.equal(fs.readFileSync(path.join(external, folder, "from-external.json"), "utf8"), '{"side":"external"}');
+    assert.equal(fs.existsSync(path.join(external, folder, "from-local.json")), false);
+    assert.equal(fs.existsSync(path.join(local, folder, "from-external.json")), false);
+    assert.equal([...analysis.localManifest.records.keys()].some((key) => key.startsWith(folder + "/")), false);
+  }
+  assert.equal((await run(engine, "sync")).result.changed, 0);
+});
+
 test("Reference cards and their media sync both directions and settle", async (t) => {
   const { local, external } = tempPair(t);
   makeLibrary(external);
