@@ -125,7 +125,7 @@ test("Sync button engine includes durable SQLite rows and a second run is settle
     "from pathlib import Path",
     "for root in sys.argv[1:]:",
     " c=sqlite3.connect(Path(root)/'sql_data/state.sqlite3')",
-    " value=json.loads(c.execute('SELECT relation_json FROM imagine_generated_relations').fetchone()[0])",
+    " value=json.loads(c.execute(\"SELECT relation_json FROM imagine_generated_relations WHERE source_id='source'\").fetchone()[0])",
     " assert {x['id'] for x in value['items']}=={'local-result','external-result'}",
     " c.close()",
   ].join("\n");
@@ -133,6 +133,21 @@ test("Sync button engine includes durable SQLite rows and a second run is settle
   const second = await run(engine, "sync");
   assert.equal(second.result.stateChanged, 0);
   assert.equal(second.result.changed, 0);
+  // App-generated state can exist after the user clears the content directories. The
+  // file reset decision must reach Python even though neither database is missing/empty.
+  fs.rmSync(path.join(external, "created"), { recursive: true });
+  execFileSync(pythonPath, ["-B", "-c", [
+    "import sys, sqlite3",
+    "from pathlib import Path",
+    "sys.path.insert(0, sys.argv[1])",
+    "import sync_state",
+    "with sqlite3.connect(Path(sys.argv[2])/'sql_data/state.sqlite3') as c:",
+    " sync_state.replace_rows(c,'main',{'imagine_generated_relations':{'new-source':{'items':[{'id':'new'}]}},'imagine_local_exclusions':{}})",
+  ].join("\n"), helper, external]);
+  const initialized = await run(engine, "sync");
+  assert.equal(initialized.analysis.initialize, true);
+  execFileSync(pythonPath, ["-B", "-c", verify, local, external]);
+  assert.equal((await run(engine, "sync")).result.changed, 0);
 });
 
 test("initial Local to External copies supported data and excludes runtime files", async (t) => {
@@ -495,6 +510,122 @@ test("per-computer Sync baselines do not turn another computer's addition into a
   assert.equal(fs.readFileSync(path.join(localB, "created", "first", "only-on-a.txt"), "utf8"), "from-a");
   const bSettings = JSON.parse(fs.readFileSync(path.join(localB, "library.json"), "utf8")).settings;
   assert.deepEqual(bSettings, { collection_order: ["created/first"] });
+});
+
+test("Sync serializes settings delete/edit conflicts and keeps deletion distinct from null", async (t) => {
+  const { local, external } = tempPair(t);
+  makeLibrary(external);
+  const settings = (root, value) => {
+    const file = path.join(root, "library.json");
+    const library = JSON.parse(fs.readFileSync(file, "utf8"));
+    write(file, JSON.stringify({ ...library, settings: value }));
+  };
+  const engine = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "settings-conflicts" });
+  settings(local, { localDeleted: 1, externalDeleted: 1, nullValue: 1 });
+  await run(engine, "sync");
+  settings(local, { externalDeleted: 2, nullValue: null });
+  settings(external, { localDeleted: 2 });
+  const analysis = await engine.analyze("sync");
+  assert.deepEqual(analysis.settingsPlan.local, { externalDeleted: 2, nullValue: null });
+  assert.deepEqual(analysis.settingsPlan.external, analysis.settingsPlan.local);
+  const records = JSON.parse(JSON.stringify(analysis.settingsPlan.conflictRecords));
+  assert.deepEqual(records.find((record) => record.key === "localDeleted"),
+    { key: "localDeleted", local: null, external: 2, local_missing: true });
+  assert.deepEqual(records.find((record) => record.key === "externalDeleted"),
+    { key: "externalDeleted", local: 2, external: null, external_missing: true });
+  assert.deepEqual(records.find((record) => record.key === "nullValue"),
+    { key: "nullValue", local: null, external: null, external_missing: true });
+  await engine.execute(analysis);
+  const conflictFile = fs.readdirSync(analysis.paths.settingsConflicts).find((name) => name.endsWith(".json"));
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(analysis.paths.settingsConflicts, conflictFile), "utf8")).settings, records);
+  for (const root of [local, external]) {
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, "library.json"), "utf8")).settings,
+      { externalDeleted: 2, nullValue: null });
+  }
+  assert.equal((await engine.analyze("sync")).settingsPlan.changed, 0);
+});
+
+test("Sync missing library metadata never means all surviving settings were deleted", async (t) => {
+  for (const missingSide of ["local", "external"]) {
+    const pair = tempPair(t);
+    makeLibrary(pair.external);
+    const engine = new LibraryBackup({ localRoot: pair.local, externalRoot: pair.external, machineId: "missing-settings" });
+    const initial = { keep: ["one"], edited: "before", removed: "remove-me" };
+    const file = path.join(pair.local, "library.json");
+    write(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, "utf8")), settings: initial }));
+    await run(engine, "sync");
+    fs.unlinkSync(path.join(pair[missingSide], "library.json"));
+    const survivor = pair[missingSide === "local" ? "external" : "local"];
+    const survivingFile = path.join(survivor, "library.json");
+    const expected = { keep: ["one"], edited: "after" };
+    write(survivingFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(survivingFile, "utf8")), settings: expected }));
+    const { analysis } = await run(engine, "sync");
+    assert.equal(analysis.initialize, true);
+    assert.deepEqual(analysis.settingsPlan.conflictRecords, []);
+    for (const root of [pair.local, pair.external]) {
+      assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, "library.json"), "utf8")).settings, expected);
+    }
+    assert.equal((await engine.analyze("sync")).settingsPlan.changed, 0);
+  }
+});
+
+test("clearing either drive repopulates files and settings despite the surviving hidden baseline", async (t) => {
+  for (const clearedSide of ["local", "external"]) {
+    for (const remaining of ["nothing", "metadata", "new-content"]) {
+      await t.test(`${clearedSide}: ${remaining}`, async (t) => {
+        const pair = tempPair(t);
+        const settings = { hidden_upload_keys: ["keep-hidden"], collection_order: ["one"] };
+        const descriptor = path.join(pair.local, "library.json");
+        write(descriptor, JSON.stringify({ ...JSON.parse(fs.readFileSync(descriptor)), settings }));
+        write(path.join(pair.local, "reference", "260909-143218", "video.mp4"), "reference video");
+        const engine = new LibraryBackup({ localRoot: pair.local, externalRoot: pair.external, machineId: "clear-test" });
+        const first = await run(engine, "sync");
+        const cleared = pair[clearedSide];
+        const savedDescriptor = JSON.parse(fs.readFileSync(path.join(cleared, "library.json")));
+        // Only temporary test libraries are removed. The sibling control folder survives.
+        fs.rmSync(cleared, { recursive: true });
+        fs.mkdirSync(cleared);
+        if (remaining !== "nothing") {
+          write(path.join(cleared, "library.json"), JSON.stringify({ ...savedDescriptor, settings: {} }));
+          write(path.join(cleared, "cache", "generated.bin"), "app generated cache");
+        }
+        if (remaining === "new-content") write(path.join(cleared, "upload", "new.png"), "new work");
+        assert.equal(fs.existsSync(first.analysis.paths.syncBaseline), true);
+        const { analysis } = await run(engine, "sync");
+        assert.equal(analysis.initialize, true);
+        assert.equal([...analysis.plan.localToExternal, ...analysis.plan.externalToLocal].some((c) => c.action === "delete"), false);
+        for (const root of [pair.local, pair.external]) {
+          assert.equal(fs.readFileSync(path.join(root, "created", "first", "image.txt"), "utf8"), "image-one");
+          assert.equal(fs.readFileSync(path.join(root, "reference", "260909-143218", "video.mp4"), "utf8"), "reference video");
+          assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, "library.json"))).settings, settings);
+          if (remaining === "new-content") assert.equal(fs.readFileSync(path.join(root, "upload", "new.png"), "utf8"), "new work");
+        }
+        const next = await engine.analyze("sync");
+        assert.equal(next.initialize, false);
+        assert.equal(next.summary.total, 0);
+        assert.equal(next.settingsPlan.changed, 0);
+      });
+    }
+  }
+});
+
+test("ordinary individual deletions still synchronize in both directions", async (t) => {
+  const { local, external } = tempPair(t);
+  write(path.join(local, "created", "first", "delete-local.txt"), "one");
+  write(path.join(local, "created", "first", "delete-external.txt"), "two");
+  const engine = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "partial-delete" });
+  await run(engine, "sync");
+  fs.unlinkSync(path.join(local, "created", "first", "delete-local.txt"));
+  fs.unlinkSync(path.join(external, "created", "first", "delete-external.txt"));
+  const { analysis } = await run(engine, "sync");
+  assert.equal(analysis.initialize, false);
+  assert.equal(analysis.plan.localToExternal.filter((c) => c.action === "delete").length, 1);
+  assert.equal(analysis.plan.externalToLocal.filter((c) => c.action === "delete").length, 1);
+  for (const root of [local, external]) {
+    assert.equal(fs.existsSync(path.join(root, "created", "first", "delete-local.txt")), false);
+    assert.equal(fs.existsSync(path.join(root, "created", "first", "delete-external.txt")), false);
+    assert.equal(fs.readFileSync(path.join(root, "created", "first", "image.txt"), "utf8"), "image-one");
+  }
 });
 
 test("Sync automatically merges a post and stores scalar conflicts outside post.json", async (t) => {

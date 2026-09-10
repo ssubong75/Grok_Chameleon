@@ -37,9 +37,9 @@ class SyncStateTests(unittest.TestCase):
         return {"imagine_generated_relations": {"source": {"items": [{"id": "base"}]}},
                 "imagine_local_exclusions": {'["account","asset"]': {"reason": "external_unsave"}}}
 
-    def sync(self, local=None):
+    def sync(self, local=None, **kwargs):
         local = local or self.a
-        return s.synchronize(local, self.usb, self.control / (local.name + ".json"), self.control)
+        return s.synchronize(local, self.usb, self.control / (local.name + ".json"), self.control, **kwargs)
 
     def test_merge_delete_multicomputer_and_noop(self):
         self.put(self.a, self.initial())
@@ -74,6 +74,34 @@ class SyncStateTests(unittest.TestCase):
         self.assertEqual(record["local"], a)
         self.assertEqual(record["external"], b)
         self.assertEqual(s.merge({}, a, b, "", []), s.merge({}, b, a, "", []))
+
+    def test_missing_or_cleared_database_preserves_surviving_rows(self):
+        self.put(self.a, self.initial())
+        self.sync()
+        for side in [self.a, self.usb]:
+            for missing in [True, False]:
+                with self.subTest(side=side.name, missing=missing):
+                    if missing:
+                        (side / "sql_data/state.sqlite3").unlink()
+                    else:
+                        self.put(side, {table: {} for table in s.TABLES})
+                    self.sync()
+                    self.assertEqual(self.state(self.a), self.initial())
+                    self.assertEqual(self.state(self.usb), self.initial())
+                    self.assertEqual(self.sync()["changed"], 0)
+
+    def test_file_initialization_preserves_rows_even_if_app_recreated_some_state(self):
+        self.put(self.a, self.initial())
+        self.sync()
+        recreated = {"imagine_generated_relations": {"new-source": {"items": [{"id": "new"}]}},
+                     "imagine_local_exclusions": {}}
+        self.put(self.usb, recreated)
+        self.sync(initialize=True)
+        expected = self.initial()
+        expected["imagine_generated_relations"].update(recreated["imagine_generated_relations"])
+        self.assertEqual(self.state(self.a), expected)
+        self.assertEqual(self.state(self.usb), expected)
+        self.assertEqual(self.sync()["changed"], 0)
 
     def test_excluded_tables_remain_local(self):
         self.put(self.a, self.initial())

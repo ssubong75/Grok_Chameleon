@@ -160,13 +160,14 @@ def publish_snapshot(root, db):
     finally:
         snapshot.unlink(missing_ok=True)
 
-def synchronize(local, external, baseline_path, control):
+def synchronize(local, external, baseline_path, control, *, initialize=False):
     local, external = Path(local).resolve(), Path(external).resolve()
     if local == external:
         raise ValueError("Same database roots")
     baseline_path, control = Path(baseline_path), Path(control)
     pending = baseline_path.with_suffix(".pending.json")
     paths = [root / "sql_data" / "state.sqlite3" for root in (local, external)]
+    database_missing = any(not db.is_file() for db in paths)
     for db in paths:
         db.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(paths[0], timeout=30, isolation_level=None)
@@ -193,8 +194,13 @@ def synchronize(local, external, baseline_path, control):
         before_local = read_rows(connection, "main")
         before_external = read_rows(connection, "peer")
         baseline = json.loads(baseline_path.read_text(encoding="utf-8")) if baseline_path.exists() else {}
+        cleared = bool(any(baseline.get(table) for table in TABLES) and (
+            not any(before_local[table] for table in TABLES)
+            or not any(before_external[table] for table in TABLES)
+        ))
+        merge_baseline = {} if initialize or database_missing or cleared else baseline
         conflicts = []
-        result = merge(baseline, before_local, before_external, "", conflicts)
+        result = merge(merge_baseline, before_local, before_external, "", conflicts)
         changed = sum(not equal(before_local[t].get(k, MISSING), result[t].get(k, MISSING))
                       or not equal(before_external[t].get(k, MISSING), result[t].get(k, MISSING))
                       for t in TABLES for k in set(before_local[t]) | set(before_external[t]) | set(result[t]))
@@ -227,4 +233,4 @@ def synchronize(local, external, baseline_path, control):
         connection.close()
 
 if __name__ == "__main__":
-    print(canonical(synchronize(*sys.argv[1:5])))
+    print(canonical(synchronize(*sys.argv[1:5], initialize="--initialize" in sys.argv[5:])))

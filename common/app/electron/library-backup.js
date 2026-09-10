@@ -681,15 +681,23 @@ function sameJson(left, right) {
 }
 
 function readLibrarySettings(root) {
-  const library = readJson(path.join(root, "library.json"));
+  const libraryPath = path.join(root, "library.json");
+  // Missing metadata is unknown state, not evidence that every setting was deleted.
+  if (!pathExists(libraryPath)) return null;
+  const library = readJson(libraryPath);
   return isJsonObject(library.settings) ? cloneJson(library.settings) : {};
 }
 
-function writeLibrarySettings(root, settings) {
+function writeLibrarySettings(root, settings, libraryId) {
   const libraryPath = path.join(root, "library.json");
+  const exists = pathExists(libraryPath);
   const library = readJson(libraryPath);
   if (!isJsonObject(library)) throw new LibraryBackupError(`Invalid library.json: ${libraryPath}`, "LIBRARY_JSON_INVALID");
-  if (sameJson(library.settings || {}, settings)) return false;
+  if (exists && sameJson(library.settings || {}, settings)) return false;
+  if (!exists) {
+    if (!libraryId) throw new LibraryBackupError("Library identity is required to restore settings.", "LIBRARY_JSON_INVALID");
+    Object.assign(library, { version: 1, created_at: utcNow(), library_id: libraryId });
+  }
   library.settings = cloneJson(settings);
   writeJsonAtomic(libraryPath, library);
   return true;
@@ -700,6 +708,14 @@ function writeLibrarySettings(root, settings) {
 function buildLibrarySettingsPlan(baselineSettings, localSettings, externalSettings) {
   const MISSING = Symbol("missing setting");
   const base = isJsonObject(baselineSettings) ? baselineSettings : {};
+  if (localSettings === null || externalSettings === null) {
+    const available = localSettings === null ? externalSettings : localSettings;
+    const settings = isJsonObject(available) ? available : base;
+    return {
+      local: cloneJson(settings), external: cloneJson(settings), nextBaseline: cloneJson(settings),
+      conflicts: [], conflictRecords: [], changed: Math.max(1, Object.keys(settings).length),
+    };
+  }
   const local = isJsonObject(localSettings) ? localSettings : {};
   const external = isJsonObject(externalSettings) ? externalSettings : {};
   const localResult = cloneJson(local);
@@ -737,7 +753,13 @@ function buildLibrarySettingsPlan(baselineSettings, localSettings, externalSetti
       changed += 1;
     } else {
       // A single Sync always converges. Local is the active setting for this run.
-      conflictRecords.push({ key, local: cloneJson(localValue), external: cloneJson(externalValue) });
+      conflictRecords.push({
+        key,
+        local: localValue === MISSING ? null : cloneJson(localValue),
+        external: externalValue === MISSING ? null : cloneJson(externalValue),
+        ...(localValue === MISSING ? { local_missing: true } : {}),
+        ...(externalValue === MISSING ? { external_missing: true } : {}),
+      });
       put(localResult, key, localValue);
       put(externalResult, key, localValue);
       put(nextBaseline, key, localValue);
@@ -957,13 +979,15 @@ class LibraryBackup {
     validateDistinctRoots(local, external);
     migrateReferenceStorage(local);
     migrateReferenceStorage(external);
-    const source = direction === "to-local" ? external : local;
-    const destination = direction === "to-local" ? local : external;
+    const sourceIsExternal = direction === "to-local"
+      || (direction === "sync" && !libraryIdentity(local) && Boolean(libraryIdentity(external)));
+    const source = sourceIsExternal ? external : local;
+    const destination = sourceIsExternal ? local : external;
     const libraryId = validateLibraryPair(
       source,
       destination,
-      direction === "to-local" ? "External Library" : "Local Library",
-      direction === "to-local" ? "Local Library" : "External Library",
+      sourceIsExternal ? "External Library" : "Local Library",
+      sourceIsExternal ? "Local Library" : "External Library",
     );
     return { local, external, source, destination, libraryId, paths: metadataPaths(local, external, libraryId, this.machineId) };
   }
@@ -1103,7 +1127,19 @@ class LibraryBackup {
       phase: "Scanning Local Drive",
       includePath: isSyncSourcePath,
     }));
-    const baseline = stored || { records: new Map(), librarySettings: {} };
+    // A missing library descriptor or a completely cleared content tree is an initial
+    // population, not thousands of individual deletions. Old receipts live outside the
+    // library folder and can survive deleting that folder. Apply this decision to files,
+    // settings and durable SQLite rows together; never reuse only part of the old base.
+    const initialize = !pathExists(path.join(context.local, "library.json"))
+      || !pathExists(path.join(context.external, "library.json"))
+      || (local.records.size === 0 && external.records.size > 0)
+      || (external.records.size === 0 && local.records.size > 0)
+      || Boolean(stored?.records.size && (
+        ![...stored.records.keys()].some((key) => local.records.has(key))
+        || ![...stored.records.keys()].some((key) => external.records.has(key))
+      ));
+    const baseline = !initialize && stored ? stored : { records: new Map(), librarySettings: {} };
     const plan = buildSyncPlan(baseline, local, external);
     const settingsPlan = buildLibrarySettingsPlan(
       baseline.librarySettings,
@@ -1135,6 +1171,7 @@ class LibraryBackup {
     plan.merges = merges;
     const summary = summarizeSyncPlan(plan);
     const notices = [];
+    if (initialize && stored) notices.push("A cleared drive was detected. Existing data will be preserved and copied; old deletions will not be applied.");
     if (plan.merges.length) notices.push(`${plan.merges.length} card${plan.merges.length === 1 ? "" : "s"} will merge Build results automatically.`);
     if (plan.conflicts.length) notices.push(`${plan.conflicts.length} file or setting${plan.conflicts.length === 1 ? "" : "s"} changed on both drives and will be left in place while the rest syncs.`);
     const warning = notices.join(" ");
@@ -1142,6 +1179,7 @@ class LibraryBackup {
       direction: "sync",
       ...context,
       syncBaseline: stored,
+      initialize,
       baseline,
       localManifest: local,
       externalManifest: external,
@@ -1422,8 +1460,8 @@ class LibraryBackup {
     }
     if (current.settingsPlan?.changed) {
       this.emit("Applying library settings changed on one drive.", 0, 1, "apply");
-      writeLibrarySettings(current.local, current.settingsPlan.local);
-      writeLibrarySettings(current.external, current.settingsPlan.external);
+      writeLibrarySettings(current.local, current.settingsPlan.local, current.libraryId);
+      writeLibrarySettings(current.external, current.settingsPlan.external, current.libraryId);
     }
     if (current.settingsPlan?.conflictRecords?.length) {
       writeJsonAtomic(path.join(current.paths.settingsConflicts, `${Date.now()}.json`), {
@@ -1486,6 +1524,7 @@ class LibraryBackup {
       const { stdout } = await runStateHelper(this.pythonPath, [
         path.join(__dirname, "..", "runtime", "sync_state.py"),
         current.local, current.external, stateBaseline, current.paths.externalControl,
+        ...(current.initialize ? ["--initialize"] : []),
       ], { env: this.pythonEnv, windowsHide: true, maxBuffer: 1024 * 1024 });
       stateResult = JSON.parse(stdout);
     }

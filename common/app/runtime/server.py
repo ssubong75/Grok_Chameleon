@@ -7359,6 +7359,8 @@ def imagine_error_is_confirmed_not_found(error: Exception) -> bool:
 def imagine_recover_missing_direct_upload_conversation_cards(
     candidates: dict[str, dict],
     account: dict,
+    *,
+    detail_cache: dict[str, dict] | None = None,
 ) -> tuple[list[dict], set[str]]:
     """Recover complete cards only when the exact official detail proves the pairing."""
     if not candidates:
@@ -7369,7 +7371,10 @@ def imagine_recover_missing_direct_upload_conversation_cards(
     # fallback for the exceptional asset-only rows, not a second broad historical sweep.
     with ThreadPoolExecutor(max_workers=min(8, len(candidates))) as executor:
         futures = {
-            executor.submit(imagine_conversation_detail, conversation_id, account, 20): conversation_id
+            executor.submit(
+                lambda key: detail_cache[key] if detail_cache is not None and key in detail_cache
+                else imagine_conversation_detail(key, account, 20), conversation_id,
+            ): conversation_id
             for conversation_id in candidates
         }
         for future in as_completed(futures):
@@ -7390,6 +7395,8 @@ def imagine_recover_missing_direct_upload_conversation_cards(
                         pending.cancel()
                     raise RuntimeError("Imagine Saved refresh incomplete; previous cards retained.") from exc
                 continue
+            if detail_cache is not None:
+                detail_cache[conversation_id] = detail
             post = imagine_saved_post_from_conversation(
                 {"conversationId": conversation_id},
                 detail,
@@ -7757,6 +7764,56 @@ def imagine_filter_saved_membership(posts: list[dict], conversation_ids: set[str
         visible.append({**post, "items": kept_items, "representative_item": representative,
                         "representative": representative.get("url") or representative.get("remote_url") or representative.get("item_id") or ""})
     return visible
+
+
+def imagine_confirm_saved_conversation_membership(
+    posts: list[dict], account: dict, listed_ids: set[str], details: dict[str, dict],
+) -> tuple[set[str], set[str]]:
+    """The paged feed omits live conversations: verify actual results before filtering.
+
+    An asset row alone cannot prove a deleted conversation still exists. Reuse details
+    already fetched on this page; query each remaining owning conversation only once.
+    Liked/clone ownership is handled separately and is never changed by this check.
+    """
+    expected: dict[str, set[str]] = {}
+    for post in posts:
+        if imagine_post_saved_identity(post)[0] != "normal-saved":
+            continue
+        for item in post.get("items") or []:
+            if not isinstance(item, dict) or imagine_item_is_upload_source(item):
+                continue
+            conversation_id = imagine_relation_conversation_id(item)
+            asset_id = imagine_item_asset_id(item)
+            if conversation_id and asset_id and conversation_id not in listed_ids:
+                expected.setdefault(conversation_id, set()).add(asset_id)
+    verified = set(listed_ids)
+    absent: set[str] = set()
+    missing = {key for key in expected if key not in details}
+    if missing:
+        with ThreadPoolExecutor(max_workers=min(8, len(missing))) as executor:
+            futures = {executor.submit(imagine_conversation_detail, key, account, 20): key for key in missing}
+            for future in as_completed(futures):
+                key = futures[future]
+                try:
+                    details[key] = future.result()
+                except Exception as exc:
+                    if imagine_error_is_confirmed_not_found(exc):
+                        details[key] = {}
+                        absent.add(key)
+                    else:
+                        for pending in futures:
+                            pending.cancel()
+                        raise RuntimeError("Imagine Saved refresh incomplete; previous cards retained.") from exc
+    for key, expected_ids in expected.items():
+        actual_ids = {
+            str(asset.get("assetId") or asset.get("id") or "").strip()
+            for response in (details.get(key) or {}).get("responses") or []
+            for asset in response.get("fileAttachmentAssetMetadata") or []
+            if isinstance(asset, dict)
+        }
+        if expected_ids & actual_ids:
+            verified.add(key)
+    return verified, absent
 
 
 def restore_imagine_display_relations(posts: list[dict], root: Path, account: dict) -> list[dict]:
@@ -8201,6 +8258,7 @@ def list_imagine_saved(payload: dict) -> dict:
         imagine_recover_missing_direct_upload_conversation_cards(
             cached_missing_direct_upload_candidates,
             account,
+            detail_cache=details,
         )
     )
     deleted_conversation_ids.update(cached_deleted_conversation_ids)
@@ -8330,6 +8388,7 @@ def list_imagine_saved(payload: dict) -> dict:
         imagine_recover_missing_direct_upload_conversation_cards(
             missing_direct_upload_candidates,
             account,
+            detail_cache=details,
         )
     )
     deleted_conversation_ids.update(asset_deleted_conversation_ids)
@@ -8530,6 +8589,14 @@ def list_imagine_saved(payload: dict) -> dict:
     posts = imagine_filter_deleted_conversation_posts(posts, detached_upload_conversation_ids, deleted_upload_result_ids)
     posts = merge_imagine_saved_lineage_cards(posts)
     posts = imagine_filter_liked_scope_posts(posts, hidden_remote_ids)
+    page_saved_conversation_ids, missing_conversation_ids = imagine_confirm_saved_conversation_membership(
+        posts, account,
+        {str(row.get("conversationId")) for row in raw_conversations
+         if isinstance(row, dict) and row.get("conversationId")},
+        details,
+    )
+    detached_upload_conversation_ids.update(missing_conversation_ids)
+    posts = imagine_filter_saved_membership(posts, page_saved_conversation_ids)
     # Keep the public Saved-page order intact here.  The renderer first collects every
     # page, then calculates each card's latest activity and sorts the complete snapshot
     # once; sorting this fragment would make the upstream order meaningless before that.
@@ -8662,8 +8729,7 @@ def list_imagine_saved(payload: dict) -> dict:
         # discard them only after exact-asset or ownership-verified conversation deletion.
         "confirmed_deleted_pending_asset_ids": sorted(confirmed_deleted_pending_asset_ids | deleted_upload_result_ids),
         "detached_conversation_ids": sorted(detached_upload_conversation_ids),
-        "saved_conversation_ids": [str(row.get("conversationId")) for row in raw_conversations
-                                   if isinstance(row, dict) and row.get("conversationId")],
+        "saved_conversation_ids": sorted(page_saved_conversation_ids),
         "liked_exclusion": imagine_liked_exclusion_payload(root, account, relations),
         "imagine": {
             "id": account.get("id") or "",
