@@ -9390,6 +9390,186 @@ def imagine_foreign_origin_liked_cards(
     return derived
 
 
+def imagine_revalidate_liked_assets(
+    cards: list[dict], account: dict, *, hidden_ids: set[str] | None = None,
+) -> tuple[list[dict], list[dict], dict]:
+    """Revalidate visible assets and restore missing, explicitly recorded clone sources.
+
+    A clone receipt is durable, but its media item lives in a machine-local index. Rebuilding
+    that index can leave the receipt beside a video without the image it records. Cache reads
+    remain offline; every live Liked read verifies these receipts and existing items instead
+    of treating cache membership as proof that a card is complete. Failed reads never delete.
+    """
+    posts = json.loads(json.dumps(cards))
+    hidden = set(hidden_ids or ())
+    records: dict[str, dict] = {}
+    held_by_card: list[list[str]] = []
+    hidden_by_card: list[set[str]] = []
+    replacements_by_card: list[dict[str, str]] = []
+    for post in posts:
+        metadata = post.get("metadata") or {}
+        card_hidden = set(hidden)
+        if metadata.get("source_hidden_in_bundle") and metadata.get("upload_source_asset_id"):
+            card_hidden.add(str(metadata["upload_source_asset_id"]))
+        hidden_by_card.append(card_hidden)
+        batch_records = imagine_normalize_external_clone_records(metadata.get("official_clone_assets"))
+        for item in post.get("items") or []:
+            record = imagine_item_clone_record(item)
+            if record:
+                batch_records.append(record)
+        replacements_by_card.append({r["source_asset_id"]: r["asset_id"] for r in batch_records})
+        held = list(dict.fromkeys([
+            *(imagine_item_asset_id(item) for item in post.get("items") or []),
+            *(r["asset_id"] for r in batch_records),
+        ]))
+        held_by_card.append([asset_id for asset_id in held if asset_id and asset_id not in card_hidden])
+        for record in batch_records:
+            records.setdefault(record["asset_id"], record)
+
+    def fetch(asset_id: str) -> tuple[dict | None, str, bool]:
+        try:
+            data = imagine_get_json(f"/rest/assets/{quote(asset_id, safe='')}", account, timeout=12)
+            asset = data.get("asset") if isinstance(data.get("asset"), dict) else data
+            if not isinstance(asset, dict) or str(asset.get("assetId") or asset.get("id") or "") != asset_id:
+                raise RuntimeError("Asset detail did not match the requested id.")
+            if asset.get("isDeleted") is True:
+                return None, "", True
+            post = imagine_unsaved_post_from_asset(asset, account)
+            if not post or not post.get("items"):
+                raise RuntimeError("Asset detail did not contain usable media.")
+            return post["items"][0], "", False
+        except Exception as exc:
+            error = str(exc)[:300]
+        # A detail 404 is not an asset deletion: the CDN can still serve the exact media
+        # returned by clone-batch. Verify that recorded URL before restoring its item.
+        record = records.get(asset_id, {})
+        media_url = str(record.get("media_url") or "")
+        mime = str(record.get("media_type") or "")
+        kind = "image" if mime.startswith("image") else "video" if mime.startswith("video") else ""
+        if media_url and kind:
+            try:
+                if imagine_remote_media_available(media_url, account, kind, timeout=8):
+                    restored = imagine_unsaved_post_from_asset({
+                        "assetId": asset_id, "key": media_url, "mimeType": mime,
+                        "sourceConversationId": record.get("conversation_id") or "",
+                        "auxKeys": {"duplicated_from_asset_id": record.get("source_asset_id") or ""},
+                    }, account)
+                    if restored and restored.get("items"):
+                        return restored["items"][0], error, False
+            except Exception:
+                pass
+        return None, error, False
+
+    fresh: dict[str, dict] = {}
+    checked: set[str] = set()
+    deleted: set[str] = set()
+    errors: list[dict] = []
+
+    def fetch_many(asset_ids: set[str]) -> None:
+        wanted = sorted(asset_ids - checked - hidden)
+        if not wanted:
+            return
+        checked.update(wanted)
+        with ThreadPoolExecutor(max_workers=min(8, len(wanted))) as executor:
+            futures = {executor.submit(fetch, asset_id): asset_id for asset_id in wanted}
+            for future in as_completed(futures):
+                asset_id = futures[future]
+                item, error, is_deleted = future.result()
+                if item:
+                    fresh[asset_id] = item
+                if is_deleted:
+                    deleted.add(asset_id)
+                if error:
+                    errors.append({"asset_id": asset_id, "stage": "asset_revalidation", "error": error})
+
+    fetch_many({asset_id for held in held_by_card for asset_id in held})
+    # Follow only parents declared by the current official response. Translate a foreign
+    # parent through this card's exact clone receipt; shared conversations are not edges.
+    for _ in range(8):
+        parents: set[str] = set()
+        changed = False
+        for held, replacements, card_hidden in zip(held_by_card, replacements_by_card, hidden_by_card):
+            known = set(held)
+            for asset_id in list(held):
+                evidence = imagine_item_official_lineage(fresh.get(asset_id, {}))
+                for source_id in evidence.get("source_ids") or []:
+                    # A copied image can still describe the foreign original's ancestors.
+                    # Only members of this exact clone batch belong beside its copied
+                    # video; importing those external ancestors joins unrelated copies.
+                    if asset_id in records and source_id not in replacements and source_id not in known:
+                        continue
+                    parent = replacements.get(source_id, source_id)
+                    if not parent or parent in known or parent in card_hidden or parent in deleted:
+                        continue
+                    held.append(parent)
+                    known.add(parent)
+                    parents.add(parent)
+                    changed = True
+        if not changed:
+            break
+        fetch_many(parents)
+
+    recovered: set[str] = set()
+    output: list[dict] = []
+    for post, held in zip(posts, held_by_card):
+        existing = {imagine_item_asset_id(item): item for item in post.get("items") or []}
+        items = []
+        for asset_id in held:
+            if asset_id in hidden or asset_id in deleted:
+                continue
+            previous = existing.get(asset_id)
+            current = fresh.get(asset_id)
+            if not current:
+                if previous:
+                    items.append(previous)
+                continue
+            item = dict(previous or current)
+            for key in ("type", "url", "remote_url", "object_url", "thumbnail_url", "mime_type"):
+                if current.get(key):
+                    item[key] = current[key]
+            metadata = dict(item.get("metadata") or {})
+            imagine = dict(metadata.get("imagine") or {})
+            current_metadata = current.get("metadata") or {}
+            current_imagine = current_metadata.get("imagine") or {}
+            for key in ("remote_url", "media_url", "owner_user_id", "account_id", "account_email"):
+                if current_metadata.get(key):
+                    metadata[key] = current_metadata[key]
+            for key in ("media_url", "media_type", "owner_user_id", "cloned_from_asset_id"):
+                if current_imagine.get(key):
+                    imagine[key] = current_imagine[key]
+            receipt = records.get(asset_id, {})
+            if receipt.get("source_asset_id"):
+                imagine.setdefault("cloned_from_asset_id", receipt["source_asset_id"])
+                if not item.get("conversation_id"):
+                    item["conversation_id"] = receipt.get("conversation_id") or ""
+            metadata["imagine"] = imagine
+            item["metadata"] = metadata
+            item = imagine_apply_official_item_lineage(item, imagine_item_official_lineage(current))
+            if not previous:
+                # A missing receipt has no trustworthy new activity time. Restoring its
+                # original must not move an old card to the top as if it were just generated.
+                item["created_at"] = post.get("created_at") or item.get("created_at") or ""
+                recovered.add(asset_id)
+            item["liked"] = True
+            item["favorite"] = True
+            items.append(item)
+        # Pending/failed UI slots can have no remote asset id yet. They are not candidates
+        # for an official asset lookup and must survive alongside their existing family.
+        items.extend(item for item in post.get("items") or [] if not imagine_item_asset_id(item))
+        if not items:
+            continue
+        post["items"] = items
+        representative = imagine_representative_item(items) or items[-1]
+        post["representative_item"] = representative
+        post["representative"] = representative.get("url") or representative.get("item_id") or ""
+        output.append(post)
+    output = merge_imagine_liked_lineage_cards(imagine_group_external_clone_batch_cards(output))
+    return output, errors, {
+        "checked": len(checked), "verified": len(fresh), "recovered": len(recovered),
+        "confirmed_deleted_asset_ids": sorted(deleted),
+    }
+
+
 # The Liked view on grok.com is two steps: the collection hands back bare asset ids, then
 # each one is looked up for its media. Nothing about it goes through /rest/media/post/list,
 # and the assets stay under their original owner, so this cannot be served from the saved
@@ -9465,14 +9645,9 @@ def list_imagine_liked(payload: dict) -> dict:
     # after another put a card's worth of round trips — measured at ~2s — between the button
     # and every single card. The saved list has fetched its conversation details in parallel
     # for the same reason; do the same here so the wait stops growing with the collection.
-    # Parallel only divided that cost; it still paid it for every entry on every open, so a
-    # collection of 60 took ~10s whether or not anything had changed, and the wait grew as
-    # it filled. A card already in the cache has not changed because the view was opened
-    # again -- what changes it is a heart, and that goes through this same function. So
-    # reuse the cached card and spend round trips only on entries the cache has never seen:
-    # right after a clone-batch that is the handful of ids it just added, not the whole
-    # collection. Fewer requests is also the point on its own; the collection listing is
-    # where 403s have shown up.
+    # Reuse cached card structure to avoid repeating the multi-endpoint media-post loader.
+    # This does not prove the card is complete or current: the live asset revalidation
+    # below checks its media, source edges, and clone receipts on every Liked read.
     ensure_imagine_state_migrated(root)
     cached_relations = imagine_state.load_generated_relations(root)
     reusable_posts: list[dict] = []
@@ -9781,6 +9956,19 @@ def list_imagine_liked(payload: dict) -> dict:
     posts = merge_imagine_liked_lineage_with_saved_cache(
         root, account, posts, hidden_ids=liked_hidden_ids,
     )
+    liked_hidden_ids.update(
+        str(asset_id) for record in cached_relations.values()
+        if isinstance(record, dict) and str(record.get("account_key") or "").strip().lower() == imagine_account_settings_key(account)
+        for asset_id in record.get("source_deleted_asset_ids") or [] if asset_id
+    )
+    posts, asset_errors, asset_check = imagine_revalidate_liked_assets(
+        posts, account, hidden_ids=liked_hidden_ids,
+    )
+    errors.extend(asset_errors)
+    # A user can delete/hide media while the remote read is in progress. Do not write
+    # that media back from an earlier snapshot after the requests finish.
+    current_hidden_ids = imagine_pending_delete_ids(root, account) | imagine_local_exclusion_ids(root, account)
+    posts = imagine_filter_deleted_conversation_posts(posts, set(), current_hidden_ids)
     # Liked follows the same card-activity order as the rest of the app.  The
     # collection fetch order must not outrank a newer generation (including a
     # failed/moderated one).
@@ -9800,6 +9988,7 @@ def list_imagine_liked(payload: dict) -> dict:
         "errors": len(errors),
         "membership_complete": bool(membership.get("complete")),
         "complete": complete,
+        "asset_revalidation": asset_check,
     })
     return {
         "ok": True,
@@ -9807,6 +9996,8 @@ def list_imagine_liked(payload: dict) -> dict:
         "errors": errors,
         "collection_id": str(membership.get("collection_id") or ""),
         "next_cursor": str(membership.get("next_cursor") or ""),
+        "asset_revalidation": asset_check,
+        "confirmed_deleted_asset_ids": asset_check["confirmed_deleted_asset_ids"],
         "has_more": bool(membership.get("has_more")),
         "membership_complete": bool(membership.get("complete")),
         "complete": complete,

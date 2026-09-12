@@ -2259,7 +2259,7 @@ async function loadImagineSavedCards({ force = false, append = false } = {}) {
     library_state.imagineRemoteError = "";
     completed = true;
   } catch (error) {
-    if (!imagineSavedRequestCancelled(error, context) && !library_state.imagineRemotePosts.length) {
+    if (!imagineSavedRequestCancelled(error, context)) {
       library_state.imagineRemoteError = error?.message || "Imagine saved list failed.";
     }
   } finally {
@@ -2568,6 +2568,12 @@ async function loadImagineLikedCards({ force = false } = {}) {
     const data = await qApi("/api/imagine/liked", { account_id: accountId, limit: 100 });
     if (!imagineAccountResponseIsCurrent(accountId, requestEpoch, data)) return;
     applyImagineLikedExclusionSnapshot(data, accountId);
+    const confirmedDeleted = new Set(data.confirmed_deleted_asset_ids || []);
+    if (confirmedDeleted.size) {
+      library_state.imagineLikedPosts = removeImagineConfirmedDeletedPendingItems(
+        library_state.imagineLikedPosts || [], confirmedDeleted,
+      );
+    }
     const livePosts = (Array.isArray(data.posts) ? data.posts : []).map(normalizeServerPost);
     library_state.imagineLikedPosts = reconcileImagineLikedLineagePosts(
       mergeImagineSyncedPosts(
@@ -2580,7 +2586,13 @@ async function loadImagineLikedCards({ force = false } = {}) {
       ),
     );
     library_state.imagineLikedLoaded = true;
+    if (data.errors?.length) {
+      library_state.imagineLikedError = "Some media could not be verified with Grok. Existing cards were retained; refresh to retry.";
+    }
     syncImagineRemotePostsIntoLibrary();
+    if (screen_state.current_screen === "i_detail" && typeof renderDetailViews === "function") {
+      renderDetailViews({ activeOnly: true });
+    }
   } catch (error) {
     if (imagineAccountResponseIsCurrent(accountId, requestEpoch)) {
       library_state.imagineLikedError = error?.message || "Imagine liked failed.";
