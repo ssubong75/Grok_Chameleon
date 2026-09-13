@@ -244,6 +244,8 @@ composerAttach?.addEventListener("click", () => {
   }
 });
 
+document.getElementById("composer_upload_to_card")?.addEventListener("change", updateComposerFileAccept);
+
 document.getElementById("image_files")?.addEventListener("change", (event) => {
   setComposerFiles(event.target.files).catch((error) => {
     console.warn(error);

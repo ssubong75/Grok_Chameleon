@@ -29181,6 +29181,14 @@ def save_composer_uploads(payload: dict) -> dict:
     if not files:
         raise RuntimeError("Upload file is missing.")
     to_card = payload.get("provider") == "build" and payload.get("to_card") is not False
+    if payload.get("provider") == "build" and not to_card:
+        for file_payload in files:
+            if not isinstance(file_payload, dict):
+                continue
+            data_url = str(file_payload.get("data_url") or "").strip()
+            mime_type = data_url_mime_type(data_url) or str(file_payload.get("type") or "").strip().lower()
+            if mime_type.startswith("video/"):
+                raise RuntimeError("Enable To Card to upload a video.")
     saved_refs: list[tuple[str, str]] = []
     date_name = datetime.now().strftime("%Y-%m-%d")
     upload_root = root / "upload" / date_name
@@ -29203,7 +29211,7 @@ def save_composer_uploads(payload: dict) -> dict:
         upload_hash = hashlib.sha256(raw).hexdigest()
         existing = find_uploaded_media_by_hash(root, upload_hash)
         if existing:
-            if to_card and media_type == "image":
+            if to_card:
                 post_path = safe_join(root, existing[0]) / "post.json"
                 post = read_json(post_path, {})
                 if not post.get("build_upload_card"):
@@ -29245,7 +29253,7 @@ def save_composer_uploads(payload: dict) -> dict:
             "mode": "upload",
             "title": title,
             "prompt": "",
-            "build_upload_card": to_card and media_type == "image",
+            "build_upload_card": to_card,
             "created_at": now,
             "updated_at": now,
             "folder_path": rel_folder,

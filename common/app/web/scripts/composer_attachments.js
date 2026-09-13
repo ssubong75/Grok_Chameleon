@@ -130,12 +130,13 @@
 
   function updateComposerFileAccept() {
     const input = document.getElementById("image_files");
-    const videoEdit = isComposerVideoEditMode();
-    if (input) input.accept = videoEdit
-      ? "image/*,video/mp4,video/webm,video/quicktime,video/*"
+    const build = composerState.provider === "build";
+    const toCard = document.getElementById("composer_upload_to_card")?.checked !== false;
+    if (input) input.accept = build && !toCard
+      ? "image/*"
       : "image/*,video/mp4,video/webm,video/quicktime,video/*";
     const uploadTitle = document.querySelector("#composer_upload_box strong");
-    if (uploadTitle) uploadTitle.textContent = "Image";
+    if (uploadTitle) uploadTitle.textContent = build ? "Image or Video" : "Image";
     const toCardOption = document.getElementById("composer_upload_to_card_option");
     if (toCardOption) toCardOption.hidden = false;
   }
@@ -1133,9 +1134,14 @@
       accountId: typeof activeImagineAccountId === "function" ? activeImagineAccountId() : "",
       toCard: document.getElementById("composer_upload_to_card")?.checked !== false,
     };
+    let skippedVideo = false;
     for (const file of Array.from(files || [])) {
       const type = file.type || (mediaTypeForName(file.name) === "video" ? "video/mp4" : "image/jpeg");
       if (!type.startsWith("image/") && !type.startsWith("video/")) continue;
+      if (uploadOptions.provider === "build" && !uploadOptions.toCard && type.startsWith("video/")) {
+        skippedVideo = true;
+        continue;
+      }
       if (isComposerVideoEditMode() && type.startsWith("video/")) {
         for (let index = composerAttachments.length - 1; index >= 0; index -= 1) {
           if (isComposerVideoAttachment(composerAttachments[index])) removeComposerAttachmentAt(index, { markDismissed: false });
@@ -1169,4 +1175,5 @@
     }
     trimComposerAttachmentsToLimit();
     renderComposerAttachments();
+    if (skippedVideo) setLibraryMessage("Enable To Card to upload a video.");
   }
