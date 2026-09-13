@@ -413,7 +413,12 @@ def _is_build_visible(post: dict) -> bool:
     source = str(post.get("source") or "")
     if area == "collection":
         return any(_item_has_build_media(item) for item in (post.get("items") or []) if isinstance(item, dict))
-    if area == "upload" or source == "imagine":
+    if area == "upload":
+        return not post.get("build_upload_replaced_by") and bool(post.get("build_upload_card")) and any(
+            _item_has_build_media(item)
+            for item in (post.get("items") or []) if isinstance(item, dict)
+        )
+    if source == "imagine":
         return False
     if source != "build" and area != "created":
         return False
@@ -427,7 +432,7 @@ def _is_job_parent_visible(post: dict, active_source_paths: frozenset[str] = fro
     여러 쿼리가 공유하므로, 거기에 업로드를 섞으면 그 화면들까지 오염된다.
     이 플래그는 빌드메인(컬렉션 끔) 목록에서만 합쳐 쓴다.
     """
-    if str(post.get("area") or "") != "upload":
+    if str(post.get("area") or "") != "upload" or post.get("build_upload_replaced_by"):
         return False
     # 모더/실패 이력은 post.json에 영구 기록되므로 job 메모리와 무관하게 유지된다.
     if post.get("build_job_failed"):

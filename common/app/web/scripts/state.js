@@ -242,6 +242,7 @@ document.documentElement.classList.toggle("platform-macos", isMacRenderer);
       imagineSearchError: "",
       imagineHiddenRemotePostIds: new Set(),
       imagineUploadPosts: [],
+      composerUploadCards: [],
       imagineUploadLoaded: false,
       imagineUploadLoading: false,
       imagineUploadError: "",
@@ -635,6 +636,7 @@ document.documentElement.classList.toggle("platform-macos", isMacRenderer);
 
   function applyLibrarySnapshot(data, options = {}) {
     if (!data) return;
+    if (Array.isArray(data.composer_upload_cards)) library_state.composerUploadCards = data.composer_upload_cards;
     library_state.rootPath = data.library_root || "";
     library_state.rootName = data.root_name || (library_state.rootPath.split(/[\\/]/).filter(Boolean).pop() || "");
     library_state.library = mergeLibraryJson(data.library || {});
@@ -861,6 +863,7 @@ document.documentElement.classList.toggle("platform-macos", isMacRenderer);
       && memo.discoverPosts === library_state.imagineDiscoverPosts
       && memo.unsavedPosts === library_state.imagineUnsavedPosts
       && memo.searchPosts === library_state.imagineSearchPosts
+      && memo.composerUploadCards === library_state.composerUploadCards
       && memo.uploadPosts === library_state.imagineUploadPosts
       && memo.likedPosts === library_state.imagineLikedPosts
     ) {
@@ -904,7 +907,10 @@ document.documentElement.classList.toggle("platform-macos", isMacRenderer);
     library_state.imagineSearchPosts = searchPosts;
     library_state.imagineUploadPosts = uploadPosts;
     library_state.imagineLikedPosts = likedPosts;
-    const posts = [...localPosts, ...savedDisplayPosts, ...discoverPosts, ...unsavedPosts, ...searchPosts, ...uploadPosts, ...likedPosts];
+    const composerPosts = typeof imagineComposerDisplayPosts === "function"
+      ? imagineComposerDisplayPosts(savedDisplayPosts) : savedDisplayPosts;
+    const composerPaths = new Set(composerPosts.map(post => post.folder_path));
+    const posts = [...localPosts.filter(post => !composerPaths.has(post.folder_path)), ...composerPosts, ...discoverPosts, ...unsavedPosts, ...searchPosts, ...uploadPosts, ...likedPosts];
     library_state.posts = posts;
     if (library_state.selectedPostIdentity) {
       const selectedPost = posts.find((post) => (
@@ -923,6 +929,7 @@ document.documentElement.classList.toggle("platform-macos", isMacRenderer);
       unsavedPosts,
       searchPosts,
       uploadPosts,
+      composerUploadCards: library_state.composerUploadCards,
       likedPosts,
     };
   }

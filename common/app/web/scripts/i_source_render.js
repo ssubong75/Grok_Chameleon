@@ -1,4 +1,92 @@
 // Imagine source list filtering and rendering
+// Local upload placeholders are kept outside the official Saved list. Once generated,
+// only the source returned with that generation is allowed into its replacement card.
+function imagineComposerItemIds(item) {
+  const metadata = item?.metadata || {};
+  const imagine = metadata.imagine || {};
+  return [item?.item_id, item?.asset_id, item?.post_id, metadata.asset_id, imagine.asset_id]
+    .map(value => String(value || "").trim()).filter(Boolean);
+}
+
+function imagineComposerSourceItem(item) {
+  return Boolean(item?.official_upload_source || item?.metadata?.official_upload_source
+    || ["source", "upload"].includes(String(item?.role || item?.metadata?.role || ""))
+    || item?.relation === "upload");
+}
+
+function imagineComposerRecordPosts(record) {
+  return Object.values(record?.results || {}).filter(result => result?.post);
+}
+
+function imagineComposerDisplayPosts(remotePosts) {
+  const accountId = String(activeImagineSavedAccount()?.id || "");
+  const posts = [...remotePosts];
+  for (const record of library_state.composerUploadCards || []) {
+    if (record.account_id !== accountId) continue;
+    const results = imagineComposerRecordPosts(record);
+    if (!results.length) {
+      if (record.post) posts.push(normalizeServerPost({ ...record.post, account_id: accountId }));
+      continue;
+    }
+    for (const result of results) {
+      const sourceItems = (result.post.items || []).filter(imagineComposerSourceItem);
+      const generatedIds = new Set((result.post.items || []).filter(item => !imagineComposerSourceItem(item)).flatMap(imagineComposerItemIds));
+      const index = posts.findIndex(post => (post.items || []).some(item => imagineComposerItemIds(item).some(id => generatedIds.has(id))));
+      if (index >= 0) {
+        const remote = posts[index];
+        const existingIds = new Set((remote.items || []).flatMap(imagineComposerItemIds));
+        const missingSources = sourceItems.filter(item => !imagineComposerItemIds(item).some(id => existingIds.has(id)));
+        const visibleIds = new Set(posts.flatMap(post => (post.items || []).flatMap(imagineComposerItemIds)));
+        const pendingResults = result.confirmed ? [] : (result.post.items || []).filter(item => (
+          !imagineComposerSourceItem(item) && !imagineComposerItemIds(item).some(id => visibleIds.has(id))
+        ));
+        if (missingSources.length || pendingResults.length) posts[index] = normalizeServerPost({
+          ...remote, items: [...missingSources, ...(remote.items || []), ...pendingResults],
+        });
+      } else if (!result.confirmed) {
+        // Saved can lag behind a successful generation. Persist this official-source
+        // bundle until Saved confirms it, including across restarts.
+        posts.push(normalizeServerPost(result.post));
+      }
+    }
+  }
+  return posts.sort(comparePostsByRecentActivity);
+}
+
+function confirmImagineComposerCards(officialPosts, accountId) {
+  const confirmations = [];
+  for (const record of library_state.composerUploadCards || []) {
+    if (record.account_id !== accountId) continue;
+    for (const [resultKey, result] of Object.entries(record.results || {})) {
+      if (result.confirmed || !result.post || result.confirming) continue;
+      const sourceIds = new Set((result.post.items || []).filter(imagineComposerSourceItem).flatMap(imagineComposerItemIds));
+      const generatedIds = new Set((result.post.items || []).filter(item => !imagineComposerSourceItem(item)).flatMap(imagineComposerItemIds));
+      const matched = officialPosts.some(post => {
+        const ids = new Set((post.items || []).flatMap(imagineComposerItemIds));
+        return [...sourceIds].some(id => ids.has(id)) && [...generatedIds].every(id => ids.has(id));
+      });
+      if (matched && generatedIds.size && sourceIds.size) {
+        result.confirming = true;
+        confirmations.push({ key: record.key, result_key: resultKey });
+      }
+    }
+  }
+  if (!confirmations.length) return;
+  qApi("/api/uploads/card-confirm", { account_id: accountId, confirmations }).then(() => {
+    for (const confirmation of confirmations) {
+      const record = (library_state.composerUploadCards || []).find(record => record.key === confirmation.key);
+      const result = record?.results?.[confirmation.result_key];
+      if (result) { result.confirmed = true; delete result.confirming; }
+    }
+  }).catch(error => {
+    for (const record of library_state.composerUploadCards || []) {
+      for (const result of Object.values(record.results || {})) delete result.confirming;
+    }
+    console.warn(error);
+  });
+}
+
+
 const IMAGINE_VIRTUAL_LIST_KEY = "imagine-main";
 const IMAGINE_DISCOVER_VIRTUAL_LIST_KEY = "imagine-discover";
 const IMAGINE_UNSAVED_VIRTUAL_LIST_KEY = "imagine-unsaved";
@@ -2122,6 +2210,7 @@ function applyImagineSavedOfficialPage(data, { replacesList = false } = {}) {
       imagineSavedMembershipByAccount.get(imaginePendingSavedAccountId()),
     );
   }
+  confirmImagineComposerCards(remotePosts, imaginePendingSavedAccountId());
   if (data.has_more === false) saveImagineSavedDisplayCache();
   syncImagineRemotePostsIntoLibrary();
   if (screen_state.current_screen === "i_detail" && typeof renderDetailViews === "function") {
@@ -2694,7 +2783,7 @@ function imagineSourcePosts() {
         !isImagineT2iGroupContainer(post)
       ));
     }
-    return imagineSavedVisiblePostsMemoResult;
+    return imagineComposerDisplayPosts(imagineSavedVisiblePostsMemoResult);
   }
   return [];
 }
@@ -2715,7 +2804,7 @@ function imagineVisibleJobs() {
 }
 
 function renderImagineSourceCards() {
-  if (library_state.imagineRemotePosts?.length) syncImagineRemotePostsIntoLibrary();
+  if (library_state.imagineRemotePosts?.length || library_state.composerUploadCards?.length) syncImagineRemotePostsIntoLibrary();
   const uploadView = library_state.iMainView === imagineViewValue("UPLOAD", "upload");
   if (
     uploadView

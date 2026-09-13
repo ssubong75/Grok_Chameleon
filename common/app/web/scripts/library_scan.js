@@ -195,6 +195,8 @@
       split_from_post_id: meta?.split_from_post_id || "",
       account_id: meta?.account_id || postField(meta, "imagine_account_id") || "",
       account_email: meta?.account_email || postField(meta, "imagine_account_email") || "",
+      build_upload_card: Boolean(meta?.build_upload_card),
+      build_upload_replaced_by: meta?.build_upload_replaced_by || [],
       folder_path: context.path,
       collection: context.collection || null,
       area: context.area,

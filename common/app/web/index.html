@@ -593,11 +593,17 @@
 
         <section id="composer" class="composer" aria-label="Create media">
           <div id="composer_upload_tray" class="composer_upload_tray" hidden aria-label="Attachments">
-            <label class="composer_upload_box" id="composer_upload_box">
-              <input id="image_files" type="file" accept="image/*,video/mp4,video/webm,video/quicktime,video/*" multiple />
-              <img src="./assets/icons/upload-plus.svg" alt="" />
-              <span><strong>Image</strong><small>Upload or Drop</small></span>
-            </label>
+            <div class="composer_upload_box" id="composer_upload_box">
+              <label class="composer_upload_picker">
+                <input id="image_files" type="file" accept="image/*,video/mp4,video/webm,video/quicktime,video/*" multiple />
+                <img src="./assets/icons/upload-plus.svg" alt="" />
+                <span><strong>Image</strong><small>Upload or Drop</small></span>
+              </label>
+              <label id="composer_upload_to_card_option" class="composer_upload_to_card" hidden>
+                <input id="composer_upload_to_card" type="checkbox" checked />
+                To Card
+              </label>
+            </div>
             <div id="composer_upload_thumb_list" class="composer_upload_thumb_list" aria-label="Recent uploads">
             </div>
             <div id="composer_attached_list" class="composer_attached_list" aria-label="Selected attachments">

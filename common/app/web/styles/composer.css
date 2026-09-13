@@ -70,7 +70,7 @@
 .composer_upload_box {
   position: relative;
   display: grid;
-  gap: 5px;
+  gap: 13px;
   place-content: center;
   place-items: center;
   align-self: stretch;
@@ -91,10 +91,42 @@
   background: #303030;
 }
 
-.composer_upload_box input {
+.composer_upload_picker {
+  display: grid;
+  place-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+
+.composer_upload_box input[type="file"] {
   position: absolute;
   inset: 0;
   opacity: 0;
+  cursor: pointer;
+}
+
+.composer_upload_to_card {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+  color: var(--soft);
+  font-size: 12px;
+  font-weight: 720;
+  cursor: pointer;
+}
+
+.composer_upload_to_card[hidden] {
+  display: none;
+}
+
+.composer_upload_to_card input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--text);
   cursor: pointer;
 }
 

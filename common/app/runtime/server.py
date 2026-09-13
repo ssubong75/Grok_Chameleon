@@ -293,6 +293,7 @@ BUILD_JOBS: dict[str, dict] = {}
 BUILD_JOB_LOCK = threading.Lock()
 BUILD_T2I_FILE_LOCK = threading.Lock()
 BUILD_POST_SAVE_LOCKS = tuple(threading.Lock() for _ in range(64))
+COMPOSER_CARD_LOCK = threading.RLock()
 COLLECTION_MOVE_LOCK = threading.Lock()
 IMAGINE_JOBS: dict[str, dict] = {}
 IMAGINE_JOB_LOCK = threading.Lock()
@@ -19879,6 +19880,7 @@ def imagine_native_bridge_generate(
 
 
 def imagine_direct_generate(payload: dict, progress_callback=None, cancel_checker=None) -> dict:
+    payload = prepare_imagine_composer_upload(payload)
     job_started_at = time.time()
     root = library_root()
     if not root:
@@ -19952,7 +19954,7 @@ def imagine_direct_generate(payload: dict, progress_callback=None, cancel_checke
             "selected_item_id": item.get("item_id") or "",
             "request_id": request_id,
         }
-    return imagine_native_bridge_generate(
+    result = imagine_native_bridge_generate(
         payload,
         account,
         prompt,
@@ -19962,6 +19964,8 @@ def imagine_direct_generate(payload: dict, progress_callback=None, cancel_checke
         progress_callback=progress_callback,
         cancel_checker=cancel_checker,
     )
+    persist_imagine_composer_result(root, payload, account, result)
+    return result
 
 
 def imagine_job_snapshot(job: dict) -> dict:
@@ -20030,6 +20034,9 @@ def imagine_direct_result_is_moderated(result) -> bool:
     if isinstance(item, dict):
         candidates.append(item)
     candidates.extend(candidate for candidate in (result.get("items") or []) if isinstance(candidate, dict))
+    generated = [candidate for candidate in candidates if not imagine_item_is_upload_source(candidate)]
+    if successful_composer_items(generated):
+        return False
     for candidate in candidates:
         metadata = candidate.get("metadata") if isinstance(candidate.get("metadata"), dict) else {}
         imagine_metadata = metadata.get("imagine") if isinstance(metadata.get("imagine"), dict) else {}
@@ -21418,6 +21425,8 @@ def post_from_folder(root: Path, folder: Path, context: dict) -> dict | None:
         "account_id": (meta or {}).get("account_id") or post_field(meta, "imagine_account_id") or "",
         "account_email": (meta or {}).get("account_email") or post_field(meta, "imagine_account_email") or "",
         "build_job_failed": bool((meta or {}).get("build_job_failed")),
+        "build_upload_card": bool((meta or {}).get("build_upload_card")),
+        "build_upload_replaced_by": (meta or {}).get("build_upload_replaced_by") or [],
         "build_favorite": bool((meta or {}).get("build_favorite") or (meta or {}).get("favorite") or (meta or {}).get("liked")),
         "favorite": bool((meta or {}).get("favorite") or (meta or {}).get("build_favorite") or (meta or {}).get("liked")),
         "order": safe_int((meta or {}).get("order"), 0),
@@ -21812,6 +21821,7 @@ def indexed_library_snapshot(root: Path, *, include_posts: bool = False) -> dict
             "enabled": True,
             "counts": library_index.counts(root),
         },
+        "composer_upload_cards": imagine_composer_card_snapshot(root),
     })
 
 
@@ -24193,6 +24203,8 @@ def post_json_from_post(post: dict, **overrides) -> dict:
         "account_id": overrides.get("account_id", post.get("account_id") or ""),
         "account_email": overrides.get("account_email", post.get("account_email") or ""),
         "build_job_failed": bool(overrides.get("build_job_failed", post.get("build_job_failed") or False)),
+        "build_upload_card": bool(overrides.get("build_upload_card", post.get("build_upload_card") or False)),
+        "build_upload_replaced_by": overrides.get("build_upload_replaced_by", post.get("build_upload_replaced_by") or []),
         "build_favorite": bool(overrides.get("build_favorite", post.get("build_favorite") or post.get("favorite") or post.get("liked") or False)),
         "favorite": bool(overrides.get("favorite", overrides.get("build_favorite", post.get("favorite") or post.get("build_favorite") or post.get("liked") or False))),
         "order": safe_int(overrides.get("order", post.get("order")), 0),
@@ -25120,9 +25132,11 @@ def build_post_save_lock(folder: Path) -> threading.Lock:
 def build_append_target(root: Path, action: str, source_attachments: list[dict]) -> tuple[Path, str] | None:
     if action not in {"i2i", "i2v", "extend", "video_edit"}:
         return None
+    if source_attachments and composer_upload_path(source_attachments[0]):
+        return None
     for attachment in source_attachments:
         rel_path = str(attachment.get("detail_post_path") or "").strip()
-        if not rel_path:
+        if not rel_path or rel_path.startswith("upload/"):
             continue
         try:
             folder = safe_join(root, rel_path)
@@ -25180,15 +25194,15 @@ def build_result_source_item_id(
     existing_items: list[dict],
     target_folder_path: str,
 ) -> str:
-    """Return the local source item a generated video must point to for its card poster."""
+    """Return the saved source item that owns this generated image or video."""
     target_type = ""
-    if action == "i2v":
+    if action in {"i2i", "i2v"}:
         image_sources = [
             attachment for attachment in source_attachments
             if attachment_media_type_for_save(attachment, "") == "image"
         ]
         # Reference-to-video has no single start image.  Do not invent one.
-        if len(image_sources) != 1:
+        if not image_sources or (action == "i2v" and len(image_sources) != 1):
             return ""
         source_attachment = image_sources[0]
         target_type = "image"
@@ -26465,7 +26479,7 @@ def build_generate(payload: dict, progress_callback=None, cancel_checker=None) -
             folder_path,
         )
         for item in saved_result_items:
-            if item.get("type") != "video" or not result_source_item_id:
+            if item.get("type") not in {"image", "video"} or not result_source_item_id:
                 continue
             item["source_item_id"] = result_source_item_id
             item["source_post_path"] = folder_path
@@ -26497,7 +26511,8 @@ def build_generate(payload: dict, progress_callback=None, cancel_checker=None) -
             post_json["build_requests"] = append_build_request_history(existing_post, request_record)
         write_json(folder / "post.json", post_json)
         report_progress(98, "running", {"action": action})
-        refresh_library_index_paths(root, [folder_path])
+        replaced_uploads = replace_build_upload_cards(root, source_attachments, folder_path, saved_result_items)
+        refresh_library_index_paths(root, [folder_path, *replaced_uploads])
         data = current_library_snapshot(root)
         data["selected_path"] = folder_path
         data["selected_item_id"] = saved_result_items[0].get("item_id") or ""
@@ -28971,6 +28986,192 @@ def uploaded_item_from_snapshot(snapshot: dict, folder_path: str, item_id: str) 
     return {"folder_path": folder_path, "item_id": item_id}
 
 
+def composer_card_store_path(root: Path) -> Path:
+    return root / "upload" / ".imagine_card_links.json"
+
+
+def write_composer_card_records(root: Path, records: dict) -> None:
+    path = composer_card_store_path(root)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        write_json(temporary, records)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def composer_card_records(root: Path) -> dict:
+    data = read_json(composer_card_store_path(root), {})
+    return data if isinstance(data, dict) else {}
+
+
+def composer_upload_path(attachment: dict) -> str:
+    path = str(attachment.get("detail_post_path") or attachment.get("upload_post_path") or "").strip("/")
+    return path if path.startswith("upload/") else ""
+
+
+def successful_composer_items(items: list[dict]) -> list[dict]:
+    return [item for item in items if isinstance(item, dict)
+            and not item.get("moderated")
+            and not (item.get("metadata") or {}).get("moderated")
+            and not ((item.get("metadata") or {}).get("imagine") or {}).get("moderated")
+            and str(item.get("status") or "").lower() not in {"failed", "moderated", "cancelled"}
+            and any(item.get(key) for key in ("file", "url", "object_url", "remote_url"))]
+
+
+def replace_build_upload_cards(root: Path, attachments: list[dict], result_path: str, items: list[dict]) -> list[str]:
+    if not successful_composer_items(items):
+        return []
+    changed = []
+    # Only the primary source owns the result; other attachments are references.
+    source_path = composer_upload_path(attachments[0]) if attachments else ""
+    if not source_path or source_path == result_path:
+        return changed
+    post_path = safe_join(root, source_path) / "post.json"
+    with COMPOSER_CARD_LOCK:
+        meta = read_json(post_path, {})
+        if not meta:
+            return changed
+        replacements = list(meta.get("build_upload_replaced_by") or [])
+        if result_path not in replacements:
+            replacements.append(result_path)
+        meta["build_upload_replaced_by"] = replacements
+        write_json(post_path, meta)
+        changed.append(source_path)
+    return changed
+
+
+def register_imagine_composer_cards(root: Path, payload: dict, refs: list[tuple[str, str]]) -> None:
+    if payload.get("provider") != "imagine" or payload.get("to_card") is False:
+        return
+    account = active_imagine_account(root, str(payload.get("account_id") or ""))
+    account_id = str((account or {}).get("id") or "")
+    if not account_id:
+        return
+    with COMPOSER_CARD_LOCK:
+        records = composer_card_records(root)
+        for path, item_id in refs:
+            post = read_json(safe_join(root, path) / "post.json", {})
+            if not any(item.get("type") == "image" and media_item_key(item) == item_id for item in post.get("items", [])):
+                continue
+            key = account_id + "::" + path
+            records.setdefault(key, {"path": path, "account_id": account_id, "results": {}})
+        write_composer_card_records(root, records)
+
+
+def imagine_composer_card_snapshot(root: Path) -> list[dict]:
+    with COMPOSER_CARD_LOCK:
+        records = composer_card_records(root)
+    cards = []
+    for key, record in records.items():
+        path = str(record.get("path") or "")
+        if not path.startswith("upload/"):
+            continue
+        folder = safe_join(root, path)
+        if not folder.is_dir():
+            continue
+        post = post_from_folder(root, folder, indexed_post_context(path))
+        if post:
+            cards.append({**record, "key": key, "post": post})
+    return cards
+
+
+def prepare_imagine_composer_upload(payload: dict) -> dict:
+    payload = dict(payload or {})
+    attachments = [dict(item) for item in payload.get("attachments", []) if isinstance(item, dict)]
+    primary = next((item for item in attachments if str(item.get("type") or item.get("mime_type") or "").startswith("image/") and not item.get("detail_auto")), None)
+    primary = primary or next((item for item in attachments if str(item.get("type") or item.get("mime_type") or "").startswith("image/")), None)
+    path = composer_upload_path(primary or {})
+    if not path or clean_option(payload.get("mode"), "image") not in {"image", "video"}:
+        return payload
+    payload["composer_upload_path"] = path
+    attachments = [primary, *(item for item in attachments if item is not primary)]
+    # A local upload card is never an official conversation or an append target.
+    payload.update(source_post_path="", source_item_id="", source_conversation_id="", parent_response_id="", source_is_t2i=False)
+    identity_keys = ("detail_post_path", "detail_item_id", "detail_post_id", "detail_root_post_id", "detail_key", "post_id", "item_id", "asset_id", "root_post_id", "original_post_id", "parent_post_id", "source_item_id", "conversation_id", "response_id", "parent_response_id")
+    for attachment in attachments:
+        if not composer_upload_path(attachment):
+            continue
+        attachment.setdefault("upload_post_path", composer_upload_path(attachment))
+        for key in identity_keys:
+            attachment.pop(key, None)
+    payload["attachments"] = attachments
+    return payload
+
+
+def persist_imagine_composer_result(root: Path, payload: dict, account: dict, result: dict) -> None:
+    path = str(payload.get("composer_upload_path") or "")
+    account_id = str(account.get("id") or "")
+    if not isinstance(result, dict):
+        return
+    post = result.get("post")
+    if not path:
+        # Further edits of the generated card retain its official source while Saved
+        # catches up; do not fall back to an older bundle after a restart.
+        source_path = str(payload.get("source_post_path") or "")
+        source_id = str(payload.get("source_item_id") or "")
+        additions = result.get("items") or [result.get("item")]
+        if not source_path or not successful_composer_items(additions):
+            return
+        with COMPOSER_CARD_LOCK:
+            records = composer_card_records(root)
+            for record in records.values():
+                if record.get("account_id") != account_id:
+                    continue
+                for result_key, stored in record.get("results", {}).items():
+                    previous = stored.get("post") or {}
+                    previous_ids = {imagine_item_asset_id(item) for item in previous.get("items", [])}
+                    if previous.get("folder_path") != source_path and (not source_id or source_id not in previous_ids):
+                        continue
+                    merged = {imagine_item_asset_id(item): item for item in previous.get("items", [])}
+                    for item in additions:
+                        if isinstance(item, dict) and imagine_item_asset_id(item):
+                            merged[imagine_item_asset_id(item)] = item
+                    stored["post"] = {**previous, "items": list(merged.values()), "updated_at": now_iso()}
+                    stored["confirmed"] = False
+                    write_composer_card_records(root, records)
+                    result["composer_upload_cards"] = imagine_composer_card_snapshot(root)
+                    return
+        return
+    if not isinstance(post, dict):
+        return
+    items = post.get("items") or []
+    sources = [item for item in items if imagine_item_is_upload_source(item)]
+    generated = successful_composer_items([item for item in items if not imagine_item_is_upload_source(item)])
+    source_ids = {imagine_item_asset_id(item) for item in sources} - {""}
+    # Never replace an upload with a result-only card or a guessed local source ID.
+    if not source_ids or not generated or not all(set(imagine_item_source_ids(item)) & source_ids for item in generated):
+        return
+    key = account_id + "::" + path
+    with COMPOSER_CARD_LOCK:
+        records = composer_card_records(root)
+        record = records.get(key)
+        if not record:
+            return
+        result_key = str(post.get("folder_path") or "")
+        record.setdefault("results", {})[result_key] = {"post": post, "confirmed": False}
+        write_composer_card_records(root, records)
+    result["composer_upload_cards"] = imagine_composer_card_snapshot(root)
+
+
+def confirm_imagine_composer_cards(payload: dict) -> dict:
+    root = library_root()
+    if not root:
+        raise RuntimeError("Library path is not set.")
+    account_id = str(payload.get("account_id") or "")
+    with COMPOSER_CARD_LOCK:
+        records = composer_card_records(root)
+        for confirmation in payload.get("confirmations", []):
+            record = records.get(str(confirmation.get("key") or ""))
+            if not record or record.get("account_id") != account_id:
+                continue
+            result = record.get("results", {}).get(str(confirmation.get("result_key") or ""))
+            if result:
+                result["confirmed"] = True
+        write_composer_card_records(root, records)
+    return {"ok": True}
+
+
 def save_composer_uploads(payload: dict) -> dict:
     root = library_root()
     if not root:
@@ -28979,6 +29180,7 @@ def save_composer_uploads(payload: dict) -> dict:
     files = payload.get("files") if isinstance(payload.get("files"), list) else []
     if not files:
         raise RuntimeError("Upload file is missing.")
+    to_card = payload.get("provider") == "build" and payload.get("to_card") is not False
     saved_refs: list[tuple[str, str]] = []
     date_name = datetime.now().strftime("%Y-%m-%d")
     upload_root = root / "upload" / date_name
@@ -29001,6 +29203,13 @@ def save_composer_uploads(payload: dict) -> dict:
         upload_hash = hashlib.sha256(raw).hexdigest()
         existing = find_uploaded_media_by_hash(root, upload_hash)
         if existing:
+            if to_card and media_type == "image":
+                post_path = safe_join(root, existing[0]) / "post.json"
+                post = read_json(post_path, {})
+                if not post.get("build_upload_card"):
+                    post["build_upload_card"] = True
+                    post["updated_at"] = now
+                    write_json(post_path, post)
             saved_refs.append(existing)
             continue
 
@@ -29036,6 +29245,7 @@ def save_composer_uploads(payload: dict) -> dict:
             "mode": "upload",
             "title": title,
             "prompt": "",
+            "build_upload_card": to_card and media_type == "image",
             "created_at": now,
             "updated_at": now,
             "folder_path": rel_folder,
@@ -29048,6 +29258,7 @@ def save_composer_uploads(payload: dict) -> dict:
 
     if not saved_refs:
         raise RuntimeError("No upload files were saved.")
+    register_imagine_composer_cards(root, payload, saved_refs)
     unhide_saved_upload_refs(root, saved_refs)
     refresh_library_index_paths(root, [folder_path for folder_path, _ in saved_refs])
     snapshot = current_library_snapshot(root)
@@ -29134,6 +29345,7 @@ POST_JSON_ROUTES = {
     "/api/prompts/delete": delete_prompt,
     "/api/translate": translate_prompt,
     "/api/uploads/save": save_composer_uploads,
+    "/api/uploads/card-confirm": confirm_imagine_composer_cards,
     "/api/uploads/remove-from-list": remove_upload_from_composer_list,
     "/api/accounts/save": save_accounts,
     "/api/accounts/total/register": register_total_account,

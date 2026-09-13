@@ -624,6 +624,22 @@ function mergeImagineResultIntoLikedSource(sourcePath, items, selectedItemId = "
 
 function applyImagineDirectResult(result, options = {}) {
   if (!result) return;
+  if (Array.isArray(result.composer_upload_cards)) {
+    const records = new Map((library_state.composerUploadCards || []).map(record => [record.key, record]));
+    for (const incoming of result.composer_upload_cards) {
+      const current = records.get(incoming.key);
+      const results = { ...current?.results, ...incoming.results };
+      for (const [key, next] of Object.entries(incoming.results || {})) {
+        const previous = current?.results?.[key];
+        if (!previous?.post || !next?.post) continue;
+        const items = new Map((previous.post.items || []).map(item => [mediaItemKey(item), item]));
+        for (const item of next.post.items || []) items.set(mediaItemKey(item), item);
+        results[key] = { ...next, post: { ...next.post, items: Array.from(items.values()) } };
+      }
+      records.set(incoming.key, { ...incoming, results });
+    }
+    library_state.composerUploadCards = Array.from(records.values());
+  }
   let selectedPath = "";
   let selectedIdentity = "";
   const upsertedPaths = [];
@@ -926,7 +942,7 @@ async function submitImagineComposer() {
     const isTextToImage = composerState.mode === "image"
       && !lockedAttachments.some((attachment) => composerMediaKind(attachment) === "image");
     const lockedPrimarySource = imaginePrimarySubmissionAttachment(lockedAttachments, composerState.mode);
-    const lockedSourcePostPath = String(lockedPrimarySource?.detail_post_path || "").trim();
+    const lockedSourcePostPath = String(lockedPrimarySource?.detail_post_path || lockedPrimarySource?.upload_post_path || "").trim();
     const lockedSourceItemId = imagineAttachmentSubmissionItemId(lockedPrimarySource);
     const lockedPreviewType = lockedPrimarySource
       ? (composerMediaKind(lockedPrimarySource) || "image")
@@ -982,7 +998,7 @@ async function submitImagineComposer() {
         focusJobThumb: true,
       });
     }
-    const attachmentSourcePostPath = String(primarySourceAttachment?.detail_post_path || "").trim();
+    const attachmentSourcePostPath = String(primarySourceAttachment?.detail_post_path || primarySourceAttachment?.upload_post_path || "").trim();
     const sourcePostPath = attachmentSourcePostPath;
     const attachmentSourceItemId = imagineAttachmentSubmissionItemId(primarySourceAttachment);
     const sourceItemId = attachmentSourceItemId;

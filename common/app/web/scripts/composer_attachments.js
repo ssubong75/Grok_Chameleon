@@ -136,6 +136,8 @@
       : "image/*,video/mp4,video/webm,video/quicktime,video/*";
     const uploadTitle = document.querySelector("#composer_upload_box strong");
     if (uploadTitle) uploadTitle.textContent = "Image";
+    const toCardOption = document.getElementById("composer_upload_to_card_option");
+    if (toCardOption) toCardOption.hidden = false;
   }
 
   function pruneComposerAttachmentsForMode() {
@@ -780,12 +782,16 @@
       });
     }
 
-    async function saveComposerUploadAttachment(file, dataUrl, type) {
+    async function saveComposerUploadAttachment(file, dataUrl, type, uploadOptions = {}) {
       if (!library_state.apiReady) return null;
-      const dimensions = composerState.provider === "build" && type.startsWith("image/")
+      const provider = uploadOptions.provider ?? composerState.provider;
+      const toCard = uploadOptions.toCard ?? (document.getElementById("composer_upload_to_card")?.checked !== false);
+      const dimensions = provider === "build" && type.startsWith("image/")
         ? await readComposerImageDimensions(dataUrl) : {};
       const data = await qApi("/api/uploads/save", {
-        provider: composerState.provider,
+        provider,
+        account_id: uploadOptions.accountId || "",
+        to_card: toCard,
         files: [{
           name: file.name,
           type,
@@ -1122,6 +1128,11 @@
     }
 
   async function setComposerFiles(files) {
+    const uploadOptions = {
+      provider: composerState.provider,
+      accountId: typeof activeImagineAccountId === "function" ? activeImagineAccountId() : "",
+      toCard: document.getElementById("composer_upload_to_card")?.checked !== false,
+    };
     for (const file of Array.from(files || [])) {
       const type = file.type || (mediaTypeForName(file.name) === "video" ? "video/mp4" : "image/jpeg");
       if (!type.startsWith("image/") && !type.startsWith("video/")) continue;
@@ -1132,7 +1143,7 @@
       }
       if (composerAttachments.length >= composerAttachmentLimit()) break;
       const dataUrl = await fileToDataUrl(file);
-      const saved = await saveComposerUploadAttachment(file, dataUrl, type);
+      const saved = await saveComposerUploadAttachment(file, dataUrl, type, uploadOptions);
       const savedKey = saved?.upload_post_path && saved?.upload_item_id
         ? composerUploadAttachmentKey(saved.upload_post_path, saved.upload_item_id)
         : "";

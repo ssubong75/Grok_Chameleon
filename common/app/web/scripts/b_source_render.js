@@ -56,6 +56,8 @@ function postHasBuildLocalMedia(post) {
 }
 
 function buildUploadSourceVisible(post) {
+  if (post?.build_upload_replaced_by?.length) return false;
+  if (post?.build_upload_card) return true;
   if (post?.build_job_failed) return true;
   return (library_state.jobs || []).some((job) => (
     generationJobProvider(job) === "build"
@@ -100,8 +102,8 @@ function buildSourcePosts() {
       // valid in the new scope. If it could not start, do not expose the previous scope.
       if (library_state.indexedBuildKey !== indexedBuildQueryKey()) return [];
     }
-    // Cached pages may still contain the upload card shown while a job ran.
-    // Recheck it at render time, including pages that arrived after completion.
+    // Keep explicitly uploaded Build cards after generation; temporary job sources
+    // still need to be rechecked when a cached page arrives after completion.
     const indexedPosts = (library_state.indexedBuildPosts || []).filter((post) => (
       post?.area !== "upload" || buildUploadSourceVisible(post)
     ));
