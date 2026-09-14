@@ -2559,14 +2559,12 @@ function attachObjectEvents(object) {
       if (event.target.closest("[data-object-control]")) return;
       event.preventDefault();
       event.stopPropagation();
-      window.clearTimeout(object.cropClickTimer);
-      object.cropClickTimer = window.setTimeout(() => cancelCropSelection(), 220);
+      setActiveObject(object.id);
     });
     object.el.addEventListener("dblclick", (event) => {
       if (event.target.closest("[data-object-control]")) return;
       event.preventDefault();
       event.stopPropagation();
-      window.clearTimeout(object.cropClickTimer);
       applyCrop();
     });
   }
@@ -2585,10 +2583,6 @@ function attachObjectEvents(object) {
       object.pendingTextCancelTimer = window.setTimeout(() => {
         if (object.pendingCommit) cancelPendingObject("text");
       }, 450);
-      return;
-    }
-    if (object.type === "crop") {
-      setActiveObject(object.id);
       return;
     }
     setActiveObject(object.id);
@@ -4151,7 +4145,10 @@ workspace?.addEventListener("wheel", (event) => {
 
 workspace?.addEventListener("pointerdown", (event) => {
   if (event.target instanceof Element && event.target.closest(".right-tools, .color-popup")) return;
-  if (!isPanActive()) return;
+  if (!isPanActive()) {
+    if (currentTool === "crop" && cropObject()) cancelCropSelection();
+    return;
+  }
   event.preventDefault();
   beginWorkspacePan(event);
 });
