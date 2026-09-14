@@ -1,4 +1,35 @@
 // Detail selection state and prompt sync
+const buildDetailRefreshRequests = new Map();
+
+async function refreshBuildDetailFromDisk() {
+  const path = String(library_state.selectedPostPath || "");
+  if (screen_state.current_screen !== "b_detail" || !library_state.apiReady || !/^(created|upload|collection|reference)\//.test(path)) return;
+  const root = library_state.rootPath;
+  const key = `${root}\n${path}`;
+  if (buildDetailRefreshRequests.has(key)) return buildDetailRefreshRequests.get(key);
+  const request = (async () => {
+    const data = await qApi("/api/library/post", { path, refresh_from_disk: true });
+    if (library_state.rootPath !== root || library_state.selectedPostPath !== path || screen_state.current_screen !== "b_detail") return;
+    if (!data?.post) return;
+    const post = normalizeServerPost(data.post);
+    mergeIndexedPostsIntoWorkingSet([post]);
+    for (const name of ["indexedBuildPosts", "indexedSearchBuildPosts", "indexedUploadPosts"]) {
+      library_state[name] = (library_state[name] || []).map((entry) => entry.folder_path === path ? post : entry);
+    }
+    for (const collection of library_state.collections || []) {
+      collection.posts = (collection.posts || []).map((entry) => entry.folder_path === path ? post : entry);
+    }
+    // Rendering adds thumbnails without resetting selection or the user's prompt draft.
+    renderDetailViews({ activeOnly: true });
+  })();
+  buildDetailRefreshRequests.set(key, request);
+  try {
+    return await request;
+  } finally {
+    buildDetailRefreshRequests.delete(key);
+  }
+}
+
 function selectLibraryPost(pathOrPost, { loadFull = true, identity = "" } = {}) {
   library_state.selectedJobId = "";
   library_state.selectedImagineJobId = "";
@@ -58,6 +89,9 @@ function selectLibraryPost(pathOrPost, { loadFull = true, identity = "" } = {}) 
     if (card.classList.contains("collection_2nd_card")) card.classList.toggle("active", selected);
   }
   renderDetailViews();
+  if (loadFull && screen_state.current_screen === "b_detail") {
+    refreshBuildDetailFromDisk().catch((error) => console.warn(error));
+  }
   if (typeof renderComposerOptions === "function") renderComposerOptions();
   if ((screen_state.current_screen === "i_detail" || screen_state.current_screen === "b_detail") && typeof syncDetailAttachmentForComposerTray === "function") {
     syncDetailAttachmentForComposerTray().catch((error) => console.warn(error));

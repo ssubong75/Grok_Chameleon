@@ -220,7 +220,6 @@ restoreLibraryRoot().then(() => {
   if (
     library_state.apiReady
     && library_state.rootPath
-    && !library_state.libraryIndexEnabled
     && typeof scanLibrary === "function"
   ) {
     setTimeout(() => {

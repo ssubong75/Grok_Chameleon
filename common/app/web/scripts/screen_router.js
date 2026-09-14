@@ -70,6 +70,7 @@ function openScreen(screenId, activeButtonId = "", options = {}) {
     loadReferenceCards().catch((error) => showErrorPanel("Reference load failed", error.message));
   }
   if (screenId === "i_detail" || screenId === "b_detail") syncComposerPromptFromDetail();
+  if (screenId === "b_detail") refreshBuildDetailFromDisk().catch((error) => console.warn(error));
   if (screenId === "i_detail" || screenId === "b_detail") playActiveDetailVideoIfSelected();
   if (screenId === "i_detail" || screenId === "b_detail") updateDetailPostNavigationButtons();
   if (screenId === "collection_main") scheduleCollectionRows();

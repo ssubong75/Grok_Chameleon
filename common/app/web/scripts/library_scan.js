@@ -438,6 +438,7 @@
     if (library_state.apiReady) {
       const data = await qApi("/api/library/scan", {});
       applyLibrarySnapshot(data);
+      await refreshBuildDetailFromDisk();
       return;
     }
     if (!library_state.rootHandle) return;

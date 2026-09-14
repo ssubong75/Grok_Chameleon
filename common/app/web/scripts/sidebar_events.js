@@ -170,11 +170,13 @@ document.getElementById("titleImagineBtn")?.addEventListener("click", async () =
     );
     showMainRefreshLoading(screenId);
     await waitForRefreshPaint();
-    // The title is the global Grok Imagine refresh control. Always reconcile the
-    // selected account's complete official Saved feed first, even when the user is
-    // currently looking at detail, search, Liked, Upload, or another screen.
-    await refreshImagineSavedMain();
-    if (!savedIsCurrentView) await refreshCurrentMainView();
+    const localView = ["b_main", "b_detail", "collection_main", "2nd_main", "reference_main", "prompt_main", "search_main"].includes(screenId);
+    if (localView) {
+      await refreshCurrentMainView();
+    } else {
+      await refreshImagineSavedMain();
+      if (!savedIsCurrentView) await refreshCurrentMainView();
+    }
   } catch (error) {
     setLibraryMessage(error.message || "Refresh failed.");
   } finally {

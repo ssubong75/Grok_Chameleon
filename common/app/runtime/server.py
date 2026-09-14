@@ -29386,6 +29386,13 @@ def get_library_post(payload: dict) -> dict:
         raise RuntimeError("Library post path is missing.")
     if not library_index.ready(root):
         ensure_library_index(root)
+    if payload.get("refresh_from_disk"):
+        folder = safe_join(root, path)
+        path = folder.relative_to(root.resolve()).as_posix()
+        if not indexed_post_context(path) or not folder.is_dir():
+            raise RuntimeError("Local card folder was not found.")
+        with build_post_save_lock(folder):
+            refresh_library_index_paths(root, [path])
     post = library_index.get_post(root, path)
     if not post:
         raise RuntimeError("Library post was not found.")
