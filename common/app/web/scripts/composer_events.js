@@ -311,6 +311,38 @@ document.getElementById("composer_save")?.addEventListener("click", () => {
   openPromptSave();
 });
 
+async function modifyBuildCardPrompt() {
+  const button = document.getElementById("composer_mod");
+  if (button?.disabled || screen_state.current_screen !== "b_detail") return;
+  const input = document.getElementById("composer_input");
+  const text = normalizeNfcText(input?.value || "").trim();
+  if (!text) {
+    input?.focus();
+    return;
+  }
+  const post = selectedLibraryPost();
+  const item = post?.items?.find((candidate) => mediaItemKey(candidate) === library_state.selectedDetailItemId);
+  if (!library_state.apiReady || !post?.folder_path || !item || post.source === "imagine" || post.folder_path.startsWith("__")) {
+    showErrorPanel("Prompt update unavailable", "Select a saved Build image or video first.");
+    return;
+  }
+  if (button) button.disabled = true;
+  try {
+    const data = await qApi("/api/library/update-item-prompt", {
+      post_path: post.folder_path,
+      item_id: mediaItemKey(item),
+      text,
+    });
+    applyLibrarySnapshot(data);
+  } catch (error) {
+    showErrorPanel("Prompt update failed", error?.message || "Could not save the prompt.");
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+document.getElementById("composer_mod")?.addEventListener("click", modifyBuildCardPrompt);
+
 const closeComposerSelects = (except = null) => {
   for (const select of document.querySelectorAll(".custom_select.open")) {
     if (select !== except) select.classList.remove("open");

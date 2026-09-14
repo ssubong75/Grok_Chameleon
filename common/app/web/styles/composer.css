@@ -482,6 +482,33 @@
   color: var(--accent);
 }
 
+.composer_mod {
+  display: none;
+}
+
+.b_detail_open .composer_mod {
+  display: inline-flex;
+}
+
+body .app_shell .b_detail_open .composer .composer_input_row {
+  grid-template-columns: 48px auto minmax(0, 1fr) auto 48px;
+}
+
+body .app_shell .b_detail_open .composer:not(.prompt_expanded) .composer_input_row::after {
+  grid-column: 3 / 4;
+  grid-row: 1;
+  right: 0;
+}
+
+body .app_shell .b_detail_open .composer:not(.prompt_expanded) .composer_input_row::before {
+  grid-column: 3 / 4;
+}
+
+.composer_mod:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+
 .composer_send {
   position: relative;
   z-index: 3;
@@ -1032,6 +1059,10 @@
     gap: 8px;
   }
 
+  body .app_shell .b_detail_open .composer .composer_input_row {
+    grid-template-columns: 48px auto minmax(0, 1fr) auto 44px;
+  }
+
   .composer_upload_tray {
     grid-template-columns: 1fr;
   }
@@ -1099,6 +1130,12 @@
   .composer {
     left: calc(76px + (100vw - 76px) / 2);
     width: min(var(--composer-width), calc(100vw - 76px - 28px));
+  }
+}
+
+@media (aspect-ratio < 1/1) {
+  body .app_shell .b_detail_open .composer .composer_input_row {
+    grid-template-columns: 44px auto minmax(0, 1fr) auto 40px;
   }
 }
 

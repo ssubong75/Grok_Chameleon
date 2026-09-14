@@ -27456,6 +27456,54 @@ def delete_library_item(payload: dict) -> dict:
     return data
 
 
+def update_library_item_prompt(payload: dict) -> dict:
+    root = library_root()
+    if not root:
+        raise RuntimeError("Library path is not set.")
+    text = normalize_unicode_text(payload.get("text")).strip()
+    if not text:
+        raise RuntimeError("Prompt text is empty.")
+    post_dir = safe_join(root, str(payload.get("post_path") or ""))
+    rel_path = post_dir.relative_to(root.resolve()).as_posix()
+    context = indexed_post_context(rel_path)
+    if not context or not post_dir.is_dir():
+        raise RuntimeError("Select a saved Build card.")
+    item_id = normalize_unicode_text(payload.get("item_id"))
+    with build_post_save_lock(post_dir):
+        post = post_from_folder(root, post_dir, context)
+        if not post or post.get("source") == "imagine":
+            raise RuntimeError("Select a saved Build card.")
+        item = next((entry for entry in post.get("items") or []
+                     if normalize_unicode_text(media_item_key(entry)) == item_id), None)
+        if not item or item.get("type") not in {"image", "video"}:
+            raise RuntimeError("Selected image or video was not found.")
+        metadata_path = post_dir / "post.json"
+        metadata = read_json(metadata_path, None)
+        if metadata is None and not metadata_path.exists():
+            metadata = post_json_from_post(post)
+        if not isinstance(metadata, dict):
+            raise RuntimeError("Card metadata could not be read.")
+        raw_items = metadata.get("items", [])
+        if not isinstance(raw_items, list):
+            raise RuntimeError("Card items could not be read.")
+        # Preserve all existing metadata, including fields unknown to the serializer.
+        target = next((entry for entry in raw_items if isinstance(entry, dict) and (
+            (item.get("file") and normalize_unicode_text(entry.get("file")) == normalize_unicode_text(item["file"]))
+            or (not item.get("file") and normalize_unicode_text(media_item_key(entry)) == item_id)
+        )), None)
+        if target is None:
+            target = serializable_media_item(item)
+            raw_items.append(target)
+        target["prompt"] = text
+        target["updated_at"] = now_iso()
+        metadata["items"] = raw_items
+        metadata["updated_at"] = now_iso()
+        write_json(metadata_path, metadata)
+        refresh_library_index_paths(root, [rel_path])
+    # Do not return selection overrides: the user may navigate while saving.
+    return current_library_snapshot(root)
+
+
 def set_post_source_item(payload: dict) -> dict:
     root = library_root()
     if not root:
@@ -29422,6 +29470,7 @@ POST_JSON_ROUTES = {
     "/api/library/delete-post": delete_library_post,
     "/api/library/delete-item": delete_library_item,
     "/api/library/set-source": set_post_source_item,
+    "/api/library/update-item-prompt": update_library_item_prompt,
     "/api/library/split-item": split_library_item,
     "/api/library/download-items": download_library_items,
     "/api/library/merge-posts": merge_selected_posts,
