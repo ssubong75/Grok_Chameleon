@@ -1335,6 +1335,19 @@
   font-weight: 760;
 }
 
+.b_detail_open_folder_icon {
+  display: block;
+  width: 24px;
+  height: 24px;
+  opacity: 0.86;
+  object-fit: contain;
+}
+
+.b_detail_open_folder:hover .b_detail_open_folder_icon,
+.b_detail_open_folder:focus-visible .b_detail_open_folder_icon {
+  filter: brightness(0) saturate(100%) invert(73%) sepia(94%) saturate(901%) hue-rotate(337deg) brightness(104%) contrast(97%);
+}
+
 .i_detail_split_btn,
 .b_detail_split_btn,
 .i_detail_source_btn,

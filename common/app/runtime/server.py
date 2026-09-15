@@ -22414,10 +22414,26 @@ def center_windows_explorer_window(
 
 
 def open_library_folder(payload: dict) -> dict:
+    payload = payload if isinstance(payload, dict) else {}
     root = library_root()
     if not root:
         raise RuntimeError("Library path is not set.")
     ensure_library_root(root)
+    target_folder = root
+    post_path = str(payload.get("post_path") or "").replace("\\", "/").strip("/")
+    if post_path:
+        post = find_post(current_library_snapshot(root), post_path)
+        item_key = str(payload.get("item_key") or "")
+        if not post:
+            raise RuntimeError("Selected Build card was not found.")
+        if not item_key or not any(media_item_key(item) == item_key for item in post.get("items", [])):
+            raise RuntimeError("Selected Build item was not found.")
+        folder_path = str(post.get("folder_path") or "").replace("\\", "/").strip("/")
+        if not folder_path:
+            raise RuntimeError("Selected Build folder was not found.")
+        target_folder = safe_join(root, folder_path)
+        if not target_folder.is_dir():
+            raise RuntimeError("Selected Build folder was not found.")
     screen_area = requested_screen_work_area(payload)
     if sys.platform == "darwin":
         if screen_area:
@@ -22429,7 +22445,7 @@ def open_library_folder(payload: dict) -> dict:
         else:
             screen_bounds = "set screenBounds to bounds of window of desktop\n"
         script = (
-            f"set targetFolder to POSIX file {applescript_string(str(root))} as alias\n"
+            f"set targetFolder to POSIX file {applescript_string(str(target_folder))} as alias\n"
             "tell application \"Finder\"\n"
             "activate\n"
             "open targetFolder\n"
@@ -22453,7 +22469,7 @@ def open_library_folder(payload: dict) -> dict:
         subprocess.Popen(["osascript", "-e", script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     elif os.name == "nt":
         previous_handles = windows_explorer_window_handles()
-        subprocess.Popen(["explorer", str(root)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen(["explorer", str(target_folder)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         threading.Thread(
             target=center_windows_explorer_window,
             args=(previous_handles, screen_area),
@@ -22464,8 +22480,8 @@ def open_library_folder(payload: dict) -> dict:
         opener = shutil.which("xdg-open")
         if not opener:
             raise RuntimeError("Folder opener is not available.")
-        subprocess.Popen([opener, str(root)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return {"ok": True, "library_root": str(root)}
+        subprocess.Popen([opener, str(target_folder)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return {"ok": True, "library_root": str(root), "folder": str(target_folder)}
 
 
 def read_exact(sock: socket.socket, size: int) -> bytes:

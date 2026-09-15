@@ -154,6 +154,40 @@ async function deleteBuildSelectedDetailItemFromLibrary() {
   }
 }
 
+function buildDetailScreenWorkArea() {
+  const activeScreen = window.screen || {};
+  return {
+    left: Number(activeScreen.availLeft) || 0,
+    top: Number(activeScreen.availTop) || 0,
+    width: Number(activeScreen.availWidth) || 0,
+    height: Number(activeScreen.availHeight) || 0,
+  };
+}
+
+async function openBuildSelectedDetailItemFolder(button = null) {
+  const post = selectedLibraryPost();
+  const item = selectedDetailItem(post);
+  if (screen_state.current_screen !== "b_detail" || !post?.folder_path || !item) {
+    showErrorPanel("Folder unavailable", "Select a saved Build item.");
+    return;
+  }
+  if (!library_state.apiReady) {
+    setLibraryMessage("Open folder needs the local app launcher.");
+    return;
+  }
+  if (button) button.disabled = true;
+  try {
+    await qApi("/api/open-library-folder", {
+      post_path: post.folder_path,
+      item_key: mediaItemKey(item),
+      screen_work_area: buildDetailScreenWorkArea(),
+    });
+    toast("Opened containing folder.");
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
 function bindBuildDetailActions() {
   document.querySelector(".b_detail_heart")?.addEventListener("click", () => {
     const post = selectedLibraryPost();
@@ -175,6 +209,12 @@ function bindBuildDetailActions() {
     deleteBuildSelectedDetailItemFromLibrary().catch((error) => {
       console.warn(error);
       showErrorPanel("Delete failed", error?.message || "Delete failed.");
+    });
+  });
+  document.querySelector(".b_detail_open_folder")?.addEventListener("click", (event) => {
+    openBuildSelectedDetailItemFolder(event.currentTarget).catch((error) => {
+      console.warn(error);
+      showErrorPanel("Folder open failed", error?.message || "Folder open failed.");
     });
   });
   document.querySelector(".b_detail_spicy")?.addEventListener("click", (event) => {
