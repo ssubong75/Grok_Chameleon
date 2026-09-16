@@ -395,7 +395,41 @@ async function submitBuildComposer() {
   }
 }
 
+let buildAnalyzeInFlight = false;
+
+function startBuildAnalyzeProgress() {
+  const screenId = screen_state.current_screen;
+  const host = screenId === "b_detail"
+    ? document.querySelector(".b_detail_media_wrap")
+    : document.getElementById(screenId);
+  const status = document.createElement("div");
+  status.className = "detail_generation_status build_analyze_status";
+  status.setAttribute("role", "status");
+  status.innerHTML = '<span class="detail_generation_progress">Analyzing <span class="detail_generation_percent">1%</span></span>';
+  const percent = status.querySelector(".detail_generation_percent");
+  host?.classList.add("has_build_analyze_status");
+  host?.append(status);
+  const startedAt = performance.now();
+  // Analyze returns a single response, so this is an estimate, never a completion signal.
+  const timer = setInterval(() => {
+    const elapsed = Math.max(0, performance.now() - startedAt);
+    const progress = elapsed <= 5000
+      ? 1 + Math.floor(94 * elapsed / 5000)
+      : 95 + Math.min(4, Math.floor((elapsed - 5000) / 2000));
+    percent.textContent = `${progress}%`;
+    status.hidden = screen_state.current_screen !== screenId;
+  }, 100);
+  return () => {
+    clearInterval(timer);
+    status.remove();
+    host?.classList.remove("has_build_analyze_status");
+  };
+}
+
 async function submitBuildAnalyze() {
+  if (buildAnalyzeInFlight) return;
+  buildAnalyzeInFlight = true;
+  const stopProgress = startBuildAnalyzeProgress();
   setComposerBusy(true);
   try {
     await syncDetailAttachmentForComposerTray();
@@ -422,6 +456,8 @@ async function submitBuildAnalyze() {
     console.warn(error);
     showErrorPanel("Analyze failed", error?.message || "Analyze failed.");
   } finally {
+    stopProgress();
+    buildAnalyzeInFlight = false;
     setComposerBusy(false);
   }
 }
