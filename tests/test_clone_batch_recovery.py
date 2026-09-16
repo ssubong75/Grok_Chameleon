@@ -21,7 +21,8 @@ def recovery_scope(**bindings):
         'imagine_post_is_link_source', 'imagine_post_clone_source_id',
         'imagine_post_saved_identity', 'imagine_saved_display_group_id',
         'imagine_stamp_saved_identity', 'merge_imagine_liked_lineage_cards',
-        'merge_imagine_liked_lineage_with_saved_cache', 'imagine_known_clone_asset_ids',
+        'merge_imagine_liked_lineage_with_saved_cache', 'normalize_imagine_liked_card',
+        'imagine_known_clone_asset_ids',
         **defaults,
     )
 
@@ -38,6 +39,45 @@ def records():
 
 
 class CloneBatchRecoveryTests(unittest.TestCase):
+    def test_legacy_liked_card_fields_are_completed_without_mutation(self):
+        original = card('legacy', ('image', ''), ('video', 'image'))
+        original['metadata'].update(cloned_copy=True, saved_provenance='cloned-liked')
+        original['items'][0]['created_at'] = '2026-08-01T00:00:00Z'
+        original['items'][1]['created_at'] = '2026-08-02T00:00:00Z'
+        before = copy.deepcopy(original)
+        normalize = recovery_scope()['normalize_imagine_liked_card']
+        result = normalize(original, {'id': 'account', 'email': 'test@example.invalid'})
+        self.assertEqual(original, before)
+        self.assertTrue(result['remote'])
+        self.assertEqual((result['area'], result['source'], result['mode']),
+                         ('imagine_remote', 'imagine', 'link'))
+        self.assertEqual(result['account_id'], 'account')
+        self.assertEqual(result['created_at'], '2026-08-01T00:00:00Z')
+        self.assertEqual(result['items'], before['items'])
+        self.assertEqual(result['metadata'], before['metadata'])
+        self.assertEqual(result['folder_path'], before['folder_path'])
+        self.assertEqual(normalize(result, {'id': 'account'}), result)
+        complete = {**result, 'mode': 'saved', 'title': 'Existing', 'created_at': '2026-07-01'}
+        self.assertEqual(normalize(complete, {'id': 'account'}), complete)
+
+    def test_relation_only_recovery_returns_remote_liked_cards(self):
+        scope = recovery_scope(
+            library_index=SimpleNamespace(query_imagine_remote_posts=lambda *a, **k: {'posts': []}),
+            imagine_account_settings_key=lambda account: 'account',
+            imagine_clone_asset_map=lambda *a: {r['source_asset_id']: r for r in records()},
+            imagine_state=SimpleNamespace(load_generated_relations=lambda root: {
+                'source': {'account_key': 'account', 'items': [
+                    {'item_id': 'image', 'created_at': '2026-08-01'},
+                    {'item_id': 'video', 'source_item_id': 'image'}]},
+            }),
+        )
+        result = scope['merge_imagine_liked_lineage_with_saved_cache'](Path('/unused'), {'id': 'account'}, [])
+        self.assertEqual(len(result), 1)
+        self.assertTrue(result[0]['remote'])
+        self.assertEqual(result[0]['area'], 'imagine_remote')
+        self.assertEqual(result[0]['account_id'], 'account')
+        self.assertEqual({i['item_id'] for i in result[0]['items']}, {'image', 'video'})
+
     def test_official_parent_separates_child_from_wrong_cached_family(self):
         scope = recovery_scope()
         old = card('wrong', ('root-a', ''), ('video-a', 'root-a'), ('video-b', 'root-a'))

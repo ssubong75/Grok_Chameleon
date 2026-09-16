@@ -134,6 +134,12 @@ function cardAttachedBuildJob(post, className = "") {
   return null;
 }
 
+function cardIsInImagineLikedList(className, backTargetOverride = null) {
+  return className === "i_card"
+    && (!backTargetOverride || backTargetOverride.screenId === "i_main")
+    && library_state.iMainView === (typeof imagineViewValue === "function" ? imagineViewValue("LIKED", "liked") : "liked");
+}
+
 function cardRenderHashForPost(post, className, backTargetOverride = null) {
   const rawRepresentative = representativeItem(post?.items || [], post) || post?.representative_item || post?.items?.[0] || {};
   const representative = cardDisplayItemForContext(post, rawRepresentative, className) || {};
@@ -147,6 +153,7 @@ function cardRenderHashForPost(post, className, backTargetOverride = null) {
   const buildFavorite = typeof postBuildFavorite === "function" ? postBuildFavorite(post) : Boolean(post?.build_favorite);
   return [
     className || "card",
+    cardIsInImagineLikedList(className, backTargetOverride) ? "liked-list-select-only" : "",
     cardBackTargetKey(backTargetOverride),
     post?.folder_path || "",
     typeof libraryPostStableIdentity === "function" ? libraryPostStableIdentity(post) : "",
@@ -674,21 +681,6 @@ function imagineCardHeartIconHtml() {
   return `<span class="imagine-save-heart-icon" aria-hidden="true"><svg class="imagine-save-heart-svg" viewBox="0 0 24 24" focusable="false"><path class="imagine-save-heart-path" d="M12 20.2c-.28 0-.55-.1-.76-.29C6.15 15.32 3 12.48 3 8.62 3 5.78 5.12 3.7 7.9 3.7c1.62 0 3.16.75 4.1 1.94.94-1.19 2.48-1.94 4.1-1.94 2.78 0 4.9 2.08 4.9 4.92 0 3.86-3.15 6.7-8.24 11.29-.21.19-.48.29-.76.29Z"/></svg></span>`;
 }
 
-function imagineCardUnsaveButton(post) {
-  const button = document.createElement("button");
-  button.className = "i_remote_unsave_btn text2image-save-button media-card-select-button imagine-save-heart saved";
-  button.type = "button";
-  button.dataset.libraryPostPath = post.folder_path || "";
-  button.setAttribute("aria-label", "Unsave");
-  button.setAttribute("aria-pressed", "true");
-  button.innerHTML = imagineCardHeartIconHtml();
-  button.addEventListener("click", (event) => {
-    stopVisualCardAction(event);
-    unsaveImagineCardPost(post).catch((error) => showErrorPanel("Unsave failed", error?.message || "Unsave failed."));
-  });
-  return button;
-}
-
 function imagineCardSaveButton(post) {
   const button = document.createElement("button");
   button.className = "i_remote_save_btn text2image-save-button media-card-select-button imagine-save-heart";
@@ -875,7 +867,13 @@ function mediaCardForPost(post, className, backTargetOverride = null) {
   if (terminalFailure) {
     article.append(cardTerminalFailureDismissButton(post, remoteOnly));
   } else if (!attachedJob) {
-    if (remoteOnly) {
+    if (cardIsInImagineLikedList(className, backTargetOverride)) {
+      // Liked is already saved. Its selection control does not depend on optional
+      // remote flags retained by the clone/recovery cache.
+      const selectButton = cardVisualSelectButton(post);
+      selectButton.classList.add("card_visual_select_primary");
+      article.append(selectButton);
+    } else if (remoteOnly) {
       const unsavedPost = typeof isImagineUnsavedPost === "function" && isImagineUnsavedPost(post);
       const imagineCardScreenId = backTargetOverride?.screenId || "i_main";
       const saveSource = typeof isImagineDiscoverPost === "function" && isImagineDiscoverPost(post);

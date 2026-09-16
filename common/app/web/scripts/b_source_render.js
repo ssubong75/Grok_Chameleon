@@ -10,8 +10,7 @@ const buildCardPagingState = {
 function buildCardPagingKey() {
   const view = String(library_state.bMainView || "build");
   const query = String(library_state.searchQuery || "").trim().toLowerCase();
-  const collectionMode = library_state.buildIncludeCollections ? "with-collection" : "without-collection";
-  return `${view}\u001f${collectionMode}\u001f${query}`;
+  return `${view}\u001f${query}`;
 }
 
 function pagedBuildPosts(posts, list = null) {
@@ -98,8 +97,7 @@ function buildSourcePosts() {
       if (typeof loadIndexedBuildPosts === "function") {
         loadIndexedBuildPosts({ force: true }).catch((error) => console.warn(error));
       }
-      // loadIndexedBuildPosts changes the key synchronously and retains only cards that are
-      // valid in the new scope. If it could not start, do not expose the previous scope.
+      // Wait until the loader has entered the unified Build scope.
       if (library_state.indexedBuildKey !== indexedBuildQueryKey()) return [];
     }
     // Keep explicitly uploaded Build cards after generation; temporary job sources
@@ -165,10 +163,6 @@ function renderBuildSourceCards() {
     }
   }
   document.getElementById("b_t2i_view_btn")?.classList.toggle("active", t2iView);
-  const collectionButton = document.getElementById("b_collection_filter_btn");
-  const collectionActive = !t2iView && Boolean(library_state.buildIncludeCollections);
-  collectionButton?.classList.toggle("active", collectionActive);
-  collectionButton?.setAttribute("aria-pressed", String(collectionActive));
   const count = document.querySelector(".b_main_header p");
   const jobSlots = visibleJobs.reduce((total, job) => total + (
     isTextToImageBuildJob(job)

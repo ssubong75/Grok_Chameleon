@@ -358,19 +358,8 @@ html.landscape_six_card_grid .workspace .card_list {
 .card:hover .media-card-select-button,
 .card:focus-within .media-card-select-button,
 .card.selected .media-card-select-button,
-.media-card-select-button.text2image-save-button.saved:not(.i_remote_unsave_btn),
-.media-card-select-button[aria-pressed="true"]:not(.i_remote_unsave_btn) {
-  opacity: 1;
-  pointer-events: auto;
-}
-
-.media-card-select-button.i_remote_unsave_btn[aria-pressed="true"] {
-  opacity: 0;
-  pointer-events: none;
-}
-
-.card:hover .media-card-select-button.i_remote_unsave_btn,
-.card:focus-within .media-card-select-button.i_remote_unsave_btn {
+.media-card-select-button.text2image-save-button.saved,
+.media-card-select-button[aria-pressed="true"] {
   opacity: 1;
   pointer-events: auto;
 }

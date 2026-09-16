@@ -2,6 +2,7 @@
 document.getElementById("b_collection_nav_btn")?.addEventListener("click", () => {
   if (typeof clearSidebarSearchQuery === "function") clearSidebarSearchQuery();
   clearCollectionSelection();
+  library_state.selectedCollectionPath = sortedCollections()[0]?.path || "";
   openScreen("collection_main", "b_collection_nav_btn");
   renderCollectionFolders();
 });

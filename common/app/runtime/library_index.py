@@ -428,9 +428,8 @@ def _is_build_visible(post: dict) -> bool:
 def _is_job_parent_visible(post: dict, active_source_paths: frozenset[str] = frozenset()) -> bool:
     """살아있는 build job의 소스(부모)로 참조되는 업로드 원본인지.
 
-    build_visible과 분리해서 관리한다. build_visible은 컬렉션 목록·카운트 등
-    여러 쿼리가 공유하므로, 거기에 업로드를 섞으면 그 화면들까지 오염된다.
-    이 플래그는 빌드메인(컬렉션 끔) 목록에서만 합쳐 쓴다.
+    build_visible과 분리해서 관리하고, 통합 빌드 목록에서만 함께 조회한다.
+    일반 업로드 목록과 컬렉션 폴더 조회의 범위는 바꾸지 않는다.
     """
     if str(post.get("area") or "") != "upload" or post.get("build_upload_replaced_by"):
         return False
@@ -901,15 +900,10 @@ def query_posts(
     parameters: list[object] = []
     normalized_scope = str(scope or "all").lower()
     if normalized_scope in {"build", "build_main"}:
-        if not include_collections:
-            # 빌드메인에서만 살아있는 job의 부모 업로드 원본을 함께 보여준다.
-            clauses.append("(build_visible = 1 OR job_parent_visible = 1)")
+        # Build Main always combines generated cards, collection media and job sources.
+        clauses.append("(build_visible = 1 OR job_parent_visible = 1)")
+        if normalized_scope == "build" and not include_collections:
             clauses.append("area != 'collection'")
-        else:
-            # 컬렉션 목록에는 폴더이동으로 컬렉션에 지정된 카드만 나온다.
-            # created(생성 결과물)나 업로드 원본은 빌드메인 전용이다.
-            clauses.append("area = 'collection'")
-            clauses.append("build_visible = 1")
     elif normalized_scope == "upload":
         clauses.append("area = 'upload'")
     elif normalized_scope == "created":
@@ -990,14 +984,13 @@ def counts(root: Path) -> dict:
                 SUM(CASE WHEN build_visible = 1 THEN 1 ELSE 0 END) AS build,
                 SUM(
                     CASE
-                        WHEN build_visible = 1
+                        WHEN build_visible = 1 OR job_parent_visible = 1
                         THEN 1 ELSE 0
                     END
                 ) AS build_main_with_collections,
                 SUM(
                     CASE
-                        WHEN build_visible = 1
-                            AND area != 'collection'
+                        WHEN build_visible = 1 OR job_parent_visible = 1
                         THEN 1 ELSE 0
                     END
                 ) AS build_main,

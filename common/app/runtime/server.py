@@ -6580,6 +6580,32 @@ def merge_imagine_liked_lineage_cards(cards: list[dict]) -> list[dict]:
     return merged_cards
 
 
+def normalize_imagine_liked_card(post: dict, account: dict) -> dict:
+    """Complete recovered Liked cards without changing asset identity or lineage."""
+    card = dict(post)
+    items = [item for item in card.get("items") or [] if isinstance(item, dict)]
+    representative = card.get("representative_item") or imagine_representative_item(items) or {}
+    card.update(remote=True, area="imagine_remote", source="imagine")
+    defaults = {
+        "mode": "link",
+        "account_id": str(account.get("id") or ""),
+        "account_email": str(account.get("email") or ""),
+        "prompt": representative.get("prompt") or "",
+        # Use an existing asset timestamp; never make a recovered card look newly created.
+        "created_at": min((str(item["created_at"]) for item in items if item.get("created_at")), default=""),
+    }
+    for key, value in defaults.items():
+        if not card.get(key):
+            card[key] = value
+    if not card.get("title"):
+        card["title"] = str(card.get("prompt") or card.get("post_id") or "Imagine").splitlines()[0][:80]
+    if not card.get("folderName"):
+        card["folderName"] = card["title"]
+    card.setdefault("liked", True)
+    card.setdefault("favorite", True)
+    return card
+
+
 def merge_imagine_liked_lineage_with_saved_cache(
     root: Path,
     account: dict,
@@ -6646,7 +6672,7 @@ def merge_imagine_liked_lineage_with_saved_cache(
     )
     merged = merge_imagine_liked_lineage_cards(recovered)
     return [
-        card for card in merged
+        normalize_imagine_liked_card(card, account) for card in merged
         if imagine_post_saved_identity(card)[0] in {"plain-liked", "cloned-liked"}
     ]
 
@@ -9087,6 +9113,7 @@ def imagine_store_liked_cache(
     # Direct clone hydration used to leave one temporary cache row per copied asset.  Normalize
     # those rows before assigning a cache key as well as before rendering them.
     posts = imagine_group_external_clone_batch_cards(posts)
+    posts = [normalize_imagine_liked_card(post, account) for post in posts]
     records = imagine_remote_cache_records(posts)
     account_key = imagine_liked_cache_account_key(account)
     try:

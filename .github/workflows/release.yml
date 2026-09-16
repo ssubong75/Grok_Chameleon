@@ -511,12 +511,10 @@ jobs:
           )) {
             if (-not $cardsPromptStyleText.Contains($marker)) { throw "Card list scroll clearance style missing: $marker" }
           }
-          if (-not (Get-Content -Raw -LiteralPath $targetIndex).Contains('id="b_collection_filter_btn"')) { throw "Build Collection filter button missing." }
-          if (-not (Get-Content -Raw -LiteralPath $targetState).Contains("buildIncludeCollections: false")) { throw "Build Collection filter default missing." }
-          if (-not (Get-Content -Raw -LiteralPath $targetBuildMain).Contains("library_state.buildIncludeCollections && post?.items?.length")) { throw "Build Collection item filter missing." }
-          if (-not (Get-Content -Raw -LiteralPath $targetBSource).Contains('const collectionMode = library_state.buildIncludeCollections ? "with-collection" : "without-collection";')) { throw "Build Collection paging key missing." }
-          if (-not (Get-Content -Raw -LiteralPath $targetSidebarEvents).Contains('document.getElementById("b_collection_filter_btn")?.addEventListener')) { throw "Build Collection filter event missing." }
-          if (-not (Get-Content -Raw -LiteralPath $targetMainStyle).Contains("gap: 70px;")) { throw "Build Collection text spacing missing." }
+          if ((Get-Content -Raw -LiteralPath $targetIndex).Contains('id="b_collection_filter_btn"')) { throw "Obsolete Build Collection toggle remains." }
+          if ((Get-Content -Raw -LiteralPath $targetState).Contains("buildIncludeCollections")) { throw "Obsolete Build Collection state remains." }
+          if (-not (Get-Content -Raw -LiteralPath $targetBuildMain).Contains("return isBuildPost(post);")) { throw "Unified Build visibility missing." }
+          if (-not (Get-Content -Raw -LiteralPath $targetLibraryScan).Contains('return "build-main";')) { throw "Unified Build paging scope missing." }
           if (-not (Get-Content -Raw -LiteralPath $targetAttachments).Contains("conversation_id: conversationId")) { throw "Attachment conversation lineage marker missing." }
           if (-not (Get-Content -Raw -LiteralPath $targetISubmit).Contains("source_conversation_id: sourceContext.conversation_id")) { throw "Submit conversation lineage marker missing." }
           if (-not (Get-Content -Raw -LiteralPath $targetBSubmit).Contains('const completedMode = String(job.context?.mode || "").toLowerCase();')) { throw "Build attachment reset marker missing." }
@@ -962,12 +960,10 @@ jobs:
           grep -F '.i_unsaved_card_list,' "$cards_prompt_css"
           grep -F '.prompt_card_list,' "$cards_prompt_css"
           grep -F '.second_main_card_list' "$cards_prompt_css"
-          grep -F 'id="b_collection_filter_btn"' "$index_html"
-          grep -F 'buildIncludeCollections: false' "$state_js"
-          grep -F 'library_state.buildIncludeCollections && post?.items?.length' "$build_main_js"
-          grep -F 'const collectionMode = library_state.buildIncludeCollections ? "with-collection" : "without-collection";' "$b_source_js"
-          grep -F 'document.getElementById("b_collection_filter_btn")?.addEventListener' "$sidebar_events_js"
-          grep -F 'gap: 70px;' "$main_css"
+          if grep -F 'id="b_collection_filter_btn"' "$index_html"; then echo "Obsolete Build Collection toggle remains." >&2; exit 1; fi
+          if grep -F 'buildIncludeCollections' "$state_js"; then echo "Obsolete Build Collection state remains." >&2; exit 1; fi
+          grep -F 'return isBuildPost(post);' "$build_main_js"
+          grep -F 'return "build-main";' "$library_scan_js"
           grep -F 'conversation_id: conversationId' "$attachments_js"
           grep -F 'source_conversation_id: sourceContext.conversation_id' "$i_submit_js"
           grep -F 'const completedMode = String(job.context?.mode || "").toLowerCase();' "$b_submit_js"

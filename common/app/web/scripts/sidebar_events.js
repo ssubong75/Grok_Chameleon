@@ -238,16 +238,6 @@ document.getElementById("b_t2i_view_btn")?.addEventListener("click", () => {
   renderSourceCards("build");
 });
 
-document.getElementById("b_collection_filter_btn")?.addEventListener("click", () => {
-  clearSidebarSearchQuery();
-  const collectionActive = library_state.bMainView === "build"
-    && Boolean(library_state.buildIncludeCollections);
-  library_state.bMainView = "build";
-  library_state.buildIncludeCollections = !collectionActive;
-  openScreen("b_main", "b_build_btn");
-  renderSourceCards("build");
-});
-
 document.getElementById("b_t2i_view_back_btn")?.addEventListener("click", () => {
   clearSidebarSearchQuery();
   library_state.bMainView = "build";

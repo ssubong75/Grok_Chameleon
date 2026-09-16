@@ -124,6 +124,11 @@ with tempfile.TemporaryDirectory(prefix='grok-clone-cache-smoke-') as directory:
     server.imagine_store_liked_cache(root, account, liked, prune=True)
     again = server.list_imagine_liked_cache({'limit': 5000})['posts']
     stored_posts = server.library_index.query_imagine_remote_posts(root, account_id + ':liked', limit=5000)['posts']
+    for post in [*liked, *again, *stored_posts]:
+        assert post.get('remote') is True, 'Recovered card lost its remote flag'
+        assert post.get('area') == 'imagine_remote', 'Recovered card lost its area'
+        assert post.get('source') == 'imagine', 'Recovered card lost its source'
+        assert post.get('account_id') == account_id, 'Recovered card lost account context'
     assert ids(liked) == ids(stored_posts), 'SQLite store lost items'
     signature = lambda posts: sorted(tuple(sorted(ids([p]))) for p in posts)
     if signature(again) != signature(liked):

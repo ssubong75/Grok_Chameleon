@@ -181,7 +181,6 @@ document.documentElement.classList.toggle("platform-macos", isMacRenderer);
       selectedItems: new Set(),
       iMainView: "imagine",
       bMainView: "build",
-      buildIncludeCollections: false,
       objectUrls: [],
       lastErrorText: "",
       jobs: [],
@@ -650,9 +649,7 @@ document.documentElement.classList.toggle("platform-macos", isMacRenderer);
         ...(data.library_index?.counts || {}),
       };
       library_state.indexedBuildTotal = Number(
-        library_state.buildIncludeCollections
-          ? library_state.libraryIndexCounts.build_main_with_collections
-          : library_state.libraryIndexCounts.build_main,
+        library_state.libraryIndexCounts.build_main,
       ) || 0;
       // A deletion response is authoritative for its paths. Any indexed page that
       // began before it can still arrive afterwards with the deleted card, so give

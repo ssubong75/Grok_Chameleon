@@ -349,24 +349,6 @@
 .b_main_title_actions {
   display: flex;
   align-items: baseline;
-  gap: 70px;
-}
-
-#b_collection_filter_btn {
-  min-height: 0;
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  color: var(--text);
-  transform: none;
-}
-
-#b_collection_filter_btn:hover,
-#b_collection_filter_btn.active {
-  border-color: transparent;
-  background: transparent;
-  color: var(--accent);
 }
 
 #i_upload_image_btn {

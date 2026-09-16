@@ -710,7 +710,7 @@
   }
 
   function indexedBuildQueryKey() {
-    return library_state.buildIncludeCollections ? "with-collections" : "without-collections";
+    return "build-main";
   }
 
   async function loadIndexedBuildPosts({ append = false, force = false } = {}) {
@@ -729,19 +729,10 @@
       library_state.indexedBuildKey = key;
       library_state.indexedBuildOffset = 0;
       library_state.indexedBuildHasMore = true;
-      if (!sameScope) {
-        // 두 스코프는 서로의 부분집합이 아니다. `without`에만 있는 것(업로드 원본 카드)과
-        // `with`에만 있는 것(컬렉션 카드)이 각각 존재하므로, 새 스냅샷을 받아오는 동안
-        // 남겨둘 카드에서 반대쪽 전용 카드를 걸러낸다.
-        const dropArea = key === "without-collections" ? "collection" : "upload";
-        library_state.indexedBuildPosts = (library_state.indexedBuildPosts || [])
-          .filter((post) => String(post?.area || "") !== dropArea);
-      }
     }
     try {
       const data = await qApi("/api/library/posts", {
         scope: "build_main",
-        include_collections: key === "with-collections",
         offset: requestOffset,
         limit: INDEXED_CACHED_CARD_LIST_SIZE,
       });
