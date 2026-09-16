@@ -10,6 +10,9 @@ contextBridge.exposeInMainWorld("grokChameleonNative", {
   openImagineUsage(payload) {
     return ipcRenderer.invoke("grok-chameleon:open-imagine-usage", payload || {});
   },
+  extractAudio(payload) {
+    return ipcRenderer.invoke("grok-chameleon:extract-audio", payload || {});
+  },
   cardPreview(payload) {
     return ipcRenderer.invoke("grok-chameleon:card-preview", payload || {});
   },

@@ -2070,3 +2070,7 @@ html.platform-windows .detail_job_badge.failed .detail_job_badge_label::after {
   opacity: 0.4;
   cursor: wait;
 }
+
+.i_detail_extract_audio[hidden], .b_detail_extract_audio[hidden] { display: none !important; }
+.i_detail_extract_audio:hover, .b_detail_extract_audio:hover,
+.i_detail_extract_audio:focus-visible, .b_detail_extract_audio:focus-visible { color: #9c5ff7; }

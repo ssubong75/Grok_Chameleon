@@ -238,7 +238,37 @@ async function captureSelectedDetailFrame() {
   }
 }
 
+let detailAudioExtractionBusy = false;
+async function extractSelectedDetailAudio(prefix) {
+  if (detailAudioExtractionBusy) return;
+  let post = selectedLibraryPost();
+  if (post?.is_job_post) post = post.base_post;
+  const item = selectedDetailItem(post);
+  if (!item || detailItemType(item) !== "video") return;
+  const url = detailMediaUrlForItem(prefix, item, post);
+  if (!url) throw new Error("선택한 영상 파일을 찾을 수 없습니다.");
+  if (!window.grokChameleonNative?.extractAudio) throw new Error("오디오 추출 기능을 사용하려면 앱을 다시 실행해 주세요.");
+  const buttons = document.querySelectorAll(".i_detail_extract_audio, .b_detail_extract_audio");
+  detailAudioExtractionBusy = true;
+  buttons.forEach(button => { button.disabled = true; });
+  try {
+    const result = await window.grokChameleonNative.extractAudio({
+      provider: prefix === "i" ? "imagine" : "build", url,
+      name: item.file || item.title || post.title || "video",
+    });
+    if (!result.cancelled) toast(`오디오 저장 완료: ${result.path}`);
+  } finally {
+    detailAudioExtractionBusy = false;
+    buttons.forEach(button => { button.disabled = false; });
+  }
+}
+
 function bindDetailCommonActions() {
+  for (const prefix of ["i", "b"]) {
+    document.querySelector(`.${prefix}_detail_extract_audio`)?.addEventListener("click", () => {
+      extractSelectedDetailAudio(prefix).catch(error => showErrorPanel("오디오 추출 실패", error.message));
+    });
+  }
   for (const selector of [".i_detail_capture_frame", ".b_detail_capture_frame"]) {
     document.querySelector(selector)?.addEventListener("click", () => {
       captureSelectedDetailFrame().catch((error) => {

@@ -4263,6 +4263,14 @@ ipcMain.handle("grok-chameleon:open-imagine-usage", async (_event, payload = {})
   return showUsagePage(usageCommandFromPayload(payload));
 });
 
+const { extractAudio } = require("./extract-audio");
+ipcMain.handle("grok-chameleon:extract-audio", async (event, payload = {}) => {
+  if (new URL(event.senderFrame.url).origin !== new URL(SERVER_BASE).origin) throw new Error("Unsupported sender.");
+  return extractAudio(payload, {
+    serverBase: SERVER_BASE, resolveSource: localCardPreviewSource, fetchJson,
+    ffmpeg: cardPreviewFfmpegBinary(), dialog, window: mainWindow,
+  });
+});
 ipcMain.handle("grok-chameleon:card-preview", async (_event, payload = {}) => ensureCardPreview(payload));
 ipcMain.handle("grok-chameleon:translate-prompt", async (_event, payload = {}) => queuePromptTranslation(payload));
 ipcMain.handle("grok-chameleon:library-backup-choose", async (_event, payload = {}) => {

@@ -561,6 +561,8 @@ function detailThumbButtonForItem(prefix, item, post, options = {}) {
 }
 
 function syncBuildDetailToolButtons(type) {
+  const audioButton = document.querySelector(".b_detail_extract_audio");
+  if (audioButton) audioButton.hidden = type !== "video";
   const captureButton = document.querySelector(".b_detail_capture_frame");
   if (captureButton) captureButton.hidden = type !== "video";
   const isImage = type === "image";
@@ -582,6 +584,8 @@ function syncDetailSpicyButtonForComposerMode(prefix, type = "") {
 }
 
 function syncImagineDetailToolButtons(type, item = null, post = null) {
+  const audioButton = document.querySelector(".i_detail_extract_audio");
+  if (audioButton) audioButton.hidden = type !== "video";
   const captureButton = document.querySelector(".i_detail_capture_frame");
   if (captureButton) captureButton.hidden = type !== "video";
   const isImage = type === "image";
@@ -675,6 +679,8 @@ function renderDetailView(prefix, post, options = {}) {
     const captureButton = document.querySelector(`.${prefix}_detail_capture_frame`);
     const selectedBaseItem = post.base_post?.items?.find((item) => mediaItemKey(item) === library_state.selectedDetailItemId);
     if (captureButton) captureButton.hidden = !selectedBaseItem || detailItemType(selectedBaseItem) !== "video";
+    const audioButton = document.querySelector(`.${prefix}_detail_extract_audio`);
+    if (audioButton) audioButton.hidden = !selectedBaseItem || detailItemType(selectedBaseItem) !== "video";
     return;
   }
   if (!post?.items?.length) {
