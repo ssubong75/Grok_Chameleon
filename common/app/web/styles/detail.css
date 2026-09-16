@@ -129,22 +129,6 @@
   stroke-linejoin: round;
 }
 
-.detail_capture_glyph {
-  width: 24px;
-  height: 24px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 2;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.i_detail_capture_frame:disabled,
-.b_detail_capture_frame:disabled {
-  opacity: 0.4;
-  cursor: wait;
-}
-
 .detail_nav_glyph {
   width: 22px;
   height: 22px;
@@ -2054,4 +2038,20 @@ html.platform-windows .detail_job_badge.failed .detail_job_badge_label::after {
 .b_detail_media.detail_nav_idle .detail_thumb_nav {
   opacity: 0;
   pointer-events: none;
+}
+
+.detail_capture_glyph {
+  width: 24px;
+  height: 24px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.i_detail_capture_frame:disabled,
+.b_detail_capture_frame:disabled {
+  opacity: 0.4;
+  cursor: wait;
 }
