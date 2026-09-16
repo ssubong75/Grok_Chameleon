@@ -131,7 +131,122 @@ function moveSelectedDetailItemToCollection() {
   }
 }
 
+let detailFrameCaptureBusy = false;
+
+async function captureSelectedDetailFrame() {
+  if (detailFrameCaptureBusy) return;
+  const screen = screen_state.current_screen;
+  if (!["i_detail", "b_detail"].includes(screen)) return;
+  const { post, item } = selectedDetailSourceContext();
+  const video = currentDetailVideoElement();
+  if (!library_state.apiReady || detailItemType(item) !== "video" || !video) {
+    throw new Error("Select a playable video first.");
+  }
+  const selectedPath = library_state.selectedPostPath;
+  const selectedId = library_state.selectedDetailItemId;
+  const stillSelected = () => screen_state.current_screen === screen
+    && library_state.selectedPostPath === selectedPath
+    && library_state.selectedDetailItemId === selectedId;
+  const buttons = document.querySelectorAll(".i_detail_capture_frame, .b_detail_capture_frame");
+  detailFrameCaptureBusy = true;
+  buttons.forEach((button) => { button.disabled = true; });
+  try {
+    video.pause();
+    // A scrub can still be decoding when the user clicks the capture button.
+    if (video.seeking || video.readyState < 2) {
+      await new Promise((resolve, reject) => {
+        const finish = (error) => {
+          window.clearTimeout(timer);
+          ["seeked", "loadeddata", "canplay"].forEach((event) => video.removeEventListener(event, ready));
+          video.removeEventListener("error", failed);
+          error ? reject(error) : resolve();
+        };
+        const ready = () => { if (!video.seeking && video.readyState >= 2) finish(); };
+        const failed = () => finish(new Error("The video frame could not be loaded."));
+        const timer = window.setTimeout(failed, 10000);
+        ["seeked", "loadeddata", "canplay"].forEach((event) => video.addEventListener(event, ready));
+        video.addEventListener("error", failed);
+        ready();
+      });
+    }
+    if (!stillSelected() || currentDetailVideoElement() !== video) {
+      throw new Error("The selected video changed. Please capture the frame again.");
+    }
+    video.pause();
+    const width = video.videoWidth;
+    const height = video.videoHeight;
+    if (!width || !height || video.readyState < 2) throw new Error("The video frame is not ready yet.");
+    const time = video.currentTime;
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("Frame capture is unavailable.");
+    context.drawImage(video, 0, 0, width, height);
+    const image = canvas.toDataURL("image/png");
+    const name = `${sanitizeDownloadName(item.file || item.item_id || "video").replace(/\.[^.]+$/, "")}_frame_${time.toFixed(3).replace(".", "-")}.png`;
+    const imagine = screen === "i_detail";
+    const data = await qApi(imagine ? "/api/uploads/save" : "/api/library/capture-frame", imagine ? {
+      provider: "imagine",
+      to_card: false,
+      files: [{ name, type: "image/png", data_url: image }],
+    } : {
+      post_path: post.folder_path,
+      item_key: mediaItemKey(item),
+      image,
+      time,
+    });
+    // Snapshot rendering normally recreates and autoplays the player. Keep the current
+    // player so saving a frame does not lose its paused position or interrupt a new view.
+    const retainedPlayer = stillSelected() ? currentDetailVideoPlayer() : null;
+    applyLibrarySnapshot(data);
+    if (retainedPlayer && stillSelected()) {
+      const replacement = currentDetailVideoPlayer();
+      if (replacement && replacement !== retainedPlayer) {
+        replacement.querySelector("video")?.pause();
+        replacement.replaceWith(retainedPlayer);
+      }
+    }
+    if (imagine) {
+      const saved = data.saved?.[0];
+      if (!saved?.item || !saved?.folder_path || !saved?.item_id) {
+        throw new Error("The saved frame could not be added to the upload list.");
+      }
+      const key = composerUploadAttachmentKey(saved.folder_path, saved.item_id);
+      if (stillSelected() && composerState.provider === "imagine"
+        && composerAttachments.length < composerAttachmentLimit()
+        && !composerAttachments.some((attachment) => composerAttachmentKey(attachment) === key)) {
+        composerAttachments.push({
+          name: saved.item.file || name,
+          type: "image/png",
+          size: saved.item.size || 0,
+          data_url: image,
+          preview_url: saved.item.object_url,
+          source_url: saved.item.object_url,
+          upload_post_path: saved.folder_path,
+          upload_item_id: saved.item_id,
+          aspect_ratio: `${width}:${height}`,
+          role: ["image", "analyze"].includes(composerState.mode) ? "source" : "reference",
+        });
+      }
+      renderComposerAttachments();
+    }
+    toast(imagine ? "Frame saved to uploads." : "Frame saved to this folder.");
+  } finally {
+    detailFrameCaptureBusy = false;
+    buttons.forEach((button) => { button.disabled = false; });
+  }
+}
+
 function bindDetailCommonActions() {
+  for (const selector of [".i_detail_capture_frame", ".b_detail_capture_frame"]) {
+    document.querySelector(selector)?.addEventListener("click", () => {
+      captureSelectedDetailFrame().catch((error) => {
+        console.warn(error);
+        showErrorPanel("Frame capture failed", error?.message || "Frame capture failed.");
+      });
+    });
+  }
   for (const selector of [".i_detail_move", ".b_detail_move"]) {
     document.querySelector(selector)?.addEventListener("click", moveSelectedDetailItemToCollection);
   }

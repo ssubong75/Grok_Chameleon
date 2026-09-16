@@ -561,6 +561,8 @@ function detailThumbButtonForItem(prefix, item, post, options = {}) {
 }
 
 function syncBuildDetailToolButtons(type) {
+  const captureButton = document.querySelector(".b_detail_capture_frame");
+  if (captureButton) captureButton.hidden = type !== "video";
   const isImage = type === "image";
   document.querySelectorAll(".b_detail_image_tool_btn").forEach((button) => {
     button.hidden = !isImage;
@@ -580,6 +582,8 @@ function syncDetailSpicyButtonForComposerMode(prefix, type = "") {
 }
 
 function syncImagineDetailToolButtons(type, item = null, post = null) {
+  const captureButton = document.querySelector(".i_detail_capture_frame");
+  if (captureButton) captureButton.hidden = type !== "video";
   const isImage = type === "image";
   const isVideo = type === "video";
   const isDiscover = typeof isImagineDiscoverPost === "function" && isImagineDiscoverPost(post, item);
@@ -668,6 +672,9 @@ function renderDetailView(prefix, post, options = {}) {
   modelBadge?.querySelector(".detail_lucky_badge")?.remove();
   if (post?.is_job_post) {
     renderBuildJobDetailView(prefix, post, options);
+    const captureButton = document.querySelector(`.${prefix}_detail_capture_frame`);
+    const selectedBaseItem = post.base_post?.items?.find((item) => mediaItemKey(item) === library_state.selectedDetailItemId);
+    if (captureButton) captureButton.hidden = !selectedBaseItem || detailItemType(selectedBaseItem) !== "video";
     return;
   }
   if (!post?.items?.length) {

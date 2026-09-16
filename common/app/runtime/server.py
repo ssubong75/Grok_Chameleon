@@ -28863,6 +28863,66 @@ def save_image_editor_upload_result(payload: dict, mime_type: str, image_data: s
     })
 
 
+def save_detail_video_frame(payload: dict) -> dict:
+    root = library_root()
+    if not root:
+        raise RuntimeError("Library path is not set.")
+    post_path = str(payload.get("post_path") or "").strip()
+    if post_path.split("/", 1)[0] not in {"created", "collection", "upload", "reference"}:
+        raise RuntimeError("Select a local video folder.")
+    folder = safe_join(root, post_path)
+    image = str(payload.get("image") or "")
+    if not image.startswith("data:image/png;base64,"):
+        raise RuntimeError("A PNG frame is required.")
+    raw = decode_data_url(image)
+    if len(raw) < 33 or raw[:8] != b"\x89PNG\r\n\x1a\n" or raw[12:16] != b"IHDR":
+        raise RuntimeError("The captured frame is not a valid PNG.")
+    width = int.from_bytes(raw[16:20], "big")
+    height = int.from_bytes(raw[20:24], "big")
+    if not width or not height:
+        raise RuntimeError("The captured frame has no image dimensions.")
+    frame_time = float(payload.get("time") or 0)
+    if not 0 <= frame_time < float("inf"):
+        raise RuntimeError("Invalid frame time.")
+    # Use the generation writer's lock and the latest on-disk metadata so a frame
+    # captured while a Build job completes cannot replace that job's new items.
+    with build_post_save_lock(folder):
+        post_file = folder / "post.json"
+        post = read_json(post_file, {})
+        items = post.get("items") or []
+        source = next((item for item in items if media_item_key(item) == str(payload.get("item_key") or "")), None)
+        if not source or (source.get("type") or media_type_for_name(source.get("file") or "")) != "video":
+            raise RuntimeError("The source video was not found in this folder.")
+        stem = safe_name(file_stem(source.get("file") or "video"), "video")
+        stamp = f"{frame_time:.3f}".replace(".", "-")
+        file_name = unique_file_name(folder, f"{stem}_frame_{stamp}", "png")
+        target = folder / file_name
+        target.write_bytes(raw)
+        item = {
+            "item_id": file_stem(file_name),
+            "type": "image",
+            "file": file_name,
+            "mime_type": "image/png",
+            "role": "result",
+            "relation": "frame_capture",
+            "title": file_stem(file_name),
+            "created_at": now_iso(),
+            "size": len(raw),
+            "width": width,
+            "height": height,
+            "aspect_ratio": f"{width}:{height}",
+            "source_item_id": media_item_key(source),
+            "frame_time": frame_time,
+        }
+        try:
+            write_json(post_file, {**post, "items": [*items, item], "updated_at": now_iso()})
+        except Exception:
+            target.unlink(missing_ok=True)
+            raise
+    refresh_library_index_paths(root, [post_path])
+    return current_library_snapshot(root)
+
+
 def save_image_editor_result(payload: dict) -> dict:
     root = library_root()
     if not root:
@@ -29476,6 +29536,7 @@ POST_JSON_ROUTES = {
         refresh_imagine_account_tier=refresh_imagine_account_tier,
     ),
     "/api/image-editor/save": save_image_editor_result,
+    "/api/library/capture-frame": save_detail_video_frame,
     **build_post_routes(
         start_build_job=start_build_job,
         get_build_job=get_build_job,
