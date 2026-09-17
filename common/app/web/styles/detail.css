@@ -2108,7 +2108,11 @@ html.platform-windows .detail_job_badge.failed .detail_job_badge_label::after {
 .b_video_merge_header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; font-size: 13px; }
 .b_video_merge_close { border: 0; background: transparent; color: inherit; font-size: 22px; cursor: pointer; }
 .b_video_merge_body { display: grid; grid-template-columns: 1fr 1fr auto; gap: 10px; align-items: center; }
-.b_video_merge_slot { position: relative; display: grid; align-content: center; gap: 5px; min-width: 0; height: 78px; padding: 6px; border: 1px dashed #777; border-radius: 9px; color: #fff; background: #222 center / cover no-repeat; cursor: pointer; overflow: hidden; }
+.b_video_merge_attachment { position: relative; min-width: 0; }
+.b_video_merge_attachment .b_video_merge_slot { width: 100%; }
+.b_video_merge_attachment .b_video_merge_remove { border: 0; padding: 0; opacity: 1; pointer-events: auto; cursor: pointer; }
+.b_video_merge_remove[hidden] { display: none; }
+.b_video_merge_slot { position: relative; display: grid; align-content: end; gap: 5px; min-width: 0; height: 78px; padding: 6px 6px 3px; border: 1px dashed #777; border-radius: 9px; color: #fff; background: #222 center / cover no-repeat; cursor: pointer; overflow: hidden; }
 .b_video_merge_slot span, .b_video_merge_slot small { position: relative; z-index: 1; background: rgba(0,0,0,.62); border-radius: 4px; padding: 2px 4px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .b_video_merge_slot small { font-size: 10px; }
 .b_video_merge_slot video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; pointer-events: none; }

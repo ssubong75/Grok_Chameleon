@@ -325,6 +325,10 @@ function renderBuildVideoMergeSlots() {
   document.querySelectorAll(".b_video_merge_slot").forEach((slot, index) => {
     const item = buildVideoMergeState.items[index];
     slot.disabled = buildVideoMergeState.busy;
+    slot.classList.toggle("has_attachment", Boolean(item));
+    const remove = slot.parentElement.querySelector(".b_video_merge_remove");
+    remove.hidden = !item;
+    remove.disabled = buildVideoMergeState.busy;
     slot.querySelector("small").textContent = item?.file || "Drop video";
     slot.title = item?.file || "Drop video or click to attach the selected video";
     const preview = item ? detailPreviewUrlForItem("b", item, selectedLibraryPost()) : "";
@@ -413,6 +417,17 @@ document.querySelectorAll(".b_video_merge_slot").forEach((slot, index) => {
       const value = JSON.parse(event.dataTransfer.getData("application/x-gc-build-video"));
       if (value.postPath === buildVideoMergeState.postPath) attachBuildVideoMergeItem(index, value.key);
     } catch (_) { /* Ignore unrelated drag payloads. */ }
+  });
+});
+document.querySelectorAll(".b_video_merge_remove").forEach((button) => {
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (buildVideoMergeState.busy) return;
+    const index = Number(button.dataset.removeSlot);
+    buildVideoMergeState.items[index] = null;
+    document.querySelector(".b_video_merge_status").textContent = "";
+    renderBuildVideoMergeSlots();
+    document.querySelector(`[data-merge-slot="${index}"]`).focus();
   });
 });
 document.querySelector(".b_video_merge_submit")?.addEventListener("click", async () => {

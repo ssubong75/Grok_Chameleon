@@ -434,8 +434,14 @@
                 <section class="b_video_merge_popup" role="dialog" aria-label="Merge Videos" hidden>
                   <div class="b_video_merge_header"><span>Merge Videos</span><button type="button" class="b_video_merge_close" aria-label="Close">×</button></div>
                   <div class="b_video_merge_body">
-                    <button type="button" class="b_video_merge_slot" data-merge-slot="0" aria-label="Video 1: drop a video or attach the selected video"><span>1</span><small>Drop video</small></button>
-                    <button type="button" class="b_video_merge_slot" data-merge-slot="1" aria-label="Video 2: drop a video or attach the selected video"><span>2</span><small>Drop video</small></button>
+                    <div class="b_video_merge_attachment">
+                      <button type="button" class="b_video_merge_slot" data-merge-slot="0" aria-label="Video 1: drop a video or attach the selected video"><span>1</span><small>Drop video</small></button>
+                      <button type="button" class="composer_upload_remove b_video_merge_remove" data-remove-slot="0" aria-label="Remove video 1" hidden><span class="delete_x_icon" aria-hidden="true"></span></button>
+                    </div>
+                    <div class="b_video_merge_attachment">
+                      <button type="button" class="b_video_merge_slot" data-merge-slot="1" aria-label="Video 2: drop a video or attach the selected video"><span>2</span><small>Drop video</small></button>
+                      <button type="button" class="composer_upload_remove b_video_merge_remove" data-remove-slot="1" aria-label="Remove video 2" hidden><span class="delete_x_icon" aria-hidden="true"></span></button>
+                    </div>
                     <button type="button" class="b_video_merge_submit" disabled>Merge</button>
                   </div>
                   <div class="b_video_merge_status" role="status" aria-live="polite"></div>
