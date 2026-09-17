@@ -590,7 +590,7 @@
       library_state.selectedCollectionPostPath = "";
     }
     library_state.collectionView = "2nd_folders";
-    const maxSlot = Math.max(11, ...posts.map((post) => Number(post.grid_slot) || 0)) + 8;
+    const maxSlot = Math.max(39, Math.max(...posts.map((post) => Number(post.grid_slot) || 0)) + 10);
     const postBySlot = new Map(posts.map((post) => [Number(post.grid_slot) || 0, post]));
     const slots = Array.from({ length: maxSlot + 1 }, (_, slot) => {
       const post = postBySlot.get(slot);

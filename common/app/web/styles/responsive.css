@@ -246,16 +246,8 @@
     max-height: calc(100dvh - var(--detail-composer-clearance) - var(--detail-narrow-controls-height));
   }
 
-  .collection_2nd_card_grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
 }
 
-@media (max-aspect-ratio: 2/3) {
-  .collection_2nd_card_grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
 
 @media (max-aspect-ratio: 5/4) {
   .account {

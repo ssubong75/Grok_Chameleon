@@ -45,6 +45,7 @@
   }
 
   function syncCollectionRows() {
+    let categoryRowHeight = 50;
     const firstList = document.querySelector(".collection_1st_card_list");
     if (firstList?.getClientRects().length) {
       const panel = firstList.closest(".collection_1st");
@@ -57,8 +58,9 @@
         const gap = parseFloat(listStyle.rowGap || listStyle.gap || "0") || 0;
         const availableHeight = panel.clientHeight - paddingY - heading.offsetHeight - panelGap;
         if (availableHeight > 0) {
-          const rowHeight = Math.max(50, (availableHeight - (gap * 7)) / 8);
-          const listHeight = (rowHeight * 8) + (gap * 7);
+          const rowHeight = Math.max(50, Math.floor((availableHeight - (gap * 9)) / 10));
+          categoryRowHeight = rowHeight;
+          const listHeight = (rowHeight * 10) + (gap * 9);
           firstList.style.setProperty("--g-1st-row-height", `${rowHeight}px`);
           firstList.style.setProperty("--g-1st-list-height", `${listHeight}px`);
         }
@@ -69,11 +71,8 @@
     if (secondGrid?.getClientRects().length) {
       const style = getComputedStyle(secondGrid);
       const gap = parseFloat(style.rowGap || style.gap || "0") || 0;
-      const availableHeight = secondGrid.clientHeight;
-      if (availableHeight > 0) {
-        const rowHeight = Math.max(50, (availableHeight - (gap * 7)) / 8);
-        secondGrid.style.setProperty("--g-2nd-row-height", `${rowHeight}px`);
-      }
+      secondGrid.style.setProperty("--g-2nd-row-height", `${categoryRowHeight}px`);
+      secondGrid.style.setProperty("--g-2nd-list-height", `${categoryRowHeight * 8 + gap * 7}px`);
     }
   }
 

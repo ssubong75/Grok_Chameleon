@@ -349,12 +349,12 @@
 
 .collection_2nd_card_grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   grid-auto-rows: var(--g-2nd-row-height, 50px);
   gap: 7px;
   align-content: start;
-  height: 100%;
-  max-height: 100%;
+  height: var(--g-2nd-list-height, 100%);
+  max-height: var(--g-2nd-list-height, 100%);
   min-height: 0;
   overflow-y: auto;
   scrollbar-width: none;
@@ -479,8 +479,8 @@
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   gap: 12px;
-  width: min(1040px, calc(100vw - 48px));
-  height: min(640px, calc(100vh - 48px));
+  width: min(1230px, calc(100vw - 48px));
+  height: min(720px, calc(100vh - 48px));
   padding: 16px;
   border: 1px solid #3a4146;
   border-radius: 8px;
@@ -985,12 +985,15 @@
 
 .move-gallery-primary-list.primary-folder-list {
   --primary-folder-row-height: 50px;
-  --primary-folder-list-height: 100%;
+  --primary-folder-list-height: 563px;
+  max-height: 100%;
 }
 
 .move-gallery-secondary-list.secondary-folder-grid {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  grid-auto-rows: var(--secondary-folder-row-height, 50px);
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-auto-rows: 50px;
+  height: 449px;
+  max-height: 100%;
 }
 
 .move-gallery-secondary-title {
