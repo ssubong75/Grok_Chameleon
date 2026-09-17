@@ -16,7 +16,12 @@ def probe_video(binary: str, source: Path) -> dict:
     if result.returncode:
         raise RuntimeError("The video file could not be inspected.")
     data = json.loads(result.stdout)
-    streams = data.get("streams") or []
+    all_streams = data.get("streams") or []
+    streams = [s for s in all_streams if not (
+        s.get("codec_type") == "video" and s.get("disposition", {}).get("attached_pic")
+    )]
+    data["has_attached_picture"] = len(streams) != len(all_streams)
+    data["streams"] = streams
     if (not streams or sum(s.get("codec_type") == "video" for s in streams) != 1
             or any(s.get("codec_type") not in {"video", "audio"} for s in streams)
             or any(s.get("codec_name") not in {"h264", "hevc", "aac"} for s in streams)):
@@ -58,7 +63,26 @@ def merge_compatible_videos(ffmpeg: str, ffprobe: str, sources: list[Path], targ
     manifest = target.parent / "inputs.ffconcat"
     if any(source.parent != target.parent or source.name not in {"1.mp4", "2.mp4"} for source in sources):
         raise RuntimeError("Invalid merge input path.")
-    manifest.write_text("ffconcat version 1.0\nfile '1.mp4'\nfile '2.mp4'\n", encoding="utf-8")
+    concat_sources = sources
+    if any(info["has_attached_picture"] for info in infos):
+        # Remove cover-art tracks before concatenation so differing cover-art
+        # positions cannot change how the demuxer matches actual media tracks.
+        concat_sources = []
+        for number, (source, info) in enumerate(zip(sources, infos), 1):
+            media_only = target.parent / f"media-{number}.mp4"
+            mapping = [value for stream in info["streams"]
+                       for value in ("-map", f"0:{stream['index']}")]
+            remux = subprocess.run(
+                [ffmpeg, "-nostdin", "-hide_banner", "-v", "error", "-i", str(source),
+                 *mapping, "-c", "copy", "-n", str(media_only)],
+                capture_output=True, text=True, timeout=300,
+            )
+            if remux.returncode:
+                raise RuntimeError("The video thumbnail could not be separated without conversion.")
+            concat_sources.append(media_only)
+    manifest.write_text("ffconcat version 1.0\n" + "".join(
+        f"file '{source.name}'\n" for source in concat_sources
+    ), encoding="utf-8")
     result = subprocess.run(
         [ffmpeg, "-nostdin", "-hide_banner", "-v", "warning",
          "-f", "concat", "-safe", "1", "-auto_convert", "0", "-i", str(manifest),

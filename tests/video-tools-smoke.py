@@ -38,9 +38,20 @@ with tempfile.TemporaryDirectory(prefix="gc-video-tools-") as temporary:
     merge_compatible_videos(ffmpeg, ffprobe, sources, target)
     original = packets(fixture)
     assert packets(target) == {index: values * 2 for index, values in original.items()}
+    cover_fixture = fixture.with_name("merge-audio-cover.mp4")
+    for case, selected in enumerate([(cover_fixture, cover_fixture), (fixture, cover_fixture),
+                                     (cover_fixture, fixture)]):
+        case_dir = work / f"cover-{case}"
+        case_dir.mkdir()
+        case_sources = [case_dir / "1.mp4", case_dir / "2.mp4"]
+        for source, sample in zip(case_sources, selected):
+            shutil.copyfile(sample, source)
+        result = case_dir / "merged.mp4"
+        merge_compatible_videos(ffmpeg, ffprobe, case_sources, result)
+        assert packets(result) == {index: values * 2 for index, values in original.items()}
     audio = work / "audio.m4a"
     subprocess.run([ffmpeg, "-v", "error", "-nostdin", "-i", str(fixture),
                     "-map", "0:a:0", "-vn", "-sn", "-dn", "-c:a", "aac",
                     "-b:a", "192k", str(audio)], check=True, timeout=30)
     assert audio.stat().st_size > 0
-print("PASS: lossless video/audio merge and M4A audio extraction")
+print("PASS: lossless merge with/without attached covers and M4A audio extraction")
