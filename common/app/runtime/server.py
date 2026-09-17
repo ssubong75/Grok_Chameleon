@@ -28890,6 +28890,62 @@ def save_image_editor_upload_result(payload: dict, mime_type: str, image_data: s
     })
 
 
+def merge_detail_videos(payload: dict) -> dict:
+    from video_merge import merge_compatible_videos
+
+    root = library_root()
+    if not root:
+        raise RuntimeError("Library path is not set.")
+    post_path = str(payload.get("post_path") or "").strip()
+    if post_path.split("/", 1)[0] not in {"created", "collection", "upload", "reference"}:
+        raise RuntimeError("Select a local video folder.")
+    keys = payload.get("item_keys")
+    if not isinstance(keys, list) or len(keys) != 2 or not all(isinstance(key, str) and key for key in keys):
+        raise RuntimeError("Attach two saved videos.")
+    folder = safe_join(root, post_path)
+    ffmpeg = resolve_ffmpeg_binary()
+    ffprobe = Path(ffmpeg).with_name("ffprobe.exe" if os.name == "nt" else "ffprobe") if ffmpeg else None
+    if not ffprobe or not ffprobe.is_file():
+        raise RuntimeError("The video merge tools are missing. Please update the app.")
+    with build_post_save_lock(folder):
+        post_file = folder / "post.json"
+        post = read_json(post_file, {})
+        items = post.get("items") or []
+        sources = []
+        for key in keys:
+            item = next((entry for entry in items if media_item_key(entry) == key), None)
+            if not item or (item.get("type") or media_type_for_name(item.get("file") or "")) != "video":
+                raise RuntimeError("The source video was not found in this folder.")
+            source = safe_join(folder, str(item.get("file") or ""))
+            if not source.is_file() or source.suffix.lower() not in {".mp4", ".mov", ".m4v"}:
+                raise RuntimeError("Merge needs locally saved MP4 or MOV videos.")
+            sources.append(source)
+        with tempfile.TemporaryDirectory(prefix="gc_merge_") as temp_dir:
+            work = Path(temp_dir)
+            inputs = [work / "1.mp4", work / "2.mp4"]
+            for source, copy in zip(sources, inputs):
+                shutil.copyfile(source, copy)
+            output = work / "merged.mp4"
+            info = merge_compatible_videos(ffmpeg, str(ffprobe), inputs, output)
+            name = unique_file_name(folder, "merged_video", "mp4")
+            target = folder / name
+            item = {
+                "item_id": file_stem(name), "type": "video", "file": name,
+                "mime_type": "video/mp4", "role": "result", "relation": "video_merge",
+                "title": file_stem(name), "created_at": now_iso(),
+                "size": output.stat().st_size, "source_item_ids": keys,
+                "aspect_ratio": f"{info['width']}:{info['height']}", **info,
+            }
+            try:
+                shutil.copyfile(output, target)
+                write_json(post_file, {**post, "items": [*items, item], "updated_at": now_iso()})
+            except Exception:
+                target.unlink(missing_ok=True)
+                raise
+    refresh_library_index_paths(root, [post_path])
+    return current_library_snapshot(root)
+
+
 def save_detail_video_frame(payload: dict) -> dict:
     root = library_root()
     if not root:
@@ -29564,6 +29620,7 @@ POST_JSON_ROUTES = {
     ),
     "/api/image-editor/save": save_image_editor_result,
     "/api/library/capture-frame": save_detail_video_frame,
+    "/api/library/merge-videos": merge_detail_videos,
     **build_post_routes(
         start_build_job=start_build_job,
         get_build_job=get_build_job,

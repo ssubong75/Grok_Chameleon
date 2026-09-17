@@ -35,6 +35,7 @@ function openScreen(screenId, activeButtonId = "", options = {}) {
   showAccountScreen(false, { skipHistory: true });
   closePromptSave();
   screen_state.current_screen = screenId;
+  if (typeof syncBuildVideoMergeContext === "function") syncBuildVideoMergeContext();
 
   for (const screen of screens) {
     screen.hidden = screen.id !== screenId;

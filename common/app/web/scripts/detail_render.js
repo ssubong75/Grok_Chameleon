@@ -338,6 +338,7 @@ function syncBuildDetailHeartState(post) {
 }
 
 function renderDetailViews(options = {}) {
+  if (typeof syncBuildVideoMergeContext === "function") syncBuildVideoMergeContext();
   const activePrefix = options.activeOnly
     ? (screen_state.current_screen === "i_detail" ? "i" : (screen_state.current_screen === "b_detail" ? "b" : ""))
     : "";
@@ -415,6 +416,7 @@ function detailThumbButtonForItem(prefix, item, post, options = {}) {
   button.type = "button";
   button.dataset.libraryItemId = key;
   button.dataset.libraryItemType = type;
+  button.draggable = prefix === "b" && type === "video";
   button.dataset.thumbSignature = detailThumbSignature(prefix, item, post);
   button.setAttribute("aria-label", `${type === "video" ? "Video" : "Image"} version`);
 

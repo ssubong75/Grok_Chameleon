@@ -72,6 +72,7 @@ env:
   COMMON_PROMPT_ACCOUNT: common/app/web/scripts/prompt_account.js
   COMMON_ACCOUNT_CORE: common/app/web/scripts/account_core.js
   COMMON_FFMPEG_WIN: common/app/vendor/ffmpeg/ffmpeg.exe
+  COMMON_FFPROBE_WIN: common/app/vendor/ffmpeg/ffprobe.exe
   COMMON_FFMPEG_LICENSE: common/app/vendor/ffmpeg/COPYING.LGPLv2.1
 
 jobs:
@@ -192,6 +193,7 @@ jobs:
             @{ Name = "account_style"; Relative = "web\styles\account.css"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_ACCOUNT_STYLE) },
             @{ Name = "composer_style"; Relative = "web\styles\composer.css"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_COMPOSER_STYLE) },
             @{ Name = "ffmpeg"; Relative = "vendor\ffmpeg\ffmpeg.exe"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_FFMPEG_WIN) },
+            @{ Name = "ffprobe"; Relative = "vendor\ffmpeg\ffprobe.exe"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_FFPROBE_WIN) },
             @{ Name = "ffmpeg_license"; Relative = "vendor\ffmpeg\COPYING.LGPLv2.1"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_FFMPEG_LICENSE) }
           )
           $variantRoot = Join-Path $env:GITHUB_WORKSPACE $env:VARIANT_COMMON_DIR
@@ -348,6 +350,18 @@ jobs:
             python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" $pythonSource.Target
             if ($LASTEXITCODE -ne 0) { throw "Windows Python syntax check failed: $($pythonSource.Relative)" }
           }
+
+          $mergeFFmpeg = ($sharedSources | Where-Object Name -eq "ffmpeg").Target
+          $videoToolsApp = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $mergeFFmpeg))
+          python (Join-Path $env:GITHUB_WORKSPACE "tests\video-tools-smoke.py") $videoToolsApp
+          if ($LASTEXITCODE -ne 0) { throw "Windows video merge/audio extraction smoke test failed." }
+          $mergeFFprobe = ($sharedSources | Where-Object Name -eq "ffprobe").Target
+          & $mergeFFprobe -version
+          if ($LASTEXITCODE -ne 0) { throw "Windows ffprobe could not start." }
+          $mergeFormats = (& $mergeFFmpeg -hide_banner -demuxers 2>&1 | Out-String)
+          if ($LASTEXITCODE -ne 0 -or $mergeFormats -notmatch "concat") { throw "Windows FFmpeg concat support is missing." }
+          $audioEncoders = (& $mergeFFmpeg -hide_banner -encoders 2>&1 | Out-String)
+          if ($LASTEXITCODE -ne 0 -or $audioEncoders -notmatch "\baac\b") { throw "Windows FFmpeg AAC encoder is missing." }
 
           $composerText = Get-Content -Raw -LiteralPath $targetComposer
           foreach ($marker in @(
@@ -741,6 +755,7 @@ jobs:
             web/styles/account.css
             web/styles/composer.css
             vendor/ffmpeg/ffmpeg
+            vendor/ffmpeg/ffprobe
             vendor/ffmpeg/COPYING.LGPLv2.1
           )
           # Automatically include every shared Electron, runtime, and web file so a
@@ -840,8 +855,10 @@ jobs:
           done
           node --test "$GITHUB_WORKSPACE/tests/library-backup.test.js"
           # git stores the bundled ffmpeg without the executable bit.
-          chmod +x "$app_root/vendor/ffmpeg/ffmpeg"
+          chmod +x "$app_root/vendor/ffmpeg/ffmpeg" "$app_root/vendor/ffmpeg/ffprobe"
           test -x "$app_root/vendor/ffmpeg/ffmpeg"
+          test -x "$app_root/vendor/ffmpeg/ffprobe"
+          python3 "$GITHUB_WORKSPACE/tests/video-tools-smoke.py" "$app_root"
           python3 - "$server_py" <<'PY'
           import ast
           import pathlib
@@ -1119,6 +1136,7 @@ jobs:
             web/styles/account.css
             web/styles/composer.css
             vendor/ffmpeg/ffmpeg
+            vendor/ffmpeg/ffprobe
             vendor/ffmpeg/COPYING.LGPLv2.1
           )
           while IFS= read -r discovered_relative; do
@@ -1545,6 +1563,7 @@ jobs:
             web/styles/account.css
             web/styles/composer.css
             vendor/ffmpeg/ffmpeg
+            vendor/ffmpeg/ffprobe
             vendor/ffmpeg/COPYING.LGPLv2.1
           )
 

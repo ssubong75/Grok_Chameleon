@@ -304,3 +304,141 @@ async function startBuildDetailSpicyVideo(button = null) {
 }
 
 bindBuildDetailActions();
+
+const buildVideoMergeState = { postPath: "", items: [null, null], busy: false };
+
+function closeBuildVideoMerge() {
+  document.querySelector(".b_video_merge_popup").hidden = true;
+  document.querySelector(".b_detail_video_merge").setAttribute("aria-expanded", "false");
+}
+
+function syncBuildVideoMergeContext() {
+  if (screen_state.current_screen !== "b_detail"
+    || selectedLibraryPost()?.folder_path !== buildVideoMergeState.postPath) {
+    closeBuildVideoMerge();
+    buildVideoMergeState.postPath = "";
+    buildVideoMergeState.items = [null, null];
+  }
+}
+
+function renderBuildVideoMergeSlots() {
+  document.querySelectorAll(".b_video_merge_slot").forEach((slot, index) => {
+    const item = buildVideoMergeState.items[index];
+    slot.disabled = buildVideoMergeState.busy;
+    slot.querySelector("small").textContent = item?.file || "Drop video";
+    slot.title = item?.file || "Drop video or click to attach the selected video";
+    const preview = item ? detailPreviewUrlForItem("b", item, selectedLibraryPost()) : "";
+    slot.style.backgroundImage = preview ? `url(${JSON.stringify(preview)})` : "";
+    slot.querySelector("video")?.remove();
+    if (item && !preview) {
+      const video = document.createElement("video");
+      video.muted = true;
+      video.playsInline = true;
+      video.preload = "metadata";
+      video.draggable = false;
+      video.setAttribute("aria-hidden", "true");
+      video.src = detailMediaUrlForItem("b", item, selectedLibraryPost());
+      video.addEventListener("loadedmetadata", () => { video.currentTime = Math.min(.01, video.duration / 2); }, { once: true });
+      slot.prepend(video);
+    }
+  });
+  const submit = document.querySelector(".b_video_merge_submit");
+  submit.disabled = buildVideoMergeState.busy || buildVideoMergeState.items.some((item) => !item);
+  submit.textContent = buildVideoMergeState.busy ? "Merging…" : "Merge";
+}
+
+function attachBuildVideoMergeItem(index, key) {
+  if (buildVideoMergeState.busy) return;
+  const post = selectedLibraryPost();
+  if (screen_state.current_screen !== "b_detail" || post?.folder_path !== buildVideoMergeState.postPath) return;
+  const item = post.items?.find((candidate) => mediaItemKey(candidate) === key);
+  if (!item || detailItemType(item) !== "video" || !item.file) {
+    toast("Select a saved video thumbnail.");
+    return;
+  }
+  buildVideoMergeState.items[index] = item;
+  document.querySelector(".b_video_merge_status").textContent = "";
+  renderBuildVideoMergeSlots();
+}
+
+document.querySelector(".b_detail_video_merge")?.addEventListener("click", () => {
+  const popup = document.querySelector(".b_video_merge_popup");
+  if (!popup.hidden) { closeBuildVideoMerge(); return; }
+  const post = selectedLibraryPost();
+  if (!post?.folder_path || !post.items?.some((item) => detailItemType(item) === "video" && item.file)) {
+    toast("Select a folder with saved videos.");
+    return;
+  }
+  if (buildVideoMergeState.postPath !== post.folder_path) {
+    buildVideoMergeState.items = [null, null];
+    document.querySelector(".b_video_merge_status").textContent = "";
+  }
+  buildVideoMergeState.postPath = post.folder_path;
+  popup.hidden = false;
+  document.querySelector(".b_detail_video_merge").setAttribute("aria-expanded", "true");
+  renderBuildVideoMergeSlots();
+  popup.querySelector(".b_video_merge_close").focus();
+});
+document.querySelector(".b_video_merge_close")?.addEventListener("click", closeBuildVideoMerge);
+document.querySelector(".b_video_merge_popup")?.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    event.stopPropagation();
+    closeBuildVideoMerge();
+    document.querySelector(".b_detail_video_merge").focus();
+  }
+});
+document.querySelector(".b_detail_thumb_list")?.addEventListener("dragstart", (event) => {
+  const thumb = event.target.closest(".b_detail_thumb_video");
+  if (!thumb || thumb.dataset.buildJobId || !event.dataTransfer) return;
+  event.dataTransfer.effectAllowed = "copy";
+  event.dataTransfer.setData("application/x-gc-build-video", JSON.stringify({
+    postPath: selectedLibraryPost()?.folder_path,
+    key: thumb.dataset.libraryItemId,
+  }));
+});
+document.querySelectorAll(".b_video_merge_slot").forEach((slot, index) => {
+  slot.addEventListener("click", () => attachBuildVideoMergeItem(index, mediaItemKey(selectedDetailItem(selectedLibraryPost()))));
+  slot.addEventListener("dragover", (event) => {
+    if (buildVideoMergeState.busy || !Array.from(event.dataTransfer?.types || []).includes("application/x-gc-build-video")) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    slot.classList.add("drag_over");
+  });
+  slot.addEventListener("dragleave", () => slot.classList.remove("drag_over"));
+  slot.addEventListener("drop", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    slot.classList.remove("drag_over");
+    try {
+      const value = JSON.parse(event.dataTransfer.getData("application/x-gc-build-video"));
+      if (value.postPath === buildVideoMergeState.postPath) attachBuildVideoMergeItem(index, value.key);
+    } catch (_) { /* Ignore unrelated drag payloads. */ }
+  });
+});
+document.querySelector(".b_video_merge_submit")?.addEventListener("click", async () => {
+  if (buildVideoMergeState.busy || buildVideoMergeState.items.some((item) => !item)) return;
+  const postPath = buildVideoMergeState.postPath;
+  if (selectedLibraryPost()?.folder_path !== postPath || screen_state.current_screen !== "b_detail") return;
+  buildVideoMergeState.busy = true;
+  renderBuildVideoMergeSlots();
+  const status = document.querySelector(".b_video_merge_status");
+  status.textContent = "Merging videos…";
+  try {
+    const data = await qApi("/api/library/merge-videos", {
+      post_path: postPath,
+      item_keys: buildVideoMergeState.items.map((item) => mediaItemKey(item)),
+    });
+    applyLibrarySnapshot(data);
+    if (buildVideoMergeState.postPath === postPath) {
+      status.textContent = "Saved to this folder.";
+      buildVideoMergeState.items = [null, null];
+    }
+    toast("Merged video saved.");
+  } catch (error) {
+    if (buildVideoMergeState.postPath === postPath) status.textContent = error?.message || "Merge failed.";
+    else showErrorPanel("Merge failed", error?.message || "Merge failed.");
+  } finally {
+    buildVideoMergeState.busy = false;
+    renderBuildVideoMergeSlots();
+  }
+});
