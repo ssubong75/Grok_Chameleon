@@ -89,8 +89,8 @@ INDEX_REPLACEMENTS = (
         f'<button class="b_detail_forward" type="button" aria-label="Forward">{FORWARD_SVG}</button>',
     ),
     replacement(
-        '<button class="i_detail_action i_detail_copy_url" type="button" aria-label="Copy media address"><span class="i_detail_copy_arrow" aria-hidden="true">↓</span></button>',
-        f'<button class="i_detail_action i_detail_copy_url" type="button" aria-label="Copy media address">{UP_SVG}</button>',
+        '<button class="i_detail_action i_detail_copy_url" type="button" aria-label="Copy Link" title="Copy Link"><span class="i_detail_copy_arrow" aria-hidden="true">↓</span></button>',
+        f'<button class="i_detail_action i_detail_copy_url" type="button" aria-label="Copy Link" title="Copy Link">{UP_SVG}</button>',
     ),
     replacement(
         '<span class="i_detail_action_glyph" aria-hidden="true">↗</span>',
@@ -101,12 +101,12 @@ INDEX_REPLACEMENTS = (
         MOVE_B_SVG,
     ),
     replacement(
-        '<button class="i_detail_action i_detail_download" type="button" aria-label="Download">↓</button>',
-        f'<button class="i_detail_action i_detail_download" type="button" aria-label="Download">{DOWNLOAD_SVG}</button>',
+        '<button class="i_detail_action i_detail_download" type="button" aria-label="Download" title="Download">↓</button>',
+        f'<button class="i_detail_action i_detail_download" type="button" aria-label="Download" title="Download">{DOWNLOAD_SVG}</button>',
     ),
     replacement(
-        '<button class="b_detail_action b_detail_download" type="button" aria-label="Download">↓</button>',
-        f'<button class="b_detail_action b_detail_download" type="button" aria-label="Download">{DOWNLOAD_SVG}</button>',
+        '<button class="b_detail_action b_detail_download" type="button" aria-label="Download" title="Download">↓</button>',
+        f'<button class="b_detail_action b_detail_download" type="button" aria-label="Download" title="Download">{DOWNLOAD_SVG}</button>',
     ),
 )
 
