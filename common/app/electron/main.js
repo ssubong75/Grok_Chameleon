@@ -791,20 +791,20 @@ function execCardPreviewFfmpeg(binary, args) {
 
 async function generateVideoCardPreview(sourcePath, targetPath, kind = "card") {
   const normalizedKind = normalizedPreviewKind(kind);
-  const maxPreviewEdge = normalizedKind === "thumbnail" ? THUMBNAIL_PREVIEW_MAX_EDGE : CARD_PREVIEW_MAX_EDGE;
   const binary = cardPreviewFfmpegBinary();
   if (!binary) throw new Error("FFmpeg is unavailable for the video poster.");
   const framePath = `${targetPath}.${process.pid}.${Date.now()}.frame.jpg`;
   try {
     // Start decoding at timestamp zero and take the first decoded frame. The resting poster
-    // therefore matches the exact frame where hover playback begins.
+    // therefore matches the exact frame where hover playback begins. Keep FFmpeg out of
+    // the resize path: the bundled Windows scaler can corrupt otherwise valid H.264 frames.
+    // writeCardPreviewImage() applies the final card/thumbnail size with nativeImage below.
     await execCardPreviewFfmpeg(binary, [
       "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
       "-i", sourcePath,
       "-map", "0:v:0",
       "-an", "-sn", "-dn",
       "-frames:v", "1",
-      "-vf", `scale=${maxPreviewEdge}:${maxPreviewEdge}:force_original_aspect_ratio=decrease`,
       "-q:v", "3",
       framePath,
     ]);
