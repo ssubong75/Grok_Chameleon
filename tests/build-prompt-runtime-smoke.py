@@ -97,4 +97,62 @@ with tempfile.TemporaryDirectory(prefix="grok-build-prompt-") as temporary:
     else:
         raise AssertionError("Imagine edit accepted")
     assert server.read_json(video_folder / "post.json") == video_meta
+    # A legacy Imagine card already moved into Collection is a Build card. A newly
+    # dropped disk image must be editable even though it is absent from post.json.
+    collection = library / "collection" / "test-category"
+    legacy = collection / "legacy-imagine"
+    legacy.mkdir(parents=True)
+    legacy_meta = {
+        "post_id": "legacy", "source": "imagine", "mode": "saved",
+        "original_post_id": "original-imagine-id", "account_id": "original-account",
+        "custom_history": {"keep": True}, "items": [],
+    }
+    server.write_json(legacy / "post.json", legacy_meta)
+    (legacy / "dropped.png").write_bytes(png)
+    server.refresh_library_index_paths(library, ["collection/test-category/legacy-imagine"])
+    legacy_post = server.get_library_post({"path": "collection/test-category/legacy-imagine"})["post"]
+    assert legacy_post["source"] == "build"
+    assert legacy_post["origin_source"] == "imagine"
+    dropped = next(i for i in legacy_post["items"] if i["file"] == "dropped.png")
+    route({"post_path": legacy_post["folder_path"], "item_id": server.media_item_key(dropped), "text": "Edited dropped image"})
+    repaired = server.read_json(legacy / "post.json")
+    assert repaired["source"] == "build" and repaired["origin_source"] == "imagine"
+    assert repaired["original_post_id"] == legacy_meta["original_post_id"]
+    assert repaired["account_id"] == legacy_meta["account_id"]
+    assert repaired["custom_history"] == legacy_meta["custom_history"]
+    assert repaired["items"][0]["prompt"] == "Edited dropped image"
+    assert (legacy / "dropped.png").read_bytes() == png
+
+    # Both whole-card and single-item moves use the shared serializer, which must
+    # classify the destination as Build while retaining Imagine provenance.
+    server.refresh_library_index_paths(library, ["created/video-card"])
+    moved = server.move_post_to_collection({
+        "post_path": "created/video-card", "collection_path": "collection/test-category",
+    })
+    moved_meta = server.read_json(library / moved["selected_path"] / "post.json")
+    assert moved_meta["source"] == "build" and moved_meta["origin_source"] == "imagine"
+    assert moved_meta["items"][0]["prompt"] == video_meta["items"][0]["prompt"]
+    source = {"source": "imagine", "post_id": "remote", "items": [], "account_id": "original-account"}
+    copied = server.post_json_from_post(source, folder_path="collection/test-category/remote", source="build", origin_source="imagine")
+    assert copied["source"] == "build" and copied["origin_source"] == "imagine"
+    assert copied["account_id"] == "original-account"
+    assert server.post_json_from_post(source, folder_path="created/unmoved")["source"] == "imagine"
+    # Exercise remote Imagine -> Collection without network or real accounts.
+    remote = {**source, "items": [{"item_id": "remote-image", "type": "image", "url": "https://example.invalid/image.png"}]}
+    server.remote_imagine_payload_post = lambda payload: remote
+    server.active_imagine_account = lambda *args: {"id": "test-account"}
+    def copy_remote(root, item, destination, account, index):
+        (destination / "image.png").write_bytes(png)
+        return {"item_id": item["item_id"], "type": "image", "file": "image.png"}
+    server.copy_imagine_remote_item_to_directory = copy_remote
+    for item_only in (False, True):
+        remote["post_id"] = "remote-single" if item_only else "remote-whole"
+        remote["items"][0]["item_id"] = remote["post_id"] + "-image"
+        response = server.copy_imagine_remote_post_to_collection({
+            "collection_path": "collection/test-category", "item_key": remote["items"][0]["item_id"],
+        }, item_only=item_only)
+        copied_meta = server.read_json(library / response["selected_path"] / "post.json")
+        assert copied_meta["source"] == "build" and copied_meta["origin_source"] == "imagine"
+        assert copied_meta["source_post_id"] == remote["post_id"]
+    print("PASS: legacy collection classification, dropped-image MOD, provenance preservation, Imagine-to-Collection move")
     print("PASS: image/video persistence, NFC, multiline text, metadata preservation, index refresh, invalid targets, provider boundary")

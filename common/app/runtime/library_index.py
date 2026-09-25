@@ -13,7 +13,7 @@ from pathlib import Path
 # Version 9 deliberately rebuilds legacy card listings once. Earlier caches can predate a
 # folder deletion or a collection copied from another computer, so preserving their rows would
 # make an already-deleted card remain visible on Build Main.
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10  # Rebuild legacy collection rows with Build classification.
 LIST_SUMMARY_VERSION = 2
 STATE_DIRECTORY = "sql_data"
 DATABASE_FILENAME = "library_index.sqlite3"

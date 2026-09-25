@@ -21431,10 +21431,14 @@ def post_from_folder(root: Path, folder: Path, context: dict) -> dict | None:
         or context.get("source")
         or "local"
     )
+    origin_source = (meta or {}).get("origin_source") or source
+    if rel_folder.startswith("collection/"):
+        source = "build"
     folder_name = context["folderName"]
     return {
         "post_id": (meta or {}).get("post_id") or post_field(meta, "imagine_post_id") or post_field(meta, "id") or folder_name,
         "source": source,
+        "origin_source": origin_source,
         "mode": (meta or {}).get("mode") or context.get("mode") or "",
         "folder_role": (meta or {}).get("folder_role") or "",
         "title": (meta or {}).get("title") or post_field(meta, "title") or post_field(meta, "prompt") or readable_name(folder_name),
@@ -24227,9 +24231,12 @@ def serializable_media_item(item: dict) -> dict:
 def post_json_from_post(post: dict, **overrides) -> dict:
     items = overrides.get("items", post.get("items") or [])
     representative = overrides.get("representative") or post.get("representative") or (items[0].get("file") if items else "") or (items[0].get("url") if items else "") or ""
+    folder_path = overrides.get("folder_path", post.get("folder_path"))
+    source = overrides.get("source", post.get("source"))
     return {
         "post_id": overrides.get("post_id", post.get("post_id")),
-        "source": overrides.get("source", post.get("source")),
+        "source": "build" if str(folder_path or "").startswith("collection/") else source,
+        "origin_source": overrides.get("origin_source") or post.get("origin_source") or post.get("source"),
         "mode": overrides.get("mode", post.get("mode")),
         "title": overrides.get("title", post.get("title")),
         "prompt": overrides.get("prompt", post.get("prompt")),
@@ -27526,6 +27533,9 @@ def update_library_item_prompt(payload: dict) -> dict:
             metadata = post_json_from_post(post)
         if not isinstance(metadata, dict):
             raise RuntimeError("Card metadata could not be read.")
+        if rel_path.startswith("collection/"):
+            metadata["origin_source"] = metadata.get("origin_source") or metadata.get("source") or "local"
+            metadata["source"] = "build"
         raw_items = metadata.get("items", [])
         if not isinstance(raw_items, list):
             raise RuntimeError("Card items could not be read.")
@@ -28266,7 +28276,8 @@ def copy_imagine_remote_post_to_collection(payload: dict, item_only: bool = Fals
             post_json = post_json_from_post(
                 source_post,
                 post_id=target_dir.name,
-                source="imagine",
+                source="build",
+                origin_source=source_post.get("origin_source") or "imagine",
                 mode=source_post.get("mode") or "imagine",
                 title=source_post.get("title") or readable_name(target_dir.name),
                 folder_path=target_path,
