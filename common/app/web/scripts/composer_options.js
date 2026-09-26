@@ -5,7 +5,10 @@ function aspectOptions(provider, mode) {
 }
 
 function resolutionOptions(provider, mode) {
-  if (provider === "build" && mode === "image") return buildT2iResolutionOptions;
+  if (provider === "build" && mode === "image") {
+    return selectedComposerControl(composerControls.imageModel).toLowerCase() === "speed"
+      ? buildT2iResolutionOptions : ["2K", "1.5K", "1K"];
+  }
   if (mode === "image") return imageResolutionOptions;
   if (mode === "video") return videoResolutionOptions;
   return [];
@@ -17,7 +20,7 @@ function isBuildImageModel20(value) {
 }
 
 function buildImage20OutputResolution(value) {
-  const match = String(value || "").trim().match(/^(1k|2k)\b/i);
+  const match = String(value || "").trim().match(/^(1k|1\.5k|2k)\b/i);
   return match ? match[1].toUpperCase() : "";
 }
 
@@ -244,7 +247,7 @@ function renderComposerOptions() {
       );
     }
     if (isBuildImage && !buildImage20) {
-      setCustomSelectOptions(composerControls.resolution, resolutionOptions(provider, mode), "1K", `${provider}:${mode}:resolution`);
+      setCustomSelectOptions(composerControls.resolution, resolutionOptions(provider, mode), "1K", `${provider}:${mode}:resolution:${selectedComposerControl(composerControls.imageModel)}`);
     }
     if (!isImageToImage && !hideImagineImageToImageOptions) {
       setCustomSelectOptions(composerControls.count, imageCountOptions, imageCountDefault, `${provider}:${mode}:count`);

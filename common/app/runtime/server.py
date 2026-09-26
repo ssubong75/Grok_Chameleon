@@ -187,7 +187,7 @@ LIBRARY_INDEX_CHANGE_STATE = threading.local()
 BUILD_VIDEO_TERMINAL_STATUSES = {"failed", "expired", "cancelled", "canceled"}
 IMAGE_ASPECT_RATIOS = {"auto", "1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "2:1", "1:2", "19.5:9", "9:19.5", "20:9", "9:20"}
 VIDEO_ASPECT_RATIOS = {"1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"}
-IMAGE_RESOLUTIONS = {"1k", "2k"}
+IMAGE_RESOLUTIONS = {"1k", "1.5k", "2k"}
 VIDEO_RESOLUTIONS = {"480p", "720p", "1080p"}
 ACCOUNT_TIERS = {"free", "super", "heavy"}
 IMAGINE_BASE = "https://grok.com"
@@ -25353,6 +25353,8 @@ def build_image_request(payload: dict, options: dict, prompt: str, image_attachm
         "response_format": "b64_json",
     }
     resolution = clean_option(options.get("resolution"), "1k").lower()
+    if resolution == "1.5k" and model == "grok-imagine-image":
+        raise RuntimeError("Speed supports 1K or 2K resolution.")
     if resolution in IMAGE_RESOLUTIONS:
         body["resolution"] = resolution
     quality = clean_option(options.get("quality") or options.get("image_quality")).lower()

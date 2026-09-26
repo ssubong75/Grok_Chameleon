@@ -89,7 +89,7 @@ document.documentElement.classList.toggle("platform-macos", isMacRenderer);
   const imageResolutionOptions = ["2K", "1K"];
   const buildT2iResolutionOptions = ["2K", "1K"];
   const buildImageModelOptions = ["M 2.0", "M 1.5"];
-  const buildImage20OutputOptions = ["2K Med", "1K Med", "2K Low", "1K Low"];
+  const buildImage20OutputOptions = ["2K Med", "1.5K Med", "1K Med", "2K Low", "1.5K Low", "1K Low"];
   const buildImage20CountOptions = ["10", "8", "4", "2"];
   const videoResolutionOptions = ["1080", "720", "480"];
   const countOptions = ["Auto", "1", "2", "4", "8", "10"];

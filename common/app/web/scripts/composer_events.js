@@ -366,7 +366,7 @@ for (const select of document.querySelectorAll(".custom_select")) {
     select.querySelectorAll(".custom_select_option").forEach((item) => item.classList.toggle("active", item === option));
     if (
       composerState.mode === "image"
-      && select === composerControls.buildImageModel
+      && (select === composerControls.buildImageModel || (composerState.provider === "build" && select === composerControls.imageModel))
       && typeof renderComposerOptions === "function"
     ) {
       renderComposerOptions();
