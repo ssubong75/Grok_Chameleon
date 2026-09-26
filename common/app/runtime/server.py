@@ -28430,6 +28430,12 @@ def merge_selected_posts(payload: dict) -> dict:
         post_dir = safe_join(root, post.get("folder_path") or "")
         if not post_dir.is_dir():
             raise RuntimeError("Selected post folder was not found.")
+        # The index may omit files added since its last scan. Never delete a source
+        # folder based only on a cached item list.
+        context = indexed_post_context(post_dir.relative_to(root).as_posix())
+        post = post_from_folder(root, post_dir, context) if context else None
+        if not post:
+            raise RuntimeError("Selected post could not be read from disk.")
         posts.append(post)
 
     target_parent, collection_id = merge_target_parent(root, payload)
@@ -28441,22 +28447,39 @@ def merge_selected_posts(payload: dict) -> dict:
     temp_dir = target_parent / f".merge-{uuid.uuid4().hex}.tmp"
     final_dir = target_parent / target_name
     merged_items: list[dict] = []
-    seen_keys: set[tuple[str, str]] = set()
+    used_item_ids: set[str] = set()
+    verified_copies: list[tuple[Path, Path]] = []
     try:
         temp_dir.mkdir(parents=True, exist_ok=False)
         for post, source_dir in zip(posts, source_dirs):
+            item_id_map = {}
+            post_copies = []
             for item in post.get("items") or []:
-                item_keys = media_item_merge_keys(post, item)
-                if item_keys and seen_keys.intersection(item_keys):
-                    continue
+                # IDs such as image-01 are folder-local, not global identities.
+                # Preserve every selected item, even when IDs or URLs coincide.
                 copied_item = copy_media_item_to_directory(source_dir, item, temp_dir)
+                old_id = media_item_key(item)
+                copied_item["item_id"] = claim_unique_media_item_id(old_id, used_item_ids)
+                item_id_map[old_id] = copied_item["item_id"]
+                if item.get("file"):
+                    import filecmp
+                    source_file = safe_join(source_dir, item["file"])
+                    copied_file = safe_join(temp_dir, copied_item["file"])
+                    if not source_file.is_file() or not copied_file.is_file() or not filecmp.cmp(source_file, copied_file, shallow=False):
+                        raise RuntimeError("Merge copy verification failed; original cards were kept.")
+                    verified_copies.append((source_file, copied_file))
                 if not copied_item.get("prompt") and post.get("prompt"):
                     copied_item["prompt"] = post.get("prompt")
                 if not copied_item.get("created_at") and post.get("created_at"):
                     copied_item["created_at"] = post.get("created_at")
                 merged_items.append(copied_item)
-                seen_keys.update(item_keys)
-                seen_keys.update(media_item_merge_keys({"folder_path": target_name}, copied_item))
+                post_copies.append(copied_item)
+            for copied_item in post_copies:
+                for key in ("source_item_id", "parent_item_id", "original_item_id", "root_item_id"):
+                    if copied_item.get(key) in item_id_map:
+                        copied_item[key] = item_id_map[copied_item[key]]
+                if isinstance(copied_item.get("reference_item_ids"), list):
+                    copied_item["reference_item_ids"] = [item_id_map.get(key, key) for key in copied_item["reference_item_ids"]]
         if not merged_items:
             raise RuntimeError("Selected cards have no media to merge.")
 
@@ -28483,6 +28506,12 @@ def merge_selected_posts(payload: dict) -> dict:
             order=min((safe_int(post.get("order"), 0) for post in posts), default=0),
         )
         write_json(temp_dir / "post.json", post_json)
+        saved = read_json(temp_dir / "post.json", {})
+        if len(saved.get("items") or []) != sum(len(post.get("items") or []) for post in posts):
+            raise RuntimeError("Merge item verification failed; original cards were kept.")
+        for source_file, copied_file in verified_copies:
+            if not filecmp.cmp(source_file, copied_file, shallow=False):
+                raise RuntimeError("Merge source changed; original cards were kept.")
         temp_dir.rename(final_dir)
     except Exception:
         if temp_dir.exists():
