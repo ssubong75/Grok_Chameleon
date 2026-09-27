@@ -78,3 +78,12 @@ test('an old account response cannot replace the current account', async () => {
   assert.equal(run.state.imagineLikedPosts, previous);
   assert.equal(run.detailsRendered(), 0);
 });
+
+test('USB-synced removals leave memory even when live membership is unavailable', async () => {
+  const run = loader({ loaded: true, existing: [post('deleted'), post('survivor')], live: {
+    posts: [], complete: false, errors: [{ error: 'offline' }], hidden_asset_ids: ['deleted'],
+  } });
+  await run.load({ force: true });
+  assert.equal(run.state.imagineLikedPosts.length, 1);
+  assert.deepEqual(Array.from(run.state.imagineLikedPosts[0].items, i => i.item_id), ['survivor']);
+});

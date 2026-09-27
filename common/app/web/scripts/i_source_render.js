@@ -2657,7 +2657,12 @@ async function loadImagineLikedCards({ force = false } = {}) {
     const data = await qApi("/api/imagine/liked", { account_id: accountId, limit: 100 });
     if (!imagineAccountResponseIsCurrent(accountId, requestEpoch, data)) return;
     applyImagineLikedExclusionSnapshot(data, accountId);
-    const confirmedDeleted = new Set(data.confirmed_deleted_asset_ids || []);
+    // USB-synced removals must also leave memory when unrelated requests fail and
+    // the partial live response deliberately preserves the rest of the old list.
+    const confirmedDeleted = new Set([
+      ...(data.confirmed_deleted_asset_ids || []),
+      ...(data.hidden_asset_ids || []),
+    ]);
     if (confirmedDeleted.size) {
       library_state.imagineLikedPosts = removeImagineConfirmedDeletedPendingItems(
         library_state.imagineLikedPosts || [], confirmedDeleted,

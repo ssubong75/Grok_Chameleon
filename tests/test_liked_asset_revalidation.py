@@ -73,7 +73,7 @@ def setup(responses, available=False):
         'imagine_item_clone_record', 'imagine_item_official_lineage',
         'imagine_apply_official_item_lineage', 'imagine_group_external_clone_batch_cards',
         'merge_imagine_liked_lineage_cards')}
-    fn = functions('imagine_revalidate_liked_assets', quote=quote,
+    fn = functions('imagine_revalidate_liked_assets', 'imagine_error_is_confirmed_not_found', quote=quote,
                    imagine_get_json=get, imagine_unsaved_post_from_asset=materialize,
                    imagine_remote_media_available=probe,
                    imagine_representative_item=lambda items: items[-1], **bindings)
@@ -131,7 +131,28 @@ class LikedAssetRevalidationTests(unittest.TestCase):
         result, errors, report = verify([card(video())], {'id': 'active'})
         self.assertEqual(held(result), {'video'})
         self.assertEqual(report['recovered'], 0)
-        self.assertTrue(errors)
+        self.assertEqual(errors, [])
+        self.assertEqual(report['confirmed_deleted_asset_ids'], ['image'])
+
+    def test_exact_missing_assets_remove_dead_cards(self):
+        for status in (404, 410):
+            with self.subTest(status=status):
+                verify, _, _ = setup({name: RuntimeError(f'Imagine HTTP {status}')
+                                      for name in ('image', 'video')})
+                result, errors, report = verify([card(video(), image())], {'id': 'active'})
+                self.assertEqual(result, [])
+                self.assertEqual(errors, [])
+                self.assertEqual(report['confirmed_deleted_asset_ids'], ['image', 'video'])
+
+    def test_missing_one_asset_preserves_unverified_sibling(self):
+        for failure in ('Imagine HTTP 403', 'Imagine HTTP 429', 'Imagine HTTP 503', 'timeout'):
+            with self.subTest(failure=failure):
+                verify, _, _ = setup({'image': RuntimeError('Imagine HTTP 404'),
+                                      'video': RuntimeError(failure)})
+                result, errors, report = verify([card(video(), image())], {'id': 'active'})
+                self.assertEqual(held(result), {'video'})
+                self.assertEqual(len(errors), 1)
+                self.assertEqual(report['confirmed_deleted_asset_ids'], ['image'])
 
     def test_hidden_original_is_never_requested_or_restored(self):
         verify, calls, _ = setup({'video': video(), 'image': image()})
@@ -139,7 +160,7 @@ class LikedAssetRevalidationTests(unittest.TestCase):
         self.assertEqual(held(result), {'video'})
         self.assertEqual([asset_id for asset_id, _ in calls], ['video'])
 
-    def test_only_explicit_deleted_flag_removes_existing_item(self):
+    def test_explicit_deleted_flag_wins_even_with_working_media_url(self):
         verify, _, probes = setup({'video': video(), 'image': {**image(), 'isDeleted': True}}, available=True)
         result, errors, report = verify([card(video(), image())], {'id': 'active'})
         self.assertEqual(held(result), {'video'})

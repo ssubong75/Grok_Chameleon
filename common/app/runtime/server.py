@@ -9338,6 +9338,7 @@ def list_imagine_liked_cache(payload: dict) -> dict:
         "errors": [],
         "cached": True,
         "liked_exclusion": imagine_liked_exclusion_payload(root, account, relations),
+        "hidden_asset_ids": sorted(hidden),
     }
 
 
@@ -9426,7 +9427,8 @@ def imagine_revalidate_liked_assets(
     A clone receipt is durable, but its media item lives in a machine-local index. Rebuilding
     that index can leave the receipt beside a video without the image it records. Cache reads
     remain offline; every live Liked read verifies these receipts and existing items instead
-    of treating cache membership as proof that a card is complete. Failed reads never delete.
+    of treating cache membership as proof that a card is complete. Transient failures never
+    delete; exact asset 404/410 can confirm deletion unless a recorded clone URL still works.
     """
     posts = json.loads(json.dumps(cards))
     hidden = set(hidden_ids or ())
@@ -9468,8 +9470,9 @@ def imagine_revalidate_liked_assets(
             return post["items"][0], "", False
         except Exception as exc:
             error = str(exc)[:300]
-        # A detail 404 is not an asset deletion: the CDN can still serve the exact media
-        # returned by clone-batch. Verify that recorded URL before restoring its item.
+            confirmed_missing = imagine_error_is_confirmed_not_found(exc)
+        # A clone detail can be unavailable while its recorded media still works. Preserve
+        # that recovery path, but do not retain a dead card forever after an exact 404/410.
         record = records.get(asset_id, {})
         media_url = str(record.get("media_url") or "")
         mime = str(record.get("media_type") or "")
@@ -9486,7 +9489,7 @@ def imagine_revalidate_liked_assets(
                         return restored["items"][0], error, False
             except Exception:
                 pass
-        return None, error, False
+        return (None, "", True) if confirmed_missing else (None, error, False)
 
     fresh: dict[str, dict] = {}
     checked: set[str] = set()
@@ -9654,6 +9657,7 @@ def list_imagine_liked(payload: dict) -> dict:
             "complete": False,
             "cached": True,
             "liked_exclusion": cached.get("liked_exclusion") or {},
+            "hidden_asset_ids": cached.get("hidden_asset_ids") or [],
         }
     entries = membership.get("entries") if isinstance(membership.get("entries"), list) else []
     posts: list[dict] = []
@@ -9993,6 +9997,7 @@ def list_imagine_liked(payload: dict) -> dict:
         posts, account, hidden_ids=liked_hidden_ids,
     )
     errors.extend(asset_errors)
+    remember_imagine_deleted_assets(root, account, set(asset_check["confirmed_deleted_asset_ids"]))
     # A user can delete/hide media while the remote read is in progress. Do not write
     # that media back from an earlier snapshot after the requests finish.
     current_hidden_ids = imagine_pending_delete_ids(root, account) | imagine_local_exclusion_ids(root, account)
@@ -10026,6 +10031,7 @@ def list_imagine_liked(payload: dict) -> dict:
         "next_cursor": str(membership.get("next_cursor") or ""),
         "asset_revalidation": asset_check,
         "confirmed_deleted_asset_ids": asset_check["confirmed_deleted_asset_ids"],
+        "hidden_asset_ids": sorted(current_hidden_ids),
         "has_more": bool(membership.get("has_more")),
         "membership_complete": bool(membership.get("complete")),
         "complete": complete,
@@ -12244,6 +12250,9 @@ def delete_imagine_asset(payload: dict) -> dict:
     # Legacy records from before clone-backed hearts can still contain only the source
     # id. They have no account-owned asset to delete, so remove that stale local alias.
     if imagine_asset_is_external_reference(root, account, asset_id):
+        imagine_state.add_local_exclusions(
+            root, imagine_account_settings_key(account), {asset_id}, reason="external_unsave",
+        )
         update_imagine_local_heart_posts(
             root,
             account,
@@ -12275,6 +12284,10 @@ def delete_imagine_asset(payload: dict) -> dict:
             rollback_imagine_delete_race_guard(root, account, asset_id)
         raise
     if root and not preserve_upload_bundle:
+        if not bundle_source_only:
+            imagine_state.add_local_exclusions(
+                root, imagine_account_settings_key(account), {asset_id}, reason="remote_asset_deleted",
+            )
         update_imagine_local_heart_posts(
             root,
             account,
@@ -12322,6 +12335,28 @@ def imagine_asset_is_external_reference(root: Path | None, account: dict, asset_
         return False
 
 
+def remember_imagine_deleted_assets(
+    root: Path | None, account: dict, asset_ids: set[str], *, reason: str = "remote_asset_deleted",
+) -> None:
+    """Persist confirmed removals in USB-synced state and prune both machine-local views."""
+    asset_ids = {str(value).strip() for value in asset_ids if str(value or "").strip()}
+    if not root or not asset_ids:
+        return
+    account_key = imagine_account_settings_key(account)
+    imagine_state.add_local_exclusions(root, account_key, asset_ids, reason=reason)
+    update_imagine_local_heart_posts(
+        root, account, remove_asset_ids=asset_ids, remove_entire_link_post=False,
+    )
+    update_imagine_account_setting_ids(
+        root, "imagine_external_reference_asset_ids", account, remove=asset_ids,
+    )
+    remove_imagine_clone_asset_map_clone_ids(root, account, asset_ids)
+    remove_imagine_generated_relation_state(root, asset_ids=asset_ids, account_key=account_key)
+    prune_imagine_remote_cache_assets(root, account, asset_ids)
+    prune_imagine_saved_display_cache(root, account, set(), asset_ids)
+    invalidate_imagine_saved_media_keys_cache(account)
+
+
 def discard_missing_imagine_asset(payload: dict) -> dict:
     payload = payload if isinstance(payload, dict) else {}
     status = safe_int(payload.get("status"), 0)
@@ -12346,25 +12381,7 @@ def discard_missing_imagine_asset(payload: dict) -> dict:
         confirmed_deleted = imagine_error_is_confirmed_not_found(exc)
     if not confirmed_deleted:
         return {"ok": True, "asset_id": asset_id, "action": "kept", "status": status}
-    account_key = imagine_account_settings_key(account)
-    imagine_state.add_local_exclusions(root, account_key, {asset_id}, reason="remote_asset_deleted")
-    update_imagine_local_heart_posts(
-        root,
-        account,
-        remove_asset_ids={asset_id},
-        remove_entire_link_post=False,
-    )
-    update_imagine_account_setting_ids(
-        root,
-        "imagine_external_reference_asset_ids",
-        account,
-        remove={asset_id},
-    )
-    remove_imagine_clone_asset_map_clone_ids(root, account, {asset_id})
-    remove_imagine_generated_relation_state(root, asset_ids={asset_id}, account_key=account_key)
-    prune_imagine_remote_cache_assets(root, account, {asset_id})
-    prune_imagine_saved_display_cache(root, account, set(), {asset_id})
-    invalidate_imagine_saved_media_keys_cache(account)
+    remember_imagine_deleted_assets(root, account, {asset_id})
     imagine_debug_event("missing_asset_pruned", {
         "account_id": str(account.get("id") or ""),
         "asset_id": asset_id,
@@ -12391,7 +12408,7 @@ def delete_imagine_asset_metadata(payload: dict) -> dict:
         rollback_imagine_delete_race_guard(root, account, asset_id)
         raise
     if root:
-        remove_imagine_generated_relation_state(root, asset_ids={asset_id})
+        remember_imagine_deleted_assets(root, account, {asset_id})
     return {"ok": True, "asset_id": asset_id, "result": result}
 
 
@@ -12415,6 +12432,17 @@ def delete_imagine_conversation(payload: dict) -> dict:
     result = imagine_delete_json(path, account, timeout=45, referer=IMAGINE_BASE + "/imagine/saved")
     root = library_root()
     if root:
+        # The UI groups only owned items from this account/conversation. Keep every
+        # deleted id, not just the representative: other computers retain their own
+        # card indexes. Shared upload sources remain governed by bundle-local hiding.
+        targets = [payload, *(payload.get("items") or [])]
+        deleted_ids = {
+            imagine_delete_target_id(target) for target in targets
+            if isinstance(target, dict) and not target.get("bundle_source_only")
+            and str(target.get("account_id") or account.get("id") or "") == str(account.get("id") or "")
+            and str(target.get("conversation_id") or conversation_id).strip() == conversation_id
+        }
+        remember_imagine_deleted_assets(root, account, deleted_ids, reason="remote_conversation_deleted")
         update_imagine_local_heart_posts(
             root,
             account,

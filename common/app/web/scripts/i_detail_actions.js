@@ -1054,7 +1054,10 @@ async function deleteImagineCardConversation(post, items) {
   }
   for (const group of groups.values()) {
     try {
-      await qApi("/api/imagine/conversation/delete", group.payload);
+      await qApi("/api/imagine/conversation/delete", {
+        ...group.payload,
+        items: group.items.map((item) => imagineDeletePayloadForItem(post, item)).filter(Boolean),
+      });
       deletedItems.push(...group.items);
     } catch (error) {
       if (isImagineConversationDeleteFallbackError(error)) {

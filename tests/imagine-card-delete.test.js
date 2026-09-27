@@ -7,6 +7,7 @@ const read = (file) => fs.readFileSync(path.join(__dirname, '../common/app/web/s
 
 function harness(failConversation = '') {
   const calls = [];
+  const payloads = [];
   const released = [];
   const context = vm.createContext({
     Map, Set,
@@ -17,6 +18,7 @@ function harness(failConversation = '') {
     isImagineConversationDeleteFallbackError: () => false,
     qApi: async (route, payload) => {
       calls.push(payload.conversation_id);
+      payloads.push(payload);
       if (payload.conversation_id === failConversation) throw new Error('HTTP 403');
       return { ok: true };
     },
@@ -25,7 +27,7 @@ function harness(failConversation = '') {
   });
   const source = read('i_detail_actions.js');
   vm.runInContext(source.slice(source.indexOf('async function deleteImagineCardConversation('), source.indexOf('function imagineLinkCardHasOwnedClone(')), context);
-  return { context, calls, released };
+  return { context, calls, released, payloads };
 }
 
 const items = [{ id: 'image', conversation: 'A' }, { id: 'video', conversation: 'A' }, { id: 'edit', conversation: 'B' }];
@@ -35,6 +37,7 @@ test('a grouped card deletes all its conversations once', async () => {
   assert.deepEqual(h.calls, ['A', 'B']);
   assert.equal(result.deletedItems.length, 3);
   assert.equal(result.failures.length, 0);
+  assert.deepEqual(h.payloads.map(p => Array.from(p.items, i => i.asset_id)), [['image', 'video'], ['edit']]);
 });
 
 test('failure of one conversation does not mark its items deleted or stop the other conversation', async () => {
@@ -50,6 +53,15 @@ test('an external original is not deleted as an owned conversation', async () =>
   const h = harness();
   await h.context.deleteImagineCardConversation({}, [...items, { id: 'foreign', conversation: 'foreign-conversation', external: true }]);
   assert.deepEqual(h.calls, ['A', 'B']);
+});
+
+test('an owned link resolves its actual conversation without sending another group', async () => {
+  const h = harness();
+  h.context.isImagineLinkSourcePost = () => true;
+  h.context.imagineLinkCardHasOwnedClone = () => true;
+  await h.context.deleteImagineCardConversation({}, items);
+  assert.deepEqual(h.payloads.map(p => p.conversation_id), ['', '', '']);
+  assert.deepEqual(h.payloads.map(p => Array.from(p.items, i => i.asset_id)), [['image'], ['video'], ['edit']]);
 });
 
 test('cached thumbnail restores scaling after temporary video fallback', () => {
