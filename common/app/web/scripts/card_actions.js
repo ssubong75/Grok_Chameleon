@@ -1,5 +1,159 @@
 // Shared media card selection, merge, and delete actions
 
+// Drag selection starts only on the existing circular Select button. A plain click
+// remains a toggle; dragging paints selection without changing unrelated cards.
+let activeCardButtonDragCleanup = null;
+
+function cardButtonDragScope() {
+  return JSON.stringify([
+    screen_state.current_screen, library_state.iMainView, library_state.bMainView,
+    library_state.selectedCollectionPostPath, library_state.searchQuery,
+    typeof account_state === "undefined" ? "" : account_state.imagine?.active_id,
+    typeof account_state === "undefined" ? "" : account_state.build?.active_id,
+  ]);
+}
+
+function cardDragSegmentIntersectsRect(from, to, rect) {
+  if (rect.right <= rect.left || rect.bottom <= rect.top) return false;
+  let low = 0;
+  let high = 1;
+  for (const [start, delta, min, max] of [
+    [from.x, to.x - from.x, rect.left, rect.right],
+    [from.y, to.y - from.y, rect.top, rect.bottom],
+  ]) {
+    if (!delta) {
+      if (start < min || start > max) return false;
+      continue;
+    }
+    const a = (min - start) / delta;
+    const b = (max - start) / delta;
+    low = Math.max(low, Math.min(a, b));
+    high = Math.min(high, Math.max(a, b));
+    if (low > high) return false;
+  }
+  return true;
+}
+
+function beginCardButtonDragSelection(event, button) {
+  if (event.button !== 0 || event.isPrimary === false || event.pointerType === "touch") return;
+  if (!["i_main", "b_main", "2nd_main", "reference_main"].includes(screen_state.current_screen)) return;
+  const list = button.closest(".card_list");
+  if (!list || list !== libraryCardListElementForScreen() || list.closest("[hidden]")) return;
+  activeCardButtonDragCleanup?.();
+  const scope = cardButtonDragScope();
+  const start = { x: event.clientX, y: event.clientY };
+  const pointerId = event.pointerId;
+  const originKey = button.dataset.libraryPostIdentity || button.dataset.libraryPostPath;
+  let last = start;
+  let dragging = false;
+  const visited = new Set();
+  const originalUserSelect = list.style.userSelect;
+  const originalCursor = list.style.cursor;
+  const valid = () => list.isConnected && !list.closest("[hidden]") && scope === cardButtonDragScope();
+  const add = (key) => {
+    if (!key || visited.has(key)) return;
+    visited.add(key);
+    library_state.selectedItems.add(key);
+  };
+  const paint = (from, to) => {
+    const bounds = list.getBoundingClientRect();
+    for (const card of list.querySelectorAll(".card[data-library-post-path]")) {
+      const control = card.querySelector(".card_visual_select_btn");
+      if (!control || control.disabled || card.hidden) continue;
+      const rect = card.getBoundingClientRect();
+      const clipped = {
+        left: Math.max(rect.left, bounds.left, 0),
+        right: Math.min(rect.right, bounds.right, window.innerWidth),
+        top: Math.max(rect.top, bounds.top, 0),
+        bottom: Math.min(rect.bottom, bounds.bottom, window.innerHeight),
+      };
+      if (cardDragSegmentIntersectsRect(from, to, clipped)) {
+        add(control.dataset.libraryPostIdentity || control.dataset.libraryPostPath);
+      }
+    }
+    library_state.cardSelectionScreen = library_state.selectedItems.size ? screen_state.current_screen : "";
+    syncCardSelectionControls();
+  };
+  const suppressReleaseClick = () => {
+    // A drag can release on a card action, or the browser can retarget its click to
+    // the list. Consume only that gesture's click, never the next physical click.
+    let timer;
+    const clear = () => {
+      document.removeEventListener("click", swallow, true);
+      document.removeEventListener("pointerdown", clear, true);
+      clearTimeout(timer);
+    };
+    const swallow = (click) => {
+      if (click.detail === 0) return;
+      click.preventDefault();
+      click.stopImmediatePropagation();
+      clear();
+    };
+    document.addEventListener("click", swallow, true);
+    document.addEventListener("pointerdown", clear, true);
+    timer = setTimeout(clear, 500);
+  };
+  const cleanup = () => {
+    window.removeEventListener("pointermove", move, true);
+    window.removeEventListener("pointerup", end, true);
+    window.removeEventListener("pointercancel", cancel, true);
+    window.removeEventListener("blur", cancel);
+    window.removeEventListener("keydown", keydown, true);
+    document.removeEventListener("scroll", scroll, true);
+    document.removeEventListener("dragstart", preventNativeDrag, true);
+    if (list.hasPointerCapture?.(pointerId)) list.releasePointerCapture(pointerId);
+    list.style.userSelect = originalUserSelect;
+    list.style.cursor = originalCursor;
+    if (dragging) suppressReleaseClick();
+    activeCardButtonDragCleanup = null;
+  };
+  const move = (next) => {
+    if (next.pointerId !== pointerId) return;
+    if (!valid() || !(next.buttons & 1)) { cleanup(); return; }
+    const point = { x: next.clientX, y: next.clientY };
+    if (!dragging && Math.hypot(point.x - start.x, point.y - start.y) < 5) return;
+    if (!dragging) {
+      dragging = true;
+      if (library_state.cardSelectionScreen && library_state.cardSelectionScreen !== screen_state.current_screen) {
+        library_state.selectedItems.clear();
+      }
+      add(originKey);
+      list.style.userSelect = "none";
+      list.style.cursor = "crosshair";
+      list.setPointerCapture?.(pointerId);
+    }
+    next.preventDefault();
+    next.stopPropagation();
+    paint(last, point);
+    last = point;
+  };
+  const end = (next) => {
+    if (next.pointerId !== pointerId) return;
+    if (dragging && valid()) paint(last, { x: next.clientX, y: next.clientY });
+    cleanup();
+  };
+  const cancel = (next) => {
+    if (next?.pointerId !== undefined && next.pointerId !== pointerId) return;
+    cleanup();
+  };
+  const keydown = (next) => { if (next.key === "Escape") { next.preventDefault(); cleanup(); } };
+  const scroll = () => {
+    if (!valid()) { cleanup(); return; }
+    if (dragging) paint(last, last);
+  };
+  const preventNativeDrag = (next) => {
+    if (dragging || button.contains(next.target)) next.preventDefault();
+  };
+  activeCardButtonDragCleanup = cleanup;
+  window.addEventListener("pointermove", move, true);
+  window.addEventListener("pointerup", end, true);
+  window.addEventListener("pointercancel", cancel, true);
+  window.addEventListener("blur", cancel);
+  window.addEventListener("keydown", keydown, true);
+  document.addEventListener("scroll", scroll, true);
+  document.addEventListener("dragstart", preventNativeDrag, true);
+}
+
 
   function cardPostByPath(path) {
     const target = String(path || "");

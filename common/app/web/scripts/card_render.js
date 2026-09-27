@@ -553,6 +553,8 @@ function renderVirtualCardList(listKey, list, entries, options = {}) {
     state.renderToken = renderToken;
   }
   if (state.options.remoteMedia) prepareVirtualRemoteCardImages(list);
+  // Scrolling can remount cached cards after drag selection changed their state.
+  if (typeof syncCardSelectionControls === "function") syncCardSelectionControls();
 }
 
 function disableVirtualCardList(listKey, list) {
@@ -644,6 +646,7 @@ function cardVisualSelectButton(post) {
   button.dataset.libraryPostPath = post.folder_path || "";
   button.dataset.libraryPostIdentity = selectionKey;
   button.setAttribute("aria-label", "Select");
+  button.title = "Click to select; hold and drag across cards to select more";
   button.setAttribute("aria-pressed", selected ? "true" : "false");
   button.innerHTML = `
     <span class="selection-checkmark" aria-hidden="true">
@@ -653,6 +656,9 @@ function cardVisualSelectButton(post) {
       </svg>
     </span>
   `;
+  button.addEventListener("pointerdown", (event) => {
+    beginCardButtonDragSelection(event, button);
+  });
   button.addEventListener("click", (event) => {
     stopVisualCardAction(event);
     toggleCardSelection(selectionKey);
