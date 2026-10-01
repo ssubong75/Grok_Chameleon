@@ -93,8 +93,7 @@ async function refreshLocalLibrarySnapshot() {
   if (typeof scanLibrary === "function") await scanLibrary();
 }
 
-async function refreshCurrentMainView() {
-  const screenId = screen_state.account_visible ? "account" : screen_state.current_screen;
+async function refreshCurrentMainView(screenId = screen_state.account_visible ? "account" : screen_state.current_screen) {
   showMainRefreshLoading(screenId);
   await waitForRefreshPaint();
   if (screenId === "account") {
@@ -186,7 +185,34 @@ document.getElementById("titleImagineBtn")?.addEventListener("click", async () =
 });
 
 let brandImagineReloading = false;
-document.getElementById("brandImagineBtn")?.addEventListener("click", () => {
+document.getElementById("brandImagineBtn")?.addEventListener("click", async () => {
+  const detailType = screen_state.account_visible ? "" : detailTypeForScreen();
+  if (detailType) {
+    if (brandImagineReloading || titleRefreshInProgress) return;
+    titleRefreshInProgress = true;
+    const detailScreen = screen_state.current_screen;
+    const target = detailBackTarget(detailType);
+    const screenId = target.screenId === "b_t2i_view_main" ? "b_main" : target.screenId;
+    const button = document.getElementById("brandImagineBtn");
+    if (button) {
+      button.disabled = true;
+      button.setAttribute("aria-disabled", "true");
+    }
+    try {
+      await refreshCurrentMainView(screenId);
+      if (screen_state.current_screen === detailScreen) renderDetailViews({ activeOnly: true });
+    } catch (error) {
+      setLibraryMessage(error.message || "Refresh failed.");
+    } finally {
+      hideMainRefreshLoading(screenId);
+      titleRefreshInProgress = false;
+      if (button) {
+        button.disabled = false;
+        button.removeAttribute("aria-disabled");
+      }
+    }
+    return;
+  }
   if (brandImagineReloading) return;
   brandImagineReloading = true;
   const button = document.getElementById("brandImagineBtn");

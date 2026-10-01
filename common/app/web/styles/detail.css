@@ -1335,19 +1335,6 @@
   font-weight: 760;
 }
 
-.b_detail_open_folder_icon {
-  display: block;
-  width: 24px;
-  height: 24px;
-  opacity: 0.86;
-  object-fit: contain;
-}
-
-.b_detail_open_folder:hover .b_detail_open_folder_icon,
-.b_detail_open_folder:focus-visible .b_detail_open_folder_icon {
-  filter: brightness(0) saturate(100%) invert(73%) sepia(94%) saturate(901%) hue-rotate(337deg) brightness(104%) contrast(97%);
-}
-
 .i_detail_split_btn,
 .b_detail_split_btn,
 .i_detail_source_btn,
@@ -2121,3 +2108,40 @@ html.platform-windows .detail_job_badge.failed .detail_job_badge_label::after {
 .b_video_merge_popup button:disabled { opacity: .45; cursor: default; }
 .b_video_merge_status { font-size: 11px; line-height: 1.4; margin-top: 8px; overflow-wrap: anywhere; }
 .b_video_merge_status:empty { display: none; }
+
+/* Path caption follows the media width, above the image/video and centered. */
+.detail_media_path {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  left: 40px;
+  right: 40px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: center;
+  color: var(--text-muted, #a7a7a7);
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.detail_media_path {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  font-family: inherit;
+  font-weight: inherit;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.detail_media_path:hover,
+.detail_media_path:focus-visible {
+  color: #fff;
+  text-decoration: none;
+}
+
+.detail_media_path:disabled {
+  opacity: 1;
+  cursor: default;
+}

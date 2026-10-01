@@ -164,27 +164,22 @@ function buildDetailScreenWorkArea() {
   };
 }
 
-async function openBuildSelectedDetailItemFolder(button = null) {
-  const post = selectedLibraryPost();
-  const item = selectedDetailItem(post);
-  if (screen_state.current_screen !== "b_detail" || !post?.folder_path || !item) {
-    showErrorPanel("Folder unavailable", "Select a saved Build item.");
-    return;
-  }
-  if (!library_state.apiReady) {
-    setLibraryMessage("Open folder needs the local app launcher.");
-    return;
-  }
-  if (button) button.disabled = true;
+async function openDetailPathFolder(button) {
+  if (!button || button.disabled) return;
+  const postPath = button.dataset.postPath;
+  const itemKey = button.dataset.itemKey;
+  if (!postPath || !itemKey || !library_state.apiReady) return;
+  button.disabled = true;
   try {
     await qApi("/api/open-library-folder", {
-      post_path: post.folder_path,
-      item_key: mediaItemKey(item),
+      post_path: postPath,
+      item_key: itemKey,
       screen_work_area: buildDetailScreenWorkArea(),
     });
     toast("Opened containing folder.");
   } finally {
-    if (button) button.disabled = false;
+    // A different selected file may have re-rendered this caption while Finder opened.
+    if (button.dataset.postPath === postPath && button.dataset.itemKey === itemKey) button.disabled = false;
   }
 }
 
@@ -211,12 +206,14 @@ function bindBuildDetailActions() {
       showErrorPanel("Delete failed", error?.message || "Delete failed.");
     });
   });
-  document.querySelector(".b_detail_open_folder")?.addEventListener("click", (event) => {
-    openBuildSelectedDetailItemFolder(event.currentTarget).catch((error) => {
-      console.warn(error);
-      showErrorPanel("Folder open failed", error?.message || "Folder open failed.");
+  for (const pathButton of document.querySelectorAll(".detail_media_path")) {
+    pathButton.addEventListener("click", (event) => {
+      openDetailPathFolder(event.currentTarget).catch((error) => {
+        console.warn(error);
+        showErrorPanel("Folder open failed", error?.message || "Folder open failed.");
+      });
     });
-  });
+  }
   document.querySelector(".b_detail_spicy")?.addEventListener("click", (event) => {
     const button = event.currentTarget;
     startBuildDetailSpicyVideo(button).catch((error) => {

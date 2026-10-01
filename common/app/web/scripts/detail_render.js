@@ -662,6 +662,49 @@ function renderImagineDetailAspectMenu(item) {
     }));
 }
 
+// Display only available path information; remote items have no local folder tree.
+function detailMediaPathLabel(post, item) {
+  if (!post || !item) return "";
+  const normalizePath = (value) => String(value || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  const folder = normalizePath(post.folder_path || post.folderName);
+  let file = String(item.file || item.file_name || item.filename || item.fileHandle?.name || "");
+  if (!file) file = String(item.remote_url || item.url || item.media_url || "");
+  if (/^https?:\/\//i.test(file)) {
+    try {
+      file = new URL(file).pathname.split("/").filter(Boolean).pop() || "";
+      try { file = decodeURIComponent(file); } catch (_) {}
+    } catch (_) { file = ""; }
+  }
+  file = normalizePath(file);
+  const path = folder && file && file !== folder && !file.startsWith(`${folder}/`)
+    ? `${folder}/${file}`
+    : (file || folder);
+  return path.split("/").filter(Boolean).join(" / ");
+}
+
+function updateDetailMediaPath(prefix, post, item) {
+  const label = document.querySelector(`.${prefix}_detail_media_path`);
+  if (!label) return;
+  const text = detailMediaPathLabel(post, item);
+  const folder = label.querySelector(".detail_media_folder");
+  const filename = label.querySelector(".detail_media_filename");
+  const splitAt = text.lastIndexOf(" / ");
+  if (folder) folder.textContent = splitAt >= 0 ? text.slice(0, splitAt + 3) : "";
+  if (filename) filename.textContent = splitAt >= 0 ? text.slice(splitAt + 3) : text;
+  const canOpen = Boolean(
+    post?.folder_path && item && library_state.apiReady
+    && !post.remote
+    && !["imagine_remote", "imagine_upload_remote"].includes(post.area)
+    && !/^imagine_(saved|discover|unsaved|search|uploads)\//.test(post.folder_path)
+  );
+  label.disabled = !canOpen;
+  label.dataset.postPath = canOpen ? post.folder_path : "";
+  label.dataset.itemKey = canOpen ? mediaItemKey(item) : "";
+  label.title = canOpen ? `${text} — Open containing folder` : text;
+  label.setAttribute("aria-label", canOpen ? `Open containing folder: ${text}` : text);
+  label.hidden = !text;
+}
+
 function renderDetailView(prefix, post, options = {}) {
   const thumbList = document.querySelector(`.${prefix}_detail_thumb_list`);
   const media = document.querySelector(`.${prefix}_detail_media`);
@@ -677,6 +720,8 @@ function renderDetailView(prefix, post, options = {}) {
   mediaWrap?.querySelector(".detail_job_badges")?.remove();
   modelBadge?.querySelector(".detail_lucky_badge")?.remove();
   if (post?.is_job_post) {
+    const pathItem = post.base_post?.items?.find((item) => mediaItemKey(item) === library_state.selectedDetailItemId);
+    updateDetailMediaPath(prefix, post.base_post, pathItem);
     renderBuildJobDetailView(prefix, post, options);
     const captureButton = document.querySelector(`.${prefix}_detail_capture_frame`);
     const selectedBaseItem = post.base_post?.items?.find((item) => mediaItemKey(item) === library_state.selectedDetailItemId);
@@ -686,6 +731,7 @@ function renderDetailView(prefix, post, options = {}) {
     return;
   }
   if (!post?.items?.length) {
+    updateDetailMediaPath(prefix, null, null);
     // A refresh can remove the selected card while this view is still open.
     // Never leave its old interactive thumbnails or media on screen.
     media.querySelectorAll("video, audio").forEach((element) => element.pause());
@@ -703,6 +749,7 @@ function renderDetailView(prefix, post, options = {}) {
   const preserveThumbScroll = Boolean(options.preserveThumbScroll);
   const previousThumbScrollTop = preserveThumbScroll ? thumbList.scrollTop : 0;
   const selectedItem = selectedDetailItem(post);
+  updateDetailMediaPath(prefix, post, selectedItem);
   if (prefix === "i") syncImagineDetailHeartState(post, selectedItem);
   if (prefix === "b") syncBuildDetailHeartState(post);
   const selectedKey = mediaItemKey(selectedItem);
