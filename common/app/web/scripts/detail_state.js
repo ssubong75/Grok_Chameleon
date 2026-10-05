@@ -1,0 +1,357 @@
+// Detail selection state and prompt sync
+const buildDetailRefreshRequests = new Map();
+
+async function refreshBuildDetailFromDisk() {
+  const path = String(library_state.selectedPostPath || "");
+  if (screen_state.current_screen !== "b_detail" || !library_state.apiReady || !/^(created|upload|collection|reference)\//.test(path)) return;
+  const root = library_state.rootPath;
+  const key = `${root}\n${path}`;
+  if (buildDetailRefreshRequests.has(key)) return buildDetailRefreshRequests.get(key);
+  const request = (async () => {
+    const data = await qApi("/api/library/post", { path, refresh_from_disk: true });
+    if (library_state.rootPath !== root || library_state.selectedPostPath !== path || screen_state.current_screen !== "b_detail") return;
+    if (!data?.post) return;
+    const post = normalizeServerPost(data.post);
+    mergeIndexedPostsIntoWorkingSet([post]);
+    for (const name of ["indexedBuildPosts", "indexedSearchBuildPosts", "indexedUploadPosts"]) {
+      library_state[name] = (library_state[name] || []).map((entry) => entry.folder_path === path ? post : entry);
+    }
+    for (const collection of library_state.collections || []) {
+      collection.posts = (collection.posts || []).map((entry) => entry.folder_path === path ? post : entry);
+    }
+    // Rendering adds thumbnails without resetting selection or the user's prompt draft.
+    renderDetailViews({ activeOnly: true });
+  })();
+  buildDetailRefreshRequests.set(key, request);
+  try {
+    return await request;
+  } finally {
+    buildDetailRefreshRequests.delete(key);
+  }
+}
+
+function selectLibraryPost(pathOrPost, { loadFull = true, identity = "" } = {}) {
+  library_state.selectedJobId = "";
+  library_state.selectedImagineJobId = "";
+  const explicitPost = pathOrPost && typeof pathOrPost === "object" ? pathOrPost : null;
+  const path = typeof libraryPostServerPath === "function"
+    ? libraryPostServerPath(pathOrPost)
+    : String(explicitPost?.folder_path || pathOrPost || "");
+  const nextIdentity = String(
+    identity
+    || (explicitPost && typeof libraryPostStableIdentity === "function"
+      ? libraryPostStableIdentity(explicitPost)
+      : ""),
+  );
+  const previousPath = library_state.selectedPostPath;
+  const previousIdentity = String(library_state.selectedPostIdentity || "");
+  library_state.selectedPostPath = path || "";
+  library_state.selectedPostIdentity = nextIdentity;
+  const postChanged = previousPath !== library_state.selectedPostPath
+    || previousIdentity !== library_state.selectedPostIdentity;
+  if (postChanged && typeof clearComposerAttachmentsForPostChange === "function") {
+    clearComposerAttachmentsForPostChange();
+  }
+  const post = selectedLibraryPost();
+  if (
+    loadFull
+    && (!post || post._indexed_summary)
+    && path
+    && library_state.libraryIndexEnabled
+    && typeof loadIndexedPost === "function"
+  ) {
+    loadIndexedPost(path).then((loadedPost) => {
+      if (
+        loadedPost
+        && library_state.selectedPostPath === path
+        && (!nextIdentity || library_state.selectedPostIdentity === nextIdentity)
+      ) selectLibraryPost(loadedPost);
+    }).catch((error) => console.warn(error));
+  }
+  if (post) {
+    if (!library_state.selectedPostIdentity && typeof libraryPostStableIdentity === "function") {
+      library_state.selectedPostIdentity = libraryPostStableIdentity(post);
+    }
+    const samePost = previousPath === library_state.selectedPostPath
+      && previousIdentity === library_state.selectedPostIdentity;
+    const visibleItems = detailVisibleItems(post);
+    const selectedStillValid = visibleItems.some((item) => mediaItemKey(item) === library_state.selectedDetailItemId);
+    if (!samePost || !selectedStillValid) {
+      library_state.selectedDetailItemId = mediaItemKey(detailDefaultSelectedItem(post));
+    }
+  }
+  for (const card of document.querySelectorAll("[data-library-post-path]")) {
+    const cardIdentity = String(card.dataset.libraryPostIdentity || "");
+    const selected = cardIdentity
+      ? cardIdentity === library_state.selectedPostIdentity
+      : card.dataset.libraryPostPath === library_state.selectedPostPath;
+    card.classList.toggle("library_selected", selected);
+    if (card.classList.contains("collection_2nd_card")) card.classList.toggle("active", selected);
+  }
+  renderDetailViews();
+  if (loadFull && screen_state.current_screen === "b_detail") {
+    refreshBuildDetailFromDisk().catch((error) => console.warn(error));
+  }
+  if (typeof renderComposerOptions === "function") renderComposerOptions();
+  if ((screen_state.current_screen === "i_detail" || screen_state.current_screen === "b_detail") && typeof syncDetailAttachmentForComposerTray === "function") {
+    syncDetailAttachmentForComposerTray().catch((error) => console.warn(error));
+  }
+}
+
+function selectedLibraryPost() {
+  const selectedPath = String(library_state.selectedPostPath || "");
+  if (!selectedPath) {
+    library_state.selectedPostIdentity = "";
+    return null;
+  }
+  const posts = [
+    ...(library_state.posts || []),
+    ...(library_state.imagineRemotePosts || []),
+  ];
+  if (library_state.selectedPostIdentity && typeof libraryPostMatchesIdentity === "function") {
+    const matched = posts.find((post) => (
+      post?.folder_path === selectedPath
+      && libraryPostMatchesIdentity(post, library_state.selectedPostIdentity)
+    ));
+    if (matched) return matched;
+    return null;
+  }
+  const fallback = posts.find((item) => item.folder_path === selectedPath) || null;
+  if (fallback && typeof libraryPostStableIdentity === "function") {
+    library_state.selectedPostIdentity = libraryPostStableIdentity(fallback);
+  }
+  return fallback;
+}
+
+function selectedDetailItem(post = selectedLibraryPost()) {
+  if (!post?.items?.length) return null;
+  const visibleItems = detailVisibleItems(post);
+  return visibleItems.find((item) => mediaItemKey(item) === library_state.selectedDetailItemId)
+    || detailDefaultSelectedItem(post)
+    || visibleItems[0]
+    || post.items[0];
+}
+
+function selectedDetailSourceContext(post = selectedLibraryPost()) {
+  const selectedItemId = String(library_state.selectedDetailItemId || "");
+  const selectedBaseItem = post?.items?.find((item) => mediaItemKey(item) === selectedItemId) || null;
+  if (selectedBaseItem) return { post, item: selectedBaseItem };
+
+  const job = screen_state.current_screen === "b_detail"
+    ? (typeof selectedBuildJob === "function" ? selectedBuildJob() : null)
+    : (screen_state.current_screen === "i_detail" && typeof selectedImagineJob === "function" ? selectedImagineJob() : null);
+  // Only borrow the job's source when the job belongs to the post being viewed. A job left
+  // selected from another card used to hand its own source over here, so a generation started
+  // from this card attached its result to that other card instead.
+  if (
+    job
+    && typeof generationJobMatchesPost === "function"
+    && generationJobMatchesPost(job, post)
+    && typeof generationJobSourcePost === "function"
+    && typeof generationJobSourceItem === "function"
+  ) {
+    const sourcePost = generationJobSourcePost(job, post);
+    const sourceItem = generationJobSourceItem(job, sourcePost, null);
+    if (sourcePost && sourceItem) return { post: sourcePost, item: sourceItem };
+  }
+
+  return { post, item: selectedDetailItem(post) };
+}
+
+function detailItemRoleRank(item) {
+  const role = String(item?.role || item?.relation || item?.source_type || item?.kind || "").toLowerCase();
+  const type = String(item?.type || "").toLowerCase();
+  return type === "image" && /(original|source|start|input|parent)/.test(role) ? 0 : 1;
+}
+
+function detailCloneBatchOrder(item) {
+  const metadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
+  const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
+  const value = metadata.clone_batch_order ?? imagine.clone_batch_order;
+  const order = Number(value);
+  return Number.isInteger(order) && order >= 0 ? order : null;
+}
+
+function detailItemIdentityIds(item) {
+  const metadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
+  const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
+  return [...new Set([
+    item?.item_id, item?.asset_id, item?.post_id,
+    metadata.asset_id, metadata.official_asset_id, metadata.cloned_from_asset_id, metadata.official_clone_source_asset_id,
+    imagine.asset_id, imagine.post_id, imagine.official_asset_id, imagine.cloned_from_asset_id, imagine.official_clone_source_asset_id,
+  ].map(value => String(value || "").trim()).filter(Boolean))];
+}
+
+function detailItemParentIds(item) {
+  const metadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
+  const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
+  return [...new Set([
+    item?.source_item_id, item?.parent_post_id, item?.original_post_id,
+    metadata.source_item_id, metadata.parent_post_id, metadata.original_post_id,
+    imagine.source_item_id, imagine.parent_post_id, imagine.original_post_id,
+  ].map(value => String(value || "").trim()).filter(Boolean))];
+}
+
+function detailItemLooksLikeTransientInput(item) {
+  return false;
+}
+
+function detailVisibleItems(post) {
+  const items = Array.isArray(post?.items) ? post.items : [];
+  return items;
+}
+
+function detailItemTimeValue(item, fallbackIndex = 0) {
+  const candidates = [
+    item?.created_at,
+    item?.createdAt,
+    item?.timestamp,
+    item?.updated_at,
+    item?.updatedAt,
+    item?.last_modified,
+    item?.lastModified,
+  ];
+  for (const value of candidates) {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    const parsed = Date.parse(String(value || ""));
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  const file = String(item?.file || item?.url || item?.item_id || "");
+  const stamp = file.match(/(20\d{2})[-_]?(\d{2})[-_]?(\d{2})[-_T ]?(\d{2})?[-_]?(\d{2})?[-_]?(\d{2})?/);
+  if (stamp) {
+    const [, year, month, day, hour = "00", minute = "00", second = "00"] = stamp;
+    const parsed = Date.parse(`${year}-${month}-${day}T${hour}:${minute}:${second}Z`);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return fallbackIndex;
+}
+
+function detailOrderedItems(post) {
+  const entries = [...detailVisibleItems(post)]
+    .map((item, index) => ({ item, index }))
+    .sort((a, b) => {
+      const cloneOrderA = detailCloneBatchOrder(a.item);
+      const cloneOrderB = detailCloneBatchOrder(b.item);
+      if (cloneOrderA !== null && cloneOrderB !== null && cloneOrderA !== cloneOrderB) {
+        return cloneOrderA - cloneOrderB;
+      }
+      return (
+        detailItemRoleRank(a.item) - detailItemRoleRank(b.item)
+        || detailItemTimeValue(a.item, a.index) - detailItemTimeValue(b.item, b.index)
+        || a.index - b.index
+      );
+    });
+  const entryByIdentity = new Map();
+  for (const entry of entries) {
+    for (const identity of detailItemIdentityIds(entry.item)) {
+      if (!entryByIdentity.has(identity)) entryByIdentity.set(identity, entry);
+    }
+  }
+  const ordered = [];
+  const visited = new Set();
+  const visiting = new Set();
+  const visit = (entry) => {
+    if (visited.has(entry) || visiting.has(entry)) return;
+    visiting.add(entry);
+    for (const parentId of detailItemParentIds(entry.item)) {
+      const parent = entryByIdentity.get(parentId);
+      if (parent) visit(parent);
+    }
+    visiting.delete(entry);
+    visited.add(entry);
+    ordered.push(entry.item);
+  };
+  for (const entry of entries) visit(entry);
+  return ordered;
+}
+
+function detailDefaultSelectedItem(post) {
+  const ordered = detailOrderedItems(post);
+  for (let index = ordered.length - 1; index >= 0; index -= 1) {
+    if (detailItemRoleRank(ordered[index]) > 0) return ordered[index];
+  }
+  return ordered[ordered.length - 1] || post?.items?.[0] || null;
+}
+
+function detailItemPrompt(item) {
+  const metadata = item?.metadata && typeof item.metadata === "object" ? item.metadata : {};
+  const imagine = metadata.imagine && typeof metadata.imagine === "object" ? metadata.imagine : {};
+  return item?.prompt
+    || item?.original_prompt
+    || item?.originalPrompt
+    || metadata.prompt
+    || metadata.original_prompt
+    || metadata.originalPrompt
+    || imagine.prompt
+    || imagine.original_prompt
+    || imagine.originalPrompt
+    || "";
+}
+
+function detailPromptFor(post, item = selectedDetailItem(post)) {
+  const itemPrompt = detailItemPrompt(item);
+  if (itemPrompt) return itemPrompt;
+  const linkSource = typeof detailIsImagineLinkSource === "function"
+    && detailIsImagineLinkSource(post, item);
+  if (item && post?.source === "imagine" && !linkSource) return "";
+  const postPrompt = detailItemPrompt(post);
+  if (postPrompt) return postPrompt;
+  if (linkSource) return "";
+  return item?.title
+    || post?.title
+    || "";
+}
+
+function currentDetailPromptPost() {
+  const basePost = selectedLibraryPost();
+  const selectedBaseItem = basePost?.items?.find((item) => (
+    mediaItemKey(item) === String(library_state.selectedDetailItemId || "")
+  ));
+  if (selectedBaseItem) return basePost;
+  if (screen_state.current_screen === "b_detail") {
+    const job = typeof selectedBuildJob === "function" ? selectedBuildJob() : null;
+    if (job) {
+      return typeof buildJobDetailPost === "function"
+        ? buildJobDetailPost(job, basePost)
+        : { prompt: job.prompt || "", items: [{ prompt: job.prompt || "" }] };
+    }
+  }
+  if (screen_state.current_screen === "i_detail") {
+    const job = typeof selectedImagineJob === "function" ? selectedImagineJob() : null;
+    if (job) {
+      return typeof imagineJobDetailPost === "function"
+        ? imagineJobDetailPost(job, basePost)
+        : { prompt: job.prompt || "", items: [{ prompt: job.prompt || "" }] };
+    }
+  }
+  return basePost;
+}
+
+function syncComposerPromptFromDetail() {
+  if (screen_state.current_screen !== "i_detail" && screen_state.current_screen !== "b_detail") return;
+  const prompt = detailPromptFor(currentDetailPromptPost());
+  const input = document.getElementById("composer_input");
+  if (input) {
+    input.value = prompt || "";
+    autoSizeComposerPromptInput(input);
+  }
+}
+
+function setSelectedDetailItem(itemId) {
+  const nextItemId = itemId || "";
+  if ((library_state.selectedDetailItemId || "") === nextItemId) {
+    syncComposerPromptFromDetail();
+    return false;
+  }
+  library_state.selectedDetailItemId = nextItemId;
+  const selectingInDetail = screen_state.current_screen === "i_detail" || screen_state.current_screen === "b_detail";
+  renderDetailViews(selectingInDetail ? { activeOnly: true, preserveThumbScroll: true } : {});
+  if (typeof renderComposerOptions === "function") renderComposerOptions();
+  if (composerState.mode === "extend") {
+    prepareDetailExtendFromCurrentVideo();
+    clampActiveDetailExtendStart();
+  }
+  syncComposerPromptFromDetail();
+  playActiveDetailVideoIfSelected();
+  return true;
+}

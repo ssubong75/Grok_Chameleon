@@ -1,0 +1,229 @@
+// Boot and global selection events
+document.getElementById("selectionDownloadBtn")?.addEventListener("click", () => {
+  downloadSelectedCardItems().catch((error) => {
+    console.warn(error);
+    showErrorPanel("Download failed", error?.message || "Download failed.");
+  });
+});
+
+document.getElementById("selectionMergeBtn")?.addEventListener("click", () => {
+  const button = document.getElementById("selectionMergeBtn");
+  const movingImagineCards = button?.dataset.selectionAction === "move";
+  const action = movingImagineCards ? moveSelectedImagineCardItems : mergeSelectedCardItems;
+  action().catch((error) => {
+    console.warn(error);
+    showErrorPanel(
+      movingImagineCards ? "Move failed" : "Merge failed",
+      error?.message || (movingImagineCards ? "Move failed." : "Merge failed."),
+    );
+  });
+});
+
+document.getElementById("selectionRenameBtn")?.addEventListener("click", () => {
+  renameSelectedCollectionCard().catch((error) => {
+    console.warn(error);
+    showErrorPanel("Rename failed", error?.message || "Rename failed.");
+  });
+});
+
+document.getElementById("selectionDeleteBtn")?.addEventListener("click", () => {
+  deleteSelectedCardItems().catch((error) => {
+    console.warn(error);
+    showErrorPanel("Delete failed", error?.message || "Delete failed.");
+  });
+});
+
+document.getElementById("selectionClearBtn")?.addEventListener("click", () => {
+  clearCardSelection();
+});
+
+document.querySelector(".topbar_history_back")?.addEventListener("click", () => {
+  navigateBrowserHistory(-1);
+});
+
+document.querySelector(".topbar_history_forward")?.addEventListener("click", () => {
+  navigateBrowserHistory(1);
+});
+
+let browserClosingSent = false;
+const INTERNAL_NAVIGATION_KEY = "grokChameleonInternalNavigation";
+
+function consumeUiReloadState() {
+  try {
+    const raw = sessionStorage.getItem("grokChameleonUiReloadStateV1") || "";
+    sessionStorage.removeItem("grokChameleonUiReloadStateV1");
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+const pendingUiReloadState = consumeUiReloadState();
+
+function restoreUiReloadState(saved) {
+  if (!saved || typeof saved !== "object") return false;
+  const imagineActiveId = String(saved.imagineActiveId || "");
+  const buildActiveId = String(saved.buildActiveId || "");
+  if (imagineActiveId && account_state.imagine.accounts.some((account) => account.id === imagineActiveId)) {
+    account_state.imagine.active_id = imagineActiveId;
+  }
+  if (buildActiveId && account_state.build.accounts.some((account) => account.id === buildActiveId)) {
+    account_state.build.active_id = buildActiveId;
+  }
+  const historySnapshot = saved.history && typeof saved.history === "object" ? saved.history : null;
+  const selectedPostSnapshot = saved.selectedPostSnapshot && typeof saved.selectedPostSnapshot === "object"
+    ? saved.selectedPostSnapshot
+    : null;
+  if (historySnapshot?.selectedPostPath && selectedPostSnapshot && typeof restoreImageEditorReturnPost === "function") {
+    const detailType = historySnapshot.screenId === "b_detail" ? "build" : "imagine";
+    const backTarget = detailType === "build"
+      ? historySnapshot.detailBack?.build
+      : historySnapshot.detailBack?.imagine;
+    restoreImageEditorReturnPost(
+      JSON.stringify(selectedPostSnapshot),
+      String(historySnapshot.selectedPostPath),
+      detailType,
+      backTarget || { screenId: detailType === "build" ? "b_main" : "i_main" },
+    );
+  }
+  const searchQuery = String(saved.searchQuery || "");
+  library_state.searchQuery = searchQuery;
+  if (searchInput) searchInput.value = searchQuery;
+  renderAccounts();
+  if (historySnapshot && typeof restoreBrowserHistoryState === "function") {
+    restoreBrowserHistoryState(historySnapshot);
+  }
+  renderLibrary();
+  if (
+    historySnapshot?.screenId === "i_main"
+    && library_state.iMainView === imagineViewValue("LIKED", "liked")
+    && typeof loadImagineLikedCards === "function"
+  ) {
+    loadImagineLikedCards({ force: false }).catch((error) => {
+      library_state.imagineLikedError = error?.message || "Imagine liked failed.";
+      library_state.imagineLikedLoading = false;
+      renderSourceCards("imagine");
+    });
+  }
+  return true;
+}
+
+function notifyBrowserClosing() {
+  if (location.protocol === "file:") return;
+  if (sessionStorage.getItem(INTERNAL_NAVIGATION_KEY)) {
+    sessionStorage.removeItem(INTERNAL_NAVIGATION_KEY);
+    browserClosingSent = true;
+    return;
+  }
+  if (browserClosingSent) return;
+  browserClosingSent = true;
+  const body = "{}";
+  const sent = navigator.sendBeacon?.("/api/browser/closing", body);
+  if (!sent) {
+    fetch("/api/browser/closing", {
+      method: "POST",
+      body,
+      headers: { "Content-Type": "application/json" },
+      keepalive: true,
+    }).catch(() => {});
+  }
+}
+
+window.addEventListener("pagehide", notifyBrowserClosing);
+window.addEventListener("beforeunload", notifyBrowserClosing);
+
+updateComposerProviderBadge();
+renderComposerOptions();
+renderSourceCards("build");
+renderBuildT2iViewCards();
+renderSourceCards("imagine");
+renderImagineDiscoverCards();
+renderPromptCards();
+renderAccounts();
+
+window.addEventListener("popstate", (event) => {
+  restoreBrowserHistoryState(event.state);
+});
+
+// The image editor is a separate page reached via location.replace(), so returning from
+// it reloads this page from scratch — the same boot path as a fresh launch, whose default
+// (Imagine main) would otherwise flash before consumeImageEditorReturn() below corrects it
+// asynchronously. Read the pending return target up front so the very first paint already
+// lands on the right screen.
+function initialScreenTargetForImageEditorReturn() {
+  const returnPostPath = sessionStorage.getItem(IMAGE_EDITOR_RETURN_POST_KEY) || "";
+  if (!returnPostPath) return null;
+  const returnProvider = sessionStorage.getItem(IMAGE_EDITOR_RETURN_PROVIDER_KEY) || "";
+  const detailType = returnProvider === "imagine" ? "imagine" : "build";
+  return {
+    screenId: detailType === "imagine" ? "i_detail" : "b_detail",
+    activeButtonId: detailType === "imagine" ? "i_imagine_nav_btn" : "b_build_btn",
+  };
+}
+
+// Stepping back past the image editor lands on a history entry whose document the editor's
+// location.replace() destroyed, so the browser reloads instead of firing popstate. The entry
+// still carries its full state, so read the screen from it rather than dropping to the Imagine
+// main default.
+function initialScreenTargetFromHistoryState() {
+  const state = window.history?.state;
+  if (!state?.grokStudioQ || !state.screenId) return null;
+  return { screenId: state.screenId, activeButtonId: state.activeButtonId || "" };
+}
+
+const editorReturnBootTarget = initialScreenTargetForImageEditorReturn();
+const bootTarget = editorReturnBootTarget || initialScreenTargetFromHistoryState();
+openScreen(
+  bootTarget?.screenId || screen_state.current_main,
+  bootTarget?.activeButtonId || "i_imagine_nav_btn",
+  { replaceHistory: true },
+);
+if (editorReturnBootTarget && typeof seedImageEditorReturnDetail === "function") {
+  // Fill the detail from the editor's stashed snapshot before the first paint, so the empty
+  // placeholder card never shows. consumeImageEditorReturn() below still runs afterwards.
+  try {
+    seedImageEditorReturnDetail();
+  } catch (error) {
+    console.warn(error);
+  }
+}
+scheduleSidebarTogglePosition();
+restoreLibraryRoot().then(() => {
+  const uiReloadRestored = restoreUiReloadState(pendingUiReloadState);
+  if (!uiReloadRestored && !editorReturnBootTarget && typeof restoreBrowserHistoryState === "function") {
+    // Same reason as initialScreenTargetFromHistoryState(): a reloaded history entry never gets
+    // a popstate, so replay its state here now that the library is loaded.
+    restoreBrowserHistoryState(window.history?.state);
+  }
+  // Start the selected account's Saved/media-store preparation only after the
+  // restored UI has chosen its final active account.  A first generation then
+  // joins this work instead of competing with it.
+  const activeImagineId = String(account_state.imagine?.active_id || "");
+  const activeImagineAccount = (account_state.imagine?.accounts || []).find(
+    (account) => String(account?.id || "") === activeImagineId,
+  );
+  if (activeImagineAccount && window.grokChameleonNative?.activateImagineAccount) {
+    window.grokChameleonNative.activateImagineAccount({
+      account_id: activeImagineAccount.id,
+      account_email: activeImagineAccount.email || "",
+      store_id: activeImagineAccount.store_id || "",
+      cookies: validImagineCookies(activeImagineAccount),
+    }).catch(() => {});
+  }
+  if (activeImagineAccount && library_state.apiReady) {
+    qApi("/api/imagine/clone-map/prepare", { account_id: activeImagineAccount.id }).catch(() => {});
+  }
+  consumeImageEditorReturn().catch((error) => showErrorPanel("Edit failed", error?.message || "Edit failed."));
+  if (typeof refreshBuildJobs === "function") refreshBuildJobs();
+  if (
+    library_state.apiReady
+    && library_state.rootPath
+    && typeof scanLibrary === "function"
+  ) {
+    setTimeout(() => {
+      scanLibrary().catch((error) => console.warn(error));
+    }, 100);
+  }
+});

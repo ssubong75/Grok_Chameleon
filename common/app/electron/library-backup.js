@@ -1,0 +1,1858 @@
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
+const { execFile } = require("node:child_process");
+const { promisify } = require("node:util");
+const runStateHelper = promisify(execFile);
+
+const CONTENT_DIRECTORIES = [
+  "created",
+  "upload",
+  "collection",
+  "reference",
+  "prompt",
+  "account",
+  "cache",
+  "previews",
+];
+const STATE_FILES = new Set([
+  "state.sqlite3",
+  "state.backup.sqlite3",
+  "state.backup.json",
+  "imagine_state.sqlite3",
+]);
+const AUTOMATIC_METADATA_PATHS = new Set([
+  "sql_data/state.backup.json",
+  "sql_data/state.backup.sqlite3",
+].map(canonicalPathKey));
+const AUTOMATIC_METADATA_DIRECTORIES = ["cache"].map(canonicalPathKey);
+// The card index is local to each computer and is never copied between libraries.  Its
+// ``library_posts`` tables must be rebuilt after a sync, but the same SQLite database also
+// holds the account-scoped Imagine Liked cache.  Do not delete the database to rebuild cards.
+const LIBRARY_INDEX_INVALIDATION_FILE = ".library-index-rebuild.json";
+// library.json is rewritten on every scan, but only these fields are what the scan puts back.
+// The rest of the file - collection order, sort, hidden uploads, and any setting added later -
+// is the user's and cannot be recovered by scanning, so it is compared like any other content.
+// Fields are subtracted rather than selected on purpose: a setting introduced tomorrow is then
+// protected without anyone remembering to add it here.
+const LIBRARY_JSON_KEY = canonicalPathKey("library.json");
+const LIBRARY_JSON_REGENERATED_FIELDS = ["updated_at", "posts", "collections", "prompts", "card_index"];
+const ALWAYS_HASH_EXTENSIONS = new Set([".json", ".sqlite3", ".db"]);
+const ALWAYS_HASH_DIRECTORIES = new Set(["account", "prompt", "sql_data"]);
+const IGNORED_NAMES = new Set([".DS_Store", "Thumbs.db", "desktop.ini"]);
+const HISTORY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+const PROGRESS_INTERVAL_MS = 200;
+const WINDOWS_RESERVED_NAMES = new Set([
+  "con", "prn", "aux", "nul",
+  ...Array.from({ length: 9 }, (_, index) => `com${index + 1}`),
+  ...Array.from({ length: 9 }, (_, index) => `lpt${index + 1}`),
+]);
+const TERMINAL_JOB_STATES = new Set(["done", "failed", "moderated", "cancelled"]);
+const MANIFEST_VERSION = 1;
+
+class LibraryBackupError extends Error {
+  constructor(message, code = "LIBRARY_BACKUP_ERROR") {
+    super(message);
+    this.name = "LibraryBackupError";
+    this.code = code;
+  }
+}
+
+function canonicalRelativePath(value) {
+  const normalized = String(value || "").replaceAll("\\", "/").replace(/^\/+|\/+$/g, "").normalize("NFC");
+  const parts = normalized.split("/");
+  if (!normalized || parts.some((part) => !part || part === "." || part === "..")) {
+    throw new LibraryBackupError(`Unsafe relative path: ${value}`, "INVALID_PATH");
+  }
+  return parts.join("/");
+}
+
+function canonicalPathKey(value) {
+  return canonicalRelativePath(value).toLocaleLowerCase("en-US");
+}
+
+function safePath(root, relativePath) {
+  const relative = canonicalRelativePath(relativePath);
+  const resolvedRoot = path.resolve(root);
+  const candidate = path.resolve(resolvedRoot, ...relative.split("/"));
+  const relation = path.relative(resolvedRoot, candidate);
+  if (!relation || relation === ".." || relation.startsWith(`..${path.sep}`) || path.isAbsolute(relation)) {
+    throw new LibraryBackupError(`Path escapes the library: ${relative}`, "INVALID_PATH");
+  }
+  return candidate;
+}
+
+function utcNow() {
+  return new Date().toISOString();
+}
+
+function randomSuffix() {
+  return crypto.randomBytes(6).toString("hex");
+}
+
+function pathExists(filePath) {
+  return fs.existsSync(filePath);
+}
+
+function readJson(filePath) {
+  if (!pathExists(filePath)) return {};
+  try {
+    const value = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  } catch (error) {
+    throw new LibraryBackupError(`Could not read backup metadata: ${filePath}: ${error.message}`, "METADATA_INVALID");
+  }
+}
+
+function writeJsonAtomic(filePath, value) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const temporary = path.join(path.dirname(filePath), `.${path.basename(filePath)}.${process.pid}.${randomSuffix()}.tmp`);
+  try {
+    fs.writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    fs.renameSync(temporary, filePath);
+  } finally {
+    try { fs.unlinkSync(temporary); } catch (_) {}
+  }
+}
+
+function referenceFolderTimestamp(metadata, fallbackMs = Date.now()) {
+  const value = [metadata?.reference_saved_at, metadata?.updated_at, metadata?.created_at]
+    .map((item) => String(item || "").trim())
+    .find(Boolean);
+  const date = new Date(value || fallbackMs);
+  const safeDate = Number.isNaN(date.getTime()) ? new Date(fallbackMs) : date;
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Seoul",
+    year: "2-digit",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(safeDate).filter((part) => part.type !== "literal").map((part) => [part.type, part.value]));
+  return `${parts.year}${parts.month}${parts.day}-${parts.hour}${parts.minute}${parts.second}`;
+}
+
+function uniqueReferenceDirectory(parent, metadata, fallbackMs) {
+  const stem = referenceFolderTimestamp(metadata, fallbackMs);
+  let candidate = path.join(parent, stem);
+  let suffix = 2;
+  while (pathExists(candidate)) {
+    candidate = path.join(parent, `${stem}-${String(suffix).padStart(2, "0")}`);
+    suffix += 1;
+  }
+  return candidate;
+}
+
+// This runs before every backup/sync scan, so both drives use the same canonical paths.
+// It renames only card directories and post.json.folder_path; post_id and media filenames stay intact.
+function migrateReferenceStorage(root) {
+  const legacyEntry = fs.readdirSync(root, { withFileTypes: true })
+    .find((entry) => entry.isDirectory() && entry.name.normalize("NFC") === "레퍼런스");
+  const legacyRoot = legacyEntry ? path.join(root, legacyEntry.name) : path.join(root, "레퍼런스");
+  const referenceRoot = path.join(root, "reference");
+  fs.mkdirSync(referenceRoot, { recursive: true });
+  if (!pathExists(legacyRoot)) return;
+  if (!fs.statSync(legacyRoot).isDirectory()) {
+    throw new LibraryBackupError(`Reference migration path is not a folder: ${legacyRoot}`, "REFERENCE_MIGRATION_INVALID");
+  }
+  for (const entry of fs.readdirSync(legacyRoot, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name, "en"))) {
+    if (!entry.isDirectory()) {
+      if (entry.name === ".DS_Store" || entry.name.startsWith("._")) {
+        fs.unlinkSync(path.join(legacyRoot, entry.name));
+        continue;
+      }
+      throw new LibraryBackupError(`Reference migration found a non-card file: ${entry.name}`, "REFERENCE_MIGRATION_INVALID");
+    }
+    const source = path.join(legacyRoot, entry.name);
+    const postPath = path.join(source, "post.json");
+    const metadata = readJson(postPath);
+    if (!isJsonObject(metadata)) {
+      throw new LibraryBackupError(`Reference migration needs valid post.json: ${entry.name}`, "REFERENCE_MIGRATION_INVALID");
+    }
+    const target = uniqueReferenceDirectory(referenceRoot, metadata, fs.statSync(source).mtimeMs);
+    fs.renameSync(source, target);
+    try {
+      metadata.folder_path = `reference/${path.basename(target)}`;
+      metadata.reference_saved_at ||= metadata.updated_at || metadata.created_at || utcNow();
+      writeJsonAtomic(path.join(target, "post.json"), metadata);
+    } catch (error) {
+      try { fs.renameSync(target, source); } catch (_) {}
+      throw error;
+    }
+  }
+  try { fs.rmdirSync(legacyRoot); } catch (_) {}
+}
+
+function snapshotJsonFiles(filePaths) {
+  return filePaths.map((filePath) => ({
+    filePath,
+    existed: pathExists(filePath),
+    value: pathExists(filePath) ? readJson(filePath) : null,
+  }));
+}
+
+function restoreJsonFiles(snapshots) {
+  const failures = [];
+  for (const snapshot of [...snapshots].reverse()) {
+    try {
+      if (snapshot.existed) writeJsonAtomic(snapshot.filePath, snapshot.value);
+      else fs.unlinkSync(snapshot.filePath);
+    } catch (error) {
+      if (!(error?.code === "ENOENT" && !snapshot.existed)) {
+        failures.push(`${snapshot.filePath}: ${error.message}`);
+      }
+    }
+  }
+  return failures;
+}
+
+function libraryIdentity(root) {
+  const libraryPath = path.join(root, "library.json");
+  if (!pathExists(libraryPath)) return "";
+  const data = readJson(libraryPath);
+  const explicit = String(data.library_id || "").trim().normalize("NFC");
+  if (explicit) return explicit;
+  const seed = [data.created_at || "", data.version || ""].join("|");
+  return `library_${crypto.createHash("sha256").update(`grok-chameleon:${seed}`).digest("hex").slice(0, 32)}`;
+}
+
+function ensureDirectory(root, label, { allowMissing = false } = {}) {
+  const resolved = path.resolve(String(root || ""));
+  if (!root) throw new LibraryBackupError(`${label} is not selected.`, "PATH_REQUIRED");
+  if (!pathExists(resolved)) {
+    if (!allowMissing) throw new LibraryBackupError(`${label} folder was not found.`, "PATH_NOT_FOUND");
+    fs.mkdirSync(resolved, { recursive: true });
+  }
+  if (!fs.statSync(resolved).isDirectory()) {
+    throw new LibraryBackupError(`${label} must be a folder.`, "PATH_NOT_DIRECTORY");
+  }
+  return resolved;
+}
+
+function validateDistinctRoots(localRoot, externalRoot) {
+  const local = path.resolve(localRoot);
+  const external = path.resolve(externalRoot);
+  if (local === external) throw new LibraryBackupError("Local and External Library folders are the same.", "SAME_ROOT");
+  const localToExternal = path.relative(local, external);
+  const externalToLocal = path.relative(external, local);
+  if (
+    (!localToExternal.startsWith("..") && !path.isAbsolute(localToExternal))
+    || (!externalToLocal.startsWith("..") && !path.isAbsolute(externalToLocal))
+  ) {
+    throw new LibraryBackupError("A library folder cannot be inside the other library folder.", "NESTED_ROOT");
+  }
+}
+
+function validateLibraryPair(sourceRoot, destinationRoot, sourceLabel, destinationLabel) {
+  const libraryId = libraryIdentity(sourceRoot);
+  if (!libraryId) {
+    throw new LibraryBackupError(`${sourceLabel} does not contain library.json.`, "SOURCE_NOT_LIBRARY");
+  }
+  const destinationId = libraryIdentity(destinationRoot);
+  if (destinationId && destinationId !== libraryId) {
+    throw new LibraryBackupError(`${sourceLabel} and ${destinationLabel} are different libraries.`, "LIBRARY_MISMATCH");
+  }
+  return libraryId;
+}
+
+function shouldIgnoreFile(name) {
+  const lower = name.toLowerCase();
+  // "._name" is the sidecar macOS writes for a file whose extended attributes the volume
+  // cannot hold. Copying one onto exFAT does not produce a file: the system folds it back
+  // into the file it belongs to, so the copy verifies and then the name is gone when the
+  // time comes to move it into place. It carries no library content either way.
+  if (name.startsWith("._")) return true;
+  return IGNORED_NAMES.has(name) || lower.endsWith(".tmp") || lower.endsWith("-journal") || lower.endsWith("-wal") || lower.endsWith("-shm");
+}
+
+// Size and modification time are only a fast cache key, not proof that contents are equal.
+// Removable filesystems can round timestamps and sync tools can preserve them. Re-hash the
+// small, mutable records that define the library while retaining stat-based reuse for large,
+// immutable media files.
+function mustAlwaysHash(relativePath) {
+  const relative = canonicalRelativePath(relativePath);
+  const key = canonicalPathKey(relative);
+  const topLevel = key.split("/")[0];
+  return key === LIBRARY_JSON_KEY
+    || ALWAYS_HASH_DIRECTORIES.has(topLevel)
+    || ALWAYS_HASH_EXTENSIONS.has(path.posix.extname(key));
+}
+
+function collectFiles(root, { includePath = null } = {}) {
+  const files = [];
+  const addFile = (absolutePath) => {
+    const stat = fs.lstatSync(absolutePath);
+    if (stat.isSymbolicLink()) {
+      throw new LibraryBackupError(`Symbolic links cannot be backed up: ${absolutePath}`, "SYMLINK_NOT_SUPPORTED");
+    }
+    const relativePath = path.relative(root, absolutePath).split(path.sep).join("/");
+    if (stat.isFile() && !shouldIgnoreFile(path.basename(absolutePath)) && (!includePath || includePath(relativePath, false))) files.push(absolutePath);
+  };
+  const walk = (directory) => {
+    const entries = fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name, "en"));
+    for (const entry of entries) {
+      if (IGNORED_NAMES.has(entry.name)) continue;
+      const absolute = path.join(directory, entry.name);
+      const relativePath = path.relative(root, absolute).split(path.sep).join("/");
+      if (entry.isSymbolicLink()) {
+        throw new LibraryBackupError(`Symbolic links cannot be backed up: ${absolute}`, "SYMLINK_NOT_SUPPORTED");
+      }
+      if (entry.isDirectory()) {
+        if (!includePath || includePath(relativePath, true)) walk(absolute);
+      } else if (entry.isFile() && !shouldIgnoreFile(entry.name) && (!includePath || includePath(relativePath, false))) files.push(absolute);
+    }
+  };
+
+  const libraryJson = path.join(root, "library.json");
+  if (pathExists(libraryJson)) addFile(libraryJson);
+  for (const directoryName of CONTENT_DIRECTORIES) {
+    const directory = path.join(root, directoryName);
+    if (pathExists(directory) && fs.statSync(directory).isDirectory()) walk(directory);
+  }
+  const stateDirectory = path.join(root, "sql_data");
+  if (pathExists(stateDirectory) && fs.statSync(stateDirectory).isDirectory()) {
+    for (const fileName of [...STATE_FILES].sort()) {
+      const filePath = path.join(stateDirectory, fileName);
+      if (pathExists(filePath)) addFile(filePath);
+    }
+  }
+  return files;
+}
+
+// Progress travels to the renderer over IPC, and one message per file means tens of thousands
+// of hops for a library this size - more than the log pane can absorb. Report on a timer and
+// always let the closing item through so the final count lands.
+function throttledProgress(progress) {
+  let lastAt = 0;
+  return (payload) => {
+    if (!progress) return;
+    const total = Number(payload.total) || 0;
+    const final = total > 0 && Number(payload.current) >= total;
+    const now = Date.now();
+    if (!final && now - lastAt < PROGRESS_INTERVAL_MS) return;
+    lastAt = now;
+    progress(payload);
+  };
+}
+
+function throwIfCancelled(signal) {
+  if (signal?.aborted) throw new LibraryBackupError("Library Backup was cancelled.", "CANCELLED");
+}
+
+async function sha256File(filePath, signal) {
+  throwIfCancelled(signal);
+  return new Promise((resolve, reject) => {
+    const digest = crypto.createHash("sha256");
+    const stream = fs.createReadStream(filePath, { highWaterMark: 4 * 1024 * 1024 });
+    const cancel = () => stream.destroy(new LibraryBackupError("Library Backup was cancelled.", "CANCELLED"));
+    signal?.addEventListener("abort", cancel, { once: true });
+    stream.on("data", (chunk) => digest.update(chunk));
+    stream.on("error", reject);
+    stream.on("end", () => resolve(digest.digest("hex")));
+    stream.on("close", () => signal?.removeEventListener("abort", cancel));
+  });
+}
+
+// Key order in JSON is not meaningful, so it is sorted before hashing; otherwise a rewrite
+// that only shuffled keys would read as a user edit.
+function stableStringify(value) {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value === undefined ? null : value);
+}
+
+function libraryJsonCompareDigest(relativePath, filePath) {
+  if (canonicalPathKey(relativePath) !== LIBRARY_JSON_KEY) return "";
+  try {
+    const data = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    if (!data || typeof data !== "object" || Array.isArray(data)) return "";
+    const compared = { ...data };
+    for (const field of LIBRARY_JSON_REGENERATED_FIELDS) delete compared[field];
+    return crypto.createHash("sha256").update(stableStringify(compared)).digest("hex");
+  } catch (_) {
+    return "";
+  }
+}
+
+// What a file is compared by when deciding whether someone changed it. Everything but
+// library.json is its own content; library.json is its content minus what the scan rewrites.
+function comparableDigest(record) {
+  return record.compareSha256 || record.sha256;
+}
+
+function manifestFromJson(data) {
+  if (!data || Number(data.schema_version) !== MANIFEST_VERSION || !Array.isArray(data.files)) return null;
+  const records = new Map();
+  for (const item of data.files) {
+    const relativePath = canonicalRelativePath(item.relative_path);
+    const record = {
+      relativePath,
+      diskRelativePath: relativePath,
+      size: Number(item.size) || 0,
+      mtimeMs: Number(item.mtime_ms) || 0,
+      sha256: String(item.sha256 || ""),
+    };
+    const compare = String(item.compare_sha256 || "");
+    if (compare) record.compareSha256 = compare;
+    records.set(canonicalPathKey(relativePath), record);
+  }
+  return {
+    libraryId: String(data.library_id || ""),
+    generation: Number(data.generation) || 0,
+    records,
+    librarySettings: data.library_settings && typeof data.library_settings === "object" && !Array.isArray(data.library_settings)
+      ? data.library_settings
+      : {},
+  };
+}
+
+function manifestToJson(libraryId, generation, manifest) {
+  return {
+    schema_version: MANIFEST_VERSION,
+    library_id: libraryId,
+    generation: Number(generation) || 0,
+    fingerprint: manifestFingerprint(manifest),
+    saved_at: utcNow(),
+    ...(manifest.librarySettings && typeof manifest.librarySettings === "object"
+      ? { library_settings: manifest.librarySettings }
+      : {}),
+    files: [...manifest.records.values()]
+      .sort((a, b) => a.relativePath.localeCompare(b.relativePath, "en"))
+      .map((record) => ({
+        relative_path: record.relativePath,
+        size: record.size,
+        mtime_ms: record.mtimeMs,
+        sha256: record.sha256,
+        ...(record.compareSha256 ? { compare_sha256: record.compareSha256 } : {}),
+      })),
+  };
+}
+
+async function scanLibrary(root, {
+  previous = null,
+  progress = null,
+  signal = null,
+  phase = "Scanning",
+  forceHashKeys = null,
+  includePath = null,
+} = {}) {
+  if (!pathExists(root)) return { records: new Map() };
+  const files = collectFiles(root, { includePath });
+  const records = new Map();
+  const report = throttledProgress(progress);
+  let index = 0;
+  for (const filePath of files) {
+    throwIfCancelled(signal);
+    index += 1;
+    const diskRelativePath = path.relative(root, filePath).split(path.sep).join("/");
+    const relativePath = canonicalRelativePath(diskRelativePath);
+    const key = canonicalPathKey(relativePath);
+    if (records.has(key)) {
+      throw new LibraryBackupError(
+        `Case or Unicode filename collision: ${records.get(key).diskRelativePath} / ${diskRelativePath}`,
+        "FILENAME_COLLISION",
+      );
+    }
+    const stat = fs.statSync(filePath);
+    const cached = previous?.records?.get(key);
+    const forceHash = mustAlwaysHash(relativePath) || Boolean(forceHashKeys?.has(key));
+    const digest = cached && !forceHash && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs
+      ? cached.sha256
+      : await sha256File(filePath, signal);
+    const record = {
+      relativePath,
+      diskRelativePath,
+      size: stat.size,
+      mtimeMs: stat.mtimeMs,
+      sha256: digest,
+    };
+    const compare = libraryJsonCompareDigest(relativePath, filePath);
+    if (compare) record.compareSha256 = compare;
+    records.set(key, record);
+    report({ phase: "scan", message: `${phase}: ${index} of ${files.length}`, current: index, total: files.length });
+  }
+  return { records };
+}
+
+function manifestFingerprint(manifest) {
+  const digest = crypto.createHash("sha256");
+  for (const [key, record] of [...manifest.records.entries()].sort(([a], [b]) => a.localeCompare(b, "en"))) {
+    digest.update(key);
+    digest.update("\0");
+    digest.update(record.relativePath);
+    digest.update("\0");
+    digest.update(String(record.size));
+    digest.update("\0");
+    digest.update(record.sha256);
+    digest.update("\n");
+  }
+  return digest.digest("hex");
+}
+
+function changedManifestKeys(previous, current) {
+  const keys = new Set([...previous.records.keys(), ...current.records.keys()]);
+  const changed = new Set();
+  for (const key of keys) {
+    const before = previous.records.get(key);
+    const after = current.records.get(key);
+    if (!before || !after || before.relativePath !== after.relativePath || comparableDigest(before) !== comparableDigest(after)) {
+      changed.add(key);
+    }
+  }
+  return changed;
+}
+
+function isAutomaticMetadataKey(key) {
+  return AUTOMATIC_METADATA_PATHS.has(key)
+    || AUTOMATIC_METADATA_DIRECTORIES.some((directory) => key.startsWith(`${directory}/`));
+}
+
+// The fingerprint that raises "the drive drifted" hashes file contents, while this asks whether
+// anything worth defending actually changed - so a rewrite that only touched regenerated values
+// leaves nothing here to report. An empty set therefore means nothing of the user's moved, not
+// that the question is unanswered.
+function onlyAutomaticMetadataChanged(previous, current) {
+  const changed = changedManifestKeys(previous, current);
+  return [...changed].every(isAutomaticMetadataKey);
+}
+
+function unexpectedExternalKeys(previous, current) {
+  return [...changedManifestKeys(previous, current)].filter((key) => !isAutomaticMetadataKey(key));
+}
+
+function missingFromDestination(sourceManifest, destinationManifest) {
+  for (const [key, sourceRecord] of sourceManifest.records) {
+    const destinationRecord = destinationManifest.records.get(key);
+    if (!destinationRecord || destinationRecord.sha256 !== sourceRecord.sha256 || destinationRecord.size !== sourceRecord.size) {
+      return sourceRecord.relativePath;
+    }
+  }
+  return "";
+}
+
+function unsyncedChangeKeys(previous, current) {
+  return [...changedManifestKeys(previous, current)].filter((key) => !isAutomaticMetadataKey(key));
+}
+
+// Names that this computer stores happily but a Windows computer cannot recreate. The backup
+// still runs; the caller surfaces these so the folders can be renamed before the drive travels.
+function windowsPortabilityIssue(relativePath) {
+  for (const part of relativePath.split("/")) {
+    if (/[<>:"|?*]/.test(part) || /[\u0000-\u001f]/.test(part)) return `${relativePath} (character Windows cannot store)`;
+    if (/[. ]$/.test(part)) return `${relativePath} (ends with a space or period, which Windows drops)`;
+    if (WINDOWS_RESERVED_NAMES.has(part.split(".")[0].toLocaleLowerCase("en-US"))) return `${relativePath} (name reserved by Windows)`;
+  }
+  return "";
+}
+
+function windowsPortabilityIssues(manifest) {
+  const issues = [];
+  for (const record of manifest.records.values()) {
+    const issue = windowsPortabilityIssue(record.relativePath);
+    if (issue) issues.push(issue);
+  }
+  return issues.sort((a, b) => a.localeCompare(b, "en"));
+}
+
+// A listing of what is on disk right now, without reading any of it. Enough to notice a file
+// that appeared, vanished, was renamed, or grew since the review, which is what the plan alone
+// cannot tell us.
+function quickInventory(root) {
+  const entries = new Map();
+  if (!pathExists(root)) return entries;
+  for (const filePath of collectFiles(root)) {
+    const diskRelativePath = path.relative(root, filePath).split(path.sep).join("/");
+    const stat = fs.statSync(filePath);
+    entries.set(canonicalPathKey(diskRelativePath), { size: stat.size, mtimeMs: stat.mtimeMs });
+  }
+  return entries;
+}
+
+function inventoryMatchesManifest(manifest, inventory) {
+  if (manifest.records.size !== inventory.size) return false;
+  for (const [key, record] of manifest.records) {
+    const seen = inventory.get(key);
+    if (!seen || seen.size !== record.size || seen.mtimeMs !== record.mtimeMs) return false;
+  }
+  return true;
+}
+
+async function fileMatchesRecord(root, record, signal) {
+  const filePath = safePath(root, record.diskRelativePath);
+  if (!pathExists(filePath)) return false;
+  const stat = fs.statSync(filePath);
+  if (!stat.isFile() || stat.size !== record.size) return false;
+  if (!mustAlwaysHash(record.relativePath) && stat.mtimeMs === record.mtimeMs) return true;
+  return (await sha256File(filePath, signal)) === record.sha256;
+}
+
+function buildChangePlan(source, destination, baseline = null) {
+  const changes = [];
+  for (const [key, sourceRecord] of [...source.records.entries()].sort(([a], [b]) => a.localeCompare(b, "en"))) {
+    const destinationRecord = destination.records.get(key);
+    if (!destinationRecord) changes.push({ action: "add", relativePath: sourceRecord.relativePath, size: sourceRecord.size, sourceRecord, destinationRecord: null });
+    else if (sourceRecord.sha256 !== destinationRecord.sha256 || sourceRecord.size !== destinationRecord.size) {
+      changes.push({ action: "update", relativePath: sourceRecord.relativePath, size: sourceRecord.size, sourceRecord, destinationRecord });
+    }
+  }
+  for (const [key, destinationRecord] of [...destination.records.entries()].sort(([a], [b]) => a.localeCompare(b, "en"))) {
+    if (source.records.has(key)) continue;
+    if (!baseline || !baseline.records.has(key)) continue;
+    changes.push({ action: "delete", relativePath: destinationRecord.relativePath, size: destinationRecord.size, sourceRecord: null, destinationRecord });
+  }
+  return changes;
+}
+
+function summarizeChanges(changes) {
+  const summary = { add: 0, update: 0, delete: 0, copy_bytes: 0, history_bytes: 0, total: changes.length };
+  for (const change of changes) {
+    summary[change.action] += 1;
+    if (change.action !== "delete") summary.copy_bytes += change.size;
+    if (change.action !== "add") summary.history_bytes += change.destinationRecord?.size || 0;
+  }
+  return summary;
+}
+
+function controlDirectory(root, libraryId, local = false) {
+  const rootKey = local
+    ? crypto.createHash("sha256").update(path.resolve(root)).digest("hex").slice(0, 16)
+    : "";
+  return path.join(
+    path.dirname(root),
+    local ? ".grok-library-backup-local" : ".grok-library-backup",
+    libraryId,
+    ...(rootKey ? [rootKey] : []),
+  );
+}
+
+function metadataPaths(localRoot, externalRoot, libraryId, machineId = "") {
+  const externalControl = controlDirectory(externalRoot, libraryId, false);
+  const localControl = controlDirectory(localRoot, libraryId, true);
+  // A single shared baseline makes a second computer's older checkout look like a deletion.
+  // Each computer therefore compares the USB against the state that *it* last synchronized.
+  const machineKey = crypto.createHash("sha256").update(String(machineId || "unknown")).digest("hex").slice(0, 24);
+  return {
+    externalControl,
+    externalManifest: path.join(externalControl, "manifest.json"),
+    syncBaseline: path.join(externalControl, "sync-baselines", `${machineKey}.json`),
+    postConflicts: path.join(externalControl, "post-conflicts"),
+    settingsConflicts: path.join(externalControl, "settings-conflicts"),
+    session: path.join(externalControl, "session.json"),
+    localControl,
+    localBaseline: path.join(localControl, "baseline.json"),
+  };
+}
+
+// Include portable accounts and original cards. Leave caches, previews and runtime profiles
+// on each drive; library settings and durable SQLite rows use their existing semantic merge.
+function isSyncSourcePath(relativePath) {
+  const key = canonicalPathKey(relativePath);
+  return key !== LIBRARY_JSON_KEY
+    && key !== "cache"
+    && !key.startsWith("cache/")
+    && key !== "previews"
+    && !key.startsWith("previews/")
+    && key !== "runtime_data"
+    && !key.startsWith("runtime_data/")
+    && !key.startsWith("sql_data/");
+}
+
+function isOriginalCardPath(relativePath) {
+  return ["created", "upload", "collection", "reference", "prompt"]
+    .includes(canonicalPathKey(relativePath).split("/")[0]);
+}
+
+function syncManifest(manifest) {
+  const records = new Map();
+  for (const [key, record] of manifest.records) {
+    if (!isSyncSourcePath(key)) continue;
+    records.set(key, record);
+  }
+  return { records };
+}
+
+function isJsonObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function cloneJson(value) {
+  return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+}
+
+function sameJson(left, right) {
+  return left === right || stableStringify(left) === stableStringify(right);
+}
+
+function readLibrarySettings(root) {
+  const libraryPath = path.join(root, "library.json");
+  // Missing metadata is unknown state, not evidence that every setting was deleted.
+  if (!pathExists(libraryPath)) return null;
+  const library = readJson(libraryPath);
+  return isJsonObject(library.settings) ? cloneJson(library.settings) : {};
+}
+
+function writeLibrarySettings(root, settings, libraryId) {
+  const libraryPath = path.join(root, "library.json");
+  const exists = pathExists(libraryPath);
+  const library = readJson(libraryPath);
+  if (!isJsonObject(library)) throw new LibraryBackupError(`Invalid library.json: ${libraryPath}`, "LIBRARY_JSON_INVALID");
+  if (exists && sameJson(library.settings || {}, settings)) return false;
+  if (!exists) {
+    if (!libraryId) throw new LibraryBackupError("Library identity is required to restore settings.", "LIBRARY_JSON_INVALID");
+    Object.assign(library, { version: 1, created_at: utcNow(), library_id: libraryId });
+  }
+  library.settings = cloneJson(settings);
+  writeJsonAtomic(libraryPath, library);
+  return true;
+}
+
+// library.json contains server-regenerated indexes together with user preferences.  Copying the
+// whole file would carry volatile indexes across drives, so merge each durable settings key.
+function buildLibrarySettingsPlan(baselineSettings, localSettings, externalSettings) {
+  const MISSING = Symbol("missing setting");
+  const base = isJsonObject(baselineSettings) ? baselineSettings : {};
+  if (localSettings === null || externalSettings === null) {
+    const available = localSettings === null ? externalSettings : localSettings;
+    const settings = isJsonObject(available) ? available : base;
+    return {
+      local: cloneJson(settings), external: cloneJson(settings), nextBaseline: cloneJson(settings),
+      conflicts: [], conflictRecords: [], changed: Math.max(1, Object.keys(settings).length),
+    };
+  }
+  const local = isJsonObject(localSettings) ? localSettings : {};
+  const external = isJsonObject(externalSettings) ? externalSettings : {};
+  const localResult = cloneJson(local);
+  const externalResult = cloneJson(external);
+  const nextBaseline = {};
+  const conflicts = [];
+  const conflictRecords = [];
+  let changed = 0;
+  const valueAt = (object, key) => Object.prototype.hasOwnProperty.call(object, key) ? object[key] : MISSING;
+  const equal = (left, right) => left === MISSING || right === MISSING ? left === right : sameJson(left, right);
+  const put = (object, key, value) => {
+    if (value === MISSING) delete object[key];
+    else object[key] = cloneJson(value);
+  };
+  const keys = new Set([...Object.keys(base), ...Object.keys(local), ...Object.keys(external)]);
+  for (const key of [...keys].sort((a, b) => a.localeCompare(b, "en"))) {
+    const previous = valueAt(base, key);
+    const localValue = valueAt(local, key);
+    const externalValue = valueAt(external, key);
+    const localChanged = !equal(localValue, previous);
+    const externalChanged = !equal(externalValue, previous);
+    if (equal(localValue, externalValue)) {
+      put(localResult, key, localValue);
+      put(externalResult, key, localValue);
+      put(nextBaseline, key, localValue);
+    } else if (localChanged && !externalChanged) {
+      put(localResult, key, localValue);
+      put(externalResult, key, localValue);
+      put(nextBaseline, key, localValue);
+      changed += 1;
+    } else if (!localChanged && externalChanged) {
+      put(localResult, key, externalValue);
+      put(externalResult, key, externalValue);
+      put(nextBaseline, key, externalValue);
+      changed += 1;
+    } else {
+      // A single Sync always converges. Local is the active setting for this run.
+      conflictRecords.push({
+        key,
+        local: localValue === MISSING ? null : cloneJson(localValue),
+        external: externalValue === MISSING ? null : cloneJson(externalValue),
+        ...(localValue === MISSING ? { local_missing: true } : {}),
+        ...(externalValue === MISSING ? { external_missing: true } : {}),
+      });
+      put(localResult, key, localValue);
+      put(externalResult, key, localValue);
+      put(nextBaseline, key, localValue);
+      changed += 1;
+    }
+  }
+  return { local: localResult, external: externalResult, nextBaseline, conflicts, conflictRecords, changed };
+}
+
+function sameRecord(left, right) {
+  return Boolean(left && right)
+    && left.sha256 === right.sha256
+    && left.size === right.size;
+}
+
+function syncChange(sourceRecord, destinationRecord) {
+  if (!sourceRecord) {
+    return destinationRecord ? {
+      action: "delete",
+      relativePath: destinationRecord.relativePath,
+      size: destinationRecord.size,
+      sourceRecord: null,
+      destinationRecord,
+    } : null;
+  }
+  return {
+    action: destinationRecord ? "update" : "add",
+    relativePath: sourceRecord.relativePath,
+    size: sourceRecord.size,
+    sourceRecord,
+    destinationRecord: destinationRecord || null,
+  };
+}
+
+// Compare the last mutually synchronized state with both drives.  A change made on just one
+// drive travels to the other; only a path changed independently on both sides is a conflict.
+function buildSyncPlan(baseline, local, external) {
+  const localToExternal = [];
+  const externalToLocal = [];
+  const conflicts = [];
+  const keys = new Set([
+    ...baseline.records.keys(),
+    ...local.records.keys(),
+    ...external.records.keys(),
+  ]);
+  for (const key of [...keys].sort((a, b) => a.localeCompare(b, "en"))) {
+    const base = baseline.records.get(key) || null;
+    const localRecord = local.records.get(key) || null;
+    const externalRecord = external.records.get(key) || null;
+    if (!base) {
+      if (localRecord && !externalRecord) localToExternal.push(syncChange(localRecord, null));
+      else if (!localRecord && externalRecord) externalToLocal.push(syncChange(externalRecord, null));
+      else if (localRecord && externalRecord && !sameRecord(localRecord, externalRecord)) {
+        localToExternal.push(syncChange(localRecord, externalRecord));
+      }
+      continue;
+    }
+    const localChanged = !sameRecord(localRecord, base);
+    const externalChanged = !sameRecord(externalRecord, base);
+    if (!localChanged && !externalChanged) continue;
+    if (sameRecord(localRecord, externalRecord) || (!localRecord && !externalRecord)) continue;
+    if (localChanged && !externalChanged) {
+      const change = syncChange(localRecord, externalRecord);
+      if (change) localToExternal.push(change);
+      continue;
+    }
+    if (!localChanged && externalChanged) {
+      const change = syncChange(externalRecord, localRecord);
+      if (change) externalToLocal.push(change);
+      continue;
+    }
+    const change = syncChange(localRecord, externalRecord);
+    if (change) localToExternal.push(change);
+  }
+  return { localToExternal, externalToLocal, conflicts };
+}
+
+function summarizeSyncPlan(plan) {
+  const localToExternal = summarizeChanges(plan.localToExternal);
+  const externalToLocal = summarizeChanges(plan.externalToLocal);
+  return {
+    local_to_external: localToExternal,
+    external_to_local: externalToLocal,
+    conflicts: plan.conflicts.length,
+    merges: plan.merges?.length || 0,
+    total: localToExternal.total + externalToLocal.total,
+    add: localToExternal.add + externalToLocal.add,
+    update: localToExternal.update + externalToLocal.update,
+    delete: localToExternal.delete + externalToLocal.delete,
+    copy_bytes: localToExternal.copy_bytes + externalToLocal.copy_bytes,
+    history_bytes: localToExternal.history_bytes + externalToLocal.history_bytes,
+  };
+}
+
+function readPostForSync(filePath) {
+  try {
+    const value = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function itemSyncKey(item, index) {
+  if (!item || typeof item !== "object") return `value:${stableStringify(item)}`;
+  const id = String(item.item_id || item.id || item.file || "").trim();
+  // item_id is present in the current data, but an index is not a cross-drive identity: the
+  // second array starts after the first one.  Identical id-less values can still deduplicate.
+  return id ? `item:${id}` : `value:${stableStringify(item)}`;
+}
+
+function mergePostItems(primaryItems, secondaryItems) {
+  const merged = new Map();
+  for (const [index, item] of [...primaryItems, ...secondaryItems].entries()) {
+    if (!item || typeof item !== "object") continue;
+    const key = itemSyncKey(item, index);
+    const existing = merged.get(key);
+    // Build result IDs are immutable.  Repeated IDs describe the same result, so keep every
+    // field supplied by either copy while consistently preferring the primary card's value.
+    merged.set(key, existing ? { ...item, ...existing } : { ...item });
+  }
+  return [...merged.values()];
+}
+
+function mergeJsonRecords(primary, secondary) {
+  const result = [];
+  const seen = new Set();
+  for (const value of [...primary, ...secondary]) {
+    const key = stableStringify(value);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(value);
+  }
+  return result;
+}
+
+function postScalarConflicts(local, external) {
+  const mergedFields = new Set(["items", "build_requests", "build_favorite", "favorite", "folder_path", "updated_at"]);
+  const conflicts = {};
+  const keys = new Set([...Object.keys(local), ...Object.keys(external)]);
+  for (const key of keys) {
+    if (mergedFields.has(key)) continue;
+    if (!sameJson(local[key], external[key])) conflicts[key] = { local: cloneJson(local[key]), external: cloneJson(external[key]) };
+  }
+  return conflicts;
+}
+
+function mergePostJson(localPath, externalPath, relativePath, localRecord, externalRecord) {
+  const local = readPostForSync(localPath);
+  const external = readPostForSync(externalPath);
+  if (!local || !external) return null;
+  // Build output unions safely. For a different scalar value, preserve both values in the card
+  // itself; Local remains the active value because this Sync was initiated from this computer.
+  const scalarConflicts = postScalarConflicts(local, external);
+  const localItems = Array.isArray(local.items) ? local.items : [];
+  const externalItems = Array.isArray(external.items) ? external.items : [];
+  const localRequests = Array.isArray(local.build_requests) ? local.build_requests : [];
+  const externalRequests = Array.isArray(external.build_requests) ? external.build_requests : [];
+  const merged = { ...local };
+  merged.items = mergePostItems(localItems, externalItems);
+  merged.build_requests = mergeJsonRecords(localRequests, externalRequests);
+  merged.folder_path = path.posix.dirname(relativePath);
+  merged.updated_at = local.updated_at || external.updated_at || utcNow();
+  merged.build_favorite = Boolean(local.build_favorite || local.favorite || external.build_favorite || external.favorite);
+  merged.favorite = merged.build_favorite;
+  // server.py rewrites post.json from a fixed set of fields, so conflict metadata must live in
+  // the control folder rather than this file.
+  delete merged.sync_conflicts;
+  return { merged, scalarConflicts };
+}
+
+
+function loadStoredManifest(filePath) {
+  return manifestFromJson(readJson(filePath));
+}
+
+function saveStoredManifest(filePath, libraryId, generation, manifest) {
+  writeJsonAtomic(filePath, manifestToJson(libraryId, generation, manifest));
+}
+
+function sessionOwnerError(session) {
+  return new LibraryBackupError(
+    `The External Library is currently in use by another computer (${String(session.started_at || "unknown time")}).`,
+    "OTHER_COMPUTER_ACTIVE",
+  );
+}
+
+function validateStoredLibrary(stored, libraryId, label) {
+  if (stored && stored.libraryId && stored.libraryId !== libraryId) {
+    throw new LibraryBackupError(`${label} metadata belongs to a different library.`, "METADATA_LIBRARY_MISMATCH");
+  }
+}
+
+function isTerminalJob(job) {
+  return TERMINAL_JOB_STATES.has(String(job?.status || "").toLowerCase());
+}
+
+class LibraryBackup {
+  constructor({ localRoot, externalRoot, machineId, progress = null, signal = null, pythonPath = "", pythonEnv = process.env }) {
+    this.pythonPath = pythonPath;
+    this.pythonEnv = pythonEnv;
+    this.localRoot = path.resolve(String(localRoot || ""));
+    this.externalRoot = path.resolve(String(externalRoot || ""));
+    this.machineId = String(machineId || "").trim();
+    this.progress = progress;
+    this.signal = signal;
+    if (!this.machineId) throw new LibraryBackupError("Internal computer ID is missing.", "MACHINE_ID_MISSING");
+  }
+
+  emit(message, current = null, total = null, phase = "work") {
+    this.progress?.({ phase, message, current, total });
+  }
+
+  validate(direction) {
+    const local = ensureDirectory(this.localRoot, "Local Library", { allowMissing: direction === "to-local" });
+    const external = ensureDirectory(this.externalRoot, "External Library", { allowMissing: direction === "to-external" });
+    validateDistinctRoots(local, external);
+    migrateReferenceStorage(local);
+    migrateReferenceStorage(external);
+    const sourceIsExternal = direction === "to-local"
+      || (direction === "sync" && !libraryIdentity(local) && Boolean(libraryIdentity(external)));
+    const source = sourceIsExternal ? external : local;
+    const destination = sourceIsExternal ? local : external;
+    const libraryId = validateLibraryPair(
+      source,
+      destination,
+      sourceIsExternal ? "External Library" : "Local Library",
+      sourceIsExternal ? "Local Library" : "External Library",
+    );
+    return { local, external, source, destination, libraryId, paths: metadataPaths(local, external, libraryId, this.machineId) };
+  }
+
+  async analyze(direction, { previousActualExternal = null, previousActualLocal = null } = {}) {
+    if (direction === "sync") return this.analyzeSync();
+    if (!["to-external", "to-local"].includes(direction)) {
+      throw new LibraryBackupError("Unknown backup direction.", "INVALID_DIRECTION");
+    }
+    const context = this.validate(direction);
+    const { libraryId, paths } = context;
+    const storedExternal = loadStoredManifest(paths.externalManifest);
+    const localBaseline = loadStoredManifest(paths.localBaseline);
+    validateStoredLibrary(storedExternal, libraryId, "External Library");
+    validateStoredLibrary(localBaseline, libraryId, "Local Library");
+    const session = readJson(paths.session);
+    if (session.machine_id && session.machine_id !== this.machineId) throw sessionOwnerError(session);
+
+    this.emit("Scanning External Library.", null, null, "scan");
+    const actualExternal = await scanLibrary(context.external, {
+      previous: previousActualExternal || storedExternal,
+      progress: this.progress,
+      signal: this.signal,
+      phase: "Scanning External Library",
+    });
+    this.emit("Scanning Local Library.", null, null, "scan");
+    const actualLocal = await scanLibrary(context.local, {
+      previous: previousActualLocal || localBaseline,
+      progress: this.progress,
+      signal: this.signal,
+      phase: "Scanning Local Library",
+    });
+    if (!actualExternal.records.size && direction === "to-local") {
+      throw new LibraryBackupError("External Library does not contain backup files.", "SOURCE_EMPTY");
+    }
+    if (!actualLocal.records.size && direction === "to-external") {
+      throw new LibraryBackupError("Local Library does not contain backup files.", "SOURCE_EMPTY");
+    }
+
+    const externalFingerprint = manifestFingerprint(actualExternal);
+    const localFingerprint = manifestFingerprint(actualLocal);
+    const storedExternalFingerprint = storedExternal ? manifestFingerprint(storedExternal) : "";
+    // A run can copy every file into place and still fail before writing its manifests - a
+    // cleanup error, a crash, a drive pulled out mid-run. What it leaves behind looks like
+    // someone edited the drive directly, except the two libraries match each other exactly.
+    // That is a finished transfer missing its receipt, not a conflict, so it is allowed
+    // through to rewrite the record instead of locking both directions until the control
+    // folders are deleted by hand.
+    const librariesMatch = Boolean(actualLocal.records.size)
+      && unsyncedChangeKeys(actualExternal, actualLocal).length === 0;
+    const unrecordedRun = "The last run copied everything but did not record itself. This run writes the missing record.";
+    let generation = storedExternal?.generation || 0;
+    let externalDrift = Boolean(storedExternal && storedExternalFingerprint !== externalFingerprint);
+    let warning = "";
+
+    if (direction === "to-external") {
+      if (session.machine_id === this.machineId) {
+        if (Number(session.generation) !== generation || String(session.base_fingerprint || "") !== storedExternalFingerprint) {
+          warning = "External Library moved on since this computer last took from it. Anything replaced is kept in history.";
+        } else if (externalDrift && !onlyAutomaticMetadataChanged(storedExternal, actualExternal)) {
+          warning = "External Library has changes made outside this backup. Anything replaced is kept in history.";
+        }
+      } else if (localBaseline && storedExternal && localBaseline.generation !== storedExternal.generation) {
+        warning = "External Library has changes from another run that this computer has not taken yet. Sending now leaves them in place unless the same file was edited here; anything replaced is kept in history.";
+      } else if (externalDrift && !onlyAutomaticMetadataChanged(storedExternal, actualExternal)) {
+        // Backing up is the Local Library's turn to write. A drive that no longer matches its
+        // own record is usually the trace of a run that copied everything and then failed
+        // before recording itself - refusing here would strand both directions. The case that
+        // actually loses work, another computer having backed up something newer, is caught by
+        // the generation check above, and anything replaced below is moved to history first.
+        const drifted = unexpectedExternalKeys(storedExternal, actualExternal).length;
+        const plural = drifted === 1 ? "" : "s";
+        warning = `External Library differs from its last record in ${drifted} file${plural} - either a run that copied everything without recording itself, or work done straight on the drive. Only the changes listed here are written, and whatever they replace is kept in history.`;
+      }
+    } else if (librariesMatch && (externalDrift || (localBaseline && unsyncedChangeKeys(localBaseline, actualLocal).length))) {
+      warning = unrecordedRun;
+    } else {
+      if (localBaseline) {
+        const unsynced = unsyncedChangeKeys(localBaseline, actualLocal);
+        if (unsynced.length) {
+          const plural = unsynced.length === 1 ? "" : "s";
+          warning = `Local Library has ${unsynced.length} change${plural} the backup does not have. Restoring replaces ${unsynced.length === 1 ? "it" : "them"} with External Library and keeps the previous version${plural} in history.`;
+        }
+      } else if (actualLocal.records.size && unsyncedChangeKeys(actualExternal, actualLocal).length) {
+        warning = "Local Library is not empty and has no backup baseline. Restoring replaces what does not match External Library and keeps the previous versions in history.";
+      }
+      if (externalDrift) generation += 1;
+    }
+
+    const sourceManifest = direction === "to-local" ? actualExternal : actualLocal;
+    const destinationManifest = direction === "to-local" ? actualLocal : actualExternal;
+    const changes = buildChangePlan(sourceManifest, destinationManifest, localBaseline || storedExternal);
+    const portability = windowsPortabilityIssues(sourceManifest);
+    if (portability.length) {
+      const plural = portability.length === 1 ? "" : "s";
+      warning = `${warning} ${portability.length} name${plural} cannot be recreated on a Windows computer, starting with ${portability[0]}.`.trim();
+    }
+    return {
+      direction,
+      ...context,
+      generation,
+      session,
+      storedExternal,
+      localBaseline,
+      actualExternal,
+      actualLocal,
+      externalDrift,
+      warning,
+      sourceManifest,
+      destinationManifest,
+      sourceFingerprint: manifestFingerprint(sourceManifest),
+      destinationFingerprint: manifestFingerprint(destinationManifest),
+      changes,
+      summary: summarizeChanges(changes),
+      analyzedAt: utcNow(),
+    };
+  }
+
+  async analyzeSync() {
+    const context = this.validate("sync");
+    const { libraryId, paths } = context;
+    const session = readJson(paths.session);
+    if (session.machine_id && session.machine_id !== this.machineId) throw sessionOwnerError(session);
+    const stored = loadStoredManifest(paths.syncBaseline);
+    validateStoredLibrary(stored, libraryId, "Library Sync");
+    this.emit("Scanning External Drive.", null, null, "scan");
+    const external = syncManifest(await scanLibrary(context.external, {
+      progress: this.progress,
+      signal: this.signal,
+      phase: "Scanning External Drive",
+      includePath: isSyncSourcePath,
+    }));
+    this.emit("Scanning Local Drive.", null, null, "scan");
+    const local = syncManifest(await scanLibrary(context.local, {
+      progress: this.progress,
+      signal: this.signal,
+      phase: "Scanning Local Drive",
+      includePath: isSyncSourcePath,
+    }));
+    // A missing library descriptor or a completely cleared content tree is an initial
+    // population, not thousands of individual deletions. Old receipts live outside the
+    // library folder and can survive deleting that folder. Apply this decision to files,
+    // settings and durable SQLite rows together; never reuse only part of the old base.
+    // Accounts/caches may survive clearing the card folders or be recreated by startup.
+    // Their presence must not disable the cleared-drive preservation rule.
+    const localCardKeys = new Set([...local.records.keys()].filter(isOriginalCardPath));
+    const externalCardKeys = new Set([...external.records.keys()].filter(isOriginalCardPath));
+    const baselineCardKeys = [...(stored?.records.keys() || [])].filter(isOriginalCardPath);
+    const initialize = !pathExists(path.join(context.local, "library.json"))
+      || !pathExists(path.join(context.external, "library.json"))
+      || (localCardKeys.size === 0 && externalCardKeys.size > 0)
+      || (externalCardKeys.size === 0 && localCardKeys.size > 0)
+      || Boolean(baselineCardKeys.length && (
+        !baselineCardKeys.some((key) => localCardKeys.has(key))
+        || !baselineCardKeys.some((key) => externalCardKeys.has(key))
+      ));
+    const baseline = !initialize && stored ? stored : { records: new Map(), librarySettings: {} };
+    const plan = buildSyncPlan(baseline, local, external);
+    const settingsPlan = buildLibrarySettingsPlan(
+      baseline.librarySettings,
+      readLibrarySettings(context.local),
+      readLibrarySettings(context.external),
+    );
+    plan.conflicts.push(...settingsPlan.conflicts);
+    const merges = [];
+    for (const [key, localRecord] of local.records) {
+      if (!isOriginalCardPath(key)) continue;
+      if (path.posix.basename(localRecord.relativePath) !== "post.json") continue;
+      const externalRecord = external.records.get(key);
+      const baseRecord = baseline.records.get(key) || null;
+      if (!localRecord || !externalRecord || sameRecord(localRecord, externalRecord)) continue;
+      // Both drives may have a new post on the first run; otherwise merge only when each
+      // side changed from the computer's own baseline.
+      if (baseRecord && (sameRecord(localRecord, baseRecord) || sameRecord(externalRecord, baseRecord))) continue;
+      const mergeResult = mergePostJson(
+        safePath(context.local, localRecord.diskRelativePath),
+        safePath(context.external, externalRecord.diskRelativePath),
+        localRecord.relativePath,
+        localRecord,
+        externalRecord,
+      );
+      if (!mergeResult) continue;
+      plan.localToExternal = plan.localToExternal.filter((change) => canonicalPathKey(change.relativePath) !== key);
+      plan.externalToLocal = plan.externalToLocal.filter((change) => canonicalPathKey(change.relativePath) !== key);
+      merges.push({ relativePath: localRecord.relativePath, localRecord, externalRecord, ...mergeResult });
+    }
+    plan.merges = merges;
+    const summary = summarizeSyncPlan(plan);
+    const notices = [];
+    if (initialize && stored) notices.push("A cleared drive was detected. Existing data will be preserved and copied; old deletions will not be applied.");
+    if (plan.merges.length) notices.push(`${plan.merges.length} card${plan.merges.length === 1 ? "" : "s"} will merge Build results automatically.`);
+    if (plan.conflicts.length) notices.push(`${plan.conflicts.length} file or setting${plan.conflicts.length === 1 ? "" : "s"} changed on both drives and will be left in place while the rest syncs.`);
+    const warning = notices.join(" ");
+    return {
+      direction: "sync",
+      ...context,
+      syncBaseline: stored,
+      initialize,
+      baseline,
+      localManifest: local,
+      externalManifest: external,
+      localFingerprint: manifestFingerprint(local),
+      externalFingerprint: manifestFingerprint(external),
+      plan,
+      settingsPlan,
+      summary,
+      warning,
+      analyzedAt: utcNow(),
+    };
+  }
+
+  async refreshPlan(reviewed) {
+    const direction = String(reviewed?.direction || "");
+    if (direction === "sync") return this.refreshSyncPlan(reviewed);
+    if (!reviewed || !["to-external", "to-local"].includes(direction)) {
+      throw new LibraryBackupError("The backup review is invalid.", "PLAN_INVALID");
+    }
+    this.emit("Refreshing the source after pausing the library.", 0, 1, "confirm");
+    const refreshed = await this.analyze(direction, {
+      previousActualExternal: reviewed.actualExternal,
+      previousActualLocal: reviewed.actualLocal,
+    });
+    const reviewedDestination = direction === "to-external" ? reviewed.actualExternal : reviewed.actualLocal;
+    const currentDestination = direction === "to-external" ? refreshed.actualExternal : refreshed.actualLocal;
+    const unsafeDestinationChanges = [...changedManifestKeys(reviewedDestination, currentDestination)]
+      .filter((key) => !isAutomaticMetadataKey(key));
+    if (unsafeDestinationChanges.length) {
+      throw new LibraryBackupError(
+        "The destination library changed after the review. Nothing was copied - review the backup again.",
+        "PLAN_CHANGED",
+      );
+    }
+    this.emit("The current source is ready to copy.", 1, 1, "confirm");
+    return refreshed;
+  }
+
+  async refreshSyncPlan(reviewed) {
+    if (!reviewed || reviewed.direction !== "sync") {
+      throw new LibraryBackupError("The sync review is invalid.", "PLAN_INVALID");
+    }
+    this.emit("Checking both drives for changes since the review.", 0, 1, "confirm");
+    const refreshed = await this.analyzeSync();
+    if (
+      refreshed.localFingerprint !== reviewed.localFingerprint
+      || refreshed.externalFingerprint !== reviewed.externalFingerprint
+      || manifestFingerprint(refreshed.baseline) !== manifestFingerprint(reviewed.baseline)
+    ) {
+      throw new LibraryBackupError(
+        "The drives changed after the review. Nothing was copied - review the sync again.",
+        "PLAN_CHANGED",
+      );
+    }
+    this.emit("Both drives are ready to sync.", 1, 1, "confirm");
+    return refreshed;
+  }
+
+  // The review dialog sits between analyze() and execute(), so the situation has to be checked
+  // again. Re-running the whole analysis would walk both libraries a second time - four full
+  // passes for one backup - so only the drive's ownership, its recorded generation, and the
+  // files actually named in the plan are re-read here.
+  async confirmPlan(analysis) {
+    const context = this.validate(analysis.direction);
+    const session = readJson(context.paths.session);
+    if (session.machine_id && session.machine_id !== this.machineId) throw sessionOwnerError(session);
+    const storedExternal = loadStoredManifest(context.paths.externalManifest);
+    const reviewed = analysis.storedExternal;
+    const externalMoved = Boolean(storedExternal) !== Boolean(reviewed)
+      || Boolean(storedExternal && reviewed && (
+        storedExternal.generation !== reviewed.generation
+        || manifestFingerprint(storedExternal) !== manifestFingerprint(reviewed)
+      ));
+    if (externalMoved) {
+      throw new LibraryBackupError("External Library changed after the review. Nothing was copied - review the backup again.", "PLAN_CHANGED");
+    }
+    // The plan names only what differed at review time. A file created, deleted or renamed
+    // since then appears in neither library's plan, so checking the plan alone would let the
+    // run start and only discover the mismatch in the final verification - by which point the
+    // destination has already been half rewritten. Walking both listings first costs a stat
+    // per file and keeps that from ever happening.
+    this.emit("Checking both libraries for changes since the review.", 0, 1, "confirm");
+    for (const [root, manifest] of [[analysis.source, analysis.sourceManifest], [analysis.destination, analysis.destinationManifest]]) {
+      throwIfCancelled(this.signal);
+      if (!inventoryMatchesManifest(manifest, quickInventory(root))) {
+        throw new LibraryBackupError(
+          "The libraries changed after the review. Nothing was copied - review the backup again.",
+          "PLAN_CHANGED",
+        );
+      }
+      for (const record of manifest.records.values()) {
+        if (!mustAlwaysHash(record.relativePath)) continue;
+        throwIfCancelled(this.signal);
+        if (!(await fileMatchesRecord(root, record, this.signal))) {
+          throw new LibraryBackupError(
+            "The libraries changed after the review. Nothing was copied - review the backup again.",
+            "PLAN_CHANGED",
+          );
+        }
+      }
+    }
+
+    const planChecks = analysis.changes.map((change) => ({ change, from: context.source, to: context.destination }));
+
+    const report = throttledProgress(this.progress);
+    let checked = 0;
+    for (const { change, from, to } of planChecks) {
+      throwIfCancelled(this.signal);
+      const stale = (change.sourceRecord && !(await fileMatchesRecord(from, change.sourceRecord, this.signal)))
+        || (change.destinationRecord && !(await fileMatchesRecord(to, change.destinationRecord, this.signal)));
+      if (stale) {
+        throw new LibraryBackupError("Library files changed after the review. Nothing was copied - review the backup again.", "PLAN_CHANGED");
+      }
+      checked += 1;
+      report({ phase: "confirm", message: `Rechecking reviewed changes: ${checked} of ${planChecks.length}`, current: checked, total: planChecks.length });
+    }
+    return { ...analysis, ...context };
+  }
+
+  async execute(analysis) {
+    if (analysis?.direction === "sync") return this.executeSync(analysis);
+    throwIfCancelled(this.signal);
+    this.emit("Rechecking the reviewed changes.", 0, 1, "confirm");
+    const current = await this.confirmPlan(analysis);
+    const destinationControl = analysis.direction === "to-external" ? current.paths.externalControl : current.paths.localControl;
+    let sourceAfter = null;
+    let destinationAfter = null;
+    let completion = null;
+    const changedKeys = new Set(current.changes.map((change) => canonicalPathKey(change.relativePath)));
+    const metadataSnapshots = snapshotJsonFiles([
+      current.paths.externalManifest,
+      current.paths.localBaseline,
+      current.paths.session,
+    ]);
+    const finalizeCompletedBackup = async () => {
+      let metadataTouched = false;
+      try {
+        // Once application starts, cancellation is intentionally ignored until verification,
+        // receipt writes and rollback have finished. Mutable metadata is always re-hashed;
+        // immutable media retains the fast size/mtime cache.
+        this.emit("Verifying completed backup.", null, null, "verify");
+        sourceAfter = await scanLibrary(current.source, {
+          previous: current.sourceManifest,
+          forceHashKeys: changedKeys,
+        });
+        destinationAfter = await scanLibrary(current.destination, {
+          previous: current.destinationManifest,
+          forceHashKeys: changedKeys,
+        });
+        const missing = missingFromDestination(sourceAfter, destinationAfter);
+        if (missing) {
+          throw new LibraryBackupError(
+            `Final verification failed. ${missing} did not arrive intact.`,
+            "VERIFY_FAILED",
+          );
+        }
+
+        metadataTouched = true;
+        if (analysis.direction === "to-external") {
+          const nextGeneration = current.generation + (current.changes.length > 0 || !current.storedExternal ? 1 : 0);
+          saveStoredManifest(current.paths.externalManifest, current.libraryId, nextGeneration, destinationAfter);
+          saveStoredManifest(current.paths.localBaseline, current.libraryId, nextGeneration, sourceAfter);
+          try { fs.unlinkSync(current.paths.session); } catch (error) { if (error?.code !== "ENOENT") throw error; }
+          completion = { direction: analysis.direction, generation: nextGeneration, changed: current.changes.length, completedAt: utcNow() };
+          return;
+        }
+
+        const nextGeneration = Math.max(1, current.generation || current.storedExternal?.generation || 1);
+        saveStoredManifest(current.paths.externalManifest, current.libraryId, nextGeneration, sourceAfter);
+        saveStoredManifest(current.paths.localBaseline, current.libraryId, nextGeneration, destinationAfter);
+        writeJsonAtomic(current.paths.session, {
+          schema_version: 1,
+          library_id: current.libraryId,
+          machine_id: this.machineId,
+          platform: process.platform,
+          generation: nextGeneration,
+          base_fingerprint: manifestFingerprint(sourceAfter),
+          started_at: utcNow(),
+        });
+        completion = { direction: analysis.direction, generation: nextGeneration, changed: current.changes.length, completedAt: utcNow() };
+      } catch (error) {
+        if (metadataTouched) {
+          const failures = restoreJsonFiles(metadataSnapshots);
+          if (failures.length) {
+            const metadataError = new LibraryBackupError(
+              `Backup failed and ${failures.length} control record(s) could not be restored. Stop using both libraries and inspect the backup records before retrying.`,
+              "METADATA_ROLLBACK_FAILED",
+            );
+            metadataError.cause = error;
+            metadataError.rollbackFailures = failures;
+            throw metadataError;
+          }
+        }
+        throw error;
+      }
+    };
+    const historyPath = await applyChanges(
+      current.source,
+      current.destination,
+      current.changes,
+      destinationControl,
+      { progress: this.progress, signal: this.signal, verify: finalizeCompletedBackup },
+    );
+    // Only mark local card listings stale after final copy verification and durable manifest
+    // writes. The server rebuilds its card tables from disk on next use while retaining each
+    // computer's account-scoped Imagine cache.
+    invalidateLibraryIndexes([current.source, current.destination]);
+    this.emit(
+      analysis.direction === "to-external" ? "Backup to External Library completed." : "Restore to Local Library completed.",
+      1,
+      1,
+      "complete",
+    );
+    return { ...completion, historyPath, index_invalidated: true };
+  }
+
+  async executeSync(analysis) {
+    throwIfCancelled(this.signal);
+    const current = analysis;
+    const verifyApplied = async (root, changes) => {
+      for (const change of changes) {
+        throwIfCancelled(this.signal);
+        if (!change.sourceRecord) {
+          if (pathExists(safePath(root, change.destinationRecord.diskRelativePath))) {
+            throw new LibraryBackupError(`Sync deletion did not finish: ${change.relativePath}`, "VERIFY_FAILED");
+          }
+        } else if (!(await fileMatchesRecord(root, change.sourceRecord, this.signal))) {
+          throw new LibraryBackupError(`Sync copy did not arrive intact: ${change.relativePath}`, "VERIFY_FAILED");
+        }
+      }
+    };
+    let externalHistory = "";
+    let localHistory = "";
+    if (current.plan.localToExternal.length) {
+      this.emit("Applying Local Drive changes to External Drive.", 0, 1, "apply");
+      externalHistory = await applyChanges(
+        current.local,
+        current.external,
+        current.plan.localToExternal,
+        current.paths.externalControl,
+        { progress: this.progress, signal: this.signal, verify: () => verifyApplied(current.external, current.plan.localToExternal) },
+      );
+    }
+    if (current.plan.externalToLocal.length) {
+      this.emit("Applying External Drive changes to Local Drive.", 0, 1, "apply");
+      localHistory = await applyChanges(
+        current.external,
+        current.local,
+        current.plan.externalToLocal,
+        current.paths.localControl,
+        { progress: this.progress, signal: this.signal, verify: () => verifyApplied(current.local, current.plan.externalToLocal) },
+      );
+    }
+    if (current.plan.merges.length) {
+      const historyRoot = path.join(current.paths.externalControl, "history", `sync-merge-${new Date().toISOString().replace(/[-:]/g, "").replace(/\..+/, "")}-${randomSuffix()}`);
+      for (const merge of current.plan.merges) {
+        throwIfCancelled(this.signal);
+        const localPost = safePath(current.local, merge.localRecord.diskRelativePath);
+        const externalPost = safePath(current.external, merge.externalRecord.diskRelativePath);
+        const localPostHistory = safePath(historyRoot, `local/${merge.relativePath}`);
+        const externalPostHistory = safePath(historyRoot, `external/${merge.relativePath}`);
+        fs.mkdirSync(path.dirname(localPostHistory), { recursive: true });
+        fs.mkdirSync(path.dirname(externalPostHistory), { recursive: true });
+        fs.copyFileSync(localPost, localPostHistory);
+        fs.copyFileSync(externalPost, externalPostHistory);
+        if (Object.keys(merge.scalarConflicts || {}).length) {
+          const conflictKey = crypto.createHash("sha256").update(merge.relativePath).digest("hex").slice(0, 16);
+          writeJsonAtomic(path.join(current.paths.postConflicts, `${conflictKey}-${Date.now()}.json`), {
+            relative_path: merge.relativePath,
+            recorded_at: utcNow(),
+            scalars: merge.scalarConflicts,
+          });
+        }
+        writeJsonAtomic(localPost, merge.merged);
+        writeJsonAtomic(externalPost, merge.merged);
+      }
+      externalHistory = externalHistory || historyRoot;
+    }
+    if (current.settingsPlan?.changed) {
+      this.emit("Applying library settings changed on one drive.", 0, 1, "apply");
+      writeLibrarySettings(current.local, current.settingsPlan.local, current.libraryId);
+      writeLibrarySettings(current.external, current.settingsPlan.external, current.libraryId);
+    }
+    if (current.settingsPlan?.conflictRecords?.length) {
+      writeJsonAtomic(path.join(current.paths.settingsConflicts, `${Date.now()}.json`), {
+        recorded_at: utcNow(),
+        settings: current.settingsPlan.conflictRecords,
+      });
+    }
+    const conflictKeys = new Set(current.plan.conflicts.map(canonicalPathKey));
+    const changedByKey = new Map();
+    for (const change of [...current.plan.localToExternal, ...current.plan.externalToLocal]) {
+      changedByKey.set(canonicalPathKey(change.relativePath), change.sourceRecord || null);
+    }
+    const mergedByKey = new Map();
+    for (const merge of current.plan.merges) {
+      const serialized = `${JSON.stringify(merge.merged, null, 2)}\n`;
+      mergedByKey.set(canonicalPathKey(merge.relativePath), {
+        relativePath: merge.relativePath,
+        diskRelativePath: merge.relativePath,
+        size: Buffer.byteLength(serialized),
+        mtimeMs: Date.now(),
+        sha256: crypto.createHash("sha256").update(serialized).digest("hex"),
+      });
+    }
+    const nextRecords = new Map();
+    const keys = new Set([
+      ...current.localManifest.records.keys(),
+      ...current.externalManifest.records.keys(),
+      ...current.baseline.records.keys(),
+      ...changedByKey.keys(),
+      ...mergedByKey.keys(),
+    ]);
+    for (const key of keys) {
+      if (conflictKeys.has(key)) {
+        const previous = current.baseline.records.get(key);
+        if (previous) nextRecords.set(key, previous);
+        continue;
+      }
+      const merged = mergedByKey.get(key);
+      if (merged) {
+        nextRecords.set(key, merged);
+        continue;
+      }
+      if (changedByKey.has(key)) {
+        const changed = changedByKey.get(key);
+        if (changed) nextRecords.set(key, changed);
+        continue;
+      }
+      const localRecord = current.localManifest.records.get(key);
+      const externalRecord = current.externalManifest.records.get(key);
+      if (localRecord && externalRecord && sameRecord(localRecord, externalRecord)) nextRecords.set(key, localRecord);
+    }
+    const nextGeneration = (current.syncBaseline?.generation || 0) + 1;
+    let stateResult = { changed: 0 };
+    const hasState = [current.local, current.external].some((root) =>
+      pathExists(path.join(root, "sql_data", "state.sqlite3")));
+    if (hasState) {
+      if (!this.pythonPath) throw new LibraryBackupError("Python is required to sync Imagine state.", "PYTHON_REQUIRED");
+      this.emit("Syncing Imagine relationships and hidden items.", 0, 1, "verify");
+      const stateBaseline = current.paths.syncBaseline.replace(/\.json$/, ".state.json");
+      const { stdout } = await runStateHelper(this.pythonPath, [
+        path.join(__dirname, "..", "runtime", "sync_state.py"),
+        current.local, current.external, stateBaseline, current.paths.externalControl,
+        ...(current.initialize ? ["--initialize"] : []),
+      ], { env: this.pythonEnv, windowsHide: true, maxBuffer: 1024 * 1024 });
+      stateResult = JSON.parse(stdout);
+    }
+    saveStoredManifest(current.paths.syncBaseline, current.libraryId, nextGeneration, {
+      records: nextRecords,
+      librarySettings: current.settingsPlan?.nextBaseline || {},
+    });
+    // The card index is intentionally excluded from sync. Mark only the local card listing
+    // stale after the files and baseline are complete; never remove Imagine Liked cache rows.
+    invalidateLibraryIndexes([current.local, current.external]);
+    const historyPath = [externalHistory, localHistory].filter(Boolean).join("\n");
+    this.emit("Library Sync completed.", 1, 1, "complete");
+    return {
+      direction: "sync",
+      generation: nextGeneration,
+      changed: current.summary.total + current.plan.merges.length + (current.settingsPlan?.changed || 0) + stateResult.changed,
+      stateChanged: stateResult.changed,
+      completedAt: utcNow(),
+      historyPath,
+      index_invalidated: true,
+    };
+  }
+}
+
+function copyPriority(change) {
+  const name = path.posix.basename(change.relativePath);
+  if (name === "library.json") return 3;
+  if (name === "post.json") return 2;
+  if (change.relativePath.startsWith("sql_data/")) return 1;
+  return 0;
+}
+
+function removeTreeSafely(target, allowedParent) {
+  const resolvedTarget = path.resolve(target);
+  const resolvedParent = path.resolve(allowedParent);
+  const relation = path.relative(resolvedParent, resolvedTarget);
+  if (!relation || relation === ".." || relation.startsWith(`..${path.sep}`) || path.isAbsolute(relation)) {
+    throw new LibraryBackupError(`Refused to remove unsafe staging path: ${target}`, "UNSAFE_CLEANUP");
+  }
+  fs.rmSync(resolvedTarget, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+}
+
+function pruneStagingRoot(controlRoot) {
+  const stagingParent = path.join(controlRoot, "staging");
+  if (!pathExists(stagingParent)) return;
+  for (const entry of fs.readdirSync(stagingParent, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    try { removeTreeSafely(path.join(stagingParent, entry.name), stagingParent); } catch (_) {}
+  }
+  try { fs.rmdirSync(stagingParent); } catch (_) {}
+}
+
+function pruneOldHistory(controlRoot) {
+  const historyParent = path.join(controlRoot, "history");
+  if (!pathExists(historyParent)) return;
+  const oldestAllowed = Date.now() - HISTORY_RETENTION_MS;
+  for (const entry of fs.readdirSync(historyParent, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const target = path.join(historyParent, entry.name);
+    try {
+      if (fs.statSync(target).mtimeMs < oldestAllowed) removeTreeSafely(target, historyParent);
+    } catch (_) {}
+  }
+  try { fs.rmdirSync(historyParent); } catch (_) {}
+}
+
+function pruneEmptyDirectories(root) {
+  const prune = (directory, top) => {
+    if (!pathExists(directory)) return;
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      if (entry.isDirectory()) prune(path.join(directory, entry.name), top);
+    }
+    if (directory !== top) {
+      try { fs.rmdirSync(directory); } catch (_) {}
+    }
+  };
+  for (const name of CONTENT_DIRECTORIES) {
+    const top = path.join(root, name);
+    prune(top, top);
+  }
+}
+
+function invalidateLibraryIndex(root) {
+  const stateDirectory = safePath(root, "sql_data");
+  fs.mkdirSync(stateDirectory, { recursive: true });
+  writeJsonAtomic(safePath(root, `sql_data/${LIBRARY_INDEX_INVALIDATION_FILE}`), {
+    version: 1,
+    invalidated_at: utcNow(),
+  });
+}
+
+function invalidateLibraryIndexes(roots) {
+  const seen = new Set();
+  for (const root of roots) {
+    if (!root) continue;
+    const resolved = path.resolve(root);
+    const key = process.platform === "win32" ? resolved.toLocaleLowerCase("en-US") : resolved;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    invalidateLibraryIndex(resolved);
+  }
+}
+
+async function copyFileVerified(sourcePath, destinationPath, expectedHash, signal) {
+  throwIfCancelled(signal);
+  fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
+  await fs.promises.copyFile(sourcePath, destinationPath, fs.constants.COPYFILE_EXCL);
+  const sourceStat = await fs.promises.stat(sourcePath);
+  await fs.promises.utimes(destinationPath, sourceStat.atime, sourceStat.mtime).catch(() => {});
+  const actualHash = await sha256File(destinationPath, signal);
+  if (actualHash !== expectedHash) {
+    throw new LibraryBackupError(`Copy verification failed: ${path.basename(destinationPath)}`, "COPY_VERIFY_FAILED");
+  }
+}
+
+async function applyChanges(sourceRoot, destinationRoot, changes, controlRoot, {
+  progress = null,
+  signal = null,
+  verify = null,
+} = {}) {
+  if (!changes.length) {
+    if (verify) await verify();
+    return "";
+  }
+  fs.mkdirSync(destinationRoot, { recursive: true });
+  fs.mkdirSync(controlRoot, { recursive: true });
+  pruneStagingRoot(controlRoot);
+  pruneOldHistory(controlRoot);
+  const destinationDevice = fs.statSync(destinationRoot).dev;
+  const controlDevice = fs.statSync(controlRoot).dev;
+  if (destinationDevice !== controlDevice) {
+    throw new LibraryBackupError("Backup staging folder is not on the destination drive.", "STAGING_VOLUME_MISMATCH");
+  }
+  const runId = `${new Date().toISOString().replace(/[-:]/g, "").replace(/\..+/, "")}-${randomSuffix()}`;
+  const stagingRoot = path.join(controlRoot, "staging", runId);
+  const historyRoot = path.join(controlRoot, "history", runId);
+  fs.mkdirSync(path.dirname(stagingRoot), { recursive: true });
+  fs.mkdirSync(stagingRoot, { recursive: false });
+  const copied = [];
+  const copyChanges = changes
+    .filter((change) => change.action !== "delete")
+    .sort((a, b) => copyPriority(a) - copyPriority(b) || a.relativePath.localeCompare(b.relativePath, "en"));
+  const total = copyChanges.length + changes.length;
+  const report = throttledProgress(progress);
+  let completed = 0;
+  try {
+    for (const change of copyChanges) {
+      throwIfCancelled(signal);
+      const sourcePath = safePath(sourceRoot, change.sourceRecord.diskRelativePath);
+      const stagedPath = safePath(stagingRoot, change.relativePath);
+      await copyFileVerified(sourcePath, stagedPath, change.sourceRecord.sha256, signal);
+      copied.push({ change, stagedPath });
+      completed += 1;
+      report({ phase: "copy", message: `Copy verified: ${change.relativePath}`, current: completed, total });
+    }
+
+    // Everything is staged; make sure it is all still there before the destination is touched.
+    // exFAT can absorb a file written under one name into another - an AppleDouble sidecar is
+    // folded into the file it describes - so a copy can verify and then be gone by the time it
+    // is moved into place. Catching that here means the destination is never half-written and
+    // there is nothing to roll back.
+    for (const { change, stagedPath } of copied) {
+      if (!pathExists(stagedPath)) {
+        throw new LibraryBackupError(
+          `The staged copy of ${change.relativePath} disappeared before it could be applied. The destination was left untouched.`,
+          "STAGING_LOST",
+        );
+      }
+    }
+
+    const rollback = [];
+    try {
+      for (const { change, stagedPath } of copied) {
+        throwIfCancelled(signal);
+        const destinationPath = safePath(destinationRoot, change.relativePath);
+        const oldPath = change.destinationRecord
+          ? safePath(destinationRoot, change.destinationRecord.diskRelativePath)
+          : destinationPath;
+        let historyPath = "";
+        if (pathExists(oldPath)) {
+          historyPath = safePath(historyRoot, change.relativePath);
+          fs.mkdirSync(path.dirname(historyPath), { recursive: true });
+          fs.renameSync(oldPath, historyPath);
+        }
+        rollback.push({ destinationPath, historyPath });
+        fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
+        fs.renameSync(stagedPath, destinationPath);
+        completed += 1;
+        report({ phase: "apply", message: `Applied: ${change.relativePath}`, current: completed, total });
+      }
+      const deletes = changes
+        .filter((change) => change.action === "delete")
+        .sort((a, b) => b.relativePath.split("/").length - a.relativePath.split("/").length);
+      for (const change of deletes) {
+        throwIfCancelled(signal);
+        const destinationPath = safePath(destinationRoot, change.destinationRecord.diskRelativePath);
+        let historyPath = "";
+        if (pathExists(destinationPath)) {
+          historyPath = safePath(historyRoot, change.relativePath);
+          fs.mkdirSync(path.dirname(historyPath), { recursive: true });
+          fs.renameSync(destinationPath, historyPath);
+          rollback.push({ destinationPath, historyPath });
+        }
+        completed += 1;
+        report({ phase: "apply", message: `Moved to history: ${change.relativePath}`, current: completed, total });
+      }
+      pruneEmptyDirectories(destinationRoot);
+      // Verification is part of the transaction. Until it succeeds, every replaced or deleted
+      // destination file remains recoverable from history and any newly added file is tracked
+      // by rollback. This prevents a late source change from leaving a half-applied backup.
+      if (verify) await verify();
+    } catch (error) {
+      const rollbackFailures = [];
+      for (const item of rollback.reverse()) {
+        try {
+          if (pathExists(item.destinationPath)) fs.unlinkSync(item.destinationPath);
+          if (item.historyPath && pathExists(item.historyPath)) {
+            fs.mkdirSync(path.dirname(item.destinationPath), { recursive: true });
+            fs.renameSync(item.historyPath, item.destinationPath);
+          }
+        } catch (rollbackError) {
+          rollbackFailures.push(`${item.destinationPath}: ${rollbackError.message}`);
+        }
+      }
+      if (rollbackFailures.length) {
+        const rollbackError = new LibraryBackupError(
+          `Backup failed and ${rollbackFailures.length} destination change(s) could not be rolled back. Stop using both libraries and inspect the backup history before retrying.`,
+          "ROLLBACK_FAILED",
+        );
+        rollbackError.cause = error;
+        rollbackError.rollbackFailures = rollbackFailures;
+        throw rollbackError;
+      }
+      if (error?.code === "VERIFY_FAILED") {
+        error.message = "Final verification failed. All applied changes were rolled back.";
+      }
+      throw error;
+    }
+  } finally {
+    // Clearing the staging area is housekeeping, not part of the backup. Some filesystems -
+    // exFAT on a removable drive especially - answer ENOTEMPTY for a directory whose files
+    // were just moved out of it. Letting that escape would fail a backup whose files are
+    // already in place and leave the manifests unwritten, locking both directions. Anything
+    // left behind is cleared at the start of the next run.
+    try {
+      removeTreeSafely(stagingRoot, controlRoot);
+    } catch (error) {
+      report({ phase: "apply", message: `Staging folder left for the next run: ${error.message}`, current: total, total });
+    }
+    try { fs.rmdirSync(path.join(controlRoot, "staging")); } catch (_) {}
+  }
+  return pathExists(historyRoot) ? historyRoot : "";
+}
+
+function inspectPaths(localRoot, externalRoot, machineId) {
+  const result = {
+    ok: true,
+    local: { path: String(localRoot || ""), exists: false, library: false },
+    external: { path: String(externalRoot || ""), exists: false, library: false },
+    ready: false,
+    message: "Select both drive folders.",
+  };
+  for (const [key, value] of [["local", localRoot], ["external", externalRoot]]) {
+    if (!value) continue;
+    const resolved = path.resolve(String(value));
+    const exists = pathExists(resolved) && fs.statSync(resolved).isDirectory();
+    result[key] = { path: resolved, exists, library: exists && Boolean(libraryIdentity(resolved)) };
+  }
+  if (!localRoot || !externalRoot) return result;
+  if (!result.local.exists || !result.external.exists) {
+      result.message = "One of the selected drive folders was not found.";
+    return result;
+  }
+  try {
+    validateDistinctRoots(result.local.path, result.external.path);
+    const id = libraryIdentity(result.local.path) || libraryIdentity(result.external.path);
+    if (!id) {
+      result.message = "Select at least one existing Chameleon drive folder.";
+      return result;
+    }
+    const otherId = result.local.library && result.external.library
+      ? libraryIdentity(result.local.path) === libraryIdentity(result.external.path)
+      : true;
+    if (!otherId) {
+      result.message = "Local and External Drive folders contain different libraries.";
+      return result;
+    }
+    const paths = metadataPaths(result.local.path, result.external.path, id);
+    const session = readJson(paths.session);
+    if (session.machine_id && session.machine_id !== machineId) {
+      result.message = "External Drive is currently in use by another computer.";
+      result.blocked = true;
+      return result;
+    }
+    result.ready = true;
+    result.session_active = session.machine_id === machineId;
+    result.message = result.session_active
+      ? "External Drive is ready to sync with this computer."
+      : "Ready to compare drives.";
+    return result;
+  } catch (error) {
+    result.message = error.message;
+    return result;
+  }
+}
+
+module.exports = {
+  LibraryBackup,
+  LibraryBackupError,
+  applyChanges,
+  buildChangePlan,
+  inspectPaths,
+  isTerminalJob,
+  libraryIdentity,
+  manifestFingerprint,
+  scanLibrary,
+  summarizeChanges,
+};

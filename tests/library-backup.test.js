@@ -1,0 +1,711 @@
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const test = require("node:test");
+const { execFileSync } = require("node:child_process");
+
+const {
+  LibraryBackup,
+  applyChanges,
+  buildChangePlan,
+  scanLibrary,
+} = require("../common/app/electron/library-backup");
+
+function write(filePath, value) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, value);
+}
+
+function makeLibrary(root, stamp = "2026-09-01T00:00:00.000Z") {
+  fs.mkdirSync(root, { recursive: true });
+  write(path.join(root, "library.json"), `${JSON.stringify({ version: 1, created_at: stamp, updated_at: stamp })}\n`);
+  write(path.join(root, "created", "first", "post.json"), "{\"title\":\"first\"}\n");
+  write(path.join(root, "created", "first", "image.txt"), "image-one");
+  write(path.join(root, "account", "build.json"), "{\"accounts\":[1]}\n");
+  write(path.join(root, "cache", "preview.bin"), "cached-preview");
+  write(path.join(root, "sql_data", "library_index.sqlite3"), "index-data");
+  write(path.join(root, "runtime_data", "logs", "ignored.log"), "do-not-copy");
+}
+
+function tempPair(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-library-backup-test-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const local = path.join(root, "local-library");
+  const external = path.join(root, "external-library");
+  makeLibrary(local);
+  fs.mkdirSync(external);
+  return { root, local, external };
+}
+
+async function run(engine, direction) {
+  const analysis = await engine.analyze(direction);
+  return { analysis, result: await engine.execute(analysis) };
+}
+
+test("accounts sync both ways while caches, previews, runtime and Imagine indexes stay local", async (t) => {
+  const { local, external } = tempPair(t);
+  makeLibrary(external);
+  const engine = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "portable-folders" });
+  const first = await run(engine, "sync");
+  // Simulate a receipt created before accounts were included.
+  const baselineFile = first.analysis.paths.syncBaseline;
+  const baseline = JSON.parse(fs.readFileSync(baselineFile));
+  const previousCount = baseline.files.length;
+  baseline.files = baseline.files.filter((record) => !/^(account|cache|previews)\//.test(record.relative_path));
+  assert.ok(baseline.files.length < previousCount);
+  write(baselineFile, JSON.stringify(baseline));
+  for (const folder of ["account", "cache", "previews"]) {
+    write(path.join(local, folder, "from-local.json"), '{"side":"local"}');
+    write(path.join(external, folder, "from-external.json"), '{"side":"external"}');
+  }
+  write(path.join(local, "runtime_data", "macos", "settings.json"), "local runtime");
+  write(path.join(external, "runtime_data", "macos", "settings.json"), "external runtime");
+  const { analysis } = await run(engine, "sync");
+  assert.equal([...analysis.localManifest.records.keys()].some((key) => key.startsWith("runtime_data/")), false);
+  for (const folder of ["account"]) {
+    for (const root of [local, external]) {
+      assert.equal(fs.readFileSync(path.join(root, folder, "from-local.json"), "utf8"), '{"side":"local"}');
+      assert.equal(fs.readFileSync(path.join(root, folder, "from-external.json"), "utf8"), '{"side":"external"}');
+    }
+    write(path.join(external, folder, "from-local.json"), '{"updated":true}');
+    fs.unlinkSync(path.join(local, folder, "from-external.json"));
+  }
+  await run(engine, "sync");
+  for (const folder of ["account"]) {
+    for (const root of [local, external]) {
+      assert.equal(fs.readFileSync(path.join(root, folder, "from-local.json"), "utf8"), '{"updated":true}');
+      assert.equal(fs.existsSync(path.join(root, folder, "from-external.json")), false);
+    }
+  }
+  assert.equal(fs.readFileSync(path.join(local, "runtime_data", "macos", "settings.json"), "utf8"), "local runtime");
+  assert.equal(fs.readFileSync(path.join(external, "runtime_data", "macos", "settings.json"), "utf8"), "external runtime");
+  assert.equal(fs.readFileSync(path.join(local, "sql_data", "library_index.sqlite3"), "utf8"), "index-data");
+  for (const folder of ["cache", "previews"]) {
+    assert.equal(fs.readFileSync(path.join(local, folder, "from-local.json"), "utf8"), '{"side":"local"}');
+    assert.equal(fs.readFileSync(path.join(external, folder, "from-external.json"), "utf8"), '{"side":"external"}');
+    assert.equal(fs.existsSync(path.join(external, folder, "from-local.json")), false);
+    assert.equal(fs.existsSync(path.join(local, folder, "from-external.json")), false);
+    assert.equal([...analysis.localManifest.records.keys()].some((key) => key.startsWith(folder + "/")), false);
+  }
+  assert.equal((await run(engine, "sync")).result.changed, 0);
+});
+
+test("Reference cards and their media sync both directions and settle", async (t) => {
+  const { local, external } = tempPair(t);
+  makeLibrary(external);
+  write(path.join(local, "reference", "local-card", "post.json"), JSON.stringify({ post_id: "local-card", items: [{ item_id: "local", file: "local.png" }] }));
+  write(path.join(local, "reference", "local-card", "local.png"), "local image");
+  write(path.join(external, "reference", "external-card", "post.json"), JSON.stringify({ post_id: "external-card", items: [{ item_id: "external", file: "external.mp4" }] }));
+  write(path.join(external, "reference", "external-card", "external.mp4"), "external video");
+  const engine = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "reference-test" });
+  await run(engine, "sync");
+  for (const root of [local, external]) {
+    assert.equal(fs.readFileSync(path.join(root, "reference", "local-card", "local.png"), "utf8"), "local image");
+    assert.equal(fs.readFileSync(path.join(root, "reference", "external-card", "external.mp4"), "utf8"), "external video");
+    assert.equal(JSON.parse(fs.readFileSync(path.join(root, "reference", "external-card", "post.json"))).post_id, "external-card");
+  }
+  const next = await engine.analyze("sync");
+  assert.equal(next.plan.localToExternal.length, 0);
+  assert.equal(next.plan.externalToLocal.length, 0);
+  assert.equal(next.plan.merges.length, 0);
+});
+
+test("Library Sync marks both card indexes stale without deleting their Imagine cache", async (t) => {
+  const { local, external } = tempPair(t);
+  makeLibrary(external);
+  write(path.join(local, "collection", "new-folder", "card", "post.json"), "{\"title\":\"new\"}\n");
+  const engine = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "index-reset-test" });
+  const { result } = await run(engine, "sync");
+
+  assert.equal(result.index_invalidated, true);
+  assert.equal(fs.existsSync(path.join(external, "collection", "new-folder", "card", "post.json")), true);
+  for (const root of [local, external]) {
+    assert.equal(fs.existsSync(path.join(root, "sql_data", "library_index.sqlite3")), true);
+    assert.equal(fs.existsSync(path.join(root, "sql_data", ".library-index-rebuild.json")), true);
+  }
+  const next = await engine.analyze("sync");
+  assert.equal(next.plan.localToExternal.length, 0);
+  assert.equal(next.plan.externalToLocal.length, 0);
+});
+
+test("a legacy card index is rejected so Build Main rebuilds from disk", async (t) => {
+  const { root } = tempPair(t);
+  const pythonPath = process.env.SYNC_TEST_PYTHON || "python3";
+  const helper = path.resolve(__dirname, "../common/app/runtime");
+  execFileSync(pythonPath, ["-B", "-c", [
+    "import sqlite3, sys",
+    "from pathlib import Path",
+    "sys.path.insert(0, sys.argv[1])",
+    "import library_index",
+    "root = Path(sys.argv[2])",
+    "library_index.rebuild(root, [], [], updated_at='2026-09-09T00:00:00Z')",
+    "assert library_index.ready(root)",
+    "with sqlite3.connect(root / 'sql_data' / library_index.DATABASE_FILENAME) as connection:",
+    " connection.execute(\"UPDATE index_metadata SET value = '8' WHERE key = 'schema_version'\")",
+    "assert not library_index.ready(root)",
+  ].join("\n"), helper, root]);
+});
+
+test("Sync button engine includes durable SQLite rows and a second run is settled", async (t) => {
+  const { local, external } = tempPair(t);
+  makeLibrary(external);
+  const pythonPath = process.env.SYNC_TEST_PYTHON || "python3";
+  const helper = path.resolve(__dirname, "../common/app/runtime");
+  execFileSync(pythonPath, ["-B", "-c", [
+    "import sys, sqlite3, json",
+    "from pathlib import Path",
+    "sys.path.insert(0, sys.argv[1])",
+    "import sync_state",
+    "for root, item in zip(sys.argv[2:], ('local-result','external-result')):",
+    " p=Path(root)/'sql_data/state.sqlite3'",
+    " p.parent.mkdir(parents=True,exist_ok=True)",
+    " c=sqlite3.connect(p)",
+    " sync_state.replace_rows(c,'main',{'imagine_generated_relations':{'source':{'items':[{'id':item}]}},'imagine_local_exclusions':{}})",
+    " c.commit(); c.close()",
+  ].join("\n"), helper, local, external]);
+  const engine = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "sqlite-test", pythonPath,
+    pythonEnv: { ...process.env, PYTHONDONTWRITEBYTECODE: "1" } });
+  const first = await run(engine, "sync");
+  assert.equal(first.result.stateChanged, 1);
+  const verify = [
+    "import sys, sqlite3, json",
+    "from pathlib import Path",
+    "for root in sys.argv[1:]:",
+    " c=sqlite3.connect(Path(root)/'sql_data/state.sqlite3')",
+    " value=json.loads(c.execute(\"SELECT relation_json FROM imagine_generated_relations WHERE source_id='source'\").fetchone()[0])",
+    " assert {x['id'] for x in value['items']}=={'local-result','external-result'}",
+    " c.close()",
+  ].join("\n");
+  execFileSync(pythonPath, ["-B", "-c", verify, local, external]);
+  const second = await run(engine, "sync");
+  assert.equal(second.result.stateChanged, 0);
+  assert.equal(second.result.changed, 0);
+  // App-generated state can exist after the user clears the content directories. The
+  // file reset decision must reach Python even though neither database is missing/empty.
+  fs.rmSync(path.join(external, "created"), { recursive: true });
+  execFileSync(pythonPath, ["-B", "-c", [
+    "import sys, sqlite3",
+    "from pathlib import Path",
+    "sys.path.insert(0, sys.argv[1])",
+    "import sync_state",
+    "with sqlite3.connect(Path(sys.argv[2])/'sql_data/state.sqlite3') as c:",
+    " sync_state.replace_rows(c,'main',{'imagine_generated_relations':{'new-source':{'items':[{'id':'new'}]}},'imagine_local_exclusions':{}})",
+  ].join("\n"), helper, external]);
+  const initialized = await run(engine, "sync");
+  assert.equal(initialized.analysis.initialize, true);
+  execFileSync(pythonPath, ["-B", "-c", verify, local, external]);
+  assert.equal((await run(engine, "sync")).result.changed, 0);
+});
+
+test("initial Local to External copies supported data and excludes runtime files", async (t) => {
+  const { local, external } = tempPair(t);
+  const engine = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "mac-a" });
+  const { analysis, result } = await run(engine, "to-external");
+
+  assert.equal(analysis.summary.add, 5);
+  assert.equal(result.generation, 1);
+  assert.equal(result.index_invalidated, true);
+  assert.equal(fs.readFileSync(path.join(external, "account", "build.json"), "utf8"), "{\"accounts\":[1]}\n");
+  assert.equal(fs.readFileSync(path.join(external, "cache", "preview.bin"), "utf8"), "cached-preview");
+  assert.equal(fs.existsSync(path.join(external, "sql_data", "library_index.sqlite3")), false);
+  assert.equal(fs.existsSync(path.join(local, "sql_data", ".library-index-rebuild.json")), true);
+  assert.equal(fs.existsSync(path.join(external, "sql_data", ".library-index-rebuild.json")), true);
+  assert.equal(fs.existsSync(path.join(external, "runtime_data")), false);
+});
+
+test("updates, deletes, and renames are mirrored and previous files go to history", async (t) => {
+  const { local, external } = tempPair(t);
+  const engine = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "mac-a" });
+  await run(engine, "to-external");
+
+  write(path.join(local, "created", "first", "image.txt"), "image-two");
+  fs.renameSync(
+    path.join(local, "created", "first", "post.json"),
+    path.join(local, "created", "first", "renamed.json"),
+  );
+  fs.unlinkSync(path.join(local, "cache", "preview.bin"));
+
+  const { analysis, result } = await run(engine, "to-external");
+  assert.equal(analysis.summary.update, 1);
+  assert.equal(analysis.summary.add, 1);
+  assert.equal(analysis.summary.delete, 2);
+  assert.equal(fs.readFileSync(path.join(external, "created", "first", "image.txt"), "utf8"), "image-two");
+  assert.equal(fs.existsSync(path.join(external, "created", "first", "post.json")), false);
+  assert.equal(fs.existsSync(path.join(external, "created", "first", "renamed.json")), true);
+  assert.equal(fs.existsSync(path.join(external, "cache", "preview.bin")), false);
+  assert.equal(Boolean(result.historyPath), true);
+  assert.equal(fs.existsSync(path.join(result.historyPath, "created", "first", "image.txt")), true);
+  assert.equal(fs.existsSync(path.join(result.historyPath, "created", "first", "post.json")), true);
+});
+
+test("External to Local creates a checkout and blocks another computer", async (t) => {
+  const { root, local, external } = tempPair(t);
+  const mac = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "mac-a" });
+  await run(mac, "to-external");
+
+  const restored = path.join(root, "restored-library");
+  fs.mkdirSync(restored);
+  const windows = new LibraryBackup({ localRoot: restored, externalRoot: external, machineId: "windows-b" });
+  const restoreResult = await run(windows, "to-local");
+  assert.equal(restoreResult.result.generation, 1);
+  assert.equal(fs.readFileSync(path.join(restored, "created", "first", "image.txt"), "utf8"), "image-one");
+
+  const otherLocal = path.join(root, "other-library");
+  fs.mkdirSync(otherLocal);
+  const other = new LibraryBackup({ localRoot: otherLocal, externalRoot: external, machineId: "mac-c" });
+  await assert.rejects(() => other.analyze("to-local"), /another computer/i);
+});
+
+test("direct External changes during a checkout are reported before anything is written", async (t) => {
+  const { root, local, external } = tempPair(t);
+  const first = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "mac-a" });
+  await run(first, "to-external");
+
+  const restored = path.join(root, "restored-library");
+  fs.mkdirSync(restored);
+  const second = new LibraryBackup({ localRoot: restored, externalRoot: external, machineId: "windows-b" });
+  await run(second, "to-local");
+  write(path.join(restored, "created", "first", "image.txt"), "local-change");
+  write(path.join(external, "created", "first", "image.txt"), "external-change");
+
+  const analysis = await second.analyze("to-external");
+  assert.match(analysis.warning, /changes made outside this backup/i);
+  assert.equal(fs.readFileSync(path.join(external, "created", "first", "image.txt"), "utf8"), "external-change");
+});
+
+test("automatic External metadata refresh does not cause a false conflict", async (t) => {
+  const { root, local, external } = tempPair(t);
+  const first = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "mac-a" });
+  await run(first, "to-external");
+
+  const restored = path.join(root, "restored-library");
+  fs.mkdirSync(restored);
+  const second = new LibraryBackup({ localRoot: restored, externalRoot: external, machineId: "windows-b" });
+  await run(second, "to-local");
+  const externalLibrary = JSON.parse(fs.readFileSync(path.join(external, "library.json"), "utf8"));
+  externalLibrary.updated_at = "2026-09-03T00:00:00.000Z";
+  write(path.join(external, "library.json"), `${JSON.stringify(externalLibrary)}\n`);
+  write(path.join(restored, "created", "first", "image.txt"), "local-change");
+
+  const analysis = await second.analyze("to-external");
+  assert.equal(analysis.summary.update >= 1, true);
+});
+
+test("case-insensitive filename collisions are rejected", async (t) => {
+  const { local, external } = tempPair(t);
+  write(path.join(local, "prompt", "Name.json"), "one");
+  write(path.join(local, "prompt", "name.json"), "two");
+  if (fs.readdirSync(path.join(local, "prompt")).length < 2) {
+    t.skip("The current filesystem is case-insensitive.");
+    return;
+  }
+  const engine = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "mac-a" });
+  await assert.rejects(() => engine.analyze("to-external"), /collision/i);
+});
+
+test("a failed atomic replacement restores the previous destination file", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-library-backup-rollback-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const source = path.join(root, "source");
+  const destination = path.join(root, "destination");
+  const control = path.join(root, ".control");
+  makeLibrary(source, "2026-09-02T00:00:00.000Z");
+  fs.cpSync(source, destination, { recursive: true });
+  write(path.join(source, "created", "first", "image.txt"), "new-value");
+  const sourceManifest = await scanLibrary(source);
+  const destinationManifest = await scanLibrary(destination);
+  const changes = buildChangePlan(sourceManifest, destinationManifest);
+  assert.equal(changes.length, 1);
+
+  const originalRename = fs.renameSync;
+  fs.renameSync = (from, to) => {
+    if (String(from).includes(`${path.sep}staging${path.sep}`) && path.resolve(to) === path.resolve(destination, "created", "first", "image.txt")) {
+      throw new Error("simulated replacement failure");
+    }
+    return originalRename(from, to);
+  };
+  try {
+    await assert.rejects(() => applyChanges(source, destination, changes, control), /simulated replacement failure/);
+  } finally {
+    fs.renameSync = originalRename;
+  }
+  assert.equal(fs.readFileSync(path.join(destination, "created", "first", "image.txt"), "utf8"), "image-one");
+});
+
+test("same-size mutable metadata changed after review is detected when mtime is preserved", async (t) => {
+  const { local, external } = tempPair(t);
+  const fixedTime = new Date("2026-09-02T01:00:00.000Z");
+  const accountPath = path.join(local, "account", "build.json");
+  fs.utimesSync(accountPath, fixedTime, fixedTime);
+  const engine = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "mac-a" });
+  await run(engine, "to-external");
+
+  write(path.join(local, "created", "first", "image.txt"), "planned-change");
+  const analysis = await engine.analyze("to-external");
+  write(accountPath, "{\"accounts\":[2]}\n");
+  fs.utimesSync(accountPath, fixedTime, fixedTime);
+
+  await assert.rejects(
+    () => engine.execute(analysis),
+    (error) => error?.code === "PLAN_CHANGED" && /Nothing was copied/i.test(error.message),
+  );
+  assert.equal(fs.readFileSync(path.join(external, "created", "first", "image.txt"), "utf8"), "image-one");
+  assert.equal(fs.readFileSync(path.join(external, "account", "build.json"), "utf8"), "{\"accounts\":[1]}\n");
+});
+
+test("a file added after review is rejected before the destination is changed", async (t) => {
+  const { local, external } = tempPair(t);
+  const engine = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "mac-a" });
+  await run(engine, "to-external");
+
+  write(path.join(local, "created", "first", "image.txt"), "planned-change");
+  const analysis = await engine.analyze("to-external");
+  write(path.join(local, "prompt", "added-after-review.json"), "{\"prompt\":\"new\"}\n");
+
+  await assert.rejects(() => engine.execute(analysis), (error) => error?.code === "PLAN_CHANGED");
+  assert.equal(fs.readFileSync(path.join(external, "created", "first", "image.txt"), "utf8"), "image-one");
+  assert.equal(fs.existsSync(path.join(external, "prompt", "added-after-review.json")), false);
+});
+
+test("Local source changes after review are included in the refreshed backup plan", async (t) => {
+  const { local, external } = tempPair(t);
+  const engine = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "mac-a" });
+  const reviewed = await engine.analyze("to-external");
+  write(path.join(local, "cache", "card-previews", "late-preview.jpg"), "late-preview");
+
+  const refreshed = await engine.refreshPlan(reviewed);
+  await engine.execute(refreshed);
+
+  assert.equal(
+    fs.readFileSync(path.join(external, "cache", "card-previews", "late-preview.jpg"), "utf8"),
+    "late-preview",
+  );
+});
+
+test("External source changes after review are included in the refreshed restore plan", async (t) => {
+  const { local, external } = tempPair(t);
+  const engine = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "mac-a" });
+  await run(engine, "to-external");
+  const reviewed = await engine.analyze("to-local");
+  write(path.join(external, "created", "late", "post.json"), "{\"title\":\"late\"}\n");
+
+  const refreshed = await engine.refreshPlan(reviewed);
+  await engine.execute(refreshed);
+
+  assert.equal(
+    fs.readFileSync(path.join(local, "created", "late", "post.json"), "utf8"),
+    "{\"title\":\"late\"}\n",
+  );
+});
+
+test("destination content changes after review are still blocked", async (t) => {
+  const { local, external } = tempPair(t);
+  const engine = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "mac-a" });
+  await run(engine, "to-external");
+  write(path.join(local, "created", "first", "image.txt"), "local-change");
+  const reviewed = await engine.analyze("to-external");
+  write(path.join(external, "created", "first", "image.txt"), "external-change-after-review");
+
+  await assert.rejects(
+    () => engine.refreshPlan(reviewed),
+    (error) => error?.code === "PLAN_CHANGED" && /destination library changed/i.test(error.message),
+  );
+  assert.equal(
+    fs.readFileSync(path.join(external, "created", "first", "image.txt"), "utf8"),
+    "external-change-after-review",
+  );
+});
+
+test("library.json user settings count as unsynced while regenerated fields do not", async (t) => {
+  const { local, external } = tempPair(t);
+  const engine = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "mac-a" });
+  await run(engine, "to-external");
+
+  const libraryPath = path.join(local, "library.json");
+  const library = JSON.parse(fs.readFileSync(libraryPath, "utf8"));
+  library.updated_at = "2026-09-03T00:00:00.000Z";
+  write(libraryPath, `${JSON.stringify(library)}\n`);
+  const regeneratedOnly = await engine.analyze("to-local");
+  assert.equal(regeneratedOnly.summary.update, 1);
+
+  library.settings = { hidden_upload_keys: ["private-item"] };
+  write(libraryPath, `${JSON.stringify(library)}\n`);
+  const settingsChanged = await engine.analyze("to-local");
+  assert.match(settingsChanged.warning, /changes? the backup does not have/i);
+});
+
+test("final verification failure rolls back every applied destination change", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-library-backup-final-verify-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const source = path.join(root, "source");
+  const destination = path.join(root, "destination");
+  const control = path.join(root, ".control");
+  makeLibrary(source, "2026-09-02T00:00:00.000Z");
+  fs.cpSync(source, destination, { recursive: true });
+  write(path.join(source, "created", "first", "image.txt"), "new-value");
+  write(path.join(source, "created", "first", "new.txt"), "new-file");
+  fs.unlinkSync(path.join(source, "account", "build.json"));
+  const sourceManifest = await scanLibrary(source);
+  const destinationManifest = await scanLibrary(destination);
+  const changes = buildChangePlan(sourceManifest, destinationManifest);
+
+  await assert.rejects(
+    () => applyChanges(source, destination, changes, control, {
+      verify: async () => {
+        throw new Error("simulated final verification failure");
+      },
+    }),
+    /simulated final verification failure/,
+  );
+  assert.equal(fs.readFileSync(path.join(destination, "created", "first", "image.txt"), "utf8"), "image-one");
+  assert.equal(fs.existsSync(path.join(destination, "created", "first", "new.txt")), false);
+  assert.equal(fs.readFileSync(path.join(destination, "account", "build.json"), "utf8"), "{\"accounts\":[1]}\n");
+});
+
+test("a control-record write failure rolls back files and both manifests", async (t) => {
+  const { root, local, external } = tempPair(t);
+  const engine = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "mac-a" });
+  await run(engine, "to-external");
+
+  const controlFiles = [];
+  const walk = (directory) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const entryPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) walk(entryPath);
+      else if (["manifest.json", "baseline.json"].includes(entry.name)) controlFiles.push(entryPath);
+    }
+  };
+  walk(root);
+  const externalManifestPath = controlFiles.find((filePath) => path.basename(filePath) === "manifest.json");
+  const localBaselinePath = controlFiles.find((filePath) => path.basename(filePath) === "baseline.json");
+  const manifestBefore = fs.readFileSync(externalManifestPath, "utf8");
+  const baselineBefore = fs.readFileSync(localBaselinePath, "utf8");
+
+  write(path.join(local, "created", "first", "image.txt"), "new-value");
+  const analysis = await engine.analyze("to-external");
+  const originalRename = fs.renameSync;
+  let failOnce = true;
+  fs.renameSync = (from, to) => {
+    if (failOnce && path.resolve(to) === path.resolve(localBaselinePath) && String(from).endsWith(".tmp")) {
+      failOnce = false;
+      throw new Error("simulated receipt write failure");
+    }
+    return originalRename(from, to);
+  };
+  try {
+    await assert.rejects(() => engine.execute(analysis), /simulated receipt write failure/);
+  } finally {
+    fs.renameSync = originalRename;
+  }
+
+  assert.equal(fs.readFileSync(path.join(external, "created", "first", "image.txt"), "utf8"), "image-one");
+  assert.equal(fs.readFileSync(externalManifestPath, "utf8"), manifestBefore);
+  assert.equal(fs.readFileSync(localBaselinePath, "utf8"), baselineBefore);
+});
+
+test("three cross-computer round trips preserve generations and latest content", async (t) => {
+  const { root, local: localA, external } = tempPair(t);
+  const localB = path.join(root, "local-b");
+  fs.mkdirSync(localB);
+  const computerA = new LibraryBackup({ localRoot: localA, externalRoot: external, machineId: "computer-a" });
+  const computerB = new LibraryBackup({ localRoot: localB, externalRoot: external, machineId: "computer-b" });
+
+  const first = await run(computerA, "to-external");
+  assert.equal(first.result.generation, 1);
+  await run(computerB, "to-local");
+  write(path.join(localB, "created", "first", "image.txt"), "change-from-b");
+  const second = await run(computerB, "to-external");
+  assert.equal(second.result.generation, 2);
+
+  const restoredA = await run(computerA, "to-local");
+  assert.equal(restoredA.result.generation, 2);
+  assert.equal(fs.readFileSync(path.join(localA, "created", "first", "image.txt"), "utf8"), "change-from-b");
+  write(path.join(localA, "created", "first", "image.txt"), "change-from-a");
+  const third = await run(computerA, "to-external");
+  assert.equal(third.result.generation, 3);
+
+  const restoredB = await run(computerB, "to-local");
+  assert.equal(restoredB.result.generation, 3);
+  assert.equal(fs.readFileSync(path.join(localB, "created", "first", "image.txt"), "utf8"), "change-from-a");
+});
+
+test("per-computer Sync baselines do not turn another computer's addition into a deletion", async (t) => {
+  const { root, local: localA, external } = tempPair(t);
+  const localB = path.join(root, "local-b");
+  makeLibrary(localB);
+  makeLibrary(external);
+  const sync = async (localRoot, machineId) => {
+    const engine = new LibraryBackup({ localRoot, externalRoot: external, machineId });
+    const analysis = await engine.analyze("sync");
+    const result = await engine.execute(analysis);
+    return { analysis, result };
+  };
+
+  await sync(localA, "computer-a");
+  await sync(localB, "computer-b");
+  write(path.join(localA, "created", "first", "only-on-a.txt"), "from-a");
+  const localLibraryPath = path.join(localA, "library.json");
+  const localLibrary = JSON.parse(fs.readFileSync(localLibraryPath, "utf8"));
+  localLibrary.settings = { collection_order: ["created/first"] };
+  write(localLibraryPath, `${JSON.stringify(localLibrary)}\n`);
+  await sync(localA, "computer-a");
+
+  const engineB = new LibraryBackup({ localRoot: localB, externalRoot: external, machineId: "computer-b" });
+  const analysisB = await engineB.analyze("sync");
+  assert.equal(analysisB.plan.localToExternal.some((change) => change.action === "delete" && change.relativePath.endsWith("only-on-a.txt")), false);
+  await engineB.execute(analysisB);
+  assert.equal(fs.readFileSync(path.join(localB, "created", "first", "only-on-a.txt"), "utf8"), "from-a");
+  const bSettings = JSON.parse(fs.readFileSync(path.join(localB, "library.json"), "utf8")).settings;
+  assert.deepEqual(bSettings, { collection_order: ["created/first"] });
+});
+
+test("Sync serializes settings delete/edit conflicts and keeps deletion distinct from null", async (t) => {
+  const { local, external } = tempPair(t);
+  makeLibrary(external);
+  const settings = (root, value) => {
+    const file = path.join(root, "library.json");
+    const library = JSON.parse(fs.readFileSync(file, "utf8"));
+    write(file, JSON.stringify({ ...library, settings: value }));
+  };
+  const engine = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "settings-conflicts" });
+  settings(local, { localDeleted: 1, externalDeleted: 1, nullValue: 1 });
+  await run(engine, "sync");
+  settings(local, { externalDeleted: 2, nullValue: null });
+  settings(external, { localDeleted: 2 });
+  const analysis = await engine.analyze("sync");
+  assert.deepEqual(analysis.settingsPlan.local, { externalDeleted: 2, nullValue: null });
+  assert.deepEqual(analysis.settingsPlan.external, analysis.settingsPlan.local);
+  const records = JSON.parse(JSON.stringify(analysis.settingsPlan.conflictRecords));
+  assert.deepEqual(records.find((record) => record.key === "localDeleted"),
+    { key: "localDeleted", local: null, external: 2, local_missing: true });
+  assert.deepEqual(records.find((record) => record.key === "externalDeleted"),
+    { key: "externalDeleted", local: 2, external: null, external_missing: true });
+  assert.deepEqual(records.find((record) => record.key === "nullValue"),
+    { key: "nullValue", local: null, external: null, external_missing: true });
+  await engine.execute(analysis);
+  const conflictFile = fs.readdirSync(analysis.paths.settingsConflicts).find((name) => name.endsWith(".json"));
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(analysis.paths.settingsConflicts, conflictFile), "utf8")).settings, records);
+  for (const root of [local, external]) {
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, "library.json"), "utf8")).settings,
+      { externalDeleted: 2, nullValue: null });
+  }
+  assert.equal((await engine.analyze("sync")).settingsPlan.changed, 0);
+});
+
+test("Sync missing library metadata never means all surviving settings were deleted", async (t) => {
+  for (const missingSide of ["local", "external"]) {
+    const pair = tempPair(t);
+    makeLibrary(pair.external);
+    const engine = new LibraryBackup({ localRoot: pair.local, externalRoot: pair.external, machineId: "missing-settings" });
+    const initial = { keep: ["one"], edited: "before", removed: "remove-me" };
+    const file = path.join(pair.local, "library.json");
+    write(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, "utf8")), settings: initial }));
+    await run(engine, "sync");
+    fs.unlinkSync(path.join(pair[missingSide], "library.json"));
+    const survivor = pair[missingSide === "local" ? "external" : "local"];
+    const survivingFile = path.join(survivor, "library.json");
+    const expected = { keep: ["one"], edited: "after" };
+    write(survivingFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(survivingFile, "utf8")), settings: expected }));
+    const { analysis } = await run(engine, "sync");
+    assert.equal(analysis.initialize, true);
+    assert.deepEqual(analysis.settingsPlan.conflictRecords, []);
+    for (const root of [pair.local, pair.external]) {
+      assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, "library.json"), "utf8")).settings, expected);
+    }
+    assert.equal((await engine.analyze("sync")).settingsPlan.changed, 0);
+  }
+});
+
+test("clearing either drive repopulates files and settings despite the surviving hidden baseline", async (t) => {
+  for (const clearedSide of ["local", "external"]) {
+    for (const remaining of ["nothing", "metadata", "new-content"]) {
+      await t.test(`${clearedSide}: ${remaining}`, async (t) => {
+        const pair = tempPair(t);
+        const settings = { hidden_upload_keys: ["keep-hidden"], collection_order: ["one"] };
+        const descriptor = path.join(pair.local, "library.json");
+        write(descriptor, JSON.stringify({ ...JSON.parse(fs.readFileSync(descriptor)), settings }));
+        write(path.join(pair.local, "reference", "260909-143218", "video.mp4"), "reference video");
+        const engine = new LibraryBackup({ localRoot: pair.local, externalRoot: pair.external, machineId: "clear-test" });
+        const first = await run(engine, "sync");
+        const cleared = pair[clearedSide];
+        const savedDescriptor = JSON.parse(fs.readFileSync(path.join(cleared, "library.json")));
+        // Only temporary test libraries are removed. The sibling control folder survives.
+        fs.rmSync(cleared, { recursive: true });
+        fs.mkdirSync(cleared);
+        if (remaining !== "nothing") {
+          write(path.join(cleared, "library.json"), JSON.stringify({ ...savedDescriptor, settings: {} }));
+          write(path.join(cleared, "cache", "generated.bin"), "app generated cache");
+        }
+        if (remaining === "new-content") write(path.join(cleared, "upload", "new.png"), "new work");
+        assert.equal(fs.existsSync(first.analysis.paths.syncBaseline), true);
+        const { analysis } = await run(engine, "sync");
+        assert.equal(analysis.initialize, true);
+        assert.equal([...analysis.plan.localToExternal, ...analysis.plan.externalToLocal].some((c) => c.action === "delete"), false);
+        for (const root of [pair.local, pair.external]) {
+          assert.equal(fs.readFileSync(path.join(root, "created", "first", "image.txt"), "utf8"), "image-one");
+          assert.equal(fs.readFileSync(path.join(root, "reference", "260909-143218", "video.mp4"), "utf8"), "reference video");
+          assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, "library.json"))).settings, settings);
+          if (remaining === "new-content") assert.equal(fs.readFileSync(path.join(root, "upload", "new.png"), "utf8"), "new work");
+        }
+        const next = await engine.analyze("sync");
+        assert.equal(next.initialize, false);
+        assert.equal(next.summary.total, 0);
+        assert.equal(next.settingsPlan.changed, 0);
+      });
+    }
+  }
+});
+
+test("ordinary individual deletions still synchronize in both directions", async (t) => {
+  const { local, external } = tempPair(t);
+  write(path.join(local, "created", "first", "delete-local.txt"), "one");
+  write(path.join(local, "created", "first", "delete-external.txt"), "two");
+  const engine = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "partial-delete" });
+  await run(engine, "sync");
+  fs.unlinkSync(path.join(local, "created", "first", "delete-local.txt"));
+  fs.unlinkSync(path.join(external, "created", "first", "delete-external.txt"));
+  const { analysis } = await run(engine, "sync");
+  assert.equal(analysis.initialize, false);
+  assert.equal(analysis.plan.localToExternal.filter((c) => c.action === "delete").length, 1);
+  assert.equal(analysis.plan.externalToLocal.filter((c) => c.action === "delete").length, 1);
+  for (const root of [local, external]) {
+    assert.equal(fs.existsSync(path.join(root, "created", "first", "delete-local.txt")), false);
+    assert.equal(fs.existsSync(path.join(root, "created", "first", "delete-external.txt")), false);
+    assert.equal(fs.readFileSync(path.join(root, "created", "first", "image.txt"), "utf8"), "image-one");
+  }
+});
+
+test("Sync automatically merges a post and stores scalar conflicts outside post.json", async (t) => {
+  const { root, local, external } = tempPair(t);
+  makeLibrary(external);
+  const engine = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "computer-a" });
+  let analysis = await engine.analyze("sync");
+  await engine.execute(analysis);
+
+  write(path.join(local, "created", "first", "post.json"), JSON.stringify({ title: "local title", items: [{ item_id: "local-build" }] }));
+  write(path.join(external, "created", "first", "post.json"), JSON.stringify({ title: "external title", items: [{ item_id: "external-build" }] }));
+  analysis = await engine.analyze("sync");
+  assert.equal(analysis.plan.conflicts.length, 0);
+  assert.equal(analysis.plan.merges.length, 1);
+  await engine.execute(analysis);
+  const localPost = JSON.parse(fs.readFileSync(path.join(local, "created", "first", "post.json"), "utf8"));
+  const externalPost = JSON.parse(fs.readFileSync(path.join(external, "created", "first", "post.json"), "utf8"));
+  assert.deepEqual(localPost, externalPost);
+  assert.equal(localPost.title, "local title");
+  assert.equal(localPost.sync_conflicts, undefined);
+  const controlRoot = path.join(root, ".grok-library-backup");
+  const conflictFiles = [];
+  const walk = (directory) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const entryPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) walk(entryPath);
+      else if (entry.name.endsWith(".json") && entryPath.includes(`${path.sep}post-conflicts${path.sep}`)) conflictFiles.push(entryPath);
+    }
+  };
+  walk(controlRoot);
+  assert.equal(conflictFiles.length, 1);
+  const conflict = JSON.parse(fs.readFileSync(conflictFiles[0], "utf8"));
+  assert.deepEqual(conflict.scalars.title, { local: "local title", external: "external title" });
+  assert.deepEqual(localPost.items.map((item) => item.item_id).sort(), ["external-build", "local-build"]);
+});
