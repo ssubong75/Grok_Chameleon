@@ -43,7 +43,7 @@ async function run(engine, direction) {
   return { analysis, result: await engine.execute(analysis) };
 }
 
-test("accounts sync both ways while caches, previews, runtime and Imagine indexes stay local", async (t) => {
+test("accounts sync both ways while unrelated caches, legacy previews, runtime and Imagine indexes stay local", async (t) => {
   const { local, external } = tempPair(t);
   makeLibrary(external);
   const engine = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "portable-folders" });

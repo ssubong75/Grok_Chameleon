@@ -329,6 +329,15 @@ document.documentElement.classList.toggle("platform-macos", isMacRenderer);
       viewportHeight - toggleHalf - edgeInset,
       Math.max(toggleHalf + edgeInset, rawToggleTop),
     );
+    const sidebarRect = document.querySelector(".sidebar")?.getBoundingClientRect();
+    const workspaceElement = document.querySelector(".workspace");
+    const workspaceRect = workspaceElement?.getBoundingClientRect();
+    if (sidebarRect && workspaceRect && workspaceElement) {
+      const workspaceInset = Number.parseFloat(getComputedStyle(workspaceElement).paddingLeft) || 0;
+      const mainBorderLeft = workspaceRect.left + workspaceInset;
+      const toggleLeft = (sidebarRect.right + mainBorderLeft) / 2;
+      document.documentElement.style.setProperty("--sidebar-toggle-left", `${toggleLeft}px`);
+    }
     document.documentElement.style.setProperty("--sidebar-toggle-top", `${toggleTop}px`);
     document.documentElement.classList.add("sidebar_toggle_placed");
   }

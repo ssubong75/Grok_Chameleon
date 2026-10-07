@@ -63,6 +63,31 @@
   align-items: center;
   justify-content: center;
   min-height: 84px;
+  flex-shrink: 0;
+}
+
+.sidebar_menu_scroll {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  gap: 18px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+
+.sidebar_menu_scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.sidebar_menu_scroll > .nav_stack,
+.sidebar_menu_scroll > .account-card {
+  flex-shrink: 0;
+}
+
+@media (max-height: 760px) {
+  .sidebar_menu_scroll { gap: 2px; }
 }
 
 .brand_imagine_btn,
@@ -204,16 +229,16 @@ html.sidebar_toggle_placed .sidebar_toggle {
   border: 0;
   background: transparent;
   color: var(--soft);
-  transform: translateY(-50%);
+  transform: translate(-50%, -50%);
 }
 
 .sidebar_close {
-  left: calc(var(--sidebar-width) - var(--sidebar-toggle-size) - 8px);
+  left: var(--sidebar-toggle-left, calc(var(--sidebar-width) + clamp(18px, 2vw, 30px) / 2));
   min-width: var(--sidebar-toggle-size);
 }
 
 .sidebar_open {
-  left: var(--sidebar-toggle-half-size);
+  left: var(--sidebar-toggle-left, calc(var(--sidebar-compact-width) + clamp(18px, 2vw, 30px) / 2));
   z-index: 50;
   border-radius: 8px;
   box-shadow: none;

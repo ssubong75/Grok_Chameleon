@@ -56,12 +56,14 @@
     <script src="./scripts/prompt_events.js" defer></script>
     <script src="./scripts/collection_events.js" defer></script>
     <script src="./scripts/screen_events.js" defer></script>
+    <script src="./scripts/list_scrollbar.js" defer></script>
     <script src="./scripts/automation.js" defer></script>
   </head>
   <body>
     <button id="sidebarOpenBtn" class="sidebar_toggle sidebar_open" type="button" hidden aria-label="Open sidebar">&gt;&gt;</button>
 
     <div id="appShell" class="app_shell">
+      <button id="sidebarCloseBtn" class="ghost_btn sidebar_toggle sidebar_close" type="button" aria-label="Hide sidebar">&lt;&lt;</button>
       <aside class="sidebar" aria-label="Main navigation">
         <div class="sidebar_head">
           <div class="brand">
@@ -69,9 +71,9 @@
               <img class="brand_icon" src="./assets/logos/grok.png" alt="Grok Chameleon" />
             </button>
           </div>
-          <button id="sidebarCloseBtn" class="ghost_btn sidebar_toggle sidebar_close" type="button" aria-label="Hide sidebar">&lt;&lt;</button>
         </div>
 
+        <div class="sidebar_menu_scroll">
           <nav class="nav_stack" aria-label="Studio sections">
             <button id="i_imagine_nav_btn" class="nav_item active" type="button">
               <span class="nav_icon i_nav_icon" aria-hidden="true">I</span>
@@ -146,6 +148,7 @@
             </button>
           </div>
         </section>
+        </div>
       </aside>
 
         <main class="workspace">

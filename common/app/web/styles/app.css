@@ -36,3 +36,41 @@
 .composer_attachment_image_preview.loaded {
   opacity: 1;
 }
+
+/* Keep a gutter for fixed-size card-list scroll handles. */
+.workspace > :is(.i_main, .b_main, .search_main, .i_discover_main, .i_unsaved_main, .collection_main, .second_main, .prompt_main, .b_t2i_view_main) {
+  padding-right: 20px;
+}
+
+.workspace :is(.card_list, .collection_1st_card_list, .collection_2nd_card_grid, .primary-folder-list, .secondary-folder-grid) {
+  scrollbar-width: none;
+}
+
+.workspace :is(.card_list, .collection_1st_card_list, .collection_2nd_card_grid, .primary-folder-list, .secondary-folder-grid)::-webkit-scrollbar {
+  display: none;
+}
+
+.list_scrollbar_rail {
+  position: fixed;
+  width: 8px;
+  z-index: 35;
+  background: transparent;
+}
+
+.list_scrollbar_rail[hidden] { display: none; }
+
+.list_scrollbar_thumb {
+  position: absolute;
+  left: 0;
+  width: 8px;
+  height: 30px;
+  border-radius: 4px;
+  background: #62676b;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.list_scrollbar_thumb:hover,
+.list_scrollbar_thumb:focus-visible { background: #92989d; }
+.list_scrollbar_thumb:active { cursor: grabbing; }

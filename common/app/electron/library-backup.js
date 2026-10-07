@@ -4,6 +4,7 @@ const path = require("node:path");
 const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
 const runStateHelper = promisify(execFile);
+const { snapshotPreviews, syncPreviewSnapshots } = require("./preview-sync");
 
 const CONTENT_DIRECTORIES = [
   "created",
@@ -647,8 +648,8 @@ function metadataPaths(localRoot, externalRoot, libraryId, machineId = "") {
   };
 }
 
-// Include portable accounts and original cards. Leave caches, previews and runtime profiles
-// on each drive; library settings and durable SQLite rows use their existing semantic merge.
+// Include portable accounts and original cards. Preview caches use a separate additive
+// sync after media verification; runtime profiles and other caches stay on each drive.
 function isSyncSourcePath(relativePath) {
   const key = canonicalPathKey(relativePath);
   return key !== LIBRARY_JSON_KEY
@@ -1412,6 +1413,8 @@ class LibraryBackup {
   async executeSync(analysis) {
     throwIfCancelled(this.signal);
     const current = analysis;
+    const localPreviews = snapshotPreviews(current.local, current.localManifest.records);
+    const externalPreviews = snapshotPreviews(current.external, current.externalManifest.records);
     const verifyApplied = async (root, changes) => {
       for (const change of changes) {
         throwIfCancelled(this.signal);
@@ -1526,6 +1529,11 @@ class LibraryBackup {
       const externalRecord = current.externalManifest.records.get(key);
       if (localRecord && externalRecord && sameRecord(localRecord, externalRecord)) nextRecords.set(key, localRecord);
     }
+    this.emit("Syncing card and detail thumbnail caches in both directions.", 0, 1, "verify");
+    const previewResult = await syncPreviewSnapshots(localPreviews, externalPreviews, nextRecords, {
+      signal: this.signal,
+      conflictKeys,
+    });
     const nextGeneration = (current.syncBaseline?.generation || 0) + 1;
     let stateResult = { changed: 0 };
     const hasState = [current.local, current.external].some((root) =>
@@ -1555,6 +1563,7 @@ class LibraryBackup {
       generation: nextGeneration,
       changed: current.summary.total + current.plan.merges.length + (current.settingsPlan?.changed || 0) + stateResult.changed,
       stateChanged: stateResult.changed,
+      previewsCopied: previewResult.copied,
       completedAt: utcNow(),
       historyPath,
       index_invalidated: true,
