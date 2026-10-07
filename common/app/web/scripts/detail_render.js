@@ -698,6 +698,7 @@ function updateDetailMediaPath(prefix, post, item) {
     && !/^imagine_(saved|discover|unsaved|search|uploads)\//.test(post.folder_path)
   );
   label.disabled = !canOpen;
+  label.setAttribute("aria-disabled", String(!canOpen));
   label.dataset.postPath = canOpen ? post.folder_path : "";
   label.dataset.itemKey = canOpen ? mediaItemKey(item) : "";
   label.title = canOpen ? `${text} — Open containing folder` : text;

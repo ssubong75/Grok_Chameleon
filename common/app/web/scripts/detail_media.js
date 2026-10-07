@@ -207,11 +207,7 @@ function mediaResolutionLabelFromDimensions(width, height) {
   const w = Number(width || 0);
   const h = Number(height || 0);
   if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return "";
-  const shortSide = Math.min(w, h);
-  for (const size of [1080, 720, 480]) {
-    if (Math.abs(shortSide - size) <= 24) return String(size);
-  }
-  return "";
+  return String(Math.round(Math.min(w, h)));
 }
 
 function normalizeMediaResolutionLabel(value) {
@@ -223,9 +219,10 @@ function normalizeMediaResolutionLabel(value) {
   }
   const text = String(value || "").trim().toLowerCase();
   if (!text) return "";
-  if (/1080\s*p|1080|hd1080|full\s*hd|\bfhd\b|upscale_target_resolution_1080p/.test(text)) return "1080";
-  if (/720\s*p|720|(^|[_\W])hd([_\W]|$)/.test(text)) return "720";
-  if (/480\s*p|480|(^|[_\W])sd([_\W]|$)/.test(text)) return "480";
+  // Match resolution labels, never a substring of a file ID or timestamp.
+  if (/(^|[^a-z0-9])(1080\s*p?|hd1080|full\s*hd|fhd)(?=$|[^a-z0-9])/.test(text)) return "1080";
+  if (/(^|[^a-z0-9])(720\s*p?|hd)(?=$|[^a-z0-9])/.test(text)) return "720";
+  if (/(^|[^a-z0-9])(480\s*p?|sd)(?=$|[^a-z0-9])/.test(text)) return "480";
   return "";
 }
 
@@ -249,16 +246,16 @@ function mediaResolutionCandidates(source) {
     metadata.resolutionName,
     metadata.resolution,
     metadata.video_resolution,
-    metadata.hd1080_media_url,
-    metadata.hdMediaUrl,
-    metadata.hd_media_url,
+    metadata.hd1080_media_url ? "1080" : "",
+    metadata.hdMediaUrl ? "720" : "",
+    metadata.hd_media_url ? "720" : "",
     imagine.resolution_name,
     imagine.resolutionName,
     imagine.resolution,
     imagine.video_resolution,
-    imagine.hd1080_media_url,
-    imagine.hdMediaUrl,
-    imagine.hd_media_url,
+    imagine.hd1080_media_url ? "1080" : "",
+    imagine.hdMediaUrl ? "720" : "",
+    imagine.hd_media_url ? "720" : "",
     meta.resolution_name,
     meta.resolutionName,
     meta.resolution,
@@ -269,26 +266,107 @@ function mediaResolutionCandidates(source) {
     options.resolution_name,
     options.resolutionName,
     options.resolution,
-    source.url,
-    source.remote_url,
-    source.object_url,
-    source.media_url,
-    source.thumbnail_url,
   ];
+}
+
+const actualVideoDimensions = new Map();
+const videoDimensionQueue = [];
+let activeVideoDimensionReads = 0;
+
+function localVideoDimensionUrl(item) {
+  if (detailItemType(item) !== "video") return "";
+  for (const value of [item?.object_url, item?.local_url, item?.url, item?.media_url]) {
+    if (!value) continue;
+    try {
+      const parsed = new URL(value, location.origin);
+      if (parsed.origin === location.origin && parsed.pathname === "/api/media") {
+        return `/api/media-dimensions${parsed.search}`;
+      }
+    } catch (_) {}
+  }
+  return "";
+}
+
+function videoDimensionSource(item) {
+  if (detailItemType(item) !== "video") return "";
+  const local = localVideoDimensionUrl(item);
+  if (local) return local;
+  return String(item?.object_url || item?.local_url || item?.url || item?.media_url || item?.remote_url || "");
+}
+
+function readActualVideoDimensions(item) {
+  const url = videoDimensionSource(item);
+  if (!url) return Promise.resolve(null);
+  if (actualVideoDimensions.has(url)) return Promise.resolve(actualVideoDimensions.get(url));
+  const pending = new Promise(resolve => videoDimensionQueue.push({ url, resolve }));
+  actualVideoDimensions.set(url, pending);
+  pumpVideoDimensionReads();
+  return pending;
+}
+
+function probeRemoteVideoDimensions(url) {
+  return new Promise(resolve => {
+    const video = document.createElement("video");
+    video.preload = "metadata";
+    video.muted = true;
+    let finished = false;
+    const finish = dimensions => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      video.removeAttribute("src");
+      video.load();
+      resolve(dimensions);
+    };
+    const timer = setTimeout(() => finish(null), 15000);
+    video.addEventListener("loadedmetadata", () => {
+      const width = video.videoWidth, height = video.videoHeight;
+      finish(width > 0 && height > 0 ? { width, height } : null);
+    }, { once: true });
+    video.addEventListener("error", () => finish(null), { once: true });
+    video.src = url;
+  });
+}
+
+function pumpVideoDimensionReads() {
+  while (activeVideoDimensionReads < 2 && videoDimensionQueue.length) {
+    const { url, resolve } = videoDimensionQueue.shift();
+    activeVideoDimensionReads++;
+    const request = url.startsWith("/api/media-dimensions?")
+      ? (library_state.apiReady ? qApi(url) : Promise.resolve(null))
+      : probeRemoteVideoDimensions(url);
+    request.then(data => {
+      const label = mediaResolutionLabelFromDimensions(data?.width, data?.height);
+      const dimensions = label ? { width: data.width, height: data.height } : null;
+      if (dimensions) actualVideoDimensions.set(url, dimensions);
+      else actualVideoDimensions.delete(url);
+      resolve(dimensions);
+    }).catch(() => { actualVideoDimensions.delete(url); resolve(null); }).finally(() => {
+      activeVideoDimensionReads--;
+      pumpVideoDimensionReads();
+    });
+  }
 }
 
 function mediaResolutionLabelForItem(item, post = null) {
   if (detailItemType(item) !== "video") return "";
+  const actual = item?._actual_video_dimensions;
+  const actualLabel = mediaResolutionLabelFromDimensions(actual?.width, actual?.height);
+  if (actualLabel) return actualLabel;
+  // A local file's generated-card metadata may belong to another video in its folder.
+  if (localVideoDimensionUrl(item)) return "";
+  const dimensionLabel = mediaResolutionLabelFromDimensions(
+    item?.width || item?.natural_width || item?.metadata?.width || item?.meta?.width,
+    item?.height || item?.natural_height || item?.metadata?.height || item?.meta?.height,
+  );
+  if (dimensionLabel) return dimensionLabel;
   for (const source of [item, post]) {
     for (const candidate of mediaResolutionCandidates(source)) {
       const label = normalizeMediaResolutionLabel(candidate);
       if (label) return label;
     }
   }
-  return mediaResolutionLabelFromDimensions(
-    item?.width || item?.natural_width || item?.metadata?.width || item?.meta?.width,
-    item?.height || item?.natural_height || item?.metadata?.height || item?.meta?.height,
-  );
+  return "";
 }
 
 function setDetailMediaAspect(prefix, aspect) {
@@ -320,6 +398,12 @@ function syncDetailMediaAspect(prefix, element, item = selectedDetailItem()) {
   const height = element.videoHeight || element.naturalHeight || 0;
   if (!width || !height) return;
   const aspect = `${width} / ${height}`;
+  if (element.videoWidth && element.videoHeight && item) {
+    item._actual_video_dimensions = { width, height };
+    const url = videoDimensionSource(item);
+    if (url) actualVideoDimensions.set(url, { width, height });
+    setDetailResolutionLabel(prefix, mediaResolutionLabelFromDimensions(width, height));
+  }
   rememberDetailAspectForItem(item, aspect);
   setDetailMediaAspect(prefix, aspect);
 }

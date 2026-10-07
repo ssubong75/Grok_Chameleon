@@ -170,6 +170,7 @@ async function openDetailPathFolder(button) {
   const itemKey = button.dataset.itemKey;
   if (!postPath || !itemKey || !library_state.apiReady) return;
   button.disabled = true;
+  button.setAttribute("aria-disabled", "true");
   try {
     await qApi("/api/open-library-folder", {
       post_path: postPath,
@@ -179,8 +180,56 @@ async function openDetailPathFolder(button) {
     toast("Opened containing folder.");
   } finally {
     // A different selected file may have re-rendered this caption while Finder opened.
-    if (button.dataset.postPath === postPath && button.dataset.itemKey === itemKey) button.disabled = false;
+    if (button.dataset.postPath === postPath && button.dataset.itemKey === itemKey) {
+      button.disabled = false;
+      button.setAttribute("aria-disabled", "false");
+    }
   }
+}
+
+// Let native text selection/copy work without treating a selection drag as a folder click.
+function bindDetailMediaPath(label) {
+  let pointerStart = null;
+  let dragged = false;
+  label.addEventListener("pointerdown", (event) => {
+    pointerStart = { x: event.clientX, y: event.clientY };
+    dragged = false;
+  });
+  const trackDrag = (event) => {
+    if (pointerStart && Math.hypot(event.clientX - pointerStart.x, event.clientY - pointerStart.y) > 4) {
+      dragged = true;
+    }
+  };
+  label.addEventListener("pointermove", trackDrag);
+  label.addEventListener("pointerup", trackDrag);
+  label.addEventListener("pointercancel", () => {
+    pointerStart = null;
+    dragged = true;
+  });
+  const hasSelectedText = () => {
+    const selection = window.getSelection();
+    return selection && !selection.isCollapsed && (
+      label.contains(selection.anchorNode) || label.contains(selection.focusNode)
+    );
+  };
+  const openFolder = () => {
+    openDetailPathFolder(label).catch((error) => {
+      console.warn(error);
+      showErrorPanel("Folder open failed", error?.message || "Folder open failed.");
+    });
+  };
+  label.addEventListener("click", (event) => {
+    const wasDragged = dragged;
+    pointerStart = null;
+    dragged = false;
+    if (wasDragged || event.detail > 1 || hasSelectedText()) return;
+    openFolder();
+  });
+  label.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || event.repeat || hasSelectedText()) return;
+    event.preventDefault();
+    openFolder();
+  });
 }
 
 function bindBuildDetailActions() {
@@ -206,13 +255,8 @@ function bindBuildDetailActions() {
       showErrorPanel("Delete failed", error?.message || "Delete failed.");
     });
   });
-  for (const pathButton of document.querySelectorAll(".detail_media_path")) {
-    pathButton.addEventListener("click", (event) => {
-      openDetailPathFolder(event.currentTarget).catch((error) => {
-        console.warn(error);
-        showErrorPanel("Folder open failed", error?.message || "Folder open failed.");
-      });
-    });
+  for (const pathLabel of document.querySelectorAll(".detail_media_path")) {
+    bindDetailMediaPath(pathLabel);
   }
   document.querySelector(".b_detail_spicy")?.addEventListener("click", (event) => {
     const button = event.currentTarget;

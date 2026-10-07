@@ -184,12 +184,14 @@ async function captureSelectedDetailFrame() {
     if (!context) throw new Error("Frame capture is unavailable.");
     context.drawImage(video, 0, 0, width, height);
     const image = canvas.toDataURL("image/png");
-    const name = `${sanitizeDownloadName(item.file || item.item_id || "video").replace(/\.[^.]+$/, "")}_frame_${time.toFixed(3).replace(".", "-")}.png`;
+    const frameStem = sanitizeDownloadName(item.file || item.item_id || "video").replace(/\.[^.]+$/, "") || "video";
+    const name = `${frameStem}_f01.png`;
     const imagine = screen === "i_detail";
     const data = await qApi(imagine ? "/api/uploads/save" : "/api/library/capture-frame", imagine ? {
       provider: "imagine",
       to_card: false,
-      files: [{ name, type: "image/png", data_url: image }],
+      frame_capture: true,
+      files: [{ name, frame_stem: frameStem, type: "image/png", data_url: image }],
     } : {
       post_path: post.folder_path,
       item_key: mediaItemKey(item),

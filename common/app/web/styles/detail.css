@@ -2132,7 +2132,9 @@ html.platform-windows .detail_job_badge.failed .detail_job_badge_label::after {
   background: transparent;
   font-family: inherit;
   font-weight: inherit;
-  cursor: pointer;
+  cursor: text;
+  -webkit-user-select: text;
+  user-select: text;
   text-decoration: none;
 }
 
@@ -2142,7 +2144,6 @@ html.platform-windows .detail_job_badge.failed .detail_job_badge_label::after {
   text-decoration: none;
 }
 
-.detail_media_path:disabled {
+.detail_media_path[aria-disabled="true"] {
   opacity: 1;
-  cursor: default;
 }

@@ -792,13 +792,25 @@ function cardVisualActionsShell(post) {
 }
 
 function appendCardResolutionBadge(media, item, post = null) {
-  const label = typeof mediaResolutionLabelForItem === "function" ? mediaResolutionLabelForItem(item, post) : "";
-  if (!label) return;
-  media.classList.add("has_resolution_badge");
-  const badge = document.createElement("span");
-  badge.className = "card_resolution_badge";
-  badge.textContent = label;
-  media.append(badge);
+  const showLabel = (label) => {
+    if (!label) return;
+    media.classList.add("has_resolution_badge");
+    let badge = media.querySelector(".card_resolution_badge");
+    if (!badge) {
+      badge = document.createElement("span");
+      badge.className = "card_resolution_badge";
+      media.append(badge);
+    }
+    badge.textContent = label;
+  };
+  showLabel(mediaResolutionLabelForItem(item, post));
+  if (videoDimensionSource(item)) {
+    readActualVideoDimensions(item).then(dimensions => {
+      if (!dimensions) return;
+      item._actual_video_dimensions = dimensions;
+      if (media.isConnected) showLabel(mediaResolutionLabelFromDimensions(dimensions.width, dimensions.height));
+    });
+  }
 }
 
 function cardJobPreviewItem(attachedPreview, rawRepresentative = {}) {

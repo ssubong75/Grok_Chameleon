@@ -24123,6 +24123,18 @@ def unique_file_name(parent: Path, preferred_stem: str, extension: str) -> str:
     return name
 
 
+def next_frame_file_name(parent: Path, source_stem: str, *, upload_tree: bool = False) -> str:
+    stem = safe_name(source_stem, "video")
+    pattern = re.compile(rf"{re.escape(stem)}_f([0-9]+)\.png", re.IGNORECASE)
+    entries = parent.glob("*/*/*") if upload_tree else parent.iterdir()
+    highest = 0
+    for entry in entries:
+        match = pattern.fullmatch(entry.name)
+        if match and entry.is_file():
+            highest = max(highest, int(match.group(1)))
+    return f"{stem}_f{highest + 1:02d}.png"
+
+
 def unique_media_file_name(parent: Path, preferred_stem: str, extension: str) -> str:
     base = safe_name(preferred_stem, "media")
     existing_stems = {
@@ -29047,8 +29059,7 @@ def save_detail_video_frame(payload: dict) -> dict:
         if not source or (source.get("type") or media_type_for_name(source.get("file") or "")) != "video":
             raise RuntimeError("The source video was not found in this folder.")
         stem = safe_name(file_stem(source.get("file") or "video"), "video")
-        stamp = f"{frame_time:.3f}".replace(".", "-")
-        file_name = unique_file_name(folder, f"{stem}_frame_{stamp}", "png")
+        file_name = next_frame_file_name(folder, stem)
         target = folder / file_name
         target.write_bytes(raw)
         item = {
@@ -29453,7 +29464,16 @@ def save_composer_uploads(payload: dict) -> dict:
     root = library_root()
     if not root:
         raise RuntimeError("Library path is not set.")
+    if payload.get("provider") == "imagine" and payload.get("frame_capture") is True:
+        # Serialize frame numbering across all dates and source upload folders.
+        with build_post_save_lock(root / "upload"):
+            return save_composer_uploads_at_root(payload, root)
+    return save_composer_uploads_at_root(payload, root)
+
+
+def save_composer_uploads_at_root(payload: dict, root: Path) -> dict:
     ensure_library_root(root)
+    frame_capture = payload.get("provider") == "imagine" and payload.get("frame_capture") is True
     files = payload.get("files") if isinstance(payload.get("files"), list) else []
     if not files:
         raise RuntimeError("Upload file is missing.")
@@ -29486,7 +29506,7 @@ def save_composer_uploads(payload: dict) -> dict:
         if not raw:
             raise RuntimeError("Upload file is empty.")
         upload_hash = hashlib.sha256(raw).hexdigest()
-        existing = find_uploaded_media_by_hash(root, upload_hash)
+        existing = None if frame_capture else find_uploaded_media_by_hash(root, upload_hash)
         if existing:
             if to_card:
                 post_path = safe_join(root, existing[0]) / "post.json"
@@ -29500,6 +29520,10 @@ def save_composer_uploads(payload: dict) -> dict:
 
         original_name = Path(str(file_payload.get("name") or "")).name
         title = file_stem(original_name) or f"upload-{upload_hash[:8]}"
+        if frame_capture:
+            stem = str(file_payload.get("frame_stem") or "video")
+            original_name = next_frame_file_name(root / "upload", stem, upload_tree=True)
+            title = file_stem(original_name)
         folder_name = unique_directory_name(upload_root, safe_name(title, f"upload-{index:02d}"))
         folder = upload_root / folder_name
         folder.mkdir(parents=True, exist_ok=True)
@@ -29975,6 +29999,25 @@ class Handler(SimpleHTTPRequestHandler):
                     return
                 mime_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
                 self.send_local_file(target, mime_type)
+                return
+            if parsed.path == "/api/media-dimensions":
+                from video_dimensions import read_video_dimensions
+                root = library_root()
+                if not root:
+                    self.send_error(HTTPStatus.NOT_FOUND)
+                    return
+                query = parse_qs(parsed.query)
+                source = safe_join(root, query.get("path", [""])[0])
+                if not source.is_file() or source.suffix.lower().lstrip(".") not in VIDEO_EXTS:
+                    self.send_error(HTTPStatus.NOT_FOUND)
+                    return
+                requested_version = query.get("v", [""])[0]
+                if requested_version and requested_version != media_source_version(source):
+                    self.send_error(HTTPStatus.NOT_FOUND)
+                    return
+                ffmpeg = resolve_ffmpeg_binary()
+                ffprobe = str(Path(ffmpeg).with_name("ffprobe.exe" if os.name == "nt" else "ffprobe")) if ffmpeg else ""
+                self.send_json({"ok": True, **read_video_dimensions(root, source, ffprobe)})
                 return
             if parsed.path == "/api/card-preview/cache-info":
                 root = library_root()

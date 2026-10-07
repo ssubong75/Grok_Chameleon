@@ -1602,7 +1602,20 @@ function editContextIcon(name) {
 
 function installEditableContextMenu(win) {
   win.webContents.on("context-menu", (_event, params) => {
-    if (!params.isEditable || win.isDestroyed() || win.webContents.isDestroyed()) return;
+    if (win.isDestroyed() || win.webContents.isDestroyed()) return;
+    if (!params.isEditable) {
+      if (params.selectionText) {
+        Menu.buildFromTemplate([{
+          label: "Copy",
+          accelerator: "CommandOrControl+C",
+          registerAccelerator: false,
+          click: () => {
+            if (!win.isDestroyed() && !win.webContents.isDestroyed()) win.webContents.copy();
+          },
+        }]).popup({ window: win });
+      }
+      return;
+    }
     const flags = params.editFlags || {};
     const actionItem = (name, label, accelerator, enabled) => ({
       label,
