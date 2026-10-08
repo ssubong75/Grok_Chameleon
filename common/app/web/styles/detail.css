@@ -638,9 +638,21 @@
 
 .i_detail_media .video-player .video-play,
 .b_detail_media .video-player .video-play {
+  position: relative;
   grid-area: play;
   width: 42px;
   height: 30px;
+}
+
+/* Extend only the hit area down to the seek row; keep the icon in place. */
+.i_detail_media .video-player .video-play::after,
+.b_detail_media .video-player .video-play::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 0;
+  width: 100%;
+  height: 4px;
 }
 
 .i_detail_media .video-player .video-time,
