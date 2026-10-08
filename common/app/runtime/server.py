@@ -24123,16 +24123,19 @@ def unique_file_name(parent: Path, preferred_stem: str, extension: str) -> str:
     return name
 
 
-def next_frame_file_name(parent: Path, source_stem: str, *, upload_tree: bool = False) -> str:
-    stem = safe_name(source_stem, "video")
-    pattern = re.compile(rf"{re.escape(stem)}_f([0-9]+)\.png", re.IGNORECASE)
-    entries = parent.glob("*/*/*") if upload_tree else parent.iterdir()
-    highest = 0
-    for entry in entries:
-        match = pattern.fullmatch(entry.name)
-        if match and entry.is_file():
-            highest = max(highest, int(match.group(1)))
-    return f"{stem}_f{highest + 1:02d}.png"
+def timestamp_media_file_name(parent: Path, extension: str = "png", *, upload_folders: bool = False) -> str:
+    stem = datetime.now().strftime("%y%m%d_%H%M")
+    if upload_folders:
+        existing = {f"{entry.name}.{extension}".casefold() for entry in parent.iterdir() if entry.is_dir()}
+        existing.update(entry.name.casefold() for entry in parent.glob("*/*") if entry.is_file())
+    else:
+        existing = {entry.name.casefold() for entry in parent.iterdir()}
+    name = f"{stem}.{extension}"
+    index = 1
+    while name.casefold() in existing:
+        name = f"{stem}_{index}.{extension}"
+        index += 1
+    return name
 
 
 def unique_media_file_name(parent: Path, preferred_stem: str, extension: str) -> str:
@@ -28899,31 +28902,16 @@ def save_image_editor_upload_result(payload: dict, mime_type: str, image_data: s
     if not raw:
         raise RuntimeError("Edited image is empty.")
     upload_hash = hashlib.sha256(raw).hexdigest()
-    existing = find_uploaded_media_by_hash(root, upload_hash)
-    if existing:
-        folder_path, item_id = existing
-        unhide_saved_upload_refs(root, [(folder_path, item_id)])
-        refresh_library_index_paths(root, [folder_path])
-        return normalize_json_unicode({
-            "ok": True,
-            "item": {
-                "id": f"{folder_path}::{item_id}",
-                "folder_path": folder_path,
-                "item_id": item_id,
-                "metadata": {"editor_save_target": "upload"},
-            },
-        })
-    source_name = str(payload.get("name") or "").strip()
     ext = extension_from_mime_type(mime_type, "png")
     now = now_iso()
     date_name = datetime.now().strftime("%Y-%m-%d")
     upload_root = root / "upload" / date_name
     upload_root.mkdir(parents=True, exist_ok=True)
-    title = f"{file_stem(source_name) or 'image'}_edit"
-    folder_name = unique_directory_name(upload_root, safe_name(title, f"edit-{upload_hash[:8]}"))
+    file_name = timestamp_media_file_name(upload_root, ext, upload_folders=True)
+    title = file_stem(file_name)
+    folder_name = title
     folder = upload_root / folder_name
     folder.mkdir(parents=True, exist_ok=True)
-    file_name = unique_file_name(folder, safe_name(title, f"edit-{upload_hash[:8]}"), ext)
     (folder / file_name).write_bytes(raw)
     item_id = file_stem(file_name)
     item = {
@@ -29058,9 +29046,9 @@ def save_detail_video_frame(payload: dict) -> dict:
         source = next((item for item in items if media_item_key(item) == str(payload.get("item_key") or "")), None)
         if not source or (source.get("type") or media_type_for_name(source.get("file") or "")) != "video":
             raise RuntimeError("The source video was not found in this folder.")
-        stem = safe_name(file_stem(source.get("file") or "video"), "video")
-        file_name = next_frame_file_name(folder, stem)
+        file_name = timestamp_media_file_name(folder)
         target = folder / file_name
+        previous_bytes = target.read_bytes() if target.is_file() else None
         target.write_bytes(raw)
         item = {
             "item_id": file_stem(file_name),
@@ -29079,9 +29067,13 @@ def save_detail_video_frame(payload: dict) -> dict:
             "frame_time": frame_time,
         }
         try:
-            write_json(post_file, {**post, "items": [*items, item], "updated_at": now_iso()})
+            retained_items = [entry for entry in items if entry.get("file") != file_name]
+            write_json(post_file, {**post, "items": [*retained_items, item], "updated_at": now_iso()})
         except Exception:
-            target.unlink(missing_ok=True)
+            if previous_bytes is None:
+                target.unlink(missing_ok=True)
+            else:
+                target.write_bytes(previous_bytes)
             raise
     refresh_library_index_paths(root, [post_path])
     return current_library_snapshot(root)
@@ -29104,14 +29096,7 @@ def save_image_editor_result(payload: dict) -> dict:
         return save_image_editor_upload_result(payload, mime_type, image_data)
     post, source_item, post_dir, source_file = editor_source_from_payload(root, payload)
     ext = extension_from_mime_type(mime_type, "png")
-    source_name = str(payload.get("name") or "").strip()
-    preferred_stem = (
-        file_stem(source_name)
-        or file_stem(source_item.get("file") if source_item else "")
-        or file_stem(source_file)
-        or "image"
-    )
-    file_name = unique_file_name(post_dir, f"{preferred_stem}_edit", ext)
+    file_name = timestamp_media_file_name(post_dir, ext)
     (post_dir / file_name).write_bytes(decode_data_url(image_data))
     now = now_iso()
     source_key = media_item_key(source_item) if source_item else ""
@@ -29521,14 +29506,13 @@ def save_composer_uploads_at_root(payload: dict, root: Path) -> dict:
         original_name = Path(str(file_payload.get("name") or "")).name
         title = file_stem(original_name) or f"upload-{upload_hash[:8]}"
         if frame_capture:
-            stem = str(file_payload.get("frame_stem") or "video")
-            original_name = next_frame_file_name(root / "upload", stem, upload_tree=True)
+            original_name = timestamp_media_file_name(upload_root, upload_folders=True)
             title = file_stem(original_name)
-        folder_name = unique_directory_name(upload_root, safe_name(title, f"upload-{index:02d}"))
+        folder_name = safe_name(title, f"upload-{index:02d}") if frame_capture else unique_directory_name(upload_root, safe_name(title, f"upload-{index:02d}"))
         folder = upload_root / folder_name
         folder.mkdir(parents=True, exist_ok=True)
         ext = upload_media_extension(original_name, mime_type, media_type)
-        file_name = unique_file_name(folder, safe_name(title, f"upload-{index:02d}"), ext)
+        file_name = original_name if frame_capture else unique_file_name(folder, safe_name(title, f"upload-{index:02d}"), ext)
         (folder / file_name).write_bytes(raw)
         item = {
             "item_id": file_stem(file_name),
