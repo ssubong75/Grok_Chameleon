@@ -801,6 +801,10 @@ function disposeCardPreviewNode(root) {
 
 function bindLazyHoverVideoPreview(host, media, poster, posterUrl, videoUrl, item) {
   if (!host || !media || !poster || !videoUrl) return;
+  if (item?.card_fast_local_preview && isFastLocalPreviewSource(videoUrl)) {
+    bindFastLocalHoverVideoPreview(host, media, poster, videoUrl);
+    return;
+  }
   let video = null;
   let hovered = false;
   let generation = 0;
@@ -860,6 +864,159 @@ function bindLazyHoverVideoPreview(host, media, poster, posterUrl, videoUrl, ite
       // Browser may block seeking before metadata is loaded.
     }
     hideVideo();
+  });
+}
+
+// Local grids share a motion gate. Remote Imagine keeps the original hover loader.
+const localPreviewLists = new WeakSet();
+const localPreviewMotion = new WeakMap();
+const localHoverPreviewBindings = new Map();
+const LOCAL_PREVIEW_SETTLE_MS = 200;
+let activeLocalHoverPreview = null;
+
+function localCardPreviewDistance(target) {
+  if (!target?.isConnected || target.closest("[hidden]")) return Infinity;
+  const card = target.closest(".card") || target;
+  const rect = card.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return Infinity;
+  const listRect = target.closest(".card_list")?.getBoundingClientRect();
+  const top = Math.max(0, listRect?.top || 0);
+  const bottom = Math.min(window.innerHeight, listRect?.bottom ?? window.innerHeight);
+  const left = Math.max(0, listRect?.left || 0);
+  const right = Math.min(window.innerWidth, listRect?.right ?? window.innerWidth);
+  if (rect.bottom <= top) return top - rect.bottom + 1;
+  if (rect.top >= bottom) return rect.top - bottom + 1;
+  if (rect.right <= left) return left - rect.right + 1;
+  if (rect.left >= right) return rect.left - right + 1;
+  return 0;
+}
+
+function localCardPreviewIsMoving(target) {
+  const motion = localPreviewMotion.get(target?.closest?.(".card_list"));
+  return Boolean(motion && performance.now() - motion.last < LOCAL_PREVIEW_SETTLE_MS);
+}
+
+function syncLocalCardPreviewViewport(list = null) {
+  for (const [preview, binding] of fastLocalPreviewBindings) {
+    if (list && preview.closest(".card_list") !== list) continue;
+    if (!preview.isConnected) {
+      disposeCardPreviewNode(preview);
+      continue;
+    }
+    const margin = localCardPreviewIsMoving(preview) ? 0 : 400;
+    if (localCardPreviewDistance(preview) > margin) binding.pause();
+    else binding.load();
+  }
+  pumpFastLocalPreviews();
+}
+
+function noteLocalPreviewMotion(event) {
+  const target = event.target;
+  const list = target?.closest?.(".card_list");
+  if (!list || !localPreviewLists.has(list)) return;
+  let motion = localPreviewMotion.get(list);
+  if (!motion) {
+    motion = { last: 0, timer: 0, frame: 0 };
+    localPreviewMotion.set(list, motion);
+  }
+  motion.last = performance.now();
+  for (const [host, binding] of localHoverPreviewBindings) {
+    if (host.closest(".card_list") === list) binding.cancel();
+  }
+  if (!motion.frame) motion.frame = requestAnimationFrame(() => {
+    motion.frame = 0;
+    syncLocalCardPreviewViewport(list);
+  });
+  clearTimeout(motion.timer);
+  motion.timer = setTimeout(() => {
+    syncLocalCardPreviewViewport(list);
+    for (const [host, binding] of localHoverPreviewBindings) {
+      if (host.closest(".card_list") === list) binding.schedule();
+    }
+  }, LOCAL_PREVIEW_SETTLE_MS + 10);
+}
+
+document.addEventListener("wheel", noteLocalPreviewMotion, { capture: true, passive: true });
+document.addEventListener("scroll", noteLocalPreviewMotion, { capture: true, passive: true });
+window.addEventListener("resize", () => syncLocalCardPreviewViewport());
+
+function bindFastLocalHoverVideoPreview(host, media, poster, videoUrl) {
+  const list = host.closest(".card_list");
+  if (list) localPreviewLists.add(list);
+  let video = null;
+  let timer = 0;
+  let hovered = false;
+  let disposed = false;
+  let pointer = null;
+  const cancel = () => {
+    clearTimeout(timer);
+    timer = 0;
+    if (video) releaseCardPreviewVideo(video);
+    video = null;
+    if (poster.hidden) poster.hidden = false;
+    if (activeLocalHoverPreview === binding) activeLocalHoverPreview = null;
+  };
+  const start = () => {
+    timer = 0;
+    if (disposed || !hovered || localCardPreviewDistance(host) !== 0) return;
+    // Scrolling can move a different card under a stationary pointer before
+    // Chromium dispatches mouseleave. Do not resume the previous card's video.
+    if (!pointer || !host.contains(document.elementFromPoint(pointer.x, pointer.y))) return;
+    if (localCardPreviewIsMoving(host)) return;
+    // Posters take precedence over optional playback, including neighbours in view.
+    const pendingPosters = [...fastLocalPreviewBindings.keys()].some(preview => (
+      preview.closest(".card_list") === list && localCardPreviewDistance(preview) === 0
+      && !preview.classList.contains("card_preview_loaded")
+    ));
+    if (!poster.naturalWidth || pendingPosters) {
+      timer = setTimeout(start, 100);
+      return;
+    }
+    if (activeLocalHoverPreview && activeLocalHoverPreview !== binding) activeLocalHoverPreview.cancel();
+    activeLocalHoverPreview = binding;
+    video = document.createElement("video");
+    const currentVideo = video;
+    video.className = "card_preview card_video_preview";
+    video.hidden = true;
+    video.poster = poster.currentSrc || poster.src;
+    video.muted = true;
+    video.loop = true;
+    video.playsInline = true;
+    video.preload = "auto";
+    const reveal = () => {
+      if (video !== currentVideo || !hovered || localCardPreviewIsMoving(host)) return;
+      video.hidden = false;
+      video.play().catch(() => {});
+    };
+    video.addEventListener("loadeddata", reveal);
+    video.addEventListener("canplay", reveal);
+    video.addEventListener("error", () => { if (video === currentVideo) cancel(); }, { once: true });
+    video.src = videoUrl;
+    media.append(video);
+  };
+  const binding = { cancel, schedule() {
+    clearTimeout(timer);
+    if (hovered && !disposed && !video) timer = setTimeout(start, LOCAL_PREVIEW_SETTLE_MS);
+  } };
+  localHoverPreviewBindings.set(host, binding);
+  const observer = typeof IntersectionObserver === "function" ? new IntersectionObserver(entries => {
+    if (entries.some(entry => !entry.isIntersecting)) cancel();
+  }) : null;
+  observer?.observe(host);
+  const rememberPointer = event => { pointer = { x: event.clientX, y: event.clientY }; };
+  host.addEventListener("mousemove", rememberPointer, { passive: true });
+  host.addEventListener("mouseenter", event => {
+    rememberPointer(event);
+    hovered = true;
+    binding.schedule();
+  });
+  host.addEventListener("mouseleave", () => { hovered = false; cancel(); });
+  registerCardPreviewDisposer(host, () => {
+    disposed = true;
+    hovered = false;
+    cancel();
+    observer?.disconnect();
+    localHoverPreviewBindings.delete(host);
   });
 }
 
@@ -1214,6 +1371,166 @@ async function deterministicBuildCardPreviewUrl(rawUrl, kind = "card") {
   }
 }
 
+// Only Build/Reference/Collection opt in. Remote Imagine keeps its existing loader.
+const fastLocalPreviewQueue = [];
+const fastLocalPreviewBindings = new Map();
+const fastLocalPreviewActive = { card: 0, thumbnail: 0 };
+const fastLocalPreviewLimits = { card: 3, thumbnail: 4 };
+const fastLocalPreviewObserver = typeof IntersectionObserver === "function"
+  ? new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      const binding = fastLocalPreviewBindings.get(entry.target);
+      if (entry.isIntersecting) binding?.load();
+      else binding?.pause();
+    }
+  }, { root: null, rootMargin: "400px 0px", threshold: 0.01 })
+  : null;
+
+function isFastLocalPreviewSource(rawUrl) {
+  try {
+    const parsed = new URL(String(rawUrl || ""), location.origin);
+    return parsed.origin === location.origin && parsed.pathname === "/api/media"
+      && /^(created|collection|reference)\//.test(String(parsed.searchParams.get("path") || "").replace(/^\/+/, ""))
+      && /^[a-f0-9]+-[a-f0-9]+$/i.test(parsed.searchParams.get("v") || "");
+  } catch (_) {
+    return false;
+  }
+}
+
+function pumpFastLocalPreviews() {
+  fastLocalPreviewQueue.sort((left, right) => (
+    (left.kind === "thumbnail" ? -1 : localCardPreviewDistance(left.target))
+    - (right.kind === "thumbnail" ? -1 : localCardPreviewDistance(right.target))
+  ));
+  for (let index = 0; index < fastLocalPreviewQueue.length;) {
+    const entry = fastLocalPreviewQueue[index];
+    if (entry.cancelled || !entry.target.isConnected) {
+      fastLocalPreviewQueue.splice(index, 1);
+      entry.cancel();
+      continue;
+    }
+    if (entry.kind === "card" && localCardPreviewDistance(entry.target) > (localCardPreviewIsMoving(entry.target) ? 0 : 400)) {
+      fastLocalPreviewBindings.get(entry.target)?.pause();
+      entry.cancel();
+      continue;
+    }
+    if (fastLocalPreviewActive[entry.kind] >= fastLocalPreviewLimits[entry.kind]) {
+      index += 1;
+      continue;
+    }
+    fastLocalPreviewQueue.splice(index, 1);
+    fastLocalPreviewActive[entry.kind] += 1;
+    Promise.resolve().then(async () => {
+      const cachedUrl = await deterministicBuildCardPreviewUrl(entry.source, entry.kind);
+      if (entry.cancelled || !entry.target.isConnected || !cachedUrl) return "";
+      if (entry.kind === "card" && localCardPreviewDistance(entry.target) > (localCardPreviewIsMoving(entry.target) ? 0 : 400)) {
+        fastLocalPreviewBindings.get(entry.target)?.pause();
+        entry.cancel();
+        return "";
+      }
+      // Read once, without HEAD + a second image GET. Holding a bounded slot until
+      // the body is read prevents fast scrolling from flooding the local server.
+      const response = await fetch(cachedUrl, {
+        signal: entry.controller.signal,
+        priority: entry.kind === "thumbnail" || localCardPreviewDistance(entry.target) === 0 ? "high" : "low",
+      });
+      if (!response.ok) return "";
+      const blob = await response.blob();
+      if (entry.cancelled || !entry.target.isConnected) return "";
+      const objectUrl = URL.createObjectURL(blob);
+      registerCardPreviewDisposer(entry.target, () => URL.revokeObjectURL(objectUrl));
+      return objectUrl;
+    }).catch(() => "").then((url) => {
+      entry.resolve({ url, cancelled: entry.cancelled });
+    }).finally(() => {
+      cardPreviewDisposers.get(entry.target)?.delete(entry.cancel);
+      fastLocalPreviewActive[entry.kind] -= 1;
+      pumpFastLocalPreviews();
+    });
+  }
+}
+
+function requestFastLocalPreview(target, source, kind = "card", priority = false) {
+  const entry = { target, source, kind, cancelled: false, controller: new AbortController() };
+  const promise = new Promise((resolve) => { entry.resolve = resolve; });
+  entry.cancel = () => {
+    if (entry.cancelled) return;
+    entry.cancelled = true;
+    entry.controller.abort();
+    const index = fastLocalPreviewQueue.indexOf(entry);
+    if (index >= 0) fastLocalPreviewQueue.splice(index, 1);
+    entry.resolve({ url: "", cancelled: true });
+    cardPreviewDisposers.get(target)?.delete(entry.cancel);
+  };
+  registerCardPreviewDisposer(target, entry.cancel);
+  if (priority) fastLocalPreviewQueue.unshift(entry);
+  else fastLocalPreviewQueue.push(entry);
+  Promise.resolve().then(pumpFastLocalPreviews);
+  return { promise, cancel: entry.cancel };
+}
+
+function syncFastLocalPreviewVisibility() {
+  syncLocalCardPreviewViewport();
+  for (const [host, binding] of localHoverPreviewBindings) {
+    if (!host.isConnected) disposeCardPreviewNode(host);
+    else if (localCardPreviewDistance(host) !== 0) binding.cancel();
+  }
+}
+
+function scheduleFastLocalCardPreview(preview, source, cacheIdentity = "") {
+  let currentRequest = null;
+  let disposed = false;
+  const binding = {
+    pause() {
+      if (!currentRequest) return;
+      currentRequest.cancel();
+      currentRequest = null;
+      delete preview.dataset.cardPreviewStarted;
+    },
+    load() {
+      if (disposed || preview.closest("[hidden]") || preview.dataset.cardPreviewStarted === "true") return;
+      if (localCardPreviewDistance(preview) > (localCardPreviewIsMoving(preview) ? 0 : 400)) return;
+      const list = preview.closest(".card_list");
+      if (list) localPreviewLists.add(list);
+      preview.dataset.cardPreviewStarted = "true";
+      const request = requestFastLocalPreview(preview, source);
+      currentRequest = request;
+      request.promise.then(({ url, cancelled }) => {
+        if (disposed || cancelled || currentRequest !== request || !preview.isConnected) return;
+        if (url) {
+          currentRequest = null;
+          preview.loading = "eager";
+          preview.src = url;
+          return;
+        }
+        // A missing cache is not a missing media file. Retain the old source/native
+        // fallback, but never let native generation delay already-cached cards.
+        preview.src = source;
+        if (typeof window.grokChameleonNative?.cardPreview !== "function") {
+          currentRequest = null;
+          return;
+        }
+        queueNativeCardPreview(preview, { url: source, kind: "card", cache_identity: cacheIdentity })
+          .then((result) => {
+            if (!disposed && currentRequest === request && preview.isConnected && result?.url) preview.src = result.url;
+          }).catch(() => {}).finally(() => {
+            if (currentRequest === request) currentRequest = null;
+          });
+      });
+    },
+  };
+  fastLocalPreviewBindings.set(preview, binding);
+  registerCardPreviewDisposer(preview, () => {
+    disposed = true;
+    binding.pause();
+    fastLocalPreviewObserver?.unobserve(preview);
+    fastLocalPreviewBindings.delete(preview);
+  });
+  preview.cardPreviewLoad = binding.load;
+  if (fastLocalPreviewObserver) fastLocalPreviewObserver.observe(preview);
+  else binding.load();
+}
+
 function resolveLocalCardPreview(url, kind = "card", cacheIdentity = "") {
   const target = arguments[3] || null;
   const key = String(url || "");
@@ -1415,7 +1732,10 @@ function appendCardImagePreview(host, media, preview, previewUrl, item) {
   }
   bindCardPreviewLoadState(media, preview, previewUrl, cardPreviewLoadOptions(host, item, previewUrl));
   media.append(preview);
-  if (item?.card_local_preview) {
+  if (item?.card_fast_local_preview && isFastLocalPreviewSource(previewUrl)) {
+    scheduleFastLocalCardPreview(preview, previewUrl, cardPreviewStableIdentity(item));
+  }
+  else if (item?.card_local_preview) {
     scheduleLocalCardPreview(preview, previewUrl, "card", cardPreviewStableIdentity(item));
   }
   else preview.src = previewUrl;

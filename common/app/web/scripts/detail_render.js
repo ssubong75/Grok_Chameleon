@@ -46,6 +46,10 @@ function startDetailThumbCacheLoads(thumbs) {
     const load = thumb?._detailThumbCacheLoad;
     if (typeof load !== "function") return;
     delete thumb._detailThumbCacheLoad;
+    if (thumb._fastLocalThumb) {
+      load(priority);
+      return;
+    }
     queueDetailThumbCacheLoad(thumb, load, priority);
   };
   for (const thumb of thumbs) {
@@ -464,7 +468,61 @@ function detailThumbButtonForItem(prefix, item, post, options = {}) {
     requestAnimationFrame(appendVideoFallback);
   } else if (queuedPreviewSource && typeof resolveLocalCardPreview === "function") {
     fill.classList.add("detail_thumb_preview");
-    if ((prefix === "b" || prefix === "i") && typeof existingPersistentCardPreview === "function") {
+    if (prefix === "b" && isFastLocalPreviewSource(buildPreviewSource)) {
+      // Local cached bytes get their own bounded queue, independent of remote
+      // existence checks and native generation. The active version is queued first.
+      button._fastLocalThumb = true;
+      let currentRequest = null;
+      let disposed = false;
+      const binding = {
+        pause() {
+          fastLocalPreviewObserver?.unobserve(button);
+          if (!currentRequest) return;
+          currentRequest.cancel();
+          currentRequest = null;
+          delete button.dataset.cardPreviewStarted;
+        },
+        load(priority = button.classList.contains("active")) {
+          if (disposed || button.dataset.cardPreviewStarted === "true") return;
+          button.dataset.cardPreviewStarted = "true";
+          const request = requestFastLocalPreview(button, buildPreviewSource, "thumbnail", priority);
+          currentRequest = request;
+          request.promise.then(({ url, cancelled }) => {
+            if (disposed || cancelled || currentRequest !== request || !fill.isConnected) return;
+            const show = (resolvedUrl) => {
+              if (disposed || currentRequest !== request || !fill.isConnected || !resolvedUrl) return;
+              fill.classList.remove("detail_thumb_video_preview");
+              fill.classList.add("detail_thumb_preview");
+              fill.replaceChildren();
+              fill.style.backgroundImage = `url("${resolvedUrl}")`;
+            };
+            if (url) {
+              show(url);
+              currentRequest = null;
+              return;
+            }
+            if (queuedPreviewSourceIsVideo) appendVideoFallback();
+            else if (previewUrl) fill.style.backgroundImage = `url("${previewUrl}")`;
+            if (typeof window.grokChameleonNative?.cardPreview !== "function") {
+              currentRequest = null;
+              return;
+            }
+            queueNativeCardPreview(fill, { url: buildPreviewSource, kind: "thumbnail" })
+              .then((result) => show(String(result?.url || "")))
+              .catch(() => {}).finally(() => {
+                if (currentRequest === request) currentRequest = null;
+              });
+          });
+        },
+      };
+      fastLocalPreviewBindings.set(button, binding);
+      registerCardPreviewDisposer(button, () => {
+        disposed = true;
+        binding.pause();
+        fastLocalPreviewBindings.delete(button);
+      });
+      button._detailThumbCacheLoad = binding.load;
+    } else if ((prefix === "b" || prefix === "i") && typeof existingPersistentCardPreview === "function") {
       // A detail version strip can be long. Ask its 320px cache in a bounded parallel
       // batch instead of making every button request its source first. Cache misses use
       // the separate native queue, so they never hold up cached thumbnails behind them.

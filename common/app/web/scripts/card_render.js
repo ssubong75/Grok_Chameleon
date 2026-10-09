@@ -103,6 +103,7 @@ function cardDisplayItemForContext(post, item, className = "") {
     card_lazy_preview: true,
     card_local_preview: true,
     card_preview_retries: 2,
+    card_fast_local_preview: ["b_card", "b_t2i_card", "collection_media_card"].includes(className),
   };
   const type = detailItemType(cardItem);
   if (type !== "video") {
@@ -971,7 +972,7 @@ function mediaCardForPost(post, className, backTargetOverride = null) {
 }
 
 function mediaCardForItem(post, item, backTarget = { screenId: "2nd_main", activeButtonId: "b_collection_nav_btn" }) {
-  const displayItem = cardDisplayItemForContext(post, item, "");
+  const displayItem = cardDisplayItemForContext(post, item, "collection_media_card");
   const type = displayItem.type || mediaTypeForName(displayItem.file || displayItem.url) || "image";
   const article = document.createElement("article");
   article.className = "card collection_media_card";

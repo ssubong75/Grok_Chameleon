@@ -40,6 +40,7 @@ function openScreen(screenId, activeButtonId = "", options = {}) {
   for (const screen of screens) {
     screen.hidden = screen.id !== screenId;
   }
+  if (typeof syncFastLocalPreviewVisibility === "function") syncFastLocalPreviewVisibility();
   pauseHiddenDetailVideos();
 
   for (const id of screenIds) {

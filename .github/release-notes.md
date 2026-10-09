@@ -2,6 +2,12 @@
 
 Grok Chameleon is a desktop app designed to make Grok Imagine and Build more convenient to use—all in one place.
 
+### Latest Changes — 2026-10-09
+
+- Local Build, Collection subfolder, and Reference cards prioritize visible cached thumbnails and cancel obsolete offscreen requests while scrolling.
+- Local hover videos wait until scrolling settles and visible posters are ready; leaving a card or hiding its list releases the video connection.
+- Local detail thumbnails use a separate bounded cache-read queue, with the selected version first. Imagine, Liked, and Discover retain their existing remote-media loading paths.
+
 ### Download
 
 | OS | File |
