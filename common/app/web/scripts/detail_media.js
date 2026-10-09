@@ -1140,7 +1140,7 @@ async function lookupPersistentCardPreview(rawUrl, kind = "card", cacheIdentity 
     }
     if (parsed.pathname !== "/api/media") return "";
     const mediaPath = String(parsed.searchParams.get("path") || "").replace(/^\/+/, "");
-    if (!/^(created|collection)\//.test(mediaPath)) return "";
+    if (!/^(created|collection|reference)\//.test(mediaPath)) return "";
     const version = String(parsed.searchParams.get("v") || "");
     const match = version.match(/^([a-f0-9]+)-([a-f0-9]+)$/i);
     if (!match) return "";
@@ -1204,7 +1204,7 @@ async function deterministicBuildCardPreviewUrl(rawUrl, kind = "card") {
     const mediaPath = String(parsed.searchParams.get("path") || "").replace(/^\/+/, "");
     const version = String(parsed.searchParams.get("v") || "");
     const match = version.match(/^([a-f0-9]+)-([a-f0-9]+)$/i);
-    if (!/^(created|collection)\//.test(mediaPath) || !match) return "";
+    if (!/^(created|collection|reference)\//.test(mediaPath) || !match) return "";
     const modifiedNs = BigInt(`0x${match[1]}`).toString(10);
     const size = BigInt(`0x${match[2]}`).toString(10);
     const key = await buildPersistentCardPreviewKey(mediaPath, modifiedNs, size, kind);

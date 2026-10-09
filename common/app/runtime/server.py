@@ -30242,7 +30242,12 @@ class Handler(SimpleHTTPRequestHandler):
                         data["unchanged"] = True
                         self.send_json(data)
                         return
-                self.send_json(scan_library(set_library_root(selected)))
+                selected_root = set_library_root(selected)
+                # A synced USB already carries a ready, relative-path card index.
+                # Only a missing/stale index needs the normal rebuilding fallback.
+                data = startup_library_snapshot(selected_root)
+                data["index_rebuilt"] = True  # Reset the previous library's UI pages.
+                self.send_json(data)
                 return
             route_handler = POST_JSON_ROUTES.get(parsed.path)
             if route_handler:

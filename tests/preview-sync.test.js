@@ -5,7 +5,24 @@ const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { snapshotPreviews, syncPreviewSnapshots, previewPaths } = require('../common/app/electron/preview-sync');
-const { LibraryBackup } = require('../common/app/electron/library-backup');
+const appRoot = process.env.SYNC_TEST_APP_ROOT;
+if (!appRoot) throw new Error('SYNC_TEST_APP_ROOT must point to the complete assembled app runtime.');
+const { LibraryBackup: RuntimeLibraryBackup } = require(path.join(appRoot, 'electron/library-backup'));
+class LibraryBackup extends RuntimeLibraryBackup {
+  constructor(options) {
+    const sandbox = path.dirname(options.localRoot);
+    super({ ...options,
+      pythonPath: process.env.SYNC_TEST_PYTHON || 'python3',
+      pythonEnv: { ...process.env,
+        GROK_CHAMELEON_RUNTIME_DIR: path.join(sandbox, 'test-runtime'),
+        GROK_CHAMELEON_PORTABLE_ROOT: sandbox,
+        GROK_CHAMELEON_LIBRARY_POINTER_PATH: path.join(sandbox, '.library_path.json'),
+        GROK_CHAMELEON_PLATFORM_KEY: process.platform === 'win32' ? 'windows' : 'macos',
+        PYTHONDONTWRITEBYTECODE: '1',
+      },
+    });
+  }
+}
 function write(root, relative, data) {
   const file = path.join(root, relative); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, data); return file;
 }
@@ -86,6 +103,7 @@ test('deleting media on either computer propagates and cached previews never res
     const repeated = await engine.execute(await engine.analyze('sync'));
     assert.equal(repeated.previewsCopied, 0);
     assert(!fs.existsSync(path.join(left, rel))); assert(!fs.existsSync(path.join(right, rel)));
-    assert(result.index_invalidated);
+    assert.equal(result.index_invalidated, false);
+    assert.equal(result.index_prepared, true);
   }
 });

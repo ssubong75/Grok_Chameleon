@@ -53,13 +53,13 @@ def _connection(root: Path, *, write: bool = False):
             uri=True,
             timeout=5.0,
         )
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA busy_timeout = 20000")
-    connection.execute("PRAGMA foreign_keys = ON")
-    if write:
-        connection.execute("PRAGMA journal_mode = DELETE")
-        connection.execute("PRAGMA synchronous = NORMAL")
     try:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout = 20000")
+        connection.execute("PRAGMA foreign_keys = ON")
+        if write:
+            connection.execute("PRAGMA journal_mode = DELETE")
+            connection.execute("PRAGMA synchronous = NORMAL")
         yield connection
         if write:
             connection.commit()

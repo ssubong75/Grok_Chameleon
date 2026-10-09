@@ -246,9 +246,13 @@
         "ready",
       );
       writeLog(result.historyPath ? `Previous files saved in history: ${result.historyPath}` : "No previous files required history storage.");
-      // Verified completion intentionally invalidates the card index. Rebuild this app's
-      // active library after the server restarts so copied collection folders appear now.
-      if (result.index_invalidated && typeof scanLibrary === "function") {
+      // Sync already prepared the index while the server was paused. Refresh visible
+      // pages from it without starting another full filesystem scan.
+      if (result.index_prepared) {
+        const data = await qApi("/api/state");
+        applyLibrarySnapshot({ ...data, index_rebuilt: true });
+        await refreshBuildDetailFromDisk();
+      } else if (result.index_invalidated && typeof scanLibrary === "function") {
         try { await scanLibrary(); } catch (_) {}
       }
     } catch (error) {

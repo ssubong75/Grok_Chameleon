@@ -1412,7 +1412,11 @@ class LibraryBackup {
 
   async executeSync(analysis) {
     throwIfCancelled(this.signal);
+    if (!this.pythonPath) throw new LibraryBackupError("Python is required to prepare synced library indexes.", "PYTHON_REQUIRED");
     const current = analysis;
+    // Mark both sides before any file changes. An interrupted sync must never expose
+    // a formerly-ready index containing deleted cards. Preparation clears these markers.
+    invalidateLibraryIndexes([current.local, current.external]);
     const localPreviews = snapshotPreviews(current.local, current.localManifest.records);
     const externalPreviews = snapshotPreviews(current.external, current.externalManifest.records);
     const verifyApplied = async (root, changes) => {
@@ -1549,13 +1553,19 @@ class LibraryBackup {
       ], { env: this.pythonEnv, windowsHide: true, maxBuffer: 1024 * 1024 });
       stateResult = JSON.parse(stdout);
     }
+    this.emit("Preparing card lists on both drives for the next computer.", 0, 1, "verify");
+    const { stdout: indexOutput } = await runStateHelper(this.pythonPath, [
+      path.join(__dirname, "..", "runtime", "prepare_sync_index.py"),
+      current.local, current.external,
+    ], { env: { ...this.pythonEnv, PYTHONDONTWRITEBYTECODE: "1" }, windowsHide: true, maxBuffer: 1024 * 1024 });
+    const indexResult = JSON.parse(indexOutput);
+    if (!indexResult.prepared) throw new LibraryBackupError("Card list preparation failed.", "INDEX_PREPARATION_FAILED");
     saveStoredManifest(current.paths.syncBaseline, current.libraryId, nextGeneration, {
       records: nextRecords,
       librarySettings: current.settingsPlan?.nextBaseline || {},
     });
-    // The card index is intentionally excluded from sync. Mark only the local card listing
-    // stale after the files and baseline are complete; never remove Imagine Liked cache rows.
-    invalidateLibraryIndexes([current.local, current.external]);
+    // Each index now describes its own final files (including destination media versions).
+    // Keep both ready so opening the USB on another OS does not rescan the library.
     const historyPath = [externalHistory, localHistory].filter(Boolean).join("\n");
     this.emit("Library Sync completed.", 1, 1, "complete");
     return {
@@ -1566,7 +1576,8 @@ class LibraryBackup {
       previewsCopied: previewResult.copied,
       completedAt: utcNow(),
       historyPath,
-      index_invalidated: true,
+      index_invalidated: false,
+      index_prepared: true,
     };
   }
 }

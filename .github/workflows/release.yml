@@ -627,8 +627,14 @@ jobs:
             python -c "import ast,pathlib,sys; ast.parse(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'), filename=sys.argv[1])" $verifiedPython
             if ($LASTEXITCODE -ne 0) { throw "Packaged Windows Python syntax check failed: $($pythonSource.Relative)" }
           }
-          node --test (Join-Path $env:GITHUB_WORKSPACE "tests\library-backup.test.js")
+          $env:SYNC_TEST_APP_ROOT = $verifiedAppRoot
+          $env:SYNC_TEST_PYTHON = (Get-Command python).Source
+          node --test (Join-Path $env:GITHUB_WORKSPACE "tests\library-backup.test.js") (Join-Path $env:GITHUB_WORKSPACE "tests\preview-sync.test.js")
           if ($LASTEXITCODE -ne 0) { throw "Library Backup tests failed on Windows." }
+          node (Join-Path $env:GITHUB_WORKSPACE "tests\sync-index-roundtrip.cjs") $env:SYNC_TEST_PYTHON
+          if ($LASTEXITCODE -ne 0) { throw "Prepared index roundtrip failed on Windows." }
+          python -B (Join-Path $env:GITHUB_WORKSPACE "tests\test_prepare_sync_index.py") $verifiedAppRoot
+          if ($LASTEXITCODE -ne 0) { throw "Prepared index preservation test failed on Windows." }
           "windows-output-sha256=" + (Get-FileHash -Algorithm SHA256 -LiteralPath $outputZip).Hash.ToLowerInvariant()
 
       - name: Retain the verified Windows build
@@ -853,7 +859,11 @@ jobs:
               python3 -c 'import ast, pathlib, sys; source = pathlib.Path(sys.argv[1]); ast.parse(source.read_text(encoding="utf-8"), filename=str(source))' "$app_root/$relative"
             fi
           done
-          node --test "$GITHUB_WORKSPACE/tests/library-backup.test.js"
+          export SYNC_TEST_APP_ROOT="$app_root"
+          export SYNC_TEST_PYTHON="$(command -v python3)"
+          node --test "$GITHUB_WORKSPACE/tests/library-backup.test.js" "$GITHUB_WORKSPACE/tests/preview-sync.test.js"
+          node "$GITHUB_WORKSPACE/tests/sync-index-roundtrip.cjs" "$SYNC_TEST_PYTHON"
+          python3 -B "$GITHUB_WORKSPACE/tests/test_prepare_sync_index.py" "$app_root"
           # git stores the bundled ffmpeg without the executable bit.
           chmod +x "$app_root/vendor/ffmpeg/ffmpeg" "$app_root/vendor/ffmpeg/ffprobe"
           test -x "$app_root/vendor/ffmpeg/ffmpeg"

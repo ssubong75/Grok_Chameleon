@@ -5,12 +5,36 @@ const path = require("node:path");
 const test = require("node:test");
 const { execFileSync } = require("node:child_process");
 
+const appRoot = process.env.SYNC_TEST_APP_ROOT;
+if (!appRoot) throw new Error("SYNC_TEST_APP_ROOT must point to the complete assembled app runtime.");
 const {
-  LibraryBackup,
+  LibraryBackup: RuntimeLibraryBackup,
   applyChanges,
   buildChangePlan,
   scanLibrary,
-} = require("../common/app/electron/library-backup");
+} = require(path.join(appRoot, "electron/library-backup"));
+
+class LibraryBackup extends RuntimeLibraryBackup {
+  constructor(options) {
+    const sandbox = path.dirname(options.localRoot);
+    super({ ...options,
+      pythonPath: options.pythonPath || process.env.SYNC_TEST_PYTHON || "python3",
+      pythonEnv: { ...process.env, ...options.pythonEnv,
+        GROK_CHAMELEON_RUNTIME_DIR: path.join(sandbox, "test-runtime"),
+        GROK_CHAMELEON_PORTABLE_ROOT: sandbox,
+        GROK_CHAMELEON_LIBRARY_POINTER_PATH: path.join(sandbox, ".library_path.json"),
+        GROK_CHAMELEON_PLATFORM_KEY: process.platform === "win32" ? "windows" : "macos",
+        PYTHONDONTWRITEBYTECODE: "1",
+      },
+    });
+  }
+}
+
+function assertReadyIndex(root) {
+  execFileSync(process.env.SYNC_TEST_PYTHON || "python3", ["-B", "-c",
+    "import sys; from pathlib import Path; sys.path.insert(0,sys.argv[1]); import library_index; assert library_index.ready(Path(sys.argv[2]))",
+    path.join(appRoot, "runtime"), root]);
+}
 
 function write(filePath, value) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -80,7 +104,7 @@ test("accounts sync both ways while unrelated caches, legacy previews, runtime a
   }
   assert.equal(fs.readFileSync(path.join(local, "runtime_data", "macos", "settings.json"), "utf8"), "local runtime");
   assert.equal(fs.readFileSync(path.join(external, "runtime_data", "macos", "settings.json"), "utf8"), "external runtime");
-  assert.equal(fs.readFileSync(path.join(local, "sql_data", "library_index.sqlite3"), "utf8"), "index-data");
+  assertReadyIndex(local);
   for (const folder of ["cache", "previews"]) {
     assert.equal(fs.readFileSync(path.join(local, folder, "from-local.json"), "utf8"), '{"side":"local"}');
     assert.equal(fs.readFileSync(path.join(external, folder, "from-external.json"), "utf8"), '{"side":"external"}');
@@ -111,18 +135,20 @@ test("Reference cards and their media sync both directions and settle", async (t
   assert.equal(next.plan.merges.length, 0);
 });
 
-test("Library Sync marks both card indexes stale without deleting their Imagine cache", async (t) => {
+test("Library Sync prepares both card indexes without a deferred rebuild", async (t) => {
   const { local, external } = tempPair(t);
   makeLibrary(external);
   write(path.join(local, "collection", "new-folder", "card", "post.json"), "{\"title\":\"new\"}\n");
   const engine = new LibraryBackup({ localRoot: local, externalRoot: external, machineId: "index-reset-test" });
   const { result } = await run(engine, "sync");
 
-  assert.equal(result.index_invalidated, true);
+  assert.equal(result.index_invalidated, false);
+  assert.equal(result.index_prepared, true);
   assert.equal(fs.existsSync(path.join(external, "collection", "new-folder", "card", "post.json")), true);
   for (const root of [local, external]) {
     assert.equal(fs.existsSync(path.join(root, "sql_data", "library_index.sqlite3")), true);
-    assert.equal(fs.existsSync(path.join(root, "sql_data", ".library-index-rebuild.json")), true);
+    assert.equal(fs.existsSync(path.join(root, "sql_data", ".library-index-rebuild.json")), false);
+    assertReadyIndex(root);
   }
   const next = await engine.analyze("sync");
   assert.equal(next.plan.localToExternal.length, 0);
