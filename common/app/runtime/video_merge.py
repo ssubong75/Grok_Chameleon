@@ -51,14 +51,60 @@ def stream_signature(stream: dict) -> dict:
     return value
 
 
-def merge_compatible_videos(ffmpeg: str, ffprobe: str, sources: list[Path], target: Path) -> dict:
+class ConversionRequired(RuntimeError):
+    """Inputs need the user's consent before lossy conversion."""
+
+
+def convert_and_merge(ffmpeg: str, ffprobe: str, sources: list[Path], target: Path, infos: list[dict]) -> dict:
+    from fractions import Fraction
+    import tempfile
+
+    video = next(s for s in infos[0]["streams"] if s["codec_type"] == "video")
+    width, height = (int(video[k]) // 2 * 2 for k in ("width", "height"))
+    rate = Fraction(video.get("avg_frame_rate") or video["r_frame_rate"])
+    if width < 2 or height < 2 or not 0 < rate <= 240:
+        raise RuntimeError("The target video dimensions or frame rate are invalid.")
+    fps = f"{rate.numerator}/{rate.denominator}"
+    # Use level 4.1 for normal HD; larger/faster videos need a higher AVC level.
+    level = ["-level:v", "4.1"] if width * height <= 1920 * 1088 and rate <= 30 else []
+    with tempfile.TemporaryDirectory(prefix="converted_", dir=target.parent) as directory:
+        work = Path(directory)
+        converted = []
+        for number, (source, info) in enumerate(zip(sources, infos), 1):
+            out = work / f"{number}.mp4"
+            v = next(s for s in info["streams"] if s["codec_type"] == "video")
+            audio = next((s for s in info["streams"] if s["codec_type"] == "audio"), None)
+            duration = float(info["format"]["duration"])
+            args = [ffmpeg, "-nostdin", "-hide_banner", "-v", "error", "-i", str(source)]
+            if audio is None:
+                args += ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]
+            args += ["-map", f"0:{v['index']}", "-map", f"0:{audio['index']}" if audio else "1:a:0",
+                     "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps},format=yuv420p",
+                     "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-profile:v", "high", *level,
+                     "-color_range", "tv", "-colorspace", "bt709", "-color_trc", "bt709", "-color_primaries", "bt709",
+                     "-video_track_timescale", "90000", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+                     "-af", "aresample=48000:async=1:first_pts=0,apad", "-t", str(duration),
+                     "-map_metadata", "-1", "-map_chapters", "-1", "-metadata:s:v:0", "rotate=0",
+                     "-disposition:v:0", "default", "-disposition:a:0", "default", "-movflags", "+faststart", "-n", str(out)]
+            result = subprocess.run(args, capture_output=True, text=True, timeout=1800)
+            if result.returncode:
+                raise RuntimeError("Video conversion failed: " + result.stderr.strip()[-600:])
+            converted.append(out)
+        joined = work / "merged.mp4"
+        result = merge_compatible_videos(ffmpeg, ffprobe, converted, joined)
+        joined.replace(target)
+        return {**result, "reencoded": True}
+
+
+def merge_compatible_videos(ffmpeg: str, ffprobe: str, sources: list[Path], target: Path, *, allow_conversion: bool = False) -> dict:
     if len(sources) != 2:
         raise RuntimeError("Attach two videos.")
     infos = [probe_video(ffprobe, source) for source in sources]
     signatures = [[stream_signature(s) for s in info["streams"]] for info in infos]
     if signatures[0] != signatures[1]:
-        raise RuntimeError("These videos have different codec, resolution, frame rate or audio settings. "
-                           "Merge was stopped to preserve original quality.")
+        if allow_conversion:
+            return convert_and_merge(ffmpeg, ffprobe, sources, target, infos)
+        raise ConversionRequired("These videos need conversion before merging.")
     # The caller creates these files with controlled names in a private workdir.
     manifest = target.parent / "inputs.ffconcat"
     if any(source.parent != target.parent or source.name not in {"1.mp4", "2.mp4"} for source in sources):

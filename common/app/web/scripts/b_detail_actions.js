@@ -480,10 +480,25 @@ document.querySelector(".b_video_merge_submit")?.addEventListener("click", async
   const status = document.querySelector(".b_video_merge_status");
   status.textContent = "Merging videos…";
   try {
-    const data = await qApi("/api/library/merge-videos", {
+    const payload = {
       post_path: postPath,
       item_keys: buildVideoMergeState.items.map((item) => mediaItemKey(item)),
-    });
+    };
+    let data = await qApi("/api/library/merge-videos", payload);
+    if (data.needs_conversion) {
+      const accepted = await confirmAction({
+        title: "Convert and merge videos?",
+        message: "The video settings differ.\nConvert to H.264/AAC (48kHz stereo) and Merge.\nThe original files will be preserved.",
+        messageCentered: true,
+        confirmLabel: "Convert and merge",
+      });
+      if (!accepted) {
+        status.textContent = "Merge cancelled. Original files were kept.";
+        return;
+      }
+      status.textContent = "Converting and merging videos…";
+      data = await qApi("/api/library/merge-videos", { ...payload, allow_conversion: true });
+    }
     applyLibrarySnapshot(data);
     if (buildVideoMergeState.postPath === postPath) {
       status.textContent = "Saved to this folder.";

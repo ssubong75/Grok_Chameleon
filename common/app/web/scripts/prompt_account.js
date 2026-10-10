@@ -114,9 +114,9 @@
     await scanLibrary();
   }
 
-  function confirmAction({ title = "Confirm", message = "", confirmLabel = "OK", cancelLabel = "Cancel" } = {}) {
+  function confirmAction({ title = "Confirm", message = "", confirmLabel = "OK", cancelLabel = "Cancel", messageCentered = false } = {}) {
     if (typeof openGalleryActionDialog === "function") {
-      return openGalleryActionDialog({ title, message, confirmLabel, cancelLabel }).then(Boolean);
+      return openGalleryActionDialog({ title, message, confirmLabel, cancelLabel, messageCentered }).then(Boolean);
     }
     return new Promise((resolve) => {
       const overlay = document.createElement("div");
@@ -133,6 +133,10 @@
       `;
       overlay.querySelector("h3").textContent = title;
       overlay.querySelector("p").textContent = message;
+      if (messageCentered) {
+        overlay.querySelector("p").style.textAlign = "center";
+        overlay.querySelector("p").style.whiteSpace = "pre-wrap";
+      }
       overlay.querySelector(".confirm_cancel").textContent = cancelLabel;
       overlay.querySelector(".confirm_ok").textContent = confirmLabel;
       const close = (value) => {

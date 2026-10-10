@@ -10,7 +10,7 @@ import tempfile
 app = Path(sys.argv[1]).resolve()
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(app / "runtime"))
-from video_merge import merge_compatible_videos
+from video_merge import ConversionRequired, merge_compatible_videos, probe_video
 
 suffix = ".exe" if os.name == "nt" else ""
 ffmpeg = str(app / "vendor/ffmpeg" / ("ffmpeg" + suffix))
@@ -54,4 +54,38 @@ with tempfile.TemporaryDirectory(prefix="gc-video-tools-") as temporary:
                     "-map", "0:a:0", "-vn", "-sn", "-dn", "-c:a", "aac",
                     "-b:a", "192k", str(audio)], check=True, timeout=30)
     assert audio.stat().st_size > 0
-print("PASS: lossless merge with/without attached covers and M4A audio extraction")
+    # Conversion is opt-in and must normalize video/audio settings across platforms.
+    mismatched = work / "different.mp4"
+    subprocess.run([ffmpeg, "-v", "error", "-i", str(fixture), "-map", "0:v:0", "-map", "0:a:0",
+                    "-vf", "scale=320:240,fps=30", "-c:v", "libx264", "-profile:v", "high",
+                    "-level:v", "3.1", "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", "32000",
+                    "-ac", "2", str(mismatched)], check=True, timeout=60)
+    shutil.copyfile(fixture, sources[0])
+    shutil.copyfile(mismatched, sources[1])
+    before = [source.read_bytes() for source in sources]
+    converted = work / "converted.mp4"
+    try:
+        merge_compatible_videos(ffmpeg, ffprobe, sources, converted)
+        raise AssertionError("Mismatched settings must require confirmation")
+    except ConversionRequired:
+        pass
+    assert not converted.exists()
+    result = merge_compatible_videos(ffmpeg, ffprobe, sources, converted, allow_conversion=True)
+    assert result["reencoded"] is True
+    streams = probe_video(ffprobe, converted)["streams"]
+    video = next(s for s in streams if s["codec_type"] == "video")
+    audio = next(s for s in streams if s["codec_type"] == "audio")
+    original_video = next(s for s in probe_video(ffprobe, sources[0])["streams"] if s["codec_type"] == "video")
+    assert video["codec_name"] == "h264" and video["level"] == 41
+    assert (video["width"], video["height"], video["r_frame_rate"]) == (
+        original_video["width"], original_video["height"], original_video["r_frame_rate"])
+    assert audio["codec_name"] == "aac" and audio["sample_rate"] == "48000" and audio["channels"] == 2
+    assert before == [source.read_bytes() for source in sources]
+    # A video without audio gets a silent track, preserving both video segments.
+    silent = work / "silent.mp4"
+    subprocess.run([ffmpeg, "-v", "error", "-i", str(fixture), "-map", "0:v:0", "-c", "copy", str(silent)],
+                   check=True, timeout=30)
+    shutil.copyfile(silent, sources[1])
+    result = merge_compatible_videos(ffmpeg, ffprobe, sources, work / "with-silence.mp4", allow_conversion=True)
+    assert result["reencoded"] is True
+print("PASS: packet-preserving merge, cover handling, consent, conversion, missing audio, and original preservation")

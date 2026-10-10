@@ -2,7 +2,12 @@
 
 Grok Chameleon is a desktop app designed to make Grok Imagine and Build more convenient to use—all in one place.
 
-### Latest Changes — 2026-10-09
+### Latest Changes — 2026-10-10
+
+- Video Edit can convert videos with different settings to matching H.264 and AAC 48kHz stereo before merging, after confirmation. Original files are preserved.
+- Matching videos still merge without re-encoding. The conversion notice uses three centered lines.
+
+### Previous Changes — 2026-10-09
 
 - Local Build, Collection subfolder, and Reference cards prioritize visible cached thumbnails and cancel obsolete offscreen requests while scrolling.
 - Local hover videos wait until scrolling settles and visible posters are ready; leaving a card or hiding its list releases the video connection.

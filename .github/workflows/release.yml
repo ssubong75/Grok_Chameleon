@@ -194,7 +194,9 @@ jobs:
             @{ Name = "composer_style"; Relative = "web\styles\composer.css"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_COMPOSER_STYLE) },
             @{ Name = "ffmpeg"; Relative = "vendor\ffmpeg\ffmpeg.exe"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_FFMPEG_WIN) },
             @{ Name = "ffprobe"; Relative = "vendor\ffmpeg\ffprobe.exe"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_FFPROBE_WIN) },
-            @{ Name = "ffmpeg_license"; Relative = "vendor\ffmpeg\COPYING.LGPLv2.1"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_FFMPEG_LICENSE) }
+            @{ Name = "ffmpeg_license"; Relative = "vendor\ffmpeg\COPYING.LGPLv2.1"; Source = (Join-Path $env:GITHUB_WORKSPACE $env:COMMON_FFMPEG_LICENSE) },
+            @{ Name = "ffmpeg_gpl"; Relative = "vendor\ffmpeg\COPYING.GPL"; Source = (Join-Path $env:GITHUB_WORKSPACE "common\app\vendor\ffmpeg\COPYING.GPL") },
+            @{ Name = "ffmpeg_notices"; Relative = "vendor\ffmpeg\FFmpeg-NOTICES.txt"; Source = (Join-Path $env:GITHUB_WORKSPACE "common\app\vendor\ffmpeg\FFmpeg-NOTICES.txt") }
           )
           $variantRoot = Join-Path $env:GITHUB_WORKSPACE $env:VARIANT_COMMON_DIR
           $variantAppRoot = Join-Path $variantRoot "app"
@@ -763,6 +765,8 @@ jobs:
             vendor/ffmpeg/ffmpeg
             vendor/ffmpeg/ffprobe
             vendor/ffmpeg/COPYING.LGPLv2.1
+            vendor/ffmpeg/COPYING.GPL
+            vendor/ffmpeg/FFmpeg-NOTICES.txt
           )
           # Automatically include every shared Electron, runtime, and web file so a
           # newly added common source cannot be left behind in the Mac package.
@@ -1148,6 +1152,8 @@ jobs:
             vendor/ffmpeg/ffmpeg
             vendor/ffmpeg/ffprobe
             vendor/ffmpeg/COPYING.LGPLv2.1
+            vendor/ffmpeg/COPYING.GPL
+            vendor/ffmpeg/FFmpeg-NOTICES.txt
           )
           while IFS= read -r discovered_relative; do
             already_registered=false
@@ -1575,6 +1581,8 @@ jobs:
             vendor/ffmpeg/ffmpeg
             vendor/ffmpeg/ffprobe
             vendor/ffmpeg/COPYING.LGPLv2.1
+            vendor/ffmpeg/COPYING.GPL
+            vendor/ffmpeg/FFmpeg-NOTICES.txt
           )
 
           while IFS= read -r discovered_relative; do

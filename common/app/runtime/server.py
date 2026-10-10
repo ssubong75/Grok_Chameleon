@@ -28961,7 +28961,7 @@ def save_image_editor_upload_result(payload: dict, mime_type: str, image_data: s
 
 
 def merge_detail_videos(payload: dict) -> dict:
-    from video_merge import merge_compatible_videos
+    from video_merge import ConversionRequired, merge_compatible_videos
 
     root = library_root()
     if not root:
@@ -28996,7 +28996,11 @@ def merge_detail_videos(payload: dict) -> dict:
             for source, copy in zip(sources, inputs):
                 shutil.copyfile(source, copy)
             output = work / "merged.mp4"
-            info = merge_compatible_videos(ffmpeg, str(ffprobe), inputs, output)
+            try:
+                info = merge_compatible_videos(ffmpeg, str(ffprobe), inputs, output,
+                                               allow_conversion=payload.get("allow_conversion") is True)
+            except ConversionRequired:
+                return {"needs_conversion": True}
             name = unique_file_name(folder, "merged_video", "mp4")
             target = folder / name
             item = {

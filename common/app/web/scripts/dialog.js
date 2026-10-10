@@ -14,6 +14,7 @@ function openGalleryActionDialog({
   cancelLabel = "Cancel",
   accentTitle = false,
   messageBox = false,
+  messageCentered = false,
 }) {
   closeGalleryActionDialog();
   return new Promise((resolve) => {
@@ -31,6 +32,13 @@ function openGalleryActionDialog({
         </div>
       </section>
     `;
+    if (messageCentered) {
+      const text = overlay.querySelector("p");
+      if (text) {
+        text.style.textAlign = "center";
+        text.style.whiteSpace = "pre-wrap";
+      }
+    }
     document.body.append(overlay);
     galleryActionOverlay = overlay;
     const input = overlay.querySelector(".gallery-action-input");
