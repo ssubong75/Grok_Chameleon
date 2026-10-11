@@ -28982,8 +28982,13 @@ def merge_detail_videos(payload: dict) -> dict:
         post = read_json(post_file, {})
         items = post.get("items") or []
         sources = []
+        # Detail thumbnails include files discovered on disk, even when post.json
+        # has no entry yet. Resolve the same merged list used by post_from_folder.
+        disk_items = media_items_in_folder(root, folder, post_path, post)
+        meta_items = media_items_from_meta(root, folder, post_path, post)
+        available_items = merge_media_items(disk_items, meta_items) if disk_items else meta_items
         for key in keys:
-            item = next((entry for entry in items if media_item_key(entry) == key), None)
+            item = next((entry for entry in available_items if media_item_key(entry) == key), None)
             if not item or (item.get("type") or media_type_for_name(item.get("file") or "")) != "video":
                 raise RuntimeError("The source video was not found in this folder.")
             source = safe_join(folder, str(item.get("file") or ""))
