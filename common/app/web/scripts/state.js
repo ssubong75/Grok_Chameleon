@@ -280,7 +280,9 @@ document.documentElement.classList.toggle("platform-macos", isMacRenderer);
     const byKey = new Map(normalizedEntries.map((entry) => [entry.key, entry]));
     const activity = (library_state.mainGenerationActivity?.[providerKey] || [])
       .filter((key) => byKey.has(key));
-    if (library_state.mainGenerationActivity?.[providerKey]) {
+    // Build cards can temporarily disappear while the index page refreshes or a
+    // search filters the list. Rendering must not erase their activity order.
+    if (providerKey !== "build" && library_state.mainGenerationActivity?.[providerKey]) {
       library_state.mainGenerationActivity[providerKey] = activity;
     }
     const promoted = new Set(activity);
