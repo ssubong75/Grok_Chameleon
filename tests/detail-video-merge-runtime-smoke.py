@@ -3,6 +3,7 @@ import importlib.util
 import base64
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -44,6 +45,7 @@ with tempfile.TemporaryDirectory(prefix='gc-detail-video-') as temporary:
     saved = server.read_json(folder / 'post.json')
     merged = next(i for i in saved['items'] if i.get('relation') == 'video_merge')
     assert (folder / merged['file']).is_file()
+    assert re.fullmatch(r'\d{6}_\d{4}(?:_\d+)?\.mp4', merged['file'])
     assert merged['source_item_ids'] == ['custom-registered-id', 'imported']
     assert all((folder / name).read_bytes() == content for name, content in original_bytes.items())
     before = (folder / 'post.json').read_bytes()
@@ -76,4 +78,49 @@ with tempfile.TemporaryDirectory(prefix='gc-detail-video-') as temporary:
         else:
             raise AssertionError('Unknown or unsafe capture key accepted')
         assert (folder / 'post.json').read_bytes() == before
-    print('PASS: disk-only video merge and frame capture; originals unchanged; missing/unsafe keys rejected')
+    # Folder discovery must register imported media, preserving opaque metadata.
+    scan_relative = 'collection/Test/Imported'
+    scan_folder = library / scan_relative
+    scan_folder.mkdir(parents=True)
+    shutil.copyfile(fixture, scan_folder / 'new.mp4')
+    old_item = {'item_id': 'NEW', 'file': 'old.mp4', 'type': 'video', 'custom': 'keep-item'}
+    original_metadata = {'post_id': 'existing', 'custom': {'keep': True}, 'items': [old_item]}
+    server.write_json(scan_folder / 'post.json', original_metadata)
+    context = server.indexed_post_context(scan_relative)
+    with server.build_post_save_lock(scan_folder):
+        server.post_from_folder(library, scan_folder, context)
+    registered = server.read_json(scan_folder / 'post.json')
+    assert registered['custom'] == original_metadata['custom']
+    assert registered['items'][0] == old_item
+    new = next(i for i in registered['items'] if i['file'] == 'new.mp4')
+    assert new['item_id'] == 'new-2'
+    assert new['created_at']
+    first = (scan_folder / 'post.json').read_bytes()
+    server.post_from_folder(library, scan_folder, context)
+    assert (scan_folder / 'post.json').read_bytes() == first
+    shutil.copyfile(fixture, scan_folder / 'old.mp4')
+    os.utime(scan_folder / 'old.mp4', (1700000000, 1700000000))
+    server.post_from_folder(library, scan_folder, context)
+    registered = server.read_json(scan_folder / 'post.json')
+    repaired = next(i for i in registered['items'] if i['file'] == 'old.mp4')
+    assert repaired['created_at'] == '2023-11-14T22:13:20Z'
+    assert repaired['custom'] == 'keep-item'
+    repaired['updated_at'] = '2099-01-01T00:00:00Z'
+    server.write_json(scan_folder / 'post.json', registered)
+    server.post_from_folder(library, scan_folder, context)
+    assert server.read_json(scan_folder / 'post.json')['items'][0]['created_at'] == '2023-11-14T22:13:20Z'
+    repaired['created_at'] = '2022-01-01T00:00:00Z'
+    server.write_json(scan_folder / 'post.json', registered)
+    scanned = server.post_from_folder(library, scan_folder, context)
+    assert next(i for i in scanned['items'] if i['file'] == 'old.mp4')['created_at'] == '2022-01-01T00:00:00Z'
+    fresh_relative = 'upload/Fresh'
+    fresh = library / fresh_relative
+    fresh.mkdir(parents=True)
+    shutil.copyfile(fixture, fresh / 'copied.mp4')
+    server.post_from_folder(library, fresh, server.indexed_post_context(fresh_relative))
+    assert server.read_json(fresh / 'post.json')['items'][0]['file'] == 'copied.mp4'
+    (fresh / 'post.json').write_text('{invalid')
+    server.post_from_folder(library, fresh, server.indexed_post_context(fresh_relative))
+    assert (fresh / 'post.json').read_text() == '{invalid'
+    assert all((folder / name).read_bytes() == content for name, content in original_bytes.items())
+    print('PASS: merge/capture; timestamp output name; registration and missing date repair; stable dates after edits; metadata preservation; collisions; nested lock')

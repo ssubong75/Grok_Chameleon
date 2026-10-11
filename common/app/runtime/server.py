@@ -292,7 +292,7 @@ TOTAL_ACCOUNT_SESSIONS: dict[str, dict] = {}
 BUILD_JOBS: dict[str, dict] = {}
 BUILD_JOB_LOCK = threading.Lock()
 BUILD_T2I_FILE_LOCK = threading.Lock()
-BUILD_POST_SAVE_LOCKS = tuple(threading.Lock() for _ in range(64))
+BUILD_POST_SAVE_LOCKS = tuple(threading.RLock() for _ in range(64))
 COMPOSER_CARD_LOCK = threading.RLock()
 COLLECTION_MOVE_LOCK = threading.Lock()
 IMAGINE_JOBS: dict[str, dict] = {}
@@ -21205,6 +21205,7 @@ def media_items_in_folder(root: Path, folder: Path, rel_folder: str, meta: dict 
             "mime_type": mime_type,
             "size": stat.st_size,
             "last_modified": int(stat.st_mtime * 1000),
+            "created_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat().replace("+00:00", "Z"),
             "object_url": media_url(rel, entry),
             "role": "result",
         }
@@ -21359,6 +21360,7 @@ def merge_media_items(media_items: list[dict], meta_items: list[dict]) -> list[d
             merged_item = {
                 **meta_item,
                 **media_item,
+                "created_at": meta_item.get("created_at") or meta_item.get("createdAt") or meta_item.get("timestamp") or media_item.get("created_at"),
                 "role": meta_item.get("role") or media_item.get("role"),
                 "relation": meta_item.get("relation") or media_item.get("relation") or "",
                 "prompt": meta_item.get("prompt") or media_item.get("prompt") or "",
@@ -21437,10 +21439,64 @@ def representative_item(items: list[dict], meta) -> dict | None:
     )
 
 
+def register_discovered_media(folder: Path, context: dict, media_items: list[dict], meta):
+    """Append disk-only media without replacing existing post or item metadata."""
+    rel_folder = str(context.get("path") or "")
+    if not media_items or rel_folder.split("/", 1)[0] not in {"created", "collection", "upload", "reference"}:
+        return meta
+    metadata_path = folder / "post.json"
+    # Some callers already hold this folder's save lock; it must be reentrant.
+    with build_post_save_lock(folder):
+        latest = read_json(metadata_path, None)
+        if latest is None and metadata_path.exists():
+            return meta  # Do not overwrite unreadable metadata.
+        if latest is not None and not isinstance(latest, dict):
+            return meta
+        raw_items = (latest or {}).get("items", [])
+        if not isinstance(raw_items, list):
+            return meta
+        disk_by_file = {_nfc(item.get("file") or ""): item for item in media_items}
+        dates_filled = False
+        raw_items = [dict(item) if isinstance(item, dict) else item for item in raw_items]
+        for item in raw_items:
+            if not isinstance(item, dict) or item.get("created_at") or item.get("createdAt") or item.get("timestamp"):
+                continue
+            disk_item = disk_by_file.get(_nfc(item.get("file") or ""))
+            if disk_item and disk_item.get("created_at"):
+                # Imported files have no app generation date; keep a stable file
+                # timestamp instead of using later metadata edits for ordering.
+                item["created_at"] = disk_item["created_at"]
+                dates_filled = True
+        known_files = {_nfc(item.get("file") or "") for item in raw_items if isinstance(item, dict)}
+        used_ids = {str(item.get("item_id") or item.get("id") or "").casefold() for item in raw_items if isinstance(item, dict)}
+        additions = []
+        for item in media_items:
+            name = str(item.get("file") or "")
+            if not name or _nfc(name) in known_files or not safe_join(folder, name).is_file():
+                continue
+            saved = serializable_media_item(item)
+            saved["item_id"] = claim_unique_media_item_id(_nfc(saved["item_id"]), used_ids)
+            additions.append(saved)
+            known_files.add(_nfc(name))
+        if not additions and not dates_filled:
+            return latest if latest is not None else meta
+        updated = dict(latest) if latest is not None else {
+            "post_id": folder.name,
+            "source": "build" if rel_folder.startswith("collection/") else context.get("source") or "local",
+            "folder_path": rel_folder,
+            "created_at": now_iso(),
+        }
+        updated["items"] = [*raw_items, *additions]
+        updated["updated_at"] = now_iso()
+        write_json(metadata_path, updated)
+        return updated
+
+
 def post_from_folder(root: Path, folder: Path, context: dict) -> dict | None:
     rel_folder = context["path"]
     meta = read_json(folder / "post.json", None)
     media_items = media_items_in_folder(root, folder, rel_folder, meta or {})
+    meta = register_discovered_media(folder, context, media_items, meta)
     meta_items = media_items_from_meta(root, folder, rel_folder, meta or {})
     remote_item = remote_item_from_meta(meta) if meta else None
     items = merge_media_items(media_items, meta_items) if media_items else (meta_items or ([remote_item] if remote_item else []))
@@ -29006,7 +29062,7 @@ def merge_detail_videos(payload: dict) -> dict:
                                                allow_conversion=payload.get("allow_conversion") is True)
             except ConversionRequired:
                 return {"needs_conversion": True}
-            name = unique_file_name(folder, "merged_video", "mp4")
+            name = timestamp_media_file_name(folder, "mp4")
             target = folder / name
             item = {
                 "item_id": file_stem(name), "type": "video", "file": name,
