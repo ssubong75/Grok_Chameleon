@@ -488,7 +488,7 @@ document.querySelector(".b_video_merge_submit")?.addEventListener("click", async
     if (data.needs_conversion) {
       const accepted = await confirmAction({
         title: "Convert and merge videos?",
-        message: "The video settings differ.\nConvert to H.264/AAC (48kHz stereo) and Merge.\nThe original files will be preserved.",
+        message: "The video settings differ.\nUse the higher-resolution video frame size and the higher FPS.\nConvert to H.264/AAC (48kHz stereo) and Merge.\nThe original files will be preserved.",
         messageCentered: true,
         confirmLabel: "Convert and merge",
       });

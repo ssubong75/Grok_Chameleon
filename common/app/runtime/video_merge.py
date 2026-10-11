@@ -59,9 +59,23 @@ def convert_and_merge(ffmpeg: str, ffprobe: str, sources: list[Path], target: Pa
     from fractions import Fraction
     import tempfile
 
-    video = next(s for s in infos[0]["streams"] if s["codec_type"] == "video")
+    videos = [next(s for s in info["streams"] if s["codec_type"] == "video") for info in infos]
+    # Keep one video's complete frame size; never combine unrelated width/height maxima.
+    video = max(videos, key=lambda v: (int(v["width"]) * int(v["height"]), int(v["width"]), int(v["height"])))
     width, height = (int(video[k]) // 2 * 2 for k in ("width", "height"))
-    rate = Fraction(video.get("avg_frame_rate") or video["r_frame_rate"])
+    rates = []
+    for stream in videos:
+        value = stream.get("avg_frame_rate")
+        if not value or value == "0/0":
+            value = stream.get("r_frame_rate")
+        try:
+            source_rate = Fraction(value)
+        except (ValueError, ZeroDivisionError, TypeError):
+            raise RuntimeError("The source video frame rate is invalid.")
+        if not 0 < source_rate <= 240:
+            raise RuntimeError("The source video frame rate is invalid.")
+        rates.append(source_rate)
+    rate = max(rates)
     if width < 2 or height < 2 or not 0 < rate <= 240:
         raise RuntimeError("The target video dimensions or frame rate are invalid.")
     fps = f"{rate.numerator}/{rate.denominator}"

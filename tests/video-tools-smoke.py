@@ -1,5 +1,6 @@
 """Exercise the packaged tools using synthetic media, never the user library."""
 import json
+from fractions import Fraction
 import os
 from pathlib import Path
 import shutil
@@ -75,10 +76,23 @@ with tempfile.TemporaryDirectory(prefix="gc-video-tools-") as temporary:
     streams = probe_video(ffprobe, converted)["streams"]
     video = next(s for s in streams if s["codec_type"] == "video")
     audio = next(s for s in streams if s["codec_type"] == "audio")
-    original_video = next(s for s in probe_video(ffprobe, sources[0])["streams"] if s["codec_type"] == "video")
+    input_videos = [next(s for s in probe_video(ffprobe, source)["streams"] if s["codec_type"] == "video") for source in sources]
+    larger = max(input_videos, key=lambda v: (v["width"] * v["height"], v["width"], v["height"]))
+    higher_fps = max(Fraction(v.get("avg_frame_rate") or v["r_frame_rate"]) for v in input_videos)
     assert video["codec_name"] == "h264" and video["level"] == 41
-    assert (video["width"], video["height"], video["r_frame_rate"]) == (
-        original_video["width"], original_video["height"], original_video["r_frame_rate"])
+    assert (video["width"], video["height"]) == (larger["width"], larger["height"])
+    assert Fraction(video["r_frame_rate"]) == higher_fps
+    reverse_dir = work / "reverse"
+    reverse_dir.mkdir()
+    reverse_sources = [reverse_dir / "1.mp4", reverse_dir / "2.mp4"]
+    for source, destination in zip(reversed(sources), reverse_sources):
+        shutil.copyfile(source, destination)
+    reversed_output = reverse_dir / "merged.mp4"
+    merge_compatible_videos(ffmpeg, ffprobe, reverse_sources, reversed_output, allow_conversion=True)
+    reversed_video = next(s for s in probe_video(ffprobe, reversed_output)["streams"] if s["codec_type"] == "video")
+    assert (reversed_video["width"], reversed_video["height"]) == (larger["width"], larger["height"])
+    # Very short segments can make ffprobe infer a slightly different rate at the join.
+    assert abs(float(Fraction(reversed_video["avg_frame_rate"]) - higher_fps)) < 0.1
     assert audio["codec_name"] == "aac" and audio["sample_rate"] == "48000" and audio["channels"] == 2
     assert before == [source.read_bytes() for source in sources]
     # A video without audio gets a silent track, preserving both video segments.
