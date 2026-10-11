@@ -1,9 +1,11 @@
 """Resolve detail videos absent from post.json using a disposable library."""
 import importlib.util
+import base64
 import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -53,4 +55,25 @@ with tempfile.TemporaryDirectory(prefix='gc-detail-video-') as temporary:
         else:
             raise AssertionError('Unknown or unsafe key accepted')
         assert (folder / 'post.json').read_bytes() == before
-    print('PASS: disk-only video and custom metadata ID merge; originals unchanged; missing/unsafe keys rejected')
+    png = subprocess.check_output([
+        server.resolve_ffmpeg_binary(), '-v', 'error', '-i', str(fixture),
+        '-frames:v', '1', '-f', 'image2pipe', '-vcodec', 'png', 'pipe:1',
+    ])
+    capture = {'post_path': relative, 'item_key': 'imported', 'time': 0,
+               'image': 'data:image/png;base64,' + base64.b64encode(png).decode()}
+    server.save_detail_video_frame(capture)
+    saved = server.read_json(folder / 'post.json')
+    frame = next(i for i in saved['items'] if i.get('relation') == 'frame_capture')
+    assert frame['source_item_id'] == 'imported'
+    assert (folder / frame['file']).read_bytes() == png
+    assert all((folder / name).read_bytes() == content for name, content in original_bytes.items())
+    before = (folder / 'post.json').read_bytes()
+    for missing in ('missing', '../outside'):
+        try:
+            server.save_detail_video_frame({**capture, 'item_key': missing})
+        except RuntimeError as error:
+            assert 'source video was not found' in str(error)
+        else:
+            raise AssertionError('Unknown or unsafe capture key accepted')
+        assert (folder / 'post.json').read_bytes() == before
+    print('PASS: disk-only video merge and frame capture; originals unchanged; missing/unsafe keys rejected')
