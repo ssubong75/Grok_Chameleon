@@ -84,13 +84,20 @@ with tempfile.TemporaryDirectory(prefix='gc-detail-video-') as temporary:
     scan_folder.mkdir(parents=True)
     shutil.copyfile(fixture, scan_folder / 'new.mp4')
     old_item = {'item_id': 'NEW', 'file': 'old.mp4', 'type': 'video', 'custom': 'keep-item'}
-    original_metadata = {'post_id': 'existing', 'custom': {'keep': True}, 'items': [old_item]}
+    original_metadata = {'post_id': 'existing', 'custom': {'keep': True},
+                         'updated_at': '2020-01-01T00:00:00Z', 'items': [old_item]}
     server.write_json(scan_folder / 'post.json', original_metadata)
     context = server.indexed_post_context(scan_relative)
+    server.DISCOVERED_MEDIA_REGISTRATION_ENABLED = False
+    before_registration = server.post_from_folder(library, scan_folder, context)
+    before_activity = server.library_index.post_activity_at(before_registration)
+    server.DISCOVERED_MEDIA_REGISTRATION_ENABLED = True
     with server.build_post_save_lock(scan_folder):
-        server.post_from_folder(library, scan_folder, context)
+        after_registration = server.post_from_folder(library, scan_folder, context)
+    assert server.library_index.post_activity_at(after_registration) == before_activity
     registered = server.read_json(scan_folder / 'post.json')
     assert registered['custom'] == original_metadata['custom']
+    assert registered['updated_at'] == original_metadata['updated_at']
     assert registered['items'][0] == old_item
     new = next(i for i in registered['items'] if i['file'] == 'new.mp4')
     assert new['item_id'] == 'new-2'
@@ -117,7 +124,11 @@ with tempfile.TemporaryDirectory(prefix='gc-detail-video-') as temporary:
     fresh = library / fresh_relative
     fresh.mkdir(parents=True)
     shutil.copyfile(fixture, fresh / 'copied.mp4')
-    server.post_from_folder(library, fresh, server.indexed_post_context(fresh_relative))
+    server.DISCOVERED_MEDIA_REGISTRATION_ENABLED = False
+    before_fresh = server.post_from_folder(library, fresh, server.indexed_post_context(fresh_relative))
+    server.DISCOVERED_MEDIA_REGISTRATION_ENABLED = True
+    after_fresh = server.post_from_folder(library, fresh, server.indexed_post_context(fresh_relative))
+    assert server.library_index.post_activity_at(after_fresh) == server.library_index.post_activity_at(before_fresh)
     assert server.read_json(fresh / 'post.json')['items'][0]['file'] == 'copied.mp4'
     (fresh / 'post.json').write_text('{invalid')
     server.post_from_folder(library, fresh, server.indexed_post_context(fresh_relative))

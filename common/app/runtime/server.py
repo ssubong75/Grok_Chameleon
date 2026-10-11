@@ -21487,10 +21487,11 @@ def register_discovered_media(folder: Path, context: dict, media_items: list[dic
             "post_id": folder.name,
             "source": "build" if rel_folder.startswith("collection/") else context.get("source") or "local",
             "folder_path": rel_folder,
-            "created_at": now_iso(),
+            "created_at": media_items[0]["created_at"],
         }
         updated["items"] = [*raw_items, *additions]
-        updated["updated_at"] = now_iso()
+        # Discovery is bookkeeping, not a new card activity. Preserve the post's
+        # timestamps; imported files already contribute their own file times.
         write_json(metadata_path, updated)
         return updated
 
