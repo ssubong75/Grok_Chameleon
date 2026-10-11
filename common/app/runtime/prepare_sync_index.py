@@ -15,13 +15,20 @@ def prepare(root, server):
     root = Path(root).resolve()
     if root == Path(root.anchor) or not (root / "library.json").is_file():
         raise ValueError("A valid library folder is required")
-    collections = server.scan_collection_folders(root)
-    posts = [
-        *server.scan_created_area(root, "created"),
-        *server.scan_created_area(root, "upload"),
-        *server.scan_created_area(root, server.REFERENCE_DIRECTORY),
-        *[post for collection in collections for post in collection.get("posts", [])],
-    ]
+    # Sync has already verified the portable metadata. Derive the index without
+    # registering files or repairing dates in post.json during this phase.
+    registration_enabled = server.DISCOVERED_MEDIA_REGISTRATION_ENABLED
+    server.DISCOVERED_MEDIA_REGISTRATION_ENABLED = False
+    try:
+        collections = server.scan_collection_folders(root)
+        posts = [
+            *server.scan_created_area(root, "created"),
+            *server.scan_created_area(root, "upload"),
+            *server.scan_created_area(root, server.REFERENCE_DIRECTORY),
+            *[post for collection in collections for post in collection.get("posts", [])],
+        ]
+    finally:
+        server.DISCOVERED_MEDIA_REGISTRATION_ENABLED = registration_enabled
     server.library_index.rebuild(
         root, server.normalize_json_unicode(posts),
         server.normalize_json_unicode(collections),

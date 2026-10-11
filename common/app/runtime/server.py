@@ -21439,10 +21439,13 @@ def representative_item(items: list[dict], meta) -> dict | None:
     )
 
 
+DISCOVERED_MEDIA_REGISTRATION_ENABLED = True
+
+
 def register_discovered_media(folder: Path, context: dict, media_items: list[dict], meta):
     """Append disk-only media without replacing existing post or item metadata."""
     rel_folder = str(context.get("path") or "")
-    if not media_items or rel_folder.split("/", 1)[0] not in {"created", "collection", "upload", "reference"}:
+    if not DISCOVERED_MEDIA_REGISTRATION_ENABLED or not media_items or rel_folder.split("/", 1)[0] not in {"created", "collection", "upload", "reference"}:
         return meta
     metadata_path = folder / "post.json"
     # Some callers already hold this folder's save lock; it must be reentrant.
