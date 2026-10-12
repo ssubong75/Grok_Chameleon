@@ -93,13 +93,17 @@ function buildSourcePosts() {
     ));
   }
   if (library_state.libraryIndexEnabled) {
-    if (library_state.indexedBuildKey !== indexedBuildQueryKey()) {
-      if (typeof loadIndexedBuildPosts === "function") {
-        loadIndexedBuildPosts({ force: true }).catch((error) => console.warn(error));
-      }
-      // Wait until the loader has entered the unified Build scope.
-      if (library_state.indexedBuildKey !== indexedBuildQueryKey()) return [];
+    const onBuildMain = screen_state.current_screen === "b_main";
+    if (
+      onBuildMain
+      && !library_state.indexedBuildLoading
+      && (!library_state.indexedBuildLoaded || library_state.indexedBuildKey !== indexedBuildQueryKey())
+      && typeof loadIndexedBuildPosts === "function"
+    ) {
+      loadIndexedBuildPosts({ force: true }).catch((error) => console.warn(error));
     }
+    if (!onBuildMain && !library_state.indexedBuildPosts?.length) return [];
+    if (library_state.indexedBuildKey !== indexedBuildQueryKey() && !library_state.indexedBuildPosts?.length) return [];
     // Keep explicitly uploaded Build cards after generation; temporary job sources
     // still need to be rechecked when a cached page arrives after completion.
     const indexedPosts = (library_state.indexedBuildPosts || []).filter((post) => (

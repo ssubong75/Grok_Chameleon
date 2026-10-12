@@ -735,7 +735,7 @@
         scope: "build_main",
         offset: requestOffset,
         limit: INDEXED_CACHED_CARD_LIST_SIZE,
-      });
+      }, { signal: typeof libraryViewSignal === "function" ? libraryViewSignal() : undefined });
       if (
         requestToken !== indexedBuildRequestToken
         || epoch !== indexedLibraryRequestEpoch()
@@ -763,6 +763,8 @@
       library_state.indexedBuildLoaded = true;
       mergeIndexedPostsIntoWorkingSet(result.merged);
       if (refreshResult.authoritativePaths) indexedBuildRefreshScope = null;
+    } catch (error) {
+      if (error?.name !== "AbortError") throw error;
     } finally {
       if (requestToken === indexedBuildRequestToken) {
         library_state.indexedBuildLoading = false;
@@ -1026,18 +1028,25 @@
     }
   }
 
+  function abortIndexedLibraryLoads() {
+    indexedBuildRequestToken += 1;
+    indexedBuildLoadingKey = "";
+    library_state.indexedBuildLoading = false;
+    indexedCollectionRequestToken += 1;
+    indexedCollectionContentRequestToken += 1;
+    for (const collection of library_state.collections || []) collection.indexed_loading = false;
+  }
+
   function refreshIndexedLibraryViews() {
     if (!library_state.libraryIndexEnabled || !library_state.apiReady) return;
-    if (!library_state.indexedBuildLoaded) {
+    const screen = screen_state.current_screen;
+    if (screen === "b_main" && !library_state.indexedBuildLoaded) {
       loadIndexedBuildPosts().catch((error) => console.warn(error));
     }
-    if (library_state.selectedCollectionPath) {
+    if (screen === "collection_main" && library_state.selectedCollectionPath) {
       loadIndexedCollectionPosts(library_state.selectedCollectionPath).catch((error) => console.warn(error));
     }
-    if (String(library_state.searchQuery || "").trim()) {
+    if (screen === "search_main" && String(library_state.searchQuery || "").trim()) {
       loadIndexedSearchBuildPosts(library_state.searchQuery).catch((error) => console.warn(error));
-    }
-    if (!library_state.indexedUploadLoaded) {
-      loadIndexedUploadPosts().catch((error) => console.warn(error));
     }
   }

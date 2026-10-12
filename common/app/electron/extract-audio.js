@@ -6,18 +6,10 @@ const { execFile } = require('node:child_process');
 async function extractAudio(payload, deps) {
   if (!deps.ffmpeg) throw new Error('FFmpeg를 찾을 수 없습니다.');
   if (!['build', 'imagine'].includes(payload.provider)) throw new Error('Invalid provider.');
-  const source = deps.resolveSource(payload.url);
-  let input = source.href;
-  let localPath = '';
-  if (source.pathname === '/api/media') {
-    const infoUrl = new URL('/api/card-preview/source-info', deps.serverBase);
-    infoUrl.search = source.search;
-    const info = await deps.fetchJson(infoUrl, {signal: AbortSignal.timeout(10000)});
-    localPath = String(info.source_path || '');
-    if (!path.isAbsolute(localPath) || !fs.statSync(localPath).isFile()) throw new Error('영상 파일을 찾을 수 없습니다.');
-    input = localPath;
-  }
-  const { uniqueStampedName, stampStem } = require('./audio-edit');
+  const { uniqueStampedName, stampStem, resolveEditInput } = require('./audio-edit');
+  const resolved = await resolveEditInput(payload, deps);
+  const input = resolved.input;
+  const localPath = resolved.localPath;
   let target;
   if (payload.provider === 'build') {
     if (!localPath) throw new Error('빌드 영상의 로컬 파일을 찾을 수 없습니다.');

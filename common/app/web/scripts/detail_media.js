@@ -1387,6 +1387,7 @@ async function deterministicBuildCardPreviewUrl(rawUrl, kind = "card") {
 
 // Build local files and cached Imagine card previews share this queue.
 const fastLocalPreviewQueue = [];
+const fastLocalPreviewLive = new Set();
 const fastLocalPreviewBindings = new Map();
 const fastLocalPreviewActive = { card: 0, thumbnail: 0 };
 const fastLocalPreviewLimits = { card: 3, thumbnail: 4 };
@@ -1441,6 +1442,7 @@ function pumpFastLocalPreviews() {
       continue;
     }
     fastLocalPreviewQueue.splice(index, 1);
+    fastLocalPreviewLive.add(entry);
     fastLocalPreviewActive[entry.kind] += 1;
     Promise.resolve().then(async () => {
       const cachedUrls = await fastCachedPreviewUrls(entry.source, entry.kind, entry.cacheIdentity);
@@ -1469,11 +1471,18 @@ function pumpFastLocalPreviews() {
     }).catch(() => "").then((url) => {
       entry.resolve({ url, cancelled: entry.cancelled });
     }).finally(() => {
+      fastLocalPreviewLive.delete(entry);
       cardPreviewDisposers.get(entry.target)?.delete(entry.cancel);
       fastLocalPreviewActive[entry.kind] -= 1;
       pumpFastLocalPreviews();
     });
   }
+}
+
+function abortFastLocalPreviews() {
+  for (const entry of fastLocalPreviewQueue.splice(0)) entry.cancel();
+  for (const entry of Array.from(fastLocalPreviewLive)) entry.cancel();
+  fastLocalPreviewLive.clear();
 }
 
 function requestFastLocalPreview(target, source, kind = "card", priority = false, cacheIdentity = "") {

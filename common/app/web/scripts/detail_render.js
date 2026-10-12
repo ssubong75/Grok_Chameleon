@@ -420,7 +420,7 @@ function detailThumbButtonForItem(prefix, item, post, options = {}) {
   button.type = "button";
   button.dataset.libraryItemId = key;
   button.dataset.libraryItemType = type;
-  button.draggable = prefix === "b" && type === "video";
+  button.draggable = type === "video" && !item?.build_job_id;
   button.dataset.thumbSignature = detailThumbSignature(prefix, item, post);
   button.setAttribute("aria-label", `${type === "video" ? "Video" : "Image"} version`);
 
@@ -454,7 +454,8 @@ function detailThumbButtonForItem(prefix, item, post, options = {}) {
     video.src = videoUrl;
     video.muted = true;
     video.playsInline = true;
-    video.preload = "metadata";
+    video.preload = "auto";
+    video.fetchPriority = "high";
     fill.replaceChildren(video);
     bindHoverVideoPreview(button, video);
   };
@@ -947,6 +948,7 @@ function renderDetailView(prefix, post, options = {}) {
       image.className = "detail_image detail-image detail_media_object";
       image.alt = "";
       image.draggable = false;
+      image.fetchPriority = "high";
       image.addEventListener("load", () => {
         syncDetailMediaAspect(prefix, image, selectedItem);
         if (prefix === "i") renderImagineDetailAspectMenu(selectedItem);

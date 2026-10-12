@@ -15,27 +15,27 @@
     <script src="./scripts/account_core.js" defer></script>
     <script src="./scripts/composer_options.js" defer></script>
     <script src="./scripts/composer_provider.js" defer></script>
-    <script src="./scripts/detail_media.js?v=20260819-liked-missing1" defer></script>
+    <script src="./scripts/detail_media.js?v=20261013-view-focus1" defer></script>
     <script src="./scripts/b_detail_media.js" defer></script>
     <script src="./scripts/i_detail_media.js" defer></script>
-    <script src="./scripts/detail_video_player.js?v=20261012-play-icon1" defer></script>
-    <script src="./scripts/detail_common_actions.js" defer></script>
-    <script src="./scripts/detail_audio_edit.js?v=20261012-audio-edit6" defer></script>
-    <script src="./scripts/b_detail_actions.js" defer></script>
+    <script src="./scripts/detail_video_player.js?v=20261013-view-focus1" defer></script>
+    <script src="./scripts/detail_common_actions.js?v=20261013-video-edit1" defer></script>
+    <script src="./scripts/detail_audio_edit.js?v=20261013-video-edit9" defer></script>
+    <script src="./scripts/b_detail_actions.js?v=20261013-video-edit5" defer></script>
     <script src="./scripts/i_detail_actions.js?v=20260819-clone-liked-hydrate2" defer></script>
     <script src="./scripts/detail_state.js" defer></script>
     <script src="./scripts/detail_navigation.js" defer></script>
-    <script src="./scripts/detail_render.js?v=20261012-audio-edit4" defer></script>
-    <script src="./scripts/library_scan.js?v=20260806-14" defer></script>
+    <script src="./scripts/detail_render.js?v=20261013-view-focus1" defer></script>
+    <script src="./scripts/library_scan.js?v=20261013-view-focus1" defer></script>
     <script src="./scripts/render.js" defer></script>
-    <script src="./scripts/build_main.js?v=20261012-audio-edit4" defer></script>
+    <script src="./scripts/build_main.js?v=20261013-view-focus1" defer></script>
     <script src="./scripts/b_composer_submit.js" defer></script>
     <script src="./scripts/i_composer_submit.js?v=20260818-continuous1" defer></script>
     <script src="./scripts/composer_submit.js" defer></script>
-    <script src="./scripts/card_render.js?v=20260806-13" defer></script>
+    <script src="./scripts/card_render.js?v=20261013-view-focus1" defer></script>
     <script src="./scripts/source_filter.js" defer></script>
-    <script src="./scripts/b_source_render.js?v=20260806-14" defer></script>
-    <script src="./scripts/i_source_render.js?v=20260819-clone-liked-group1" defer></script>
+    <script src="./scripts/b_source_render.js?v=20261013-view-focus1" defer></script>
+    <script src="./scripts/i_source_render.js?v=20261013-view-focus1" defer></script>
     <script src="./scripts/source_render.js" defer></script>
     <script src="./scripts/navigation_history.js" defer></script>
     <script src="./scripts/screen_router.js" defer></script>
@@ -367,7 +367,7 @@
                 </button>
                 <button class="i_detail_action i_detail_spicy i_detail_image_tool_btn" type="button" aria-label="Spicy" hidden><span class="i_detail_spicy_glyph" aria-hidden="true">Spicy</span></button>
                 <button class="i_detail_action i_detail_edit" type="button" aria-label="Image Edit" title="Image Edit"><span class="i_detail_edit_glyph" aria-hidden="true">Ie</span></button>
-                <button class="i_detail_action i_detail_extract_audio" type="button" aria-label="Audio Edit" title="Audio Edit" hidden><span class="i_detail_edit_glyph" aria-hidden="true">Ae</span></button>
+                <button class="i_detail_action i_detail_extract_audio" type="button" aria-label="Video Edit" title="Video Edit" hidden><span class="i_detail_edit_glyph" aria-hidden="true">Ve</span></button>
                 <button class="i_detail_action i_detail_crop_btn i_detail_image_tool_btn" type="button" aria-label="Crop" title="Crop" hidden>
                   <span class="i_detail_crop_icon" aria-hidden="true"></span>
                 </button>
@@ -437,21 +437,6 @@
                   <span class="b_detail_model_badge"><span class="b_detail_resolution_name"></span><span class="b_detail_model_name">Quality</span></span>
                 </div>
                 <div class="b_detail_media b_detail_media_image"><img src="./assets/icons/image.svg" alt="" /></div>
-                <section class="b_video_merge_popup" role="dialog" aria-label="Merge Videos" hidden>
-                  <div class="b_video_merge_header"><span>Merge Videos</span><button type="button" class="b_video_merge_close" aria-label="Close">×</button></div>
-                  <div class="b_video_merge_body">
-                    <div class="b_video_merge_attachment">
-                      <button type="button" class="b_video_merge_slot" data-merge-slot="0" aria-label="Video 1: drop a video or attach the selected video"><span>1</span><small>Drop video</small></button>
-                      <button type="button" class="composer_upload_remove b_video_merge_remove" data-remove-slot="0" aria-label="Remove video 1" hidden><span class="delete_x_icon" aria-hidden="true"></span></button>
-                    </div>
-                    <div class="b_video_merge_attachment">
-                      <button type="button" class="b_video_merge_slot" data-merge-slot="1" aria-label="Video 2: drop a video or attach the selected video"><span>2</span><small>Drop video</small></button>
-                      <button type="button" class="composer_upload_remove b_video_merge_remove" data-remove-slot="1" aria-label="Remove video 2" hidden><span class="delete_x_icon" aria-hidden="true"></span></button>
-                    </div>
-                    <button type="button" class="b_video_merge_submit" disabled>Merge</button>
-                  </div>
-                  <div class="b_video_merge_status" role="status" aria-live="polite"></div>
-                </section>
               </div>
               <aside class="b_detail_actions" aria-label="Build actions">
                 <button class="b_detail_action b_detail_heart text2image-detail-save imagine-save-heart" type="button" aria-label="Favorite" aria-pressed="false" hidden>
@@ -463,8 +448,7 @@
                 </button>
                 <button class="b_detail_action b_detail_spicy b_detail_image_tool_btn" type="button" aria-label="Spicy" hidden><span class="b_detail_spicy_glyph" aria-hidden="true">Spicy</span></button>
                 <button class="b_detail_action b_detail_edit" type="button" aria-label="Image Edit" title="Image Edit"><span class="b_detail_edit_glyph" aria-hidden="true">Ie</span></button>
-                <button class="b_detail_action b_detail_video_merge" type="button" aria-label="Video Edit" title="Video Edit" aria-expanded="false"><span class="b_detail_merge_glyph" aria-hidden="true">Ve</span></button>
-                <button class="b_detail_action b_detail_extract_audio" type="button" aria-label="Audio Edit" title="Audio Edit" hidden><span class="b_detail_edit_glyph" aria-hidden="true">Ae</span></button>
+                <button class="b_detail_action b_detail_extract_audio" type="button" aria-label="Video Edit" title="Video Edit" hidden><span class="b_detail_edit_glyph" aria-hidden="true">Ve</span></button>
                 <button class="b_detail_action b_detail_capture_frame" type="button" aria-label="Capture Frame" title="Capture Frame" hidden><svg class="detail_capture_glyph" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 7h4l2-3h4l2 3h4a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1Z"></path><circle cx="12" cy="13" r="4"></circle></svg></button>
 	                <button class="b_detail_action b_detail_move" type="button" aria-label="Move to Folder" title="Move to Folder">
                   <svg class="b_detail_action_glyph" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M7 17 17 7"></path><path d="M10 7h7v7"></path></svg>

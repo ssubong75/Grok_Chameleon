@@ -4301,7 +4301,7 @@ ipcMain.handle("grok-chameleon:local-audio-peaks", async (event, payload = {}) =
 });
 ipcMain.handle("grok-chameleon:read-audio-file", async (event, payload = {}) => {
   assertAppSender(event);
-  return readLocalAudio(payload.path);
+  return readLocalAudio(payload.path, audioEditDeps(), payload.includeVideo !== false);
 });
 ipcMain.handle("grok-chameleon:save-audio-edit", async (event, payload = {}) => {
   assertAppSender(event);
@@ -4310,8 +4310,11 @@ ipcMain.handle("grok-chameleon:save-audio-edit", async (event, payload = {}) => 
 ipcMain.handle("grok-chameleon:pick-audio-files", async (event) => {
   assertAppSender(event);
   const selected = await dialog.showOpenDialog(mainWindow, {
-    title: "오디오 파일",
-    filters: [{ name: "Audio", extensions: ["mp3", "wav", "m4a", "aac", "flac", "ogg", "aiff", "aif"] }],
+    title: "오디오 또는 비디오",
+    filters: [{
+      name: "Audio and Video",
+      extensions: ["mp3", "wav", "m4a", "aac", "flac", "ogg", "aiff", "aif", "mp4", "mov", "m4v", "mkv", "webm", "avi"],
+    }],
     properties: ["openFile", "multiSelections"],
   });
   return { cancelled: selected.canceled, paths: selected.canceled ? [] : selected.filePaths };

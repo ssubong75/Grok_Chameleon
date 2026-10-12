@@ -121,13 +121,17 @@
   }
 
   let moveToCollectionOverlay = null;
+  let moveToCollectionDismiss = null;
   let moveToCollectionRequestPending = false;
   let mergeDestinationOverlay = null;
   let mergeDestinationResolve = null;
 
   function closeMoveToCollectionDialog() {
+    const dismiss = moveToCollectionDismiss;
+    moveToCollectionDismiss = null;
     moveToCollectionOverlay?.remove();
     moveToCollectionOverlay = null;
+    dismiss?.(null);
   }
 
   function closeMergeDestinationDialog(result = null) {
@@ -441,7 +445,7 @@
     });
   }
 
-  function openMoveToCollectionDialog({ postPath = "", postPaths = [], postObject = null, postObjects = [], itemKey = "" } = {}) {
+  function openMoveToCollectionDialog({ postPath = "", postPaths = [], postObject = null, postObjects = [], itemKey = "", saveMode = false, onSave = null } = {}) {
     closeMoveToCollectionDialog();
     const requestedPaths = (postPaths.length ? postPaths : [postPath])
       .map((path) => String(path || "").trim())
@@ -460,18 +464,18 @@
         )) === index;
       });
     const sourcePost = sourcePosts[0] || null;
-    if (isLikedReferenceSaveContext(sourcePosts)) {
+    if (!saveMode && isLikedReferenceSaveContext(sourcePosts)) {
       saveLikedCardsToReference(sourcePosts).catch((error) => (
         showErrorPanel("Reference save failed", error?.message || "Reference save failed.")
       ));
       return;
     }
-    if (!sourcePost) {
+    if (!saveMode && !sourcePost) {
       setLibraryMessage("Select a post to move.");
       return;
     }
     let selectedPrimaryPath = library_state.selectedCollectionPath
-      || collectionForPostPath(sourcePost.folder_path)?.path
+      || collectionForPostPath(sourcePost?.folder_path)?.path
       || firstMoveCollectionPath();
     let selectedSecondPath = "";
     let collectionSelected = !selectedPrimaryPath;
@@ -511,6 +515,22 @@
     `;
     document.body.append(overlay);
     moveToCollectionOverlay = overlay;
+    let saveSettled = false;
+    const finishSave = (result) => {
+      if (!saveMode || saveSettled) return;
+      saveSettled = true;
+      onSave?.(result);
+    };
+    moveToCollectionDismiss = saveMode ? finishSave : null;
+    const commitSave = (postPathValue) => {
+      if (!postPathValue) return;
+      moveToCollectionDismiss = null;
+      closeMoveToCollectionDialog();
+      finishSave({
+        collectionPath: selectedPrimaryPath,
+        postPath: postPathValue,
+      });
+    };
 
     const primaryList = overlay.querySelector(".move-gallery-primary-list");
     const secondaryList = overlay.querySelector(".move-gallery-secondary-list");
@@ -696,6 +716,10 @@
         card.addEventListener("dblclick", () => {
           selectedSecondPath = post.folder_path;
           collectionSelected = false;
+          if (saveMode) {
+            commitSave(post.folder_path);
+            return;
+          }
           moveToCollectionTarget({
             sourcePost,
             sourcePosts,
@@ -883,6 +907,10 @@
     overlay.addEventListener("keydown", (event) => {
       if (event.key === "Escape") closeMoveToCollectionDialog();
       if (event.key === "Enter" && selectedSecondPath) {
+        if (saveMode) {
+          commitSave(selectedSecondPath);
+          return;
+        }
         moveToCollectionTarget({
           sourcePost,
           sourcePosts,

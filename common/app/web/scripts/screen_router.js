@@ -27,6 +27,15 @@ function showAccountScreen(show, options = {}) {
 
 function openScreen(screenId, activeButtonId = "", options = {}) {
   const previousScreenId = screen_state.current_screen;
+  const openingDetail = screenId === "i_detail" || screenId === "b_detail";
+  if (typeof focusLibraryView === "function") focusLibraryView({ keepMedia: openingDetail });
+  if (!openingDetail && (previousScreenId === "i_detail" || previousScreenId === "b_detail")) {
+    document.querySelectorAll(".i_detail_media video, .b_detail_media video").forEach((video) => {
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+    });
+  }
   if (screenId === "b_t2i_view_main") {
     library_state.bMainView = "t2i";
     screenId = "b_main";
@@ -83,6 +92,14 @@ function openScreen(screenId, activeButtonId = "", options = {}) {
   if (screenId === "i_detail" || screenId === "b_detail") playActiveDetailVideoIfSelected();
   if (screenId === "i_detail" || screenId === "b_detail") updateDetailPostNavigationButtons();
   if (screenId === "collection_main") scheduleCollectionRows();
+  if (!openingDetail && screenId === "i_main" && typeof renderSourceCards === "function") renderSourceCards("imagine");
+  if (!openingDetail && screenId === "b_main") {
+    if (typeof renderSourceCards === "function") renderSourceCards("build");
+    if (previousScreenId !== "b_main" && typeof refreshBuildJobs === "function") {
+      refreshBuildJobs().catch((error) => console.warn(error));
+    }
+  }
+  if (screenId === "i_discover_main" && typeof renderImagineDiscoverCards === "function") renderImagineDiscoverCards();
   if (typeof scheduleScreenVirtualCardList === "function") scheduleScreenVirtualCardList(screenId);
   if (typeof syncCardSelectionControls === "function") syncCardSelectionControls();
   const historyOptions = (

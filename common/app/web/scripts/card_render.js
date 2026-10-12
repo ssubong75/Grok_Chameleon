@@ -956,6 +956,7 @@ function mediaCardForPost(post, className, backTargetOverride = null) {
   if (attachedJob && typeof buildJobActionButton === "function") article.append(buildJobActionButton(attachedJob));
 
   const activate = () => {
+    if (typeof focusLibraryView === "function") focusLibraryView();
     const representativeId = mediaItemKey(rawRepresentative);
     if (representativeId) library_state.selectedDetailItemId = representativeId;
     selectLibraryPost(post);
@@ -1049,6 +1050,7 @@ function mediaCardForItem(post, item, backTarget = { screenId: "2nd_main", activ
   article.append(media, caption);
 
   const activate = () => {
+    if (typeof focusLibraryView === "function") focusLibraryView();
     selectLibraryPost(post);
     setSelectedDetailItem(mediaItemKey(item));
     const detailType = cardUsesImagineDetail(post, "") ? "imagine" : "build";

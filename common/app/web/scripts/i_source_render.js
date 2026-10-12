@@ -247,6 +247,7 @@ async function openImagineLinkPost(value) {
     // main header, so relying on the later collapsed-input cleanup could leave an old
     // link visible when the user returns from the detail page.
     if (input) input.value = "";
+    if (typeof focusLibraryView === "function") focusLibraryView();
     setImagineTab("i_link_btn");
     library_state.iMainView = imagineViewValue("LINK", "link");
     screen_state.detail_back.imagine = {
@@ -2070,6 +2071,24 @@ function newImagineSavedSyncToken() {
   return `saved-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
+function libraryViewSignal() {
+  if (!library_state.libraryViewController) library_state.libraryViewController = new AbortController();
+  return library_state.libraryViewController.signal;
+}
+
+function focusLibraryView({ keepMedia = false } = {}) {
+  library_state.libraryViewController?.abort?.();
+  library_state.libraryViewController = new AbortController();
+  if (typeof invalidateImagineSavedRequestsForDelete === "function") invalidateImagineSavedRequestsForDelete();
+  library_state.imagineLikedLoading = false;
+  library_state.imagineUploadLoading = false;
+  library_state.imagineDiscoverLoading = false;
+  library_state.imagineDiscoverCacheLoading = false;
+  library_state.imagineRemoteCacheLoading = false;
+  if (typeof abortIndexedLibraryLoads === "function") abortIndexedLibraryLoads();
+  if (!keepMedia && typeof abortFastLocalPreviews === "function") abortFastLocalPreviews();
+}
+
 function invalidateImagineSavedRequestsForDelete() {
   const controller = library_state.imagineRemoteRequestController;
   controller?.abort?.();
@@ -2503,7 +2522,7 @@ async function loadImagineDiscoverCacheCards() {
     const data = await qApi("/api/imagine/discover/cache", {
       account_id: accountId,
       limit: 5000,
-    });
+    }, { signal: libraryViewSignal() });
     if (!imagineAccountResponseIsCurrent(accountId, requestEpoch, data)) return;
     const cachedPosts = normalizeImagineDiscoverPosts(Array.isArray(data.posts) ? data.posts : []);
     if (cachedPosts.length) {
@@ -2548,7 +2567,7 @@ async function loadImagineDiscoverCards({ force = false, append = false, reconci
       limit: 60,
       cursor: force || quietReconcile ? "" : (append ? (library_state.imagineDiscoverCursor || "") : ""),
       media_type: "video",
-    });
+    }, { signal: libraryViewSignal() });
     if (serial !== imagineDiscoverRequestSerial || !imagineAccountResponseIsCurrent(accountId, requestEpoch, data)) {
       listChanged = false;
       return;
@@ -2662,7 +2681,7 @@ async function loadImagineUploadCards({ force = false, append = false } = {}) {
       account_id: accountId,
       limit: 50,
       cursor: force ? "" : (append ? (library_state.imagineUploadCursor || "") : ""),
-    });
+    }, { signal: libraryViewSignal() });
     if (!imagineAccountResponseIsCurrent(accountId, requestEpoch, data)) return;
     const posts = (Array.isArray(data.posts) ? data.posts : []).map(normalizeServerPost);
     library_state.imagineUploadPosts = append && !force
@@ -2702,7 +2721,7 @@ async function loadImagineLikedCards({ force = false } = {}) {
   // when memory has no cards, then keep that stable view while the live page revalidates.
   if (!(library_state.imagineLikedPosts || []).length) {
     try {
-      const cached = await qApi("/api/imagine/liked/cache", { account_id: accountId, limit: 5000 });
+      const cached = await qApi("/api/imagine/liked/cache", { account_id: accountId, limit: 5000 }, { signal: libraryViewSignal() });
       if (imagineAccountResponseIsCurrent(accountId, requestEpoch, cached)) {
         applyImagineLikedExclusionSnapshot(cached, accountId);
         const cachedPosts = (Array.isArray(cached?.posts) ? cached.posts : []).map(normalizeServerPost);
@@ -2723,7 +2742,7 @@ async function loadImagineLikedCards({ force = false } = {}) {
     }
   }
   try {
-    const data = await qApi("/api/imagine/liked", { account_id: accountId, limit: 100 });
+    const data = await qApi("/api/imagine/liked", { account_id: accountId, limit: 100 }, { signal: libraryViewSignal() });
     if (!imagineAccountResponseIsCurrent(accountId, requestEpoch, data)) return;
     applyImagineLikedExclusionSnapshot(data, accountId);
     // USB-synced removals must also leave memory when unrelated requests fail and
@@ -2758,7 +2777,7 @@ async function loadImagineLikedCards({ force = false } = {}) {
     }
   } catch (error) {
     if (imagineAccountResponseIsCurrent(accountId, requestEpoch)) {
-      library_state.imagineLikedError = error?.message || "Imagine liked failed.";
+      if (error?.name !== "AbortError") library_state.imagineLikedError = error?.message || "Imagine liked failed.";
     }
   } finally {
     if (imagineAccountResponseIsCurrent(accountId, requestEpoch)) {
@@ -2777,14 +2796,14 @@ async function loadImagineSavedCacheCards() {
   library_state.imagineRemoteCacheLoading = true;
   renderImagineSourceCards();
   try {
-    let data = await qApi("/api/imagine/saved/display-cache", { account_id: accountId });
+    let data = await qApi("/api/imagine/saved/display-cache", { account_id: accountId }, { signal: libraryViewSignal() });
     if (!imagineAccountResponseIsCurrent(accountId, requestEpoch, data)) return;
     applyImagineLikedExclusionSnapshot(data, accountId);
     let cachedPosts = normalizeImagineRemotePosts(Array.isArray(data?.posts) ? data.posts : []);
     // The display cache is the previous complete, reconciled screen. If it is not available
     // yet, migrate once from the legacy page-fragment cache and let the live read create it.
     if (data?.found !== true) {
-      data = await qApi("/api/imagine/saved/cache", { account_id: accountId, limit: 5000 });
+      data = await qApi("/api/imagine/saved/cache", { account_id: accountId, limit: 5000 }, { signal: libraryViewSignal() });
       if (!imagineAccountResponseIsCurrent(accountId, requestEpoch, data)) return;
       applyImagineLikedExclusionSnapshot(data, accountId);
       cachedPosts = normalizeImagineRemotePosts(Array.isArray(data?.posts) ? data.posts : []);

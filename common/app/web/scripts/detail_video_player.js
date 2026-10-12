@@ -182,7 +182,8 @@
     const videoUrl = detailMediaUrlForItem(prefix, item, selectedLibraryPost());
     video.src = videoUrl || item.object_url || item.url || "";
     video.playsInline = true;
-    video.preload = "metadata";
+    video.preload = "auto";
+    video.fetchPriority = "high";
     video.loop = true;
     video.defaultMuted = false;
     video.muted = false;

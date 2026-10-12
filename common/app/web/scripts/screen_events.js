@@ -216,14 +216,4 @@ restoreLibraryRoot().then(() => {
     qApi("/api/imagine/clone-map/prepare", { account_id: activeImagineAccount.id }).catch(() => {});
   }
   consumeImageEditorReturn().catch((error) => showErrorPanel("Edit failed", error?.message || "Edit failed."));
-  if (typeof refreshBuildJobs === "function") refreshBuildJobs();
-  if (
-    library_state.apiReady
-    && library_state.rootPath
-    && typeof scanLibrary === "function"
-  ) {
-    setTimeout(() => {
-      scanLibrary().catch((error) => console.warn(error));
-    }, 100);
-  }
 });

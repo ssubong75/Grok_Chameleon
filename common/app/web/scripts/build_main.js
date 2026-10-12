@@ -406,6 +406,7 @@
 
 
   function selectBuildJob(jobId, options = {}) {
+    if (typeof focusLibraryView === "function") focusLibraryView();
     const job = (library_state.jobs || []).find((candidate) => String(candidate.id || "") === String(jobId || ""));
     if (!job) return;
     library_state.selectedJobId = String(job.id);
