@@ -35,6 +35,13 @@ function openScreen(screenId, activeButtonId = "", options = {}) {
   showAccountScreen(false, { skipHistory: true });
   closePromptSave();
   screen_state.current_screen = screenId;
+  if (
+    screenId === "i_discover_main"
+    && previousScreenId !== "i_discover_main"
+    && typeof prepareImagineDiscoverQuietReconcile === "function"
+  ) {
+    prepareImagineDiscoverQuietReconcile();
+  }
   if (typeof syncBuildVideoMergeContext === "function") syncBuildVideoMergeContext();
 
   for (const screen of screens) {

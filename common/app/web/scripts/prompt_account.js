@@ -480,6 +480,8 @@
     library_state.imagineDiscoverCacheLoading = false;
     library_state.imagineDiscoverLoaded = false;
     library_state.imagineDiscoverLoading = false;
+    library_state.imagineDiscoverReconcileScheduled = false;
+    library_state.imagineDiscoverReconcileAttempted = false;
     library_state.imagineDiscoverError = "";
     library_state.imagineDiscoverCursor = "";
     library_state.imagineDiscoverHasMore = false;

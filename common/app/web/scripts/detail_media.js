@@ -1273,23 +1273,37 @@ function cardPreviewStableIdentity(item) {
   return assetId ? `${accountId}:${assetId}${imageVariant}` : "";
 }
 
+async function imaginePersistentCardPreviewUrls(rawUrl, kind = "card", cacheIdentity = "") {
+  try {
+    const parsed = new URL(String(rawUrl || ""), location.origin);
+    if (parsed.origin !== location.origin || parsed.pathname !== "/api/imagine/remote/media") return [];
+    const previewKind = String(kind || "").toLowerCase() === "thumbnail" ? "thumbnail" : "card";
+    const stableIdentity = String(cacheIdentity || "").trim();
+    const keySources = stableIdentity
+      ? [
+        `remote\0${CARD_PREVIEW_RENDER_REVISION}\0${previewKind}\0identity\0${stableIdentity}`,
+        `remote\0${CARD_PREVIEW_RENDER_REVISION}\0${previewKind}\0${parsed.pathname}${parsed.search}`,
+      ]
+      : [`remote\0${CARD_PREVIEW_RENDER_REVISION}\0${previewKind}\0${parsed.pathname}${parsed.search}`];
+    const urls = [];
+    for (const keySource of keySources) {
+      const key = await sha256Text(keySource);
+      if (key) urls.push(`/api/card-preview?key=${key}`);
+    }
+    return urls;
+  } catch (_) {
+    return [];
+  }
+}
+
 async function lookupPersistentCardPreview(rawUrl, kind = "card", cacheIdentity = "") {
   try {
     const parsed = new URL(String(rawUrl || ""), location.origin);
     if (parsed.origin !== location.origin) return "";
     const previewKind = String(kind || "").toLowerCase() === "thumbnail" ? "thumbnail" : "card";
     if (parsed.pathname === "/api/imagine/remote/media") {
-      const stableIdentity = String(cacheIdentity || "").trim();
-      const keySources = stableIdentity
-        ? [
-          `remote\0${CARD_PREVIEW_RENDER_REVISION}\0${previewKind}\0identity\0${stableIdentity}`,
-          `remote\0${CARD_PREVIEW_RENDER_REVISION}\0${previewKind}\0${parsed.pathname}${parsed.search}`,
-        ]
-        : [`remote\0${CARD_PREVIEW_RENDER_REVISION}\0${previewKind}\0${parsed.pathname}${parsed.search}`];
-      for (const keySource of keySources) {
-        const key = await sha256Text(keySource);
-        if (!key) continue;
-        const previewUrl = `/api/card-preview?key=${key}`;
+      const urls = await imaginePersistentCardPreviewUrls(rawUrl, kind, cacheIdentity);
+      for (const previewUrl of urls) {
         const response = await fetch(previewUrl, { method: "HEAD", cache: "force-cache" });
         if (response.ok) return previewUrl;
       }
@@ -1371,7 +1385,7 @@ async function deterministicBuildCardPreviewUrl(rawUrl, kind = "card") {
   }
 }
 
-// Only Build/Reference/Collection opt in. Remote Imagine keeps its existing loader.
+// Build local files and cached Imagine card previews share this queue.
 const fastLocalPreviewQueue = [];
 const fastLocalPreviewBindings = new Map();
 const fastLocalPreviewActive = { card: 0, thumbnail: 0 };
@@ -1395,6 +1409,14 @@ function isFastLocalPreviewSource(rawUrl) {
   } catch (_) {
     return false;
   }
+}
+
+async function fastCachedPreviewUrls(source, kind, cacheIdentity) {
+  if (typeof isImagineRemoteCardPreview === "function" && isImagineRemoteCardPreview(source)) {
+    return imaginePersistentCardPreviewUrls(source, kind, cacheIdentity);
+  }
+  const cachedUrl = await deterministicBuildCardPreviewUrl(source, kind);
+  return cachedUrl ? [cachedUrl] : [];
 }
 
 function pumpFastLocalPreviews() {
@@ -1421,25 +1443,29 @@ function pumpFastLocalPreviews() {
     fastLocalPreviewQueue.splice(index, 1);
     fastLocalPreviewActive[entry.kind] += 1;
     Promise.resolve().then(async () => {
-      const cachedUrl = await deterministicBuildCardPreviewUrl(entry.source, entry.kind);
-      if (entry.cancelled || !entry.target.isConnected || !cachedUrl) return "";
-      if (entry.kind === "card" && localCardPreviewDistance(entry.target) > (localCardPreviewIsMoving(entry.target) ? 0 : 400)) {
-        fastLocalPreviewBindings.get(entry.target)?.pause();
-        entry.cancel();
-        return "";
+      const cachedUrls = await fastCachedPreviewUrls(entry.source, entry.kind, entry.cacheIdentity);
+      if (entry.cancelled || !entry.target.isConnected || !cachedUrls.length) return "";
+      for (const cachedUrl of cachedUrls) {
+        if (entry.cancelled || !entry.target.isConnected) return "";
+        if (entry.kind === "card" && localCardPreviewDistance(entry.target) > (localCardPreviewIsMoving(entry.target) ? 0 : 400)) {
+          fastLocalPreviewBindings.get(entry.target)?.pause();
+          entry.cancel();
+          return "";
+        }
+        // Read once, without HEAD + a second image GET. Holding a bounded slot until
+        // the body is read prevents fast scrolling from flooding the local server.
+        const response = await fetch(cachedUrl, {
+          signal: entry.controller.signal,
+          priority: entry.kind === "thumbnail" || localCardPreviewDistance(entry.target) === 0 ? "high" : "low",
+        });
+        if (!response.ok) continue;
+        const blob = await response.blob();
+        if (entry.cancelled || !entry.target.isConnected) return "";
+        const objectUrl = URL.createObjectURL(blob);
+        registerCardPreviewDisposer(entry.target, () => URL.revokeObjectURL(objectUrl));
+        return objectUrl;
       }
-      // Read once, without HEAD + a second image GET. Holding a bounded slot until
-      // the body is read prevents fast scrolling from flooding the local server.
-      const response = await fetch(cachedUrl, {
-        signal: entry.controller.signal,
-        priority: entry.kind === "thumbnail" || localCardPreviewDistance(entry.target) === 0 ? "high" : "low",
-      });
-      if (!response.ok) return "";
-      const blob = await response.blob();
-      if (entry.cancelled || !entry.target.isConnected) return "";
-      const objectUrl = URL.createObjectURL(blob);
-      registerCardPreviewDisposer(entry.target, () => URL.revokeObjectURL(objectUrl));
-      return objectUrl;
+      return "";
     }).catch(() => "").then((url) => {
       entry.resolve({ url, cancelled: entry.cancelled });
     }).finally(() => {
@@ -1450,8 +1476,8 @@ function pumpFastLocalPreviews() {
   }
 }
 
-function requestFastLocalPreview(target, source, kind = "card", priority = false) {
-  const entry = { target, source, kind, cancelled: false, controller: new AbortController() };
+function requestFastLocalPreview(target, source, kind = "card", priority = false, cacheIdentity = "") {
+  const entry = { target, source, kind, cacheIdentity, cancelled: false, controller: new AbortController() };
   const promise = new Promise((resolve) => { entry.resolve = resolve; });
   entry.cancel = () => {
     if (entry.cancelled) return;
@@ -1493,7 +1519,7 @@ function scheduleFastLocalCardPreview(preview, source, cacheIdentity = "") {
       const list = preview.closest(".card_list");
       if (list) localPreviewLists.add(list);
       preview.dataset.cardPreviewStarted = "true";
-      const request = requestFastLocalPreview(preview, source);
+      const request = requestFastLocalPreview(preview, source, "card", false, cacheIdentity);
       currentRequest = request;
       request.promise.then(({ url, cancelled }) => {
         if (disposed || cancelled || currentRequest !== request || !preview.isConnected) return;
@@ -1505,7 +1531,9 @@ function scheduleFastLocalCardPreview(preview, source, cacheIdentity = "") {
         }
         // A missing cache is not a missing media file. Retain the old source/native
         // fallback, but never let native generation delay already-cached cards.
-        preview.src = source;
+        // Imagine cards must not open the remote file here: a fast scroll would
+        // request every missed sample from grok.com.
+        if (!isImagineRemoteCardPreview(source)) preview.src = source;
         if (typeof window.grokChameleonNative?.cardPreview !== "function") {
           currentRequest = null;
           return;
@@ -1555,30 +1583,6 @@ function scheduleLocalCardPreview(preview, url, kind = "card", cacheIdentity = "
   preview.cardPreviewLoad = () => {
     if (preview.dataset.cardPreviewStarted === "true") return;
     preview.dataset.cardPreviewStarted = "true";
-    if (isImagineRemoteCardPreview(url)) {
-      existingPersistentCardPreview(url, kind, cacheIdentity).then((existingPreview) => {
-        if (!preview.isConnected) return;
-        if (existingPreview) {
-          preview.src = existingPreview;
-          return;
-        }
-        const nativePreview = window.grokChameleonNative?.cardPreview;
-        if (typeof nativePreview !== "function") {
-          preview.src = url;
-          return;
-        }
-        queueNativeCardPreview(preview, { url, kind, cache_identity: cacheIdentity }).then((result) => {
-          if (!result) return;
-          const cachedUrl = String(result?.url || "");
-          if (preview.isConnected) preview.src = cachedUrl || url;
-        }).catch(() => {
-          if (preview.isConnected) preview.src = url;
-        });
-      }).catch(() => {
-        if (preview.isConnected) preview.src = url;
-      });
-      return;
-    }
     // A deterministic Build preview URL is only a possible file location. After a
     // preview-render revision it will not exist until this card has been generated.
     // Show the original immediately on a cache miss, then replace it in the background;
@@ -1733,6 +1737,9 @@ function appendCardImagePreview(host, media, preview, previewUrl, item) {
   bindCardPreviewLoadState(media, preview, previewUrl, cardPreviewLoadOptions(host, item, previewUrl));
   media.append(preview);
   if (item?.card_fast_local_preview && isFastLocalPreviewSource(previewUrl)) {
+    scheduleFastLocalCardPreview(preview, previewUrl, cardPreviewStableIdentity(item));
+  }
+  else if (item?.card_local_preview && isImagineRemoteCardPreview(previewUrl)) {
     scheduleFastLocalCardPreview(preview, previewUrl, cardPreviewStableIdentity(item));
   }
   else if (item?.card_local_preview) {

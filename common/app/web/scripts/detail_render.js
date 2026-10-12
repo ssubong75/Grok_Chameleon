@@ -468,9 +468,13 @@ function detailThumbButtonForItem(prefix, item, post, options = {}) {
     requestAnimationFrame(appendVideoFallback);
   } else if (queuedPreviewSource && typeof resolveLocalCardPreview === "function") {
     fill.classList.add("detail_thumb_preview");
-    if (prefix === "b" && isFastLocalPreviewSource(buildPreviewSource)) {
-      // Local cached bytes get their own bounded queue, independent of remote
-      // existence checks and native generation. The active version is queued first.
+    const fastImagineDetailThumb = prefix === "i"
+      && typeof isImagineRemoteCardPreview === "function"
+      && isImagineRemoteCardPreview(buildPreviewSource);
+    if ((prefix === "b" && isFastLocalPreviewSource(buildPreviewSource)) || fastImagineDetailThumb) {
+      // Cached bytes get their own bounded queue. The active version is queued first.
+      // A fast list scroll cancels card reads that leave the screen, and these
+      // thumbnails do not wait behind that list.
       button._fastLocalThumb = true;
       let currentRequest = null;
       let disposed = false;
@@ -485,7 +489,13 @@ function detailThumbButtonForItem(prefix, item, post, options = {}) {
         load(priority = button.classList.contains("active")) {
           if (disposed || button.dataset.cardPreviewStarted === "true") return;
           button.dataset.cardPreviewStarted = "true";
-          const request = requestFastLocalPreview(button, buildPreviewSource, "thumbnail", priority);
+          const request = requestFastLocalPreview(
+            button,
+            buildPreviewSource,
+            "thumbnail",
+            priority,
+            previewCacheIdentity,
+          );
           currentRequest = request;
           request.promise.then(({ url, cancelled }) => {
             if (disposed || cancelled || currentRequest !== request || !fill.isConnected) return;
@@ -501,13 +511,19 @@ function detailThumbButtonForItem(prefix, item, post, options = {}) {
               currentRequest = null;
               return;
             }
-            if (queuedPreviewSourceIsVideo) appendVideoFallback();
-            else if (previewUrl) fill.style.backgroundImage = `url("${previewUrl}")`;
+            if (!fastImagineDetailThumb) {
+              if (queuedPreviewSourceIsVideo) appendVideoFallback();
+              else if (previewUrl) fill.style.backgroundImage = `url("${previewUrl}")`;
+            }
             if (typeof window.grokChameleonNative?.cardPreview !== "function") {
               currentRequest = null;
               return;
             }
-            queueNativeCardPreview(fill, { url: buildPreviewSource, kind: "thumbnail" })
+            queueNativeCardPreview(fill, {
+              url: buildPreviewSource,
+              kind: "thumbnail",
+              cache_identity: previewCacheIdentity,
+            })
               .then((result) => show(String(result?.url || "")))
               .catch(() => {}).finally(() => {
                 if (currentRequest === request) currentRequest = null;
@@ -560,6 +576,30 @@ function detailThumbButtonForItem(prefix, item, post, options = {}) {
             if (remoteImagineSource) showSourceFallback();
           });
         };
+        const showSavedPreview = (resolvedUrl) => {
+          if (!fill.isConnected || !resolvedUrl) return false;
+          showCachedPreview(resolvedUrl);
+          return true;
+        };
+        const showFirstSavedPreview = (urls, index = 0) => {
+          if (!fill.isConnected) return;
+          const resolvedUrl = urls[index] || "";
+          if (!resolvedUrl) {
+            if (!remoteImagineSource) showSourceFallback();
+            queueMissingPreview();
+            return;
+          }
+          showSavedPreview(resolvedUrl);
+          if (!remoteImagineSource) return;
+          const probe = new Image();
+          probe.onerror = () => showFirstSavedPreview(urls, index + 1);
+          probe.src = resolvedUrl;
+        };
+        if (remoteImagineSource && typeof imaginePersistentCardPreviewUrls === "function") {
+          return imaginePersistentCardPreviewUrls(buildPreviewSource, "thumbnail", previewCacheIdentity).then((urls) => {
+            showFirstSavedPreview(urls);
+          }).catch(() => queueMissingPreview());
+        }
         return existingPersistentCardPreview(buildPreviewSource, "thumbnail", previewCacheIdentity).then((existingPreview) => {
           if (!fill.isConnected) return;
           if (existingPreview) {

@@ -216,6 +216,8 @@ document.documentElement.classList.toggle("platform-macos", isMacRenderer);
       imagineDiscoverCacheLoading: false,
       imagineDiscoverLoaded: false,
       imagineDiscoverLoading: false,
+      imagineDiscoverReconcileScheduled: false,
+      imagineDiscoverReconcileAttempted: false,
       imagineDiscoverError: "",
       imagineDiscoverCursor: "",
       imagineDiscoverHasMore: false,

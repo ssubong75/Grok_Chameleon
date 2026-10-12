@@ -2396,6 +2396,53 @@ function maybeLoadMoreImagineUploadCards() {
   });
 }
 
+let imagineDiscoverRequestSerial = 0;
+
+function prependNewImagineDiscoverPosts(existingPosts, incomingPosts) {
+  const existing = existingPosts || [];
+  const existingPaths = new Set(
+    existing.map((post) => String(post?.folder_path || "")).filter(Boolean),
+  );
+  const additions = [];
+  for (const post of incomingPosts || []) {
+    const path = String(post?.folder_path || "");
+    if (!path || existingPaths.has(path)) continue;
+    existingPaths.add(path);
+    additions.push(post);
+  }
+  if (!additions.length) return existing;
+  return [...additions, ...existing];
+}
+
+function prepareImagineDiscoverQuietReconcile() {
+  if (library_state.imagineDiscoverLoading || library_state.imagineDiscoverReconcileScheduled) return;
+  library_state.imagineDiscoverLoaded = false;
+  library_state.imagineDiscoverReconcileAttempted = false;
+}
+
+function scheduleImagineDiscoverQuietReconcile() {
+  if (library_state.imagineDiscoverReconcileScheduled || library_state.imagineDiscoverReconcileAttempted) return;
+  if (screen_state.current_screen !== "i_discover_main") return;
+  if (!library_state.imagineDiscoverCacheLoaded || library_state.imagineDiscoverLoaded) return;
+  if (library_state.imagineDiscoverLoading || !canLoadImagineSavedList()) return;
+  library_state.imagineDiscoverReconcileScheduled = true;
+  const start = () => {
+    library_state.imagineDiscoverReconcileScheduled = false;
+    if (screen_state.current_screen !== "i_discover_main") return;
+    if (library_state.imagineDiscoverLoaded || library_state.imagineDiscoverLoading) return;
+    library_state.imagineDiscoverReconcileAttempted = true;
+    loadImagineDiscoverCards({ reconcile: true }).catch(() => {});
+  };
+  const afterPaint = () => {
+    if (typeof window.requestIdleCallback === "function") {
+      window.requestIdleCallback(start, { timeout: 1500 });
+    } else {
+      window.setTimeout(start, 400);
+    }
+  };
+  window.requestAnimationFrame(() => window.requestAnimationFrame(afterPaint));
+}
+
 function mergeImagineDiscoverPosts(existingPosts, nextPosts) {
   const merged = new Map();
   for (const post of existingPosts || []) {
@@ -2478,46 +2525,68 @@ async function loadImagineDiscoverCacheCards() {
   }
 }
 
-async function loadImagineDiscoverCards({ force = false, append = false } = {}) {
+async function loadImagineDiscoverCards({ force = false, append = false, reconcile = false } = {}) {
   if (library_state.imagineDiscoverLoading) return;
-  if (!force && !append && library_state.imagineDiscoverLoaded) return;
+  if (!force && !append && !reconcile && library_state.imagineDiscoverLoaded) return;
   if (append && !library_state.imagineDiscoverCursor) return;
   if (!canLoadImagineSavedList()) return;
   const accountId = imaginePendingSavedAccountId();
   const requestEpoch = Number(library_state.imagineRemoteRequestEpoch || 0);
   if (!accountId) return;
-  library_state.imagineDiscoverLoading = true;
-  library_state.imagineDiscoverError = "";
+  const quietReconcile = reconcile && !force && !append;
+  const serial = ++imagineDiscoverRequestSerial;
   let backgroundCacheToken = "";
-  renderImagineDiscoverCards();
+  let listChanged = !quietReconcile;
+  if (!quietReconcile) {
+    library_state.imagineDiscoverLoading = true;
+    library_state.imagineDiscoverError = "";
+    renderImagineDiscoverCards();
+  }
   try {
     const data = await qApi("/api/imagine/discover", {
       account_id: accountId,
       limit: 60,
-      cursor: force ? "" : (append ? (library_state.imagineDiscoverCursor || "") : ""),
+      cursor: force || quietReconcile ? "" : (append ? (library_state.imagineDiscoverCursor || "") : ""),
       media_type: "video",
     });
-    if (!imagineAccountResponseIsCurrent(accountId, requestEpoch, data)) return;
+    if (serial !== imagineDiscoverRequestSerial || !imagineAccountResponseIsCurrent(accountId, requestEpoch, data)) {
+      listChanged = false;
+      return;
+    }
     const posts = Array.isArray(data.posts) ? data.posts : [];
     const normalized = normalizeImagineDiscoverPosts(posts);
-    library_state.imagineDiscoverPosts = append && !force
-      ? mergeImagineDiscoverPosts(library_state.imagineDiscoverPosts || [], normalized)
-      : mergeImagineDiscoverRefreshedPosts(library_state.imagineDiscoverPosts || [], normalized);
+    if (quietReconcile) {
+      const nextPosts = prependNewImagineDiscoverPosts(library_state.imagineDiscoverPosts || [], normalized);
+      listChanged = nextPosts !== (library_state.imagineDiscoverPosts || []);
+      library_state.imagineDiscoverPosts = nextPosts;
+    } else {
+      library_state.imagineDiscoverPosts = append && !force
+        ? mergeImagineDiscoverPosts(library_state.imagineDiscoverPosts || [], normalized)
+        : mergeImagineDiscoverRefreshedPosts(library_state.imagineDiscoverPosts || [], normalized);
+    }
     library_state.imagineDiscoverCursor = String(data.next_cursor || "");
     library_state.imagineDiscoverHasMore = Boolean(data.has_more && library_state.imagineDiscoverCursor);
     library_state.imagineDiscoverLoaded = true;
     backgroundCacheToken = String(data.background_cache_token || "");
   } catch (error) {
-    if (imagineAccountResponseIsCurrent(accountId, requestEpoch)) {
+    if (serial === imagineDiscoverRequestSerial && imagineAccountResponseIsCurrent(accountId, requestEpoch) && !quietReconcile) {
       library_state.imagineDiscoverError = error?.message || "Imagine Discover list failed.";
     }
+    if (quietReconcile) listChanged = false;
   } finally {
-    if (imagineAccountResponseIsCurrent(accountId, requestEpoch)) {
-      library_state.imagineDiscoverLoading = false;
-      renderImagineDiscoverCards();
+    if (serial === imagineDiscoverRequestSerial && imagineAccountResponseIsCurrent(accountId, requestEpoch)) {
+      if (!quietReconcile) library_state.imagineDiscoverLoading = false;
+      if (listChanged) renderImagineDiscoverCards();
+      else if (quietReconcile && screen_state.current_screen === "i_discover_main") {
+        requestAnimationFrame(maybeLoadMoreImagineDiscoverCards);
+      }
     }
   }
-  if (backgroundCacheToken && imagineAccountResponseIsCurrent(accountId, requestEpoch)) {
+  if (
+    backgroundCacheToken
+    && serial === imagineDiscoverRequestSerial
+    && imagineAccountResponseIsCurrent(accountId, requestEpoch)
+  ) {
     scheduleImagineDiscoverBackgroundSourceCache(backgroundCacheToken, accountId);
   }
 }
@@ -2986,11 +3055,7 @@ function renderImagineDiscoverCards() {
     && !library_state.imagineDiscoverLoading
     && canLoadImagineSavedList()
   ) {
-    loadImagineDiscoverCards().catch((error) => {
-      library_state.imagineDiscoverError = error?.message || "Imagine Discover list failed.";
-      library_state.imagineDiscoverLoading = false;
-      renderImagineDiscoverCards();
-    });
+    scheduleImagineDiscoverQuietReconcile();
   }
   const list = document.querySelector(".i_discover_card_list");
   if (!list) return;

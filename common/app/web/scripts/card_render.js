@@ -84,17 +84,43 @@ function buildCardVideoPosterUrl(post, item, visited = new Set()) {
     : "";
 }
 
+function imagineCardProxyUrl(item, post, rawUrl, kind) {
+  const value = String(rawUrl || "").trim();
+  if (!value || typeof iDetailProxyUrl !== "function") return value;
+  const accountId = typeof iDetailAccountId === "function" ? iDetailAccountId(item, post) : "";
+  return iDetailProxyUrl(value, kind, accountId);
+}
+
 function cardDisplayItemForContext(post, item, className = "") {
   if (cardUsesImagineDetail(post, className)) {
+    // Imagine main, Liked, and Discover share i_card. Proxy every media URL so the
+    // card and its detail thumbs use the same bounded cache reader as Build.
     const sourceItem = item || {};
     const type = detailItemType(sourceItem);
-    const previewUrl = sourceItem.thumbnail_url || sourceItem.poster_url || "";
+    const mediaKind = type === "video" ? "video" : "image";
+    const proxiedMedia = imagineCardProxyUrl(
+      sourceItem,
+      post,
+      sourceItem.object_url || sourceItem.url || sourceItem.remote_url || sourceItem.media_url || "",
+      mediaKind,
+    );
+    const proxiedPoster = imagineCardProxyUrl(
+      sourceItem,
+      post,
+      sourceItem.thumbnail_url || sourceItem.poster_url || "",
+      "image",
+    );
     return {
       ...sourceItem,
+      object_url: proxiedMedia || sourceItem.object_url,
+      url: proxiedMedia || sourceItem.url,
+      remote_url: proxiedMedia || sourceItem.remote_url,
+      thumbnail_url: proxiedPoster || sourceItem.thumbnail_url,
+      poster_url: proxiedPoster || sourceItem.poster_url,
       card_lazy_preview: true,
       card_local_preview: true,
       card_preview_retries: 2,
-      card_static_video_preview: type === "video" && Boolean(previewUrl),
+      card_static_video_preview: type === "video" && Boolean(proxiedPoster || sourceItem.thumbnail_url || sourceItem.poster_url),
     };
   }
   const localItem = typeof bLocalMediaItem === "function" ? bLocalMediaItem(item) : item;
