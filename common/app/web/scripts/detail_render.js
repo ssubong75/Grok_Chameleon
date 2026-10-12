@@ -835,6 +835,7 @@ function renderDetailView(prefix, post, options = {}) {
     // Never leave its old interactive thumbnails or media on screen.
     media.querySelectorAll("video, audio").forEach((element) => element.pause());
     thumbList.replaceChildren();
+    if (typeof releaseDetailAudioEditorIfHost === "function") releaseDetailAudioEditorIfHost(media);
     media.replaceChildren();
     if (meta) meta.textContent = "";
     if (modelName) modelName.textContent = "";
@@ -924,15 +925,23 @@ function renderDetailView(prefix, post, options = {}) {
   const moderated = typeof mediaItemIsModerated === "function" && mediaItemIsModerated(selectedItem);
   const hasDetailMedia = !moderated && Boolean(detailMediaUrl);
   media.className = `${prefix}_detail_media ${prefix}_detail_media_${type}${moderated ? " has_moderated_preview" : (hasDetailMedia ? " has_detail_media" : " has_detail_placeholder")}`;
+  const keptAudioPlayer = !moderated && hasDetailMedia && type === "video" && typeof retainedDetailAudioPlayer === "function"
+    ? retainedDetailAudioPlayer(prefix, selectedItem)
+    : null;
+  if (!keptAudioPlayer && typeof releaseDetailAudioEditorIfHost === "function") releaseDetailAudioEditorIfHost(media);
   media.replaceChildren();
   setDetailMediaAspect(prefix, detailAspectFromItem(selectedItem));
   if (moderated) {
     media.append(hiddenMediaPreviewElement());
   } else if (hasDetailMedia) {
     if (type === "video") {
-      const player = createDetailVideoPlayer(prefix, renderItem, post);
-      media.append(player);
-      playDetailVideoIfCurrent(prefix, player.querySelector("video"));
+      if (keptAudioPlayer) {
+        media.append(keptAudioPlayer);
+      } else {
+        const player = createDetailVideoPlayer(prefix, renderItem, post);
+        media.append(player);
+        playDetailVideoIfCurrent(prefix, player.querySelector("video"));
+      }
     } else {
       const image = document.createElement("img");
       image.className = "detail_image detail-image detail_media_object";

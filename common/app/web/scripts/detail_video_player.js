@@ -165,6 +165,8 @@
 
   function setDetailVideoButtonIcon(button, icon, label) {
     if (!button) return;
+    if (button.dataset.icon === icon && button.getAttribute("aria-label") === label) return;
+    button.dataset.icon = icon;
     button.innerHTML = detailVideoIcon(icon);
     button.setAttribute("aria-label", label);
   }

@@ -13,6 +13,21 @@ contextBridge.exposeInMainWorld("grokChameleonNative", {
   extractAudio(payload) {
     return ipcRenderer.invoke("grok-chameleon:extract-audio", payload || {});
   },
+  audioPeaks(payload) {
+    return ipcRenderer.invoke("grok-chameleon:audio-peaks", payload || {});
+  },
+  localAudioPeaks(payload) {
+    return ipcRenderer.invoke("grok-chameleon:local-audio-peaks", payload || {});
+  },
+  readAudioFile(payload) {
+    return ipcRenderer.invoke("grok-chameleon:read-audio-file", payload || {});
+  },
+  saveAudioEdit(payload) {
+    return ipcRenderer.invoke("grok-chameleon:save-audio-edit", payload || {});
+  },
+  pickAudioFiles() {
+    return ipcRenderer.invoke("grok-chameleon:pick-audio-files");
+  },
   cardPreview(payload) {
     return ipcRenderer.invoke("grok-chameleon:card-preview", payload || {});
   },

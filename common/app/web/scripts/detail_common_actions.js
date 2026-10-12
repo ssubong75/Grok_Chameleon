@@ -269,6 +269,10 @@ async function extractSelectedDetailAudio(prefix) {
 function bindDetailCommonActions() {
   for (const prefix of ["i", "b"]) {
     document.querySelector(`.${prefix}_detail_extract_audio`)?.addEventListener("click", () => {
+      if (typeof openDetailAudioEditor === "function") {
+        openDetailAudioEditor(prefix).catch(error => showErrorPanel("오디오 편집 실패", error.message));
+        return;
+      }
       extractSelectedDetailAudio(prefix).catch(error => showErrorPanel("오디오 추출 실패", error.message));
     });
   }

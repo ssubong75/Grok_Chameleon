@@ -640,19 +640,30 @@
 .b_detail_media .video-player .video-play {
   position: relative;
   grid-area: play;
-  width: 42px;
+  width: 34px;
+  height: 34px;
+}
+
+.i_detail_media .video-player .video-play .video-icon,
+.b_detail_media .video-player .video-play .video-icon {
+  width: 30px;
   height: 30px;
+  border: 1px solid #fff;
+  border-radius: 50%;
+  background: transparent;
+  color: #fff;
+}
+
+.i_detail_media .video-player .video-play .video-icon svg,
+.b_detail_media .video-player .video-play .video-icon svg {
+  width: 20px;
+  height: 20px;
 }
 
 /* Extend only the hit area down to the seek row; keep the icon in place. */
 .i_detail_media .video-player .video-play::after,
 .b_detail_media .video-player .video-play::after {
-  content: "";
-  position: absolute;
-  top: 100%;
-  left: 0;
-  width: 100%;
-  height: 4px;
+  content: none;
 }
 
 .i_detail_media .video-player .video-time,
@@ -2158,4 +2169,211 @@ html.platform-windows .detail_job_badge.failed .detail_job_badge_label::after {
 
 .detail_media_path[aria-disabled="true"] {
   opacity: 1;
+}
+
+.audio_edit {
+  position: absolute;
+  right: 16px;
+  bottom: 69px;
+  left: 16px;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  pointer-events: none;
+}
+
+.audio_edit_bar {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: end;
+  min-height: 49px;
+  padding: 0 4px 9px;
+  pointer-events: none;
+}
+
+.audio_edit_wave {
+  display: block;
+  width: 100%;
+  height: 78px;
+  border-top: 1px solid #fff;
+  pointer-events: auto;
+  cursor: crosshair;
+}
+
+.audio_edit_magnetic {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 0;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  background: transparent;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.2;
+  pointer-events: auto;
+  transform: translate(-8px, -2.6px);
+}
+
+.audio_edit_check {
+  width: 12px;
+  height: 12px;
+  border: 1px solid #fff;
+  box-sizing: border-box;
+  position: relative;
+}
+
+.audio_edit_magnetic[aria-pressed="true"] .audio_edit_check::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 0;
+  width: 3px;
+  height: 6px;
+  border: solid #e10600;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.audio_edit_tools {
+  justify-self: end;
+  display: flex;
+  flex-direction: row;
+  align-items: end;
+  gap: 12px;
+  pointer-events: auto;
+}
+
+.audio_edit_add,
+.audio_edit_extract,
+.audio_edit_save {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  transform: translateY(4px);
+  padding: 0;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.audio_edit_add,
+.audio_edit_extract {
+  border: 1px solid #fff;
+  background: transparent;
+  color: #fff;
+}
+
+.audio_edit_add {
+  position: relative;
+}
+
+.audio_edit_add::before,
+.audio_edit_add::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  border-radius: 999px;
+  background: #fff;
+  transform: translate(-50%, -50%);
+}
+
+.audio_edit_add::before {
+  width: 14px;
+  height: 3px;
+}
+
+.audio_edit_add::after {
+  width: 3px;
+  height: 14px;
+}
+
+.audio_edit_extract svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: #fff;
+  stroke-width: 4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.audio_edit_save {
+  border: 0;
+  background: #fff;
+  isolation: isolate;
+}
+
+.audio_edit_save span {
+  color: #000;
+  font-size: 12px;
+  font-weight: 760;
+  letter-spacing: 0.04em;
+  mix-blend-mode: destination-out;
+}
+
+.audio_edit_target {
+  justify-self: start;
+  display: flex;
+  gap: 12px;
+  pointer-events: auto;
+  transform: translateY(-2.6px);
+}
+
+.audio_edit_target button {
+  min-height: 0;
+  padding: 0 3px;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  background: transparent;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.audio_edit_target button.is-selected {
+  border-color: #fff;
+}
+
+.audio_edit_black {
+  position: absolute;
+  top: 0;
+  right: 16px;
+  bottom: 147px;
+  left: 16px;
+  z-index: 3;
+  background: #000;
+  pointer-events: none;
+}
+
+.i_detail_media .video-player:fullscreen .audio_edit,
+.i_detail_media .video-player.is-fullscreen .audio_edit,
+.b_detail_media .video-player:fullscreen .audio_edit,
+.b_detail_media .video-player.is-fullscreen .audio_edit {
+  right: 34px;
+  bottom: 87px;
+  left: 34px;
+}
+
+.i_detail_media .video-player:fullscreen .audio_edit_black,
+.i_detail_media .video-player.is-fullscreen .audio_edit_black,
+.b_detail_media .video-player:fullscreen .audio_edit_black,
+.b_detail_media .video-player.is-fullscreen .audio_edit_black {
+  right: 34px;
+  bottom: 165px;
+  left: 34px;
+}
+
+.i_detail_media .video-player,
+.b_detail_media .video-player {
+  position: relative;
+}
+
+.i_detail_extract_audio[aria-pressed="true"],
+.b_detail_extract_audio[aria-pressed="true"] {
+  color: #9c5ff7;
 }

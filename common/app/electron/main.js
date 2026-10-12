@@ -4277,12 +4277,44 @@ ipcMain.handle("grok-chameleon:open-imagine-usage", async (_event, payload = {})
 });
 
 const { extractAudio } = require("./extract-audio");
-ipcMain.handle("grok-chameleon:extract-audio", async (event, payload = {}) => {
-  if (new URL(event.senderFrame.url).origin !== new URL(SERVER_BASE).origin) throw new Error("Unsupported sender.");
-  return extractAudio(payload, {
+const { audioPeaks, localAudioPeaks, readLocalAudio, saveAudioEdit } = require("./audio-edit");
+function audioEditDeps() {
+  return {
     serverBase: SERVER_BASE, resolveSource: localCardPreviewSource, fetchJson,
     ffmpeg: cardPreviewFfmpegBinary(), dialog, window: mainWindow,
+  };
+}
+function assertAppSender(event) {
+  if (new URL(event.senderFrame.url).origin !== new URL(SERVER_BASE).origin) throw new Error("Unsupported sender.");
+}
+ipcMain.handle("grok-chameleon:extract-audio", async (event, payload = {}) => {
+  assertAppSender(event);
+  return extractAudio(payload, audioEditDeps());
+});
+ipcMain.handle("grok-chameleon:audio-peaks", async (event, payload = {}) => {
+  assertAppSender(event);
+  return audioPeaks(payload, audioEditDeps());
+});
+ipcMain.handle("grok-chameleon:local-audio-peaks", async (event, payload = {}) => {
+  assertAppSender(event);
+  return localAudioPeaks(payload.path, audioEditDeps());
+});
+ipcMain.handle("grok-chameleon:read-audio-file", async (event, payload = {}) => {
+  assertAppSender(event);
+  return readLocalAudio(payload.path);
+});
+ipcMain.handle("grok-chameleon:save-audio-edit", async (event, payload = {}) => {
+  assertAppSender(event);
+  return saveAudioEdit(payload, audioEditDeps());
+});
+ipcMain.handle("grok-chameleon:pick-audio-files", async (event) => {
+  assertAppSender(event);
+  const selected = await dialog.showOpenDialog(mainWindow, {
+    title: "오디오 파일",
+    filters: [{ name: "Audio", extensions: ["mp3", "wav", "m4a", "aac", "flac", "ogg", "aiff", "aif"] }],
+    properties: ["openFile", "multiSelections"],
   });
+  return { cancelled: selected.canceled, paths: selected.canceled ? [] : selected.filePaths };
 });
 ipcMain.handle("grok-chameleon:card-preview", async (_event, payload = {}) => ensureCardPreview(payload));
 ipcMain.handle("grok-chameleon:translate-prompt", async (_event, payload = {}) => queuePromptTranslation(payload));

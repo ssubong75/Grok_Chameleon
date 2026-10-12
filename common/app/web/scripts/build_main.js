@@ -772,15 +772,23 @@
       const baseModerated = typeof mediaItemIsModerated === "function" && mediaItemIsModerated(selectedBaseItem);
       const hasDetailMedia = !baseModerated && Boolean(detailMediaUrl);
       media.className = `${prefix}_detail_media ${prefix}_detail_media_${baseType}${baseModerated ? " has_moderated_preview" : (hasDetailMedia ? " has_detail_media" : " has_detail_placeholder")}`;
+      const keptAudioPlayer = !baseModerated && hasDetailMedia && baseType === "video" && typeof retainedDetailAudioPlayer === "function"
+        ? retainedDetailAudioPlayer(prefix, selectedBaseItem)
+        : null;
+      if (!keptAudioPlayer && typeof releaseDetailAudioEditorIfHost === "function") releaseDetailAudioEditorIfHost(media);
       media.replaceChildren();
       setDetailMediaAspect(prefix, detailAspectFromItem(selectedBaseItem));
       if (baseModerated) {
         media.append(hiddenMediaPreviewElement());
       } else if (hasDetailMedia) {
         if (baseType === "video") {
-          const player = createDetailVideoPlayer(prefix, renderItem);
-          media.append(player);
-          playDetailVideoIfCurrent(prefix, player.querySelector("video"));
+          if (keptAudioPlayer) {
+            media.append(keptAudioPlayer);
+          } else {
+            const player = createDetailVideoPlayer(prefix, renderItem);
+            media.append(player);
+            playDetailVideoIfCurrent(prefix, player.querySelector("video"));
+          }
         } else {
           const image = document.createElement("img");
           image.className = "detail_image detail-image detail_media_object";

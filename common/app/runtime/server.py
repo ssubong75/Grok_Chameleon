@@ -29152,6 +29152,50 @@ def save_detail_video_frame(payload: dict) -> dict:
     return current_library_snapshot(root)
 
 
+def register_detail_saved_video(payload: dict) -> dict:
+    root = library_root()
+    if not root:
+        raise RuntimeError("Library path is not set.")
+    post_path = str(payload.get("post_path") or "").strip()
+    if post_path.split("/", 1)[0] not in {"created", "collection", "upload", "reference"}:
+        raise RuntimeError("Select a local video folder.")
+    file_name = Path(str(payload.get("file_name") or "")).name
+    if not file_name.lower().endswith(".mp4"):
+        raise RuntimeError("A saved MP4 is required.")
+    folder = safe_join(root, post_path)
+    target = folder / file_name
+    if not target.is_file():
+        raise RuntimeError("Saved video was not found.")
+    with build_post_save_lock(folder):
+        post_file = folder / "post.json"
+        post = read_json(post_file, {})
+        items = [dict(item) for item in post.get("items") or [] if isinstance(item, dict)]
+        if any(str(item.get("file") or "") == file_name for item in items):
+            pass
+        else:
+            item = {
+                "item_id": file_stem(file_name),
+                "type": "video",
+                "file": file_name,
+                "mime_type": "video/mp4",
+                "role": "result",
+                "relation": "audio_edit",
+                "title": file_stem(file_name),
+                "created_at": now_iso(),
+                "size": target.stat().st_size,
+                "source_item_id": str(payload.get("source_item_id") or ""),
+            }
+            width = safe_int(payload.get("width"))
+            height = safe_int(payload.get("height"))
+            if width and height:
+                item["width"] = width
+                item["height"] = height
+                item["aspect_ratio"] = f"{width}:{height}"
+            write_json(post_file, {**post, "items": [*items, item], "updated_at": now_iso()})
+    refresh_library_index_paths(root, [post_path])
+    return current_library_snapshot(root)
+
+
 def save_image_editor_result(payload: dict) -> dict:
     root = library_root()
     if not root:
@@ -29771,6 +29815,7 @@ POST_JSON_ROUTES = {
     ),
     "/api/image-editor/save": save_image_editor_result,
     "/api/library/capture-frame": save_detail_video_frame,
+    "/api/library/register-saved-video": register_detail_saved_video,
     "/api/library/merge-videos": merge_detail_videos,
     **build_post_routes(
         start_build_job=start_build_job,

@@ -466,6 +466,7 @@
   color: var(--text);
   font-size: 12px;
   font-weight: 760;
+  letter-spacing: 0.04em;
   white-space: nowrap;
   transition:
     background-color 280ms ease,
