@@ -110,6 +110,7 @@ function cardDisplayItemForContext(post, item, className = "") {
       sourceItem.thumbnail_url || sourceItem.poster_url || "",
       "image",
     );
+    const previewUrl = proxiedPoster || sourceItem.thumbnail_url || sourceItem.poster_url || "";
     return {
       ...sourceItem,
       object_url: proxiedMedia || sourceItem.object_url,
@@ -120,7 +121,7 @@ function cardDisplayItemForContext(post, item, className = "") {
       card_lazy_preview: true,
       card_local_preview: true,
       card_preview_retries: 2,
-      card_static_video_preview: type === "video" && Boolean(proxiedPoster || sourceItem.thumbnail_url || sourceItem.poster_url),
+      card_static_video_preview: type === "video" && Boolean(previewUrl),
     };
   }
   const localItem = typeof bLocalMediaItem === "function" ? bLocalMediaItem(item) : item;
