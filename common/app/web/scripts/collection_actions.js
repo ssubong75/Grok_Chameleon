@@ -261,7 +261,7 @@
       return Promise.resolve(null);
     }
 
-    let targetPath = "created";
+    let targetPath = "";
     let activeCollectionPath = "";
     const targetBlocked = (path) => sourcePaths.some((sourcePath) => (
       path === sourcePath || path.startsWith(`${sourcePath}/`)
@@ -324,8 +324,8 @@
         const blocked = !targetPath || targetBlocked(targetPath);
         if (confirmButton) confirmButton.disabled = blocked;
         if (selectionLabel) {
-          selectionLabel.textContent = !blocked && targetPath === "created"
-            ? ""
+          selectionLabel.textContent = !targetPath
+            ? "Choose a folder."
             : (blocked
               ? "This folder is included in the merge."
               : `Destination: ${targetLabel()}`);
@@ -351,15 +351,6 @@
       };
       const renderPrimary = () => {
         primaryList.replaceChildren();
-        const buildCard = folderCard({
-          path: "created",
-          label: "Build Main",
-          active: targetPath === "created",
-          primary: true,
-        });
-        buildCard.addEventListener("click", () => selectTarget("created"));
-        primaryList.append(buildCard);
-
         for (const collection of collections()) {
           const card = folderCard({
             path: collection.path,
