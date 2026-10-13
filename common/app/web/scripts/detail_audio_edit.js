@@ -1593,14 +1593,15 @@ function chooseVideoEditSaveFolder() {
 async function saveDetailAudioEditor() {
   const editor = detailAudioEditor;
   if (!editor || editor.saving) return;
-  const folder = await chooseVideoEditSaveFolder();
-  if (!folder?.postPath || detailAudioEditor !== editor) return;
   editor.saving = true;
   try {
+    const localSource = new URL(editor.payload.url, window.location.href).pathname === "/api/media";
+    const folder = localSource ? null : await chooseVideoEditSaveFolder();
+    if ((!localSource && !folder?.postPath) || detailAudioEditor !== editor) return;
     const result = await detailAudioNative().saveAudioEdit({
       provider: editor.payload.provider,
       url: editor.payload.url,
-      destinationPath: folder.postPath,
+      destinationPath: folder?.postPath || "",
       audioClips: detailPriorityAudioClips(editor.audioClips).map(serializeDetailAudioClip),
       videoClips: editor.videoClips.map((clip) => ({
         start: clip.start,
@@ -1609,9 +1610,9 @@ async function saveDetailAudioEditor() {
         source: clip.source || "original",
       })),
     });
-    if (!result || result.cancelled || detailAudioEditor !== editor) return;
+    if (!result || result.cancelled) return;
     const data = await qApi("/api/library/register-saved-video", {
-      post_path: folder.postPath,
+      post_path: result.postPath,
       file_name: result.fileName,
       source_item_id: typeof mediaItemKey === "function" ? mediaItemKey(editor.payload.item) : "",
       width: result.width,

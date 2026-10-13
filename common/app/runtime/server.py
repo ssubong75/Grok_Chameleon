@@ -28487,25 +28487,37 @@ def merged_post_source(posts: list[dict]) -> str:
     return "build"
 
 
-def remove_merged_source_directory(source_dir: Path) -> bool:
-    retry_delays = (0.08, 0.2, 0.5, 1.0)
-    for attempt in range(len(retry_delays) + 1):
-        try:
-            shutil.rmtree(source_dir)
-            return True
-        except FileNotFoundError:
-            return True
-        except OSError as exc:
-            if exc.errno != errno.ENOTEMPTY:
-                raise
-            if attempt >= len(retry_delays):
-                log_event(
-                    "merge_source_cleanup_deferred "
-                    f"path={source_dir} detail={exc}"
-                )
-                return False
-            time.sleep(retry_delays[attempt])
-    return False
+def merge_source_files(source_dir: Path, post: dict) -> list[Path]:
+    allowed = {"post.json", ".DS_Store"}
+    for item in post.get("items") or []:
+        name = str(item.get("file") or "")
+        if name:
+            if Path(name).name != name:
+                raise RuntimeError("Merge stopped: nested media paths must be kept.")
+            allowed.add(name)
+    allowed.update(thumbnail_file_names(source_dir, post))
+    entries = list(source_dir.iterdir())
+    for entry in entries:
+        if entry.is_symlink() or not entry.is_file():
+            raise RuntimeError("Merge stopped: a selected folder contains subfolders or links. Original folders were kept.")
+        if entry.name not in allowed and not is_apple_metadata_file_name(entry.name):
+            raise RuntimeError("Merge stopped: a selected folder contains files outside the merge. Original folders were kept.")
+    return entries
+
+
+def remove_merged_source_directory(source_dir: Path, post: dict) -> bool:
+    # Never recursively remove a card folder: newly added children must survive.
+    try:
+        entries = merge_source_files(source_dir, post)
+    except (RuntimeError, OSError):
+        return False
+    try:
+        for entry in entries:
+            entry.unlink()
+        source_dir.rmdir()
+        return True
+    except OSError:
+        return False
 
 
 def merge_selected_posts(payload: dict) -> dict:
@@ -28535,12 +28547,15 @@ def merge_selected_posts(payload: dict) -> dict:
         post_dir = safe_join(root, post.get("folder_path") or "")
         if not post_dir.is_dir():
             raise RuntimeError("Selected post folder was not found.")
+        if any(entry.is_symlink() or entry.is_dir() for entry in post_dir.iterdir()):
+            raise RuntimeError("Merge stopped: a selected folder contains subfolders or links. Original folders were kept.")
         # The index may omit files added since its last scan. Never delete a source
         # folder based only on a cached item list.
         context = indexed_post_context(post_dir.relative_to(root).as_posix())
         post = post_from_folder(root, post_dir, context) if context else None
         if not post:
             raise RuntimeError("Selected post could not be read from disk.")
+        merge_source_files(post_dir, post)
         posts.append(post)
 
     target_parent, collection_id = merge_target_parent(root, payload)
@@ -28617,12 +28632,12 @@ def merge_selected_posts(payload: dict) -> dict:
         for source_file, copied_file in verified_copies:
             if not filecmp.cmp(source_file, copied_file, shallow=False):
                 raise RuntimeError("Merge source changed; original cards were kept.")
+        for post, source_dir in zip(posts, source_dirs):
+            merge_source_files(source_dir, post)
         temp_dir.rename(final_dir)
     except Exception:
         if temp_dir.exists():
             shutil.rmtree(temp_dir, ignore_errors=True)
-        if final_dir.exists() and final_dir.name == target_name:
-            shutil.rmtree(final_dir, ignore_errors=True)
         raise
 
     cleanup_deferred: list[str] = []
@@ -28634,12 +28649,13 @@ def merge_selected_posts(payload: dict) -> dict:
             )
             if source_post:
                 remove_build_previews_for_items(root, source_dir, source_post.get("items") or [])
-            if not remove_merged_source_directory(source_dir):
+            if not remove_merged_source_directory(source_dir, source_post or {}):
                 cleanup_deferred.append(source_dir.relative_to(root).as_posix())
 
     delete_library_index_paths(root, post_paths, recursive=True)
     refresh_library_index_paths(root, [final_dir.relative_to(root).as_posix()])
     if cleanup_deferred:
+        refresh_library_index_paths(root, cleanup_deferred, recursive=True)
         log_event(
             "merge_completed_with_deferred_cleanup "
             f"target={final_dir.relative_to(root).as_posix()} "
@@ -29168,7 +29184,18 @@ def register_detail_saved_video(payload: dict) -> dict:
         raise RuntimeError("Saved video was not found.")
     with build_post_save_lock(folder):
         post_file = folder / "post.json"
-        post = read_json(post_file, {})
+        post = read_json(post_file, None)
+        if post is None and post_file.exists():
+            raise RuntimeError("Cannot read post.json; existing metadata was kept.")
+        if post is not None and not isinstance(post, dict):
+            raise RuntimeError("Invalid post.json; existing metadata was kept.")
+        if post is None:
+            post = post_json_from_post(
+                {}, post_id=folder.name, source="local", title=folder.name,
+                created_at=now_iso(), folder_path=post_path,
+                collection=Path(post_path).parts[1] if post_path.startswith("collection/") else None,
+                items=[],
+            )
         items = [dict(item) for item in post.get("items") or [] if isinstance(item, dict)]
         if any(str(item.get("file") or "") == file_name for item in items):
             pass

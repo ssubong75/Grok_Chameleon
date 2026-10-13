@@ -286,7 +286,7 @@ function audioSourcePath(clip) {
 }
 
 function librarySaveDirectory(rootText, relativePath) {
-  const root = path.resolve(String(rootText || ""));
+  const root = fs.realpathSync(path.resolve(String(rootText || "")));
   const relative = String(relativePath || "").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
   const top = relative.split("/")[0];
   if (!path.isAbsolute(root) || !relative || !["collection", "created", "upload", "reference"].includes(top)) {
@@ -295,10 +295,10 @@ function librarySaveDirectory(rootText, relativePath) {
   if (relative.split("/").some((part) => !part || part === "." || part === "..")) {
     throw new Error("저장할 항목 폴더를 선택해 주세요.");
   }
-  const directory = path.resolve(root, ...relative.split("/"));
+  const directory = fs.realpathSync(path.resolve(root, ...relative.split("/")));
   const inside = path.relative(root, directory);
   if (!inside || inside.startsWith("..") || path.isAbsolute(inside)) throw new Error("저장할 항목 폴더를 선택해 주세요.");
-  if (!fs.existsSync(directory) || !fs.statSync(directory).isDirectory() || !fs.existsSync(path.join(directory, "post.json"))) {
+  if (!fs.statSync(directory).isDirectory()) {
     throw new Error("저장할 항목 폴더를 찾을 수 없습니다.");
   }
   return directory;
@@ -309,7 +309,8 @@ async function saveAudioEdit(payload, deps) {
   const ffprobe = probeBinary(deps.ffmpeg);
   if (!ffprobe) throw new Error("FFprobe를 찾을 수 없습니다.");
   if (!["build", "imagine"].includes(payload.provider)) throw new Error("Invalid provider.");
-  const { input } = await resolveInput(payload, deps);
+  const { input, localPath } = await resolveInput(payload, deps);
+  const localSource = deps.resolveSource(payload.url).pathname === "/api/media";
   const info = await probeMedia(ffprobe, input);
   const clipEnd = [...(payload.videoClips || []), ...(payload.audioClips || [])]
     .reduce((max, clip) => Math.max(max, finite(clip.start) + finite(clip.duration)), 0);
@@ -330,10 +331,28 @@ async function saveAudioEdit(payload, deps) {
   videoClips.forEach(assignInput);
   audioClips.forEach(assignInput);
 
-  const destinationPath = String(payload.destinationPath || "").trim();
-  if (!destinationPath) throw new Error("저장할 항목 폴더를 선택해 주세요.");
   const accounts = await deps.fetchJson(new URL("/api/accounts", deps.serverBase), { signal: AbortSignal.timeout(10000) });
-  const directory = librarySaveDirectory(accounts.library_root, destinationPath);
+  const libraryRoot = fs.realpathSync(accounts.library_root);
+  let directory;
+  if (localSource) {
+    if (!localPath) throw new Error("원본 영상 파일을 찾을 수 없습니다.");
+    const sourceDirectory = path.dirname(fs.realpathSync(localPath));
+    directory = librarySaveDirectory(libraryRoot, path.relative(libraryRoot, sourceDirectory));
+  } else {
+    const destinationPath = String(payload.destinationPath || "").trim();
+    if (!destinationPath) throw new Error("저장할 폴더를 선택해 주세요.");
+    const parent = librarySaveDirectory(libraryRoot, destinationPath);
+    const stem = stampStem();
+    for (let index = 0; ; index += 1) {
+      directory = path.join(parent, index ? `${stem}_${index}` : stem);
+      try {
+        fs.mkdirSync(directory);
+        break;
+      } catch (error) {
+        if (error.code !== "EEXIST") throw error;
+      }
+    }
+  }
   const target = path.join(directory, uniqueStampedName(directory, "mp4"));
 
   const width = evenSize(info.width || 1280);
@@ -391,12 +410,13 @@ async function saveAudioEdit(payload, deps) {
   args.push(temp);
   try {
     await runFile(deps.ffmpeg, args);
-    await fs.promises.rename(temp, target);
+    await fs.promises.copyFile(temp, target, fs.constants.COPYFILE_EXCL);
     const stat = await fs.promises.stat(target);
     return {
       cancelled: false,
       path: target,
       fileName: path.basename(target),
+      postPath: path.relative(libraryRoot, directory).split(path.sep).join("/"),
       width,
       height,
       duration,
