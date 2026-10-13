@@ -16,6 +16,7 @@ function closeDetailAudioEditor() {
   editor.video?.removeEventListener("timeupdate", editor.onTime);
   editor.video?.removeEventListener("seeked", editor.onTime);
   editor.video?.removeEventListener("play", editor.onPlay);
+  editor.video?.removeEventListener("loadedmetadata", editor.onLayout);
   editor.player?.removeEventListener("click", editor.onPlayClick, true);
   const seek = editor.player?.querySelector(".video-seek");
   seek?.removeEventListener("input", editor.onSeek, true);
@@ -91,12 +92,19 @@ async function openDetailAudioEditor(prefix) {
   panel.innerHTML = `
     <div class="audio_edit_bar">
       <div class="audio_edit_target">
-        <button type="button" data-target="both" class="is-selected">Both</button>
+        <button type="button" data-target="both" class="is-selected">Video</button>
         <button type="button" data-target="audio">Audio</button>
-        <button type="button" data-target="video">Video</button>
+        <span class="audio_edit_separator" aria-hidden="true"></span>
+        <div class="audio_edit_options">
+          <button class="audio_edit_range" type="button" aria-pressed="false">Range<span class="audio_edit_check" aria-hidden="true"></span></button>
+          <button class="audio_edit_magnetic" type="button" aria-pressed="true">Magnetic<span class="audio_edit_check" aria-hidden="true"></span></button>
+        </div>
+        <span class="audio_edit_separator" aria-hidden="true"></span>
+        <button class="audio_edit_history_btn audio_edit_undo" type="button" aria-label="Undo" title="Undo (⌘Z / Ctrl+Z)" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 15A8 8 0 0 0 4 15M7.498463 13.289899 2.8 15 1.931759 10.075961"></path></svg></button>
+        <button class="audio_edit_history_btn audio_edit_redo" type="button" aria-label="Redo" title="Redo (⌘⇧Z / Ctrl+Shift+Z)" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path transform="translate(24 0) scale(-1 1)" d="M20 15A8 8 0 0 0 4 15M7.498463 13.289899 2.8 15 1.931759 10.075961"></path></svg></button>
+        <span class="audio_edit_separator" aria-hidden="true"></span>
       </div>
       <div class="audio_edit_tools">
-        <button class="audio_edit_magnetic" type="button" aria-pressed="true">Magnetic<span class="audio_edit_check" aria-hidden="true"></span></button>
         <button class="audio_edit_add" type="button" aria-label="Add audio" title="Add audio"></button>
         <button class="audio_edit_extract" type="button" aria-label="Audio Extract" title="Audio Extract">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 18 18 6"></path><path d="M11 6h7v7"></path></svg>
@@ -126,11 +134,14 @@ async function openDetailAudioEditor(prefix) {
     previousMuted: video.muted,
     duration: Number(video.duration) || 0,
     magnetic: true,
+    selectRange: false,
     target: "both",
     selection: null,
     audioClips: [],
     videoClips: [],
     clipboard: null,
+    undoStack: [],
+    redoStack: [],
     gesture: null,
     previewNodes: [],
     blobUrls: [],
@@ -141,6 +152,14 @@ async function openDetailAudioEditor(prefix) {
     running: false,
   };
   detailAudioEditor = editor;
+  editor.onLayout = () => {
+    const width = Number(video.videoWidth) || 0;
+    const height = Number(video.videoHeight) || 0;
+    panel.classList.toggle("audio_edit_portrait", width > 0 && height > 0 && width * 3 <= height * 2);
+    panel.classList.toggle("audio_edit_9_16", width > 0 && height > 0 && width * 16 <= height * 9);
+  };
+  video.addEventListener("loadedmetadata", editor.onLayout);
+  editor.onLayout();
   editor.onTime = () => {
     if (detailAudioEditor !== editor) return;
     if (!detailTimelineCustom(editor)) editor.time = editor.video.currentTime || 0;
@@ -170,7 +189,9 @@ async function openDetailAudioEditor(prefix) {
     editor.duration = Number(video.duration) || 0;
   }
   editor.mediaDuration = editor.duration;
+  const originalGroup = detailAudioClipId();
   editor.videoClips = [makeDetailVideoClip(0, 0, editor.duration, "original", editor.duration)];
+  editor.videoClips[0].group = originalGroup;
   drawDetailAudioEditor();
   const info = await detailAudioNative().audioPeaks(payload);
   if (detailAudioEditor !== editor) return;
@@ -178,7 +199,10 @@ async function openDetailAudioEditor(prefix) {
   editor.mediaDuration = editor.duration;
   editor.info = info;
   editor.audioClips = info.hasAudio ? [makeDetailAudioClip("original", 0, editor.duration, info.peaks, editor.duration)] : [];
-  editor.audioClips.forEach((clip) => { clip.vIndex = 1; });
+  editor.audioClips.forEach((clip) => {
+    clip.vIndex = 1;
+    clip.group = originalGroup;
+  });
   if (editor.videoClips.length === 1 && editor.videoClips[0].start === 0 && editor.videoClips[0].inPoint === 0) {
     editor.videoClips[0].duration = editor.duration;
     editor.videoClips[0].mediaDuration = editor.duration;
@@ -206,6 +230,21 @@ function makeDetailVideoClip(start, inPoint, duration, source = "original", medi
 
 function bindDetailAudioEditor(editor) {
   const panel = editor.panel;
+  panel.querySelector(".audio_edit_undo").addEventListener("click", (event) => {
+    event.stopPropagation();
+    restoreDetailAudioHistory();
+  });
+  panel.querySelector(".audio_edit_redo").addEventListener("click", (event) => {
+    event.stopPropagation();
+    restoreDetailAudioHistory(true);
+  });
+  panel.querySelector(".audio_edit_range").addEventListener("click", (event) => {
+    event.stopPropagation();
+    editor.selectRange = !editor.selectRange;
+    editor.selection = null;
+    event.currentTarget.setAttribute("aria-pressed", String(editor.selectRange));
+    drawDetailAudioEditor();
+  });
   panel.querySelector(".audio_edit_magnetic").addEventListener("click", (event) => {
     event.stopPropagation();
     editor.magnetic = !editor.magnetic;
@@ -224,16 +263,18 @@ function bindDetailAudioEditor(editor) {
     event.stopPropagation();
     saveDetailAudioEditor().catch((error) => showErrorPanel("비디오 편집 저장 실패", error.message));
   });
-  panel.querySelectorAll(".audio_edit_target button").forEach((button) => {
+  panel.querySelectorAll(".audio_edit_target button[data-target]").forEach((button) => {
     button.addEventListener("click", (event) => {
       event.stopPropagation();
       editor.target = button.dataset.target;
+      editor.selection = null;
       drawDetailAudioEditor();
     });
   });
   editor.canvas.addEventListener("pointermove", (event) => {
     if (editor.gesture) return;
     if (detailAudioHandleAt(event)) editor.canvas.style.cursor = "ew-resize";
+    else if (editor.selectRange && !detailAudioTimeInsideSelection(detailAudioTimeAt(event))) editor.canvas.style.cursor = "crosshair";
     else if (detailAudioClipAtTime(detailAudioTimeAt(event))) editor.canvas.style.cursor = "grab";
     else editor.canvas.style.cursor = "crosshair";
   });
@@ -242,24 +283,29 @@ function bindDetailAudioEditor(editor) {
     editor.canvas.setPointerCapture?.(event.pointerId);
     const time = detailAudioTimeAt(event);
     const handle = detailAudioHandleAt(event);
-    const trimIds = handle ? detailAudioTrimIds(handle.clip) : [];
+    const rangeInside = editor.selectRange && detailAudioTimeInsideSelection(time);
+    const rangeHandle = Boolean(handle?.selection);
+    const trimIds = handle && !rangeHandle ? detailAudioTrimIds(handle.clip) : [];
     const clip = trimIds.length ? null : detailAudioClipAtTime(time);
     const moveIds = clip ? detailAudioTrimIds(clip) : [];
+    const selecting = editor.selectRange && !rangeInside && !handle;
+    if (selecting) editor.selection = { start: time, end: time, clipIds: moveIds, materialized: false };
     editor.gesture = {
       x: event.clientX,
       y: event.clientY,
       shift: event.shiftKey,
       time,
-      inside: false,
-      mode: trimIds.length ? "trim" : "pending",
+      inside: Boolean(rangeInside || rangeHandle),
+      mode: selecting ? "select" : rangeHandle ? "range-trim" : trimIds.length ? "trim" : "pending",
       trimEdge: handle?.edge || "",
       trimIds,
       trimBases: trimIds.length ? detailAudioTrimBases(handle.clip) : null,
       moveIds,
       audio: cloneDetailClips(editor.audioClips),
       video: cloneDetailClips(editor.videoClips),
+      historyBefore: captureDetailAudioHistory(editor),
     };
-    if (!trimIds.length && !moveIds.length) seekDetailAudioTime(time);
+    if (!selecting && !rangeHandle && !trimIds.length && !moveIds.length) seekDetailAudioTime(time);
   });
   panel.querySelector(".audio_edit_shield").addEventListener("click", (event) => {
     event.stopPropagation();
@@ -288,6 +334,59 @@ function cloneDetailClips(clips) {
   return clips.map((clip) => ({ ...clip }));
 }
 
+function captureDetailAudioHistory(editor) {
+  return {
+    audioClips: editor.audioClips.map(clip => ({ ...clip, preview: null })),
+    videoClips: cloneDetailClips(editor.videoClips),
+    duration: editor.duration,
+    selection: editor.selection ? { ...editor.selection, clipIds: [...(editor.selection.clipIds || [])] } : null,
+    target: editor.target,
+    selectRange: editor.selectRange,
+  };
+}
+
+function detailAudioHistoryKey(state) {
+  const clips = list => list.map(clip => [clip.id, clip.source, clip.start, clip.inPoint, clip.duration, clip.gain, clip.group, clip.vIndex]);
+  return JSON.stringify([state.duration, clips(state.audioClips), clips(state.videoClips)]);
+}
+
+function recordDetailAudioHistory(editor, before) {
+  if (!before || detailAudioEditor !== editor) return;
+  if (detailAudioHistoryKey(before) === detailAudioHistoryKey(editor)) return;
+  editor.undoStack.push(before);
+  if (editor.undoStack.length > 100) editor.undoStack.shift();
+  editor.redoStack = [];
+}
+
+function restoreDetailAudioHistory(redo = false) {
+  const editor = detailAudioEditor;
+  if (!editor || editor.gesture || editor.saving) return;
+  const from = redo ? editor.redoStack : editor.undoStack;
+  const to = redo ? editor.undoStack : editor.redoStack;
+  if (!from.length) return;
+  to.push(captureDetailAudioHistory(editor));
+  const state = from.pop();
+  stopDetailTimeline(editor);
+  editor.previewNodes.forEach(node => {
+    node.element.pause();
+    node.element.src = "";
+  });
+  editor.previewNodes = [];
+  editor.audioClips = state.audioClips.map(clip => ({ ...clip, preview: null }));
+  editor.videoClips = cloneDetailClips(state.videoClips);
+  editor.duration = state.duration;
+  editor.selection = state.selection ? { ...state.selection, clipIds: [...state.selection.clipIds] } : null;
+  editor.target = state.target;
+  editor.selectRange = state.selectRange;
+  editor.panel.querySelector(".audio_edit_range").setAttribute("aria-pressed", String(editor.selectRange));
+  editor.time = Math.min(editor.time || 0, editor.duration);
+  refreshDetailTimeline(editor);
+  presentDetailTimeline(editor, false);
+  syncDetailAudioPreview();
+  drawDetailAudioEditor();
+  paintDetailTimelineChrome(editor);
+}
+
 function detailAudioTimeAt(event) {
   const editor = detailAudioEditor;
   const rect = editor.canvas.getBoundingClientRect();
@@ -309,10 +408,70 @@ function detailAudioTimeInsideSelection(time) {
   return Boolean(range && time >= range.start && time <= range.end);
 }
 
+function materializeDetailAudioRange(copy = false) {
+  const editor = detailAudioEditor;
+  const selection = editor.selection;
+  const range = detailAudioSelectionRange();
+  if (!range) return [];
+  if (selection.materialized && !copy) return selection.clipIds || [];
+  const selected = new Set(selection.clipIds || []);
+  const groups = new Map();
+  const groupFor = (clip, part) => {
+    const key = `${clip.group || clip.id}:${part}`;
+    if (!groups.has(key)) groups.set(key, detailAudioClipId());
+    return groups.get(key);
+  };
+  const pieces = [];
+  const split = (clips) => {
+    const remaining = [];
+    const extracted = [];
+    clips.forEach((clip) => {
+      const from = Math.max(clip.start, range.start);
+      const to = Math.min(clip.start + clip.duration, range.end);
+      if (!selected.has(clip.id) || to - from < 0.04) {
+        remaining.push(clip);
+        return;
+      }
+      const piece = { ...clip, id: detailAudioClipId(), group: groupFor(clip, "selected"),
+        start: from, inPoint: clip.inPoint + from - clip.start, duration: to - from, preview: null };
+      extracted.push(piece);
+      pieces.push(piece);
+      if (copy) remaining.push(clip);
+      else {
+        clip.preview?.element.pause();
+        if (clip.start < from) remaining.push({ ...clip, id: detailAudioClipId(), group: groupFor(clip, "left"), duration: from - clip.start, preview: null });
+        if (clip.start + clip.duration > to) remaining.push({ ...clip, id: detailAudioClipId(), group: groupFor(clip, "right"),
+          start: to, inPoint: clip.inPoint + to - clip.start, duration: clip.start + clip.duration - to, preview: null });
+      }
+    });
+    return [...remaining, ...extracted];
+  };
+  editor.audioClips = split(editor.audioClips);
+  editor.videoClips = split(editor.videoClips);
+  assignFreshDetailVIndexes(editor, pieces);
+  selection.clipIds = pieces.map(clip => clip.id);
+  selection.materialized = true;
+  return selection.clipIds;
+}
+
 function moveDetailAudioGesture(event) {
   const editor = detailAudioEditor;
   const gesture = editor?.gesture;
   if (!gesture) return;
+  if (gesture.mode === "select") {
+    editor.selection.end = detailAudioTimeAt(event);
+    drawDetailAudioEditor();
+    return;
+  }
+  if (gesture.mode === "range-trim") {
+    if (Math.abs(event.clientX - gesture.x) < 4) return;
+    const ids = materializeDetailAudioRange();
+    const clip = [...editor.audioClips, ...editor.videoClips].find(item => ids.includes(item.id));
+    if (!clip) return;
+    gesture.trimIds = ids;
+    gesture.trimBases = detailAudioTrimBases(clip);
+    gesture.mode = "trim";
+  }
   if (gesture.mode === "trim") {
     applyDetailAudioTrim(gesture, detailAudioTimeAt(event));
     return;
@@ -321,21 +480,42 @@ function moveDetailAudioGesture(event) {
   const dy = event.clientY - gesture.y;
   if (gesture.mode === "pending") {
     if (Math.abs(dx) < 4 && Math.abs(dy) < 4) return;
-    if (gesture.moveIds?.length) gesture.mode = "move";
+    if (gesture.inside) {
+      const copying = gesture.shift && Math.abs(dx) >= Math.abs(dy);
+      gesture.moveIds = materializeDetailAudioRange(copying);
+      gesture.audio = cloneDetailClips(editor.audioClips);
+      gesture.video = cloneDetailClips(editor.videoClips);
+      gesture.rangeBase = detailAudioSelectionRange();
+      if (copying) {
+        gesture.mode = "copy";
+        gesture.copyIds = new Set(gesture.moveIds);
+      }
+    }
+    if (gesture.moveIds?.length) {
+      const selected = new Set(gesture.moveIds);
+      if (gesture.mode !== "copy") gesture.mode = Math.abs(dy) > Math.abs(dx) && editor.audioClips.some(clip => selected.has(clip.id)) ? "volume" : "move";
+      if (gesture.mode === "move" && gesture.shift) {
+        gesture.mode = "copy";
+        beginDetailAudioCopy(gesture);
+      } else if (gesture.mode === "move") {
+        editor.audioClips = [...editor.audioClips.filter(clip => !selected.has(clip.id)), ...editor.audioClips.filter(clip => selected.has(clip.id))];
+        editor.videoClips = [...editor.videoClips.filter(clip => !selected.has(clip.id)), ...editor.videoClips.filter(clip => selected.has(clip.id))];
+      }
+    }
     else return;
   }
-  if (gesture.mode === "select") return;
   const seconds = (dx / Math.max(editor.canvas.getBoundingClientRect().width, 1)) * editor.duration;
   if (gesture.mode === "move" || gesture.mode === "copy") {
     applyDetailAudioShift(gesture, seconds);
     return;
   }
   if (gesture.mode === "volume") {
-    const range = detailAudioSelectionRange();
-    editor.audioClips.forEach((clip, index) => {
-      if (!range || !clipIntersects(clip, range.start, range.end)) return;
-      clip.gain = Math.min(4, Math.max(0, gesture.gains[index] + (-dy / 140)));
+    editor.audioClips.forEach((clip) => {
+      if (!gesture.moveIds.includes(clip.id)) return;
+      const base = gesture.audio.find(item => item.id === clip.id);
+      clip.gain = Math.min(4, Math.max(0, (base?.gain ?? 1) + (-dy / 140)));
     });
+    syncDetailAudioPreview();
     drawDetailAudioEditor();
   }
 }
@@ -345,13 +525,15 @@ function finishDetailAudioGesture(event) {
   const gesture = editor?.gesture;
   if (!gesture) return;
   editor.gesture = null;
-  if (gesture.mode === "trim" || gesture.mode === "move" || gesture.mode === "copy") {
+  if (gesture.mode === "trim" || gesture.mode === "move" || gesture.mode === "copy" || (gesture.mode === "volume" && gesture.inside)) {
     refreshDetailTimeline(editor);
   } else if (gesture.mode === "pending") {
     seekDetailAudioTime(gesture.time);
   } else if (gesture.mode === "select" && editor.selection && editor.selection.end < editor.selection.start) {
-    editor.selection = { start: editor.selection.end, end: editor.selection.start };
+    editor.selection = { ...editor.selection, start: editor.selection.end, end: editor.selection.start };
   }
+  if (gesture.mode === "select" && !detailAudioSelectionRange()) editor.selection = null;
+  recordDetailAudioHistory(editor, gesture.historyBefore);
   syncDetailAudioPreview();
   drawDetailAudioEditor();
 }
@@ -371,7 +553,13 @@ function beginDetailAudioCopy(gesture) {
   const editor = detailAudioEditor;
   const range = { start: Math.min(gesture.time, gesture.time), end: Math.max(gesture.time, gesture.time) };
   const selection = detailAudioSelectionRange() || range;
-  const copies = sliceDetailClips(editor.audioClips, editor.videoClips, selection.start, selection.end);
+  const selected = new Set(gesture.moveIds || []);
+  const copySelected = (clips) => clips.filter(clip => selected.has(clip.id)).map(clip => ({
+    ...clip, id: detailAudioClipId(), preview: null,
+  }));
+  const copies = selected.size
+    ? { audio: copySelected(editor.audioClips), video: copySelected(editor.videoClips) }
+    : sliceDetailClips(editor.audioClips, editor.videoClips, selection.start, selection.end);
   const groups = new Map();
   [...copies.audio, ...copies.video].forEach((clip) => {
     if (!clip.group) return;
@@ -414,12 +602,17 @@ function editorUsesAudio(targets, audioClips) {
 function applyDetailAudioShift(gesture, seconds) {
   const editor = detailAudioEditor;
   if (!gesture.bases) gesture.bases = detailAudioMoveBases(gesture);
-  const delta = snapDetailAudioDelta(gesture.bases, seconds);
+  const earliest = Math.min(...gesture.bases.values(), gesture.rangeBase?.start ?? Infinity);
+  const delta = Math.max(-earliest, snapDetailAudioDelta(gesture.bases, seconds));
   [...editor.audioClips, ...editor.videoClips].forEach((clip) => {
     if (!gesture.bases.has(clip.id)) return;
     const base = gesture.bases.get(clip.id);
     clip.start = Math.max(0, base + delta);
   });
+  if (gesture.rangeBase && editor.selection) {
+    editor.selection.start = gesture.rangeBase.start + delta;
+    editor.selection.end = gesture.rangeBase.end + delta;
+  }
   drawDetailAudioEditor();
 }
 
@@ -479,9 +672,13 @@ function snapDetailAudioDelta(bases, delta) {
 
 function handleDetailAudioKey(event) {
   const editor = detailAudioEditor;
-  if (!editor || event.target?.closest("input, textarea")) return;
+  if (!editor || event.target?.closest("input, textarea, [contenteditable='true']")) return;
   const key = event.key.toLowerCase();
-  if ((event.ctrlKey || event.metaKey) && key === "c") {
+  if ((event.ctrlKey || event.metaKey) && !event.altKey && key === "z") {
+    event.preventDefault();
+    event.stopPropagation();
+    restoreDetailAudioHistory(event.shiftKey);
+  } else if ((event.ctrlKey || event.metaKey) && key === "c") {
     event.preventDefault();
     copyDetailAudioSelection(false);
   } else if ((event.ctrlKey || event.metaKey) && key === "x") {
@@ -516,6 +713,7 @@ function pasteDetailAudioClipboard() {
   const editor = detailAudioEditor;
   const clipboard = editor?.clipboard;
   if (!clipboard) return;
+  const historyBefore = captureDetailAudioHistory(editor);
   const at = detailAudioNow();
   const groups = new Map();
   const regroup = (group) => {
@@ -542,6 +740,7 @@ function pasteDetailAudioClipboard() {
     editor.videoClips.push(copy);
   });
   refreshDetailTimeline(editor);
+  recordDetailAudioHistory(editor, historyBefore);
   syncDetailAudioPreview();
   drawDetailAudioEditor();
 }
@@ -550,10 +749,13 @@ function deleteDetailAudioSelection() {
   const range = detailAudioSelectionRange();
   const editor = detailAudioEditor;
   if (!range || !editor) return;
+  const historyBefore = captureDetailAudioHistory(editor);
+  editor.previewNodes.forEach(node => node.element.pause());
   if (editor.target !== "video") editor.audioClips = removeDetailClipRange(editor.audioClips, range.start, range.end);
   if (editor.target !== "audio") editor.videoClips = removeDetailClipRange(editor.videoClips, range.start, range.end);
   editor.selection = null;
   refreshDetailTimeline(editor);
+  recordDetailAudioHistory(editor, historyBefore);
   syncDetailAudioPreview();
   drawDetailAudioEditor();
 }
@@ -689,6 +891,7 @@ function placeDetailAttachment(editor, file, blobUrl, time, mediaUrl) {
   if (length < 0.04) return time;
   const isVideo = detailAudioIsVideo(file.path);
   if (!file.hasAudio && !isVideo) return time;
+  const historyBefore = captureDetailAudioHistory(editor);
   const end = detailClipEnd(editor);
   const start = end > 0 ? end + 2 : 0;
   const vIndex = nextDetailVIndex(editor);
@@ -708,6 +911,7 @@ function placeDetailAttachment(editor, file, blobUrl, time, mediaUrl) {
     editor.videoClips.push(clip);
   }
   refreshDetailTimeline(editor);
+  recordDetailAudioHistory(editor, historyBefore);
   return start + length;
 }
 
@@ -981,7 +1185,15 @@ function detailAudioHandleAt(event) {
   const rect = editor.canvas.getBoundingClientRect();
   const x = event.clientX - rect.left;
   const y = event.clientY - rect.top;
-  const handles = detailAudioGuides(editor, rect.width).flatMap((guide) => detailAudioHandleRects(guide, rect.height));
+  const range = detailAudioSelectionRange();
+  const rangeHandles = range ? detailAudioHandleRects({
+    left: range.start / editor.duration * rect.width,
+    span: (range.end - range.start) / editor.duration * rect.width,
+  }, rect.height).map(handle => ({ ...handle, selection: true })) : [];
+  const selected = editor.selection?.materialized ? new Set(editor.selection.clipIds) : new Set();
+  const handles = [...rangeHandles, ...detailAudioGuides(editor, rect.width)
+    .filter(guide => !selected.has(guide.clip.id))
+    .flatMap((guide) => detailAudioHandleRects(guide, rect.height))];
   return handles.find((handle) => x >= handle.x - 4 && x <= handle.x + handle.w + 4 && y >= handle.y - 4 && y <= handle.y + handle.h + 4) || null;
 }
 
@@ -1061,6 +1273,13 @@ function applyDetailAudioTrim(gesture, time) {
       clip.duration = end - base.start;
     }
   });
+  if (gesture.inside && editor.selection) {
+    const clips = [...editor.audioClips, ...editor.videoClips].filter(clip => ids.has(clip.id));
+    if (clips.length) {
+      editor.selection.start = Math.min(...clips.map(clip => clip.start));
+      editor.selection.end = Math.max(...clips.map(clip => clip.start + clip.duration));
+    }
+  }
   drawDetailAudioEditor();
 }
 
@@ -1096,8 +1315,6 @@ function smoothDetailAudioSeries(values) {
 
 function drawDetailAudioWave(context, editor, rect, duration) {
   editor.audioClips.forEach((clip) => drawDetailAudioClipWave(context, clip, rect, duration));
-  context.fillStyle = "#fff";
-  context.fillRect(0, rect.height / 2 - 0.3, rect.width, 0.6);
 }
 
 function drawDetailAudioClipWave(context, clip, rect, duration) {
@@ -1107,7 +1324,7 @@ function drawDetailAudioClipWave(context, clip, rect, duration) {
   const step = 3;
   const samples = [];
   const span = Math.max(0.001, clip.mediaDuration || clip.duration);
-  const gain = Math.min(4, Math.max(0, clip.gain || 1));
+  const gain = Math.min(4, Math.max(0, clip.gain ?? 1));
   for (let x = 0; x <= width; x += step) {
     const local = clip.inPoint + (x / Math.max(width, 1)) * clip.duration;
     const index = Math.min(clip.peaks.length - 1, Math.max(0, Math.floor((local / span) * clip.peaks.length)));
@@ -1139,8 +1356,10 @@ function drawDetailAudioClipWave(context, clip, rect, duration) {
     context.quadraticCurveTo(previousX, previousY, (previousX + x) / 2, (previousY + y) / 2);
   }
   context.closePath();
-  context.fillStyle = clip.source === "original" ? "#fff" : "#c4c4c4";
+  context.fillStyle = "#c4c4c4";
   context.fill();
+  context.fillStyle = "#fff";
+  context.fillRect(left, mid - 0.3, width, 0.6);
 }
 
 function drawDetailVLabels(context, editor, rect, duration) {
@@ -1180,6 +1399,9 @@ function drawDetailAudioEditor() {
   context.setTransform(dpr, 0, 0, dpr, 0, 0);
   context.clearRect(0, 0, rect.width, rect.height);
   const duration = editor.duration || 1;
+  const range = detailAudioSelectionRange();
+  const selected = editor.selection?.materialized ? new Set(editor.selection.clipIds) : new Set();
+  const guides = detailAudioGuides(editor, rect.width).filter(guide => !selected.has(guide.clip.id));
   detailAudioGuides(editor, rect.width).forEach((guide) => {
     context.fillStyle = "rgba(0, 0, 0, 0.55)";
     context.fillRect(guide.left, 0, guide.span, rect.height);
@@ -1191,7 +1413,7 @@ function drawDetailAudioEditor() {
     context.fillStyle = clip.source && clip.source !== "original" ? "rgba(196, 196, 196, 0.9)" : "rgba(255, 255, 255, 0.85)";
     context.fillRect(x, rect.height - 3, Math.max(1, width), 2);
   });
-  detailAudioGuides(editor, rect.width).forEach((guide) => {
+  guides.forEach((guide) => {
     context.fillStyle = "#fff";
     context.fillRect(guide.left, 0, 1, rect.height);
     context.fillRect(guide.left + guide.span - 1, 0, 1, rect.height);
@@ -1199,17 +1421,29 @@ function drawDetailAudioEditor() {
       context.fillRect(handle.x, handle.y, handle.w, handle.h);
     });
   });
-  const range = detailAudioSelectionRange();
-  editor.panel.querySelectorAll(".audio_edit_target button").forEach((button) => {
+  editor.panel.querySelectorAll(".audio_edit_target button[data-target]").forEach((button) => {
     button.classList.toggle("is-selected", button.dataset.target === editor.target);
   });
+  editor.panel.querySelector(".audio_edit_undo").disabled = !editor.undoStack.length || Boolean(editor.gesture) || Boolean(editor.saving);
+  editor.panel.querySelector(".audio_edit_redo").disabled = !editor.redoStack.length || Boolean(editor.gesture) || Boolean(editor.saving);
   if (range) {
     const left = (range.start / duration) * rect.width;
     const width = ((range.end - range.start) / duration) * rect.width;
-    context.fillStyle = "rgba(255, 255, 255, 0.16)";
-    context.fillRect(left, 0, width, rect.height);
+    context.save();
     context.strokeStyle = "#fff";
-    context.strokeRect(left + 0.5, 0.5, Math.max(0, width - 1), rect.height - 1);
+    context.lineWidth = 1;
+    context.setLineDash([2, 3]);
+    context.beginPath();
+    context.moveTo(left + 0.5, 0);
+    context.lineTo(left + 0.5, rect.height);
+    context.moveTo(left + width - 0.5, 0);
+    context.lineTo(left + width - 0.5, rect.height);
+    context.stroke();
+    context.restore();
+    context.fillStyle = "#fff";
+    detailAudioHandleRects({ left, span: width }, rect.height).forEach((handle) => {
+      context.fillRect(handle.x, handle.y, handle.w, handle.h);
+    });
   }
   const playhead = Math.min(rect.width, Math.max(0, (detailAudioNow() / duration) * rect.width));
   context.fillStyle = "#fff";
@@ -1234,11 +1468,13 @@ function syncDetailAudioPreview() {
   const context = editor.audioContext || new (window.AudioContext || window.webkitAudioContext)();
   editor.audioContext = context;
   if (context.state === "suspended") context.resume().catch(() => {});
+  const activeClip = [...editor.audioClips].reverse().find(clip => time >= clip.start && time < clip.start + clip.duration);
+  const playing = detailTimelineCustom(editor) ? editor.running : !editor.video.paused;
   editor.audioClips.forEach((clip) => {
     const node = ensureDetailAudioNode(editor, clip, context);
     if (!node) return;
     const local = time - clip.start;
-    const active = local >= 0 && local < clip.duration;
+    const active = playing && clip === activeClip;
     node.gain.gain.value = clip.gain || 0;
     if (!active) {
       node.element.pause();
@@ -1344,7 +1580,7 @@ async function saveDetailAudioEditor() {
       provider: editor.payload.provider,
       url: editor.payload.url,
       destinationPath: folder.postPath,
-      audioClips: editor.audioClips.map(serializeDetailAudioClip),
+      audioClips: detailPriorityAudioClips(editor.audioClips).map(serializeDetailAudioClip),
       videoClips: editor.videoClips.map((clip) => ({
         start: clip.start,
         inPoint: clip.inPoint,
@@ -1365,6 +1601,15 @@ async function saveDetailAudioEditor() {
   } finally {
     editor.saving = false;
   }
+}
+
+function detailPriorityAudioClips(clips) {
+  let result = [];
+  clips.forEach((clip) => {
+    result = removeDetailClipRange(result, clip.start, clip.start + clip.duration);
+    result.push({ ...clip });
+  });
+  return result;
 }
 
 function serializeDetailAudioClip(clip) {

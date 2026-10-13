@@ -397,6 +397,8 @@ function syncDetailMediaAspect(prefix, element, item = selectedDetailItem()) {
   const width = element.videoWidth || element.naturalWidth || 0;
   const height = element.videoHeight || element.naturalHeight || 0;
   if (!width || !height) return;
+  element.closest(".i_detail_media, .b_detail_media")?.classList.toggle("detail_video_9_16",
+    Boolean(element.videoWidth && element.videoHeight) && width * 16 <= height * 9);
   const aspect = `${width} / ${height}`;
   if (element.videoWidth && element.videoHeight && item) {
     item._actual_video_dimensions = { width, height };

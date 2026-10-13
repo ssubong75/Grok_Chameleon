@@ -2020,7 +2020,7 @@ html.platform-windows .detail_job_badge.failed .detail_job_badge_label::after {
 .detail_thumb_nav {
   position: absolute;
   top: 50%;
-  right: 12px;
+  right: 19px;
   z-index: 12;
   display: grid;
   align-content: space-between;
@@ -2043,6 +2043,10 @@ html.platform-windows .detail_job_badge.failed .detail_job_badge_label::after {
   background: transparent;
   color: #fff;
   line-height: 1;
+}
+
+.detail_video_9_16:not(:fullscreen):not(:has(.video-player.is-fullscreen)) > .detail_thumb_nav {
+  top: calc(50% - 10px);
 }
 
 .i_detail_media .detail_thumb_nav_btn:hover,
@@ -2083,8 +2087,17 @@ html.platform-windows .detail_job_badge.failed .detail_job_badge_label::after {
 }
 
 .i_detail_extract_audio[hidden], .b_detail_extract_audio[hidden] { display: none !important; }
-.i_detail_extract_audio:hover, .b_detail_extract_audio:hover,
-.i_detail_extract_audio:focus-visible, .b_detail_extract_audio:focus-visible { color: #9c5ff7; }
+.i_detail_action.i_detail_extract_audio:hover,
+.b_detail_action.b_detail_extract_audio:hover,
+.i_detail_action.i_detail_extract_audio:focus-visible,
+.b_detail_action.b_detail_extract_audio:focus-visible { color: var(--accent); }
+
+.i_detail_action.i_detail_capture_frame:hover,
+.b_detail_action.b_detail_capture_frame:hover,
+.i_detail_action.i_detail_capture_frame:focus-visible,
+.b_detail_action.b_detail_capture_frame:focus-visible,
+.i_detail_action.i_detail_capture_frame:active,
+.b_detail_action.b_detail_capture_frame:active { color: var(--prompt-teal); }
 .i_detail_edit_glyph,
 .b_detail_edit_glyph {
   display: grid;
@@ -2181,12 +2194,13 @@ html.platform-windows .detail_job_badge.failed .detail_job_badge_label::after {
   cursor: crosshair;
 }
 
-.audio_edit_magnetic {
+.audio_edit_magnetic,
+.audio_edit_range {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   min-height: 0;
-  padding: 0;
+  padding: 0 3px;
   border: 1px solid transparent;
   border-radius: 2px;
   background: transparent;
@@ -2194,11 +2208,13 @@ html.platform-windows .detail_job_badge.failed .detail_job_badge_label::after {
   font-size: 14px;
   font-weight: 700;
   line-height: 1.2;
+  white-space: nowrap;
   pointer-events: auto;
-  transform: translate(-8px, -2.6px);
+  transform: none;
 }
 
 .audio_edit_check {
+  flex: 0 0 12px;
   width: 12px;
   height: 12px;
   border: 1px solid #fff;
@@ -2206,7 +2222,8 @@ html.platform-windows .detail_job_badge.failed .detail_job_badge_label::after {
   position: relative;
 }
 
-.audio_edit_magnetic[aria-pressed="true"] .audio_edit_check::after {
+.audio_edit_magnetic[aria-pressed="true"] .audio_edit_check::after,
+.audio_edit_range[aria-pressed="true"] .audio_edit_check::after {
   content: "";
   position: absolute;
   left: 3px;
@@ -2234,7 +2251,7 @@ html.platform-windows .detail_job_badge.failed .detail_job_badge_label::after {
   place-items: center;
   width: 32px;
   height: 32px;
-  transform: translateY(3px);
+  transform: translateY(1px);
   padding: 0;
   border-radius: 50%;
   cursor: pointer;
@@ -2272,39 +2289,71 @@ html.platform-windows .detail_job_badge.failed .detail_job_badge_label::after {
   height: 14px;
 }
 
+.audio_edit_add:hover,
+.audio_edit_add:focus-visible {
+  background: rgb(0 0 0 / 0.55);
+}
+
+.audio_edit_extract:hover,
+.audio_edit_extract:focus-visible {
+  background: rgb(0 0 0 / 0.55);
+}
+
 .audio_edit_extract svg {
   width: 18px;
   height: 18px;
   fill: none;
-  stroke: #fff;
+  stroke: currentColor;
   stroke-width: 4;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
 
 .audio_edit_save {
-  border: 0;
+  border: 1px solid transparent;
   background: #fff;
   isolation: isolate;
 }
 
+.audio_edit_save:hover,
+.audio_edit_save:focus-visible {
+  background: var(--accent);
+  border-color: #fff;
+}
+
 .audio_edit_save span {
   color: #000;
-  font-size: 12px;
-  font-weight: 760;
+  font-size: 11px;
+  font-weight: 720;
   letter-spacing: 0.04em;
   mix-blend-mode: destination-out;
 }
 
+.audio_edit_save:hover span,
+.audio_edit_save:focus-visible span {
+  color: #fff;
+  mix-blend-mode: normal;
+}
+
 .audio_edit_target {
+  position: relative;
   justify-self: start;
   display: flex;
+  align-items: center;
   gap: 12px;
   pointer-events: auto;
   transform: translateY(-2.6px);
 }
 
-.audio_edit_target button {
+.audio_edit_separator {
+  align-self: center;
+  flex: 0 0 2px;
+  height: 16px;
+  background: rgb(255 255 255 / 0.5);
+  pointer-events: none;
+}
+
+.audio_edit_target button[data-target] {
   min-height: 0;
   padding: 0 3px;
   border: 1px solid transparent;
@@ -2314,10 +2363,132 @@ html.platform-windows .detail_job_badge.failed .detail_job_badge_label::after {
   font-size: 14px;
   font-weight: 700;
   line-height: 1.2;
+  white-space: nowrap;
 }
 
-.audio_edit_target button.is-selected {
+.audio_edit_target button[data-target].is-selected {
   border-color: #fff;
+}
+
+.audio_edit_options {
+  display: contents;
+}
+
+.video-player:not(:fullscreen):not(.is-fullscreen) .audio_edit_portrait .audio_edit_bar {
+  align-items: center;
+}
+
+.video-player:not(:fullscreen):not(.is-fullscreen) .audio_edit_portrait .audio_edit_target {
+  display: grid;
+  grid-template-columns: auto 2px auto 2px 32px 32px 2px;
+  grid-template-rows: repeat(2, auto);
+  row-gap: 6px;
+  transform: translateY(-0.6px);
+}
+
+.video-player:not(:fullscreen):not(.is-fullscreen) .audio_edit_portrait .audio_edit_options {
+  display: contents;
+}
+
+.video-player:not(:fullscreen):not(.is-fullscreen) .audio_edit_portrait button[data-target="audio"] {
+  grid-area: 1 / 1;
+  justify-self: start;
+}
+
+.video-player:not(:fullscreen):not(.is-fullscreen) .audio_edit_portrait button[data-target="both"] {
+  grid-area: 2 / 1;
+  justify-self: start;
+}
+
+.video-player:not(:fullscreen):not(.is-fullscreen) .audio_edit_portrait .audio_edit_range {
+  grid-area: 1 / 3;
+  justify-self: stretch;
+  justify-content: space-between;
+}
+
+.video-player:not(:fullscreen):not(.is-fullscreen) .audio_edit_portrait .audio_edit_magnetic {
+  grid-area: 2 / 3;
+}
+
+.video-player:not(:fullscreen):not(.is-fullscreen) .audio_edit_portrait .audio_edit_separator {
+  grid-row: 1 / 3;
+}
+
+.video-player:not(:fullscreen):not(.is-fullscreen) .audio_edit_portrait .audio_edit_separator:nth-child(3) {
+  grid-column: 2;
+}
+
+.video-player:not(:fullscreen):not(.is-fullscreen) .audio_edit_portrait .audio_edit_separator:nth-child(5) {
+  grid-column: 4;
+}
+
+.video-player:not(:fullscreen):not(.is-fullscreen) .audio_edit_portrait .audio_edit_separator:last-child {
+  grid-column: 7;
+}
+
+.video-player:not(:fullscreen):not(.is-fullscreen) .audio_edit_portrait .audio_edit_undo {
+  grid-area: 1 / 5 / 3 / 6;
+}
+
+.video-player:not(:fullscreen):not(.is-fullscreen) .audio_edit_portrait .audio_edit_redo {
+  grid-area: 1 / 6 / 3 / 7;
+}
+
+.video-player:not(:fullscreen):not(.is-fullscreen) .audio_edit_portrait .audio_edit_tools {
+  align-items: center;
+  transform: translateY(-0.6px);
+}
+
+.video-player:not(:fullscreen):not(.is-fullscreen) .audio_edit_portrait .audio_edit_tools > button {
+  transform: none;
+}
+
+.video-player:not(:fullscreen):not(.is-fullscreen) .audio_edit_9_16 .audio_edit_tools {
+  flex-direction: column;
+  transform: translateY(-6.4px);
+}
+
+.video-player:not(:fullscreen):not(.is-fullscreen) .audio_edit_9_16 .audio_edit_bar {
+  align-items: end;
+}
+
+.audio_edit_history_btn {
+  align-self: center;
+  margin-left: 8px;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: #fff;
+  cursor: pointer;
+}
+
+.audio_edit_history_btn svg {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.audio_edit_undo svg {
+  overflow: visible;
+}
+
+.audio_edit_history_btn:hover:not(:disabled),
+.audio_edit_history_btn:focus-visible:not(:disabled) {
+  background: rgb(255 255 255 / 0.15);
+}
+
+.audio_edit_history_btn:disabled {
+  opacity: 1;
+  cursor: default;
 }
 
 .audio_edit_picture {
@@ -2342,10 +2513,7 @@ video.audio_edit_source_hidden {
 
 .audio_edit_black {
   position: absolute;
-  top: 0;
-  right: 16px;
-  bottom: 147px;
-  left: 16px;
+  inset: 0;
   z-index: 3;
   background: #000;
   pointer-events: none;
@@ -2360,15 +2528,6 @@ video.audio_edit_source_hidden {
   left: 34px;
 }
 
-.i_detail_media .video-player:fullscreen .audio_edit_black,
-.i_detail_media .video-player.is-fullscreen .audio_edit_black,
-.b_detail_media .video-player:fullscreen .audio_edit_black,
-.b_detail_media .video-player.is-fullscreen .audio_edit_black {
-  right: 34px;
-  bottom: 165px;
-  left: 34px;
-}
-
 .i_detail_media .video-player,
 .b_detail_media .video-player {
   position: relative;
@@ -2376,5 +2535,5 @@ video.audio_edit_source_hidden {
 
 .i_detail_extract_audio[aria-pressed="true"],
 .b_detail_extract_audio[aria-pressed="true"] {
-  color: #9c5ff7;
+  color: var(--accent);
 }

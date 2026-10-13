@@ -22,29 +22,71 @@ function detailItemSourceLike(item) {
   return /(original|source|start|input|parent)/.test(role);
 }
 
-function detailImageEditorCandidate(prefix, post, selectedItem) {
-  if (!post || !selectedItem) return null;
-  const selectedType = detailItemType(selectedItem);
-  if (selectedType === "image" && detailMediaUrlForItem(prefix, selectedItem, post)) return selectedItem;
-  const sourceKeys = new Set([
-    selectedItem.source_item_id,
-    selectedItem.parent_item_id,
-    selectedItem.original_item_id,
-    selectedItem.root_item_id,
-  ].map((value) => String(value || "").trim()).filter(Boolean));
-  const ordered = detailOrderedItems(post);
-  const matchedSource = ordered.find((item) => (
-    detailItemType(item) === "image"
-    && detailMediaUrlForItem(prefix, item, post)
-    && sourceKeys.has(mediaItemKey(item))
+function sameImageEditorMediaUrl(left, right) {
+  if (!left || !right) return false;
+  try {
+    return new URL(left, window.location.origin).href === new URL(right, window.location.origin).href;
+  } catch (_) {
+    return left === right;
+  }
+}
+
+function detailImageEditorCandidate(prefix, post, selectedItem, sourceUrl) {
+  const matches = item => detailItemType(item) === "image"
+    && sameImageEditorMediaUrl(detailMediaUrlForItem(prefix, item, post), sourceUrl);
+  if (selectedItem && matches(selectedItem)) return selectedItem;
+  return (post?.items || []).find(matches) || null;
+}
+
+function detailImageEditorPost(prefix, sourceUrl) {
+  const current = selectedLibraryPost();
+  const lists = ["posts", "imagineRemotePosts", "imagineLikedPosts", "imagineDiscoverPosts", "imagineUnsavedPosts", "imagineSearchPosts", "imagineUploadPosts"];
+  const candidates = [current, ...lists.flatMap(key => library_state[key] || [])].filter(post => (
+    post?.folder_path === library_state.selectedPostPath
   ));
-  if (matchedSource) return matchedSource;
-  const explicitSource = ordered.find((item) => (
-    detailItemType(item) === "image"
-    && detailMediaUrlForItem(prefix, item, post)
-    && detailItemSourceLike(item)
-  ));
-  return explicitSource || null;
+  return candidates.find(post => (post.items || []).some(item => (
+    sameImageEditorMediaUrl(detailMediaUrlForItem(prefix, item, post), sourceUrl)
+  ))) || current;
+}
+
+async function captureDetailImageEditorFrame(video, stillSelected, black = false) {
+  video.pause();
+  if (video.seeking || video.readyState < 2) {
+    await new Promise((resolve, reject) => {
+      let timer;
+      const finish = error => {
+        window.clearTimeout(timer);
+        ["seeked", "loadeddata", "canplay"].forEach(name => video.removeEventListener(name, ready));
+        video.removeEventListener("error", failed);
+        error ? reject(error) : resolve();
+      };
+      const ready = () => { if (!video.seeking && video.readyState >= 2) finish(); };
+      const failed = () => finish(new Error("영상 프레임을 읽지 못했습니다."));
+      timer = window.setTimeout(failed, 10000);
+      ["seeked", "loadeddata", "canplay"].forEach(name => video.addEventListener(name, ready));
+      video.addEventListener("error", failed);
+      ready();
+    });
+  }
+  if (!stillSelected()) throw new Error("선택한 파일이 변경됐습니다. 다시 시도해 주세요.");
+  if (!video.videoWidth || !video.videoHeight) throw new Error("영상 프레임의 해상도를 읽지 못했습니다.");
+  const canvas = document.createElement("canvas");
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("영상 프레임 캡처를 사용할 수 없습니다.");
+  try {
+    if (black) {
+      context.fillStyle = "#000";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+    } else context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    return await new Promise((resolve, reject) => canvas.toBlob(blob => {
+      blob ? resolve(blob) : reject(new Error("영상 프레임 캡처에 실패했습니다."));
+    }, "image/png"));
+  } catch (error) {
+    if (error.name === "SecurityError") throw new Error("영상 접근 권한 때문에 현재 프레임을 캡처할 수 없습니다.");
+    throw error;
+  }
 }
 
 function imageEditorReturnBackTarget(value, provider = "imagine") {
@@ -142,16 +184,42 @@ function restoreImageEditorReturnPost(snapshotText, postPath, provider, returnBa
   }
 }
 
-function openDetailImageEditor(provider = "build") {
+let detailImageEditorOpening = false;
+
+async function openDetailImageEditor(provider = "build") {
+  if (detailImageEditorOpening) return;
+  detailImageEditorOpening = true;
+  let frameKey = "";
+  try {
   const normalizedProvider = provider === "imagine" ? "imagine" : "build";
   const prefix = normalizedProvider === "imagine" ? "i" : "b";
-  const post = selectedLibraryPost();
-  const selectedItem = selectedDetailItem(post);
-  const target = detailImageEditorCandidate(prefix, post, selectedItem);
-  const sourceUrl = detailMediaUrlForItem(prefix, target, post);
-  if (!post?.folder_path || !sourceUrl) {
-    showErrorPanel("Edit unavailable", "This detail item does not have an editable source image.");
-    return;
+  const selectedId = library_state.selectedDetailItemId || "";
+  const media = document.querySelector(`.${prefix}_detail_media`);
+  const image = media?.querySelector("img.detail_image");
+  const video = media?.querySelector("video.audio_edit_picture.is-shown") || media?.querySelector("video.custom-video");
+  let sourceUrl = image ? (image.currentSrc || image.src) : (video?.currentSrc || video?.src || "");
+  const post = detailImageEditorPost(prefix, sourceUrl);
+  const selectedItem = (post?.items || []).find(item => mediaItemKey(item) === selectedId) || null;
+  if (!post?.folder_path || (!image && !video)) throw new Error("현재 상세화면에서 편집할 파일을 찾지 못했습니다.");
+  const stillSelected = () => library_state.selectedPostPath === post.folder_path
+    && (library_state.selectedDetailItemId || "") === selectedId
+    && document.querySelector(`.${prefix}_detail_media`) === media
+    && screen_state.current_screen === `${prefix}_detail`;
+  const target = image ? detailImageEditorCandidate(prefix, post, selectedItem, sourceUrl)
+    : (detailItemType(selectedItem) === "video" ? selectedItem
+      : (post.items || []).find(item => detailItemType(item) === "video"
+        && sameImageEditorMediaUrl(detailMediaUrlForItem(prefix, item, post), sourceUrl)));
+  if (!target || !sourceUrl) throw new Error("화면에 표시된 파일과 라이브러리 항목이 일치하지 않습니다. 다른 이미지로 대체하지 않고 편집을 중단했습니다.");
+  if (video && !image) {
+    if (typeof detailAudioEditor !== "undefined" && detailAudioEditor?.player === media.querySelector(".video-player")) {
+      stopDetailTimeline(detailAudioEditor);
+    }
+    const black = Boolean(media.querySelector(".audio_edit_black:not([hidden])"));
+    const blob = await captureDetailImageEditorFrame(video, stillSelected, black);
+    if (!stillSelected()) throw new Error("선택한 영상이 변경됐습니다. 다시 시도해 주세요.");
+    frameKey = await imageEditorTransfer.put(blob);
+    if (!stillSelected()) throw new Error("선택한 영상이 변경됐습니다. 다시 시도해 주세요.");
+    sourceUrl = detailMediaUrlForItem(prefix, target, post) || sourceUrl;
   }
   const saveTarget = normalizedProvider === "imagine" ? "upload" : "detail";
   const url = new URL("/editor.html", window.location.origin);
@@ -160,12 +228,13 @@ function openDetailImageEditor(provider = "build") {
   url.searchParams.set("name", target.title || target.file || post.title || "Image");
   url.searchParams.set("provider", normalizedProvider);
   url.searchParams.set("save_target", saveTarget);
+  if (frameKey) url.searchParams.set("frame_key", frameKey);
   const returnUrl = new URL(window.location.href);
   returnUrl.hash = `${prefix}_detail`;
   url.searchParams.set("return", `${returnUrl.pathname}${returnUrl.search}${returnUrl.hash}`);
   sessionStorage.setItem(IMAGE_EDITOR_RETURN_PROVIDER_KEY, normalizedProvider);
   sessionStorage.setItem(IMAGE_EDITOR_RETURN_POST_KEY, post.folder_path || "");
-  sessionStorage.setItem(IMAGE_EDITOR_RETURN_ITEM_KEY, mediaItemKey(selectedItem || target));
+  sessionStorage.setItem(IMAGE_EDITOR_RETURN_ITEM_KEY, mediaItemKey(target));
   const returnBackTarget = screen_state.detail_back?.[normalizedProvider] || null;
   sessionStorage.setItem(IMAGE_EDITOR_RETURN_BACK_KEY, JSON.stringify(returnBackTarget || {}));
   sessionStorage.setItem(IMAGE_EDITOR_RETURN_POST_SNAPSHOT_KEY, JSON.stringify(post));
@@ -182,14 +251,20 @@ function openDetailImageEditor(provider = "build") {
     sessionStorage.setItem(IMAGE_EDITOR_HISTORY_TAIL_KEY, String(browserHistoryTail));
   }
   window.location.replace(url.toString());
+  } catch (error) {
+    if (frameKey) await imageEditorTransfer.remove(frameKey).catch(() => {});
+    showErrorPanel("이미지 편집기를 열지 못했습니다", error?.message || "현재 파일을 전달하지 못했습니다.");
+  } finally {
+    detailImageEditorOpening = false;
+  }
 }
 
 function openBuildDetailImageEditor() {
-  openDetailImageEditor("build");
+  return openDetailImageEditor("build");
 }
 
 function openImagineDetailImageEditor() {
-  openDetailImageEditor("imagine");
+  return openDetailImageEditor("imagine");
 }
 
 function selectImageEditorReturnPost(postPath, itemId) {

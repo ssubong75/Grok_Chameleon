@@ -1,12 +1,15 @@
 const params = new URLSearchParams(window.location.search);
 const itemId = params.get("item_id") || "";
 const sourceUrl = params.get("source") || "";
+const frameKey = params.get("frame_key") || "";
 const imageName = params.get("name") || "Image";
 const returnPath = safeReturnPath(params.get("return") || "");
 const editorProvider = params.get("provider") || "";
 const editorSaveTarget = params.get("save_target") || "";
 
 const image = document.querySelector("#editorImage");
+let editorFrameObjectUrl = "";
+let editorImageReady = false;
 const imageCanvas = document.querySelector("#imageCanvas");
 const paintCanvas = document.querySelector("#paintCanvas");
 const objectLayer = document.querySelector("#objectLayer");
@@ -245,6 +248,7 @@ fetch("/assets/tui-icons.svg")
   .catch(() => {});
 
 if (image) {
+  if (saveButton) saveButton.disabled = true;
   image.alt = imageName;
   image.draggable = false;
   image.addEventListener("load", () => {
@@ -257,12 +261,39 @@ if (image) {
     initializeEditorTool();
     initialHistoryState = captureHistoryState();
     window.requestAnimationFrame(() => resetHistory());
+    editorImageReady = true;
+    if (saveButton) saveButton.disabled = false;
+    if (editorFrameObjectUrl) {
+      URL.revokeObjectURL(editorFrameObjectUrl);
+      editorFrameObjectUrl = "";
+    }
   });
-  if (sourceUrl) image.src = editorImageLoadUrl(sourceUrl);
-  else setStatus("No image source.");
+  image.addEventListener("error", () => {
+    editorImageReady = false;
+    if (saveButton) saveButton.disabled = true;
+    if (editorFrameObjectUrl) URL.revokeObjectURL(editorFrameObjectUrl);
+    editorFrameObjectUrl = "";
+    setStatus(frameKey ? "캡처한 프레임을 읽지 못했습니다." : "이미지를 읽지 못했습니다. 파일 위치나 계정 접근 권한을 확인해 주세요.");
+  });
+  loadImageEditorSource().catch(error => setStatus(error.message || "이미지를 전달받지 못했습니다."));
 }
 
-closeButton?.addEventListener("click", () => returnToMainApp());
+async function loadImageEditorSource() {
+  if (frameKey) {
+    const blob = await imageEditorTransfer.take(frameKey);
+    if (!(blob instanceof Blob) || !blob.size) throw new Error("캡처한 프레임 전달 데이터가 없거나 만료됐습니다.");
+    editorFrameObjectUrl = URL.createObjectURL(blob);
+    image.src = editorFrameObjectUrl;
+  } else if (sourceUrl) image.src = editorImageLoadUrl(sourceUrl);
+  else throw new Error("편집할 이미지 주소가 없습니다.");
+}
+
+closeButton?.addEventListener("click", async () => {
+  if (frameKey) await imageEditorTransfer.remove(frameKey).catch(() => {});
+  if (editorFrameObjectUrl) URL.revokeObjectURL(editorFrameObjectUrl);
+  editorFrameObjectUrl = "";
+  returnToMainApp();
+});
 saveButton?.addEventListener("click", saveEdit);
 
 async function api(path, options = {}) {
@@ -3731,6 +3762,10 @@ function returnToMainApp(savedItemId = "", options = {}) {
 }
 
 async function saveEdit() {
+  if (!editorImageReady) {
+    setStatus("이미지를 모두 읽은 후 저장해 주세요.");
+    return;
+  }
   if (!itemId || !sourceUrl) {
     setStatus("Cannot save: missing image source.");
     return;
