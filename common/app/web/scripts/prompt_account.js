@@ -2,9 +2,9 @@
   async function uniqueFileName(parentHandle, preferredStem, extension) {
     const base = safeFileStem(preferredStem);
     let name = `${base}.${extension}`;
-    let index = 2;
+    let index = 1;
     while (await getOptionalFile(parentHandle, name)) {
-      name = `${base}-${index}.${extension}`;
+      name = `${base}_${index}.${extension}`;
       index += 1;
     }
     return name;
@@ -15,9 +15,9 @@
     const base = safeFileStem(title);
     let name = `${base}.txt`;
     if (name === current) return current;
-    let index = 2;
+    let index = 1;
     while (await getOptionalFile(parentHandle, name)) {
-      name = `${base}-${index}.txt`;
+      name = `${base}_${index}.txt`;
       if (name === current) return current;
       index += 1;
     }

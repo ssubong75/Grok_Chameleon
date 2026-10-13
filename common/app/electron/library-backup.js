@@ -138,9 +138,9 @@ function referenceFolderTimestamp(metadata, fallbackMs = Date.now()) {
 function uniqueReferenceDirectory(parent, metadata, fallbackMs) {
   const stem = referenceFolderTimestamp(metadata, fallbackMs);
   let candidate = path.join(parent, stem);
-  let suffix = 2;
+  let suffix = 1;
   while (pathExists(candidate)) {
-    candidate = path.join(parent, `${stem}-${String(suffix).padStart(2, "0")}`);
+    candidate = path.join(parent, `${stem}_${suffix}`);
     suffix += 1;
   }
   return candidate;

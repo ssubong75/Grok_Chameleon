@@ -2,9 +2,9 @@
 async function uniqueDirectoryName(parentHandle, preferredName) {
   const base = preferredName.replace(/[/:\\]/g, "-").trim() || "post";
   let name = base;
-  let index = 2;
+  let index = 1;
   while (await getOptionalDirectory(parentHandle, name)) {
-    name = `${base}-${index}`;
+    name = `${base}_${index}`;
     index += 1;
   }
   return name;

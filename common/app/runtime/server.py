@@ -736,9 +736,9 @@ def reference_storage_folder_stem(metadata: dict | None, fallback_timestamp: flo
 def unique_reference_storage_directory(parent: Path, metadata: dict | None, fallback_timestamp: float | None = None) -> Path:
     stem = reference_storage_folder_stem(metadata, fallback_timestamp)
     candidate = parent / stem
-    suffix = 2
+    suffix = 1
     while candidate.exists():
-        candidate = parent / f"{stem}-{suffix:02d}"
+        candidate = parent / f"{stem}_{suffix}"
         suffix += 1
     return candidate
 
@@ -22202,8 +22202,8 @@ def applescript_string(value: str) -> str:
 def unique_trash_path(path: Path) -> Path:
     if not path.exists():
         return path
-    for index in range(2, 1000):
-        candidate = path.with_name(f"{path.stem}-{index}{path.suffix}")
+    for index in range(1, 1000):
+        candidate = path.with_name(f"{path.stem}_{index}{path.suffix}")
         if not candidate.exists():
             return candidate
     raise RuntimeError(f"Could not find a free Trash filename near {path.name}.")
@@ -24176,9 +24176,9 @@ def close_total_account_browser(
 def unique_file_name(parent: Path, preferred_stem: str, extension: str) -> str:
     base = safe_name(preferred_stem, "prompt")
     name = f"{base}.{extension}"
-    index = 2
+    index = 1
     while (parent / name).exists():
-        name = f"{base}-{index}.{extension}"
+        name = f"{base}_{index}.{extension}"
         index += 1
     return name
 
@@ -24206,9 +24206,9 @@ def unique_media_file_name(parent: Path, preferred_stem: str, extension: str) ->
         if entry.is_file()
     }
     stem = base
-    index = 2
+    index = 1
     while stem.casefold() in existing_stems:
-        stem = f"{base}-{index}"
+        stem = f"{base}_{index}"
         index += 1
     return f"{stem}.{extension}"
 
@@ -24219,9 +24219,9 @@ def unique_file_name_for_update(parent: Path, preferred_stem: str, extension: st
     name = f"{base}.{extension}"
     if name == current:
         return current
-    index = 2
+    index = 1
     while (parent / name).exists():
-        name = f"{base}-{index}.{extension}"
+        name = f"{base}_{index}.{extension}"
         if name == current:
             return current
         index += 1
@@ -24231,9 +24231,9 @@ def unique_file_name_for_update(parent: Path, preferred_stem: str, extension: st
 def unique_directory_name(parent: Path, preferred: str) -> str:
     base = safe_name(preferred, "post")
     name = base
-    index = 2
+    index = 1
     while (parent / name).exists():
-        name = f"{base}-{index}"
+        name = f"{base}_{index}"
         index += 1
     return name
 
@@ -24847,9 +24847,9 @@ def unique_path(path: Path) -> Path:
         return path
     stem = path.stem or "media"
     suffix = path.suffix
-    index = 2
+    index = 1
     while True:
-        candidate = path.with_name(f"{stem}-{index}{suffix}")
+        candidate = path.with_name(f"{stem}_{index}{suffix}")
         if not candidate.exists():
             return candidate
         index += 1
@@ -28563,7 +28563,12 @@ def merge_selected_posts(payload: dict) -> dict:
     if any(source_dir.resolve() == target_parent.resolve() or path_inside(source_dir, target_parent) for source_dir in source_dirs):
         raise RuntimeError("Select a destination outside the cards being merged.")
 
-    target_name = unique_directory_name(target_parent, "merged-item")
+    target_stem = datetime.now().strftime("%y%m%d_%H%M")
+    target_name = target_stem
+    duplicate_index = 1
+    while (target_parent / target_name).exists():
+        target_name = f"{target_stem}_{duplicate_index}"
+        duplicate_index += 1
     temp_dir = target_parent / f".merge-{uuid.uuid4().hex}.tmp"
     final_dir = target_parent / target_name
     merged_items: list[dict] = []
