@@ -137,6 +137,7 @@ async function openDetailAudioEditor(prefix) {
     selectRange: false,
     target: "both",
     selection: null,
+    selectedClipIds: [],
     audioClips: [],
     videoClips: [],
     clipboard: null,
@@ -242,6 +243,7 @@ function bindDetailAudioEditor(editor) {
     event.stopPropagation();
     editor.selectRange = !editor.selectRange;
     editor.selection = null;
+    editor.selectedClipIds = [];
     event.currentTarget.setAttribute("aria-pressed", String(editor.selectRange));
     drawDetailAudioEditor();
   });
@@ -268,6 +270,7 @@ function bindDetailAudioEditor(editor) {
       event.stopPropagation();
       editor.target = button.dataset.target;
       editor.selection = null;
+      editor.selectedClipIds = [];
       drawDetailAudioEditor();
     });
   });
@@ -278,8 +281,10 @@ function bindDetailAudioEditor(editor) {
     else if (detailAudioClipAtTime(detailAudioTimeAt(event))) editor.canvas.style.cursor = "grab";
     else editor.canvas.style.cursor = "crosshair";
   });
+  editor.canvas.tabIndex = -1;
   editor.canvas.addEventListener("pointerdown", (event) => {
     if (!editor.duration) return;
+    editor.canvas.focus({ preventScroll: true });
     editor.canvas.setPointerCapture?.(event.pointerId);
     const time = detailAudioTimeAt(event);
     const handle = detailAudioHandleAt(event);
@@ -289,6 +294,8 @@ function bindDetailAudioEditor(editor) {
     const clip = trimIds.length ? null : detailAudioClipAtTime(time);
     const moveIds = clip ? detailAudioTrimIds(clip) : [];
     const selecting = editor.selectRange && !rangeInside && !handle;
+    editor.selectedClipIds = selecting || rangeInside || rangeHandle ? [] : [...(trimIds.length ? trimIds : moveIds)];
+    if (!selecting && !rangeInside && !rangeHandle) editor.selection = null;
     if (selecting) editor.selection = { start: time, end: time, clipIds: moveIds, materialized: false };
     editor.gesture = {
       x: event.clientX,
@@ -342,6 +349,7 @@ function captureDetailAudioHistory(editor) {
     selection: editor.selection ? { ...editor.selection, clipIds: [...(editor.selection.clipIds || [])] } : null,
     target: editor.target,
     selectRange: editor.selectRange,
+    selectedClipIds: [...editor.selectedClipIds],
   };
 }
 
@@ -378,6 +386,7 @@ function restoreDetailAudioHistory(redo = false) {
   editor.selection = state.selection ? { ...state.selection, clipIds: [...state.selection.clipIds] } : null;
   editor.target = state.target;
   editor.selectRange = state.selectRange;
+  editor.selectedClipIds = [...(state.selectedClipIds || [])];
   editor.panel.querySelector(".audio_edit_range").setAttribute("aria-pressed", String(editor.selectRange));
   editor.time = Math.min(editor.time || 0, editor.duration);
   refreshDetailTimeline(editor);
@@ -533,6 +542,9 @@ function finishDetailAudioGesture(event) {
     editor.selection = { ...editor.selection, start: editor.selection.end, end: editor.selection.start };
   }
   if (gesture.mode === "select" && !detailAudioSelectionRange()) editor.selection = null;
+  if (!editor.selection && gesture.mode !== "select") {
+    editor.selectedClipIds = [...(gesture.copyIds || (gesture.trimIds.length ? gesture.trimIds : gesture.moveIds))];
+  }
   recordDetailAudioHistory(editor, gesture.historyBefore);
   syncDetailAudioPreview();
   drawDetailAudioEditor();
@@ -692,6 +704,7 @@ function handleDetailAudioKey(event) {
     deleteDetailAudioSelection();
   } else if (event.key === "Escape") {
     editor.selection = null;
+    editor.selectedClipIds = [];
     drawDetailAudioEditor();
   }
 }
@@ -748,12 +761,20 @@ function pasteDetailAudioClipboard() {
 function deleteDetailAudioSelection() {
   const range = detailAudioSelectionRange();
   const editor = detailAudioEditor;
-  if (!range || !editor) return;
+  if (!editor || editor.gesture || editor.saving) return;
+  const selected = new Set(editor.selectedClipIds);
+  if (!range && !selected.size) return;
   const historyBefore = captureDetailAudioHistory(editor);
   editor.previewNodes.forEach(node => node.element.pause());
-  if (editor.target !== "video") editor.audioClips = removeDetailClipRange(editor.audioClips, range.start, range.end);
-  if (editor.target !== "audio") editor.videoClips = removeDetailClipRange(editor.videoClips, range.start, range.end);
+  if (range) {
+    if (editor.target !== "video") editor.audioClips = removeDetailClipRange(editor.audioClips, range.start, range.end);
+    if (editor.target !== "audio") editor.videoClips = removeDetailClipRange(editor.videoClips, range.start, range.end);
+  } else {
+    if (editor.target !== "video") editor.audioClips = editor.audioClips.filter(clip => !selected.has(clip.id));
+    if (editor.target !== "audio") editor.videoClips = editor.videoClips.filter(clip => !selected.has(clip.id));
+  }
   editor.selection = null;
+  editor.selectedClipIds = [];
   refreshDetailTimeline(editor);
   recordDetailAudioHistory(editor, historyBefore);
   syncDetailAudioPreview();
