@@ -24,7 +24,7 @@ function closeDetailAudioEditor() {
   if (editor.video && editor.previousLoop != null) editor.video.loop = editor.previousLoop;
   document.removeEventListener("pointermove", editor.onPointerMove);
   document.removeEventListener("pointerup", editor.onPointerUp);
-  document.removeEventListener("keydown", editor.onKey);
+  document.removeEventListener("keydown", editor.onKey, true);
   editor.previewNodes?.forEach((node) => {
     node.element.pause();
     node.element.src = "";
@@ -100,6 +100,8 @@ async function openDetailAudioEditor(prefix) {
           <button class="audio_edit_magnetic" type="button" aria-pressed="true">Magnetic<span class="audio_edit_check" aria-hidden="true"></span></button>
         </div>
         <span class="audio_edit_separator" aria-hidden="true"></span>
+        <button class="audio_edit_add_track" type="button">A.Track +</button>
+        <span class="audio_edit_separator audio_edit_track_separator" aria-hidden="true"></span>
         <button class="audio_edit_history_btn audio_edit_undo" type="button" aria-label="Undo" title="Undo (⌘Z / Ctrl+Z)" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 15A8 8 0 0 0 4 15M7.498463 13.289899 2.8 15 1.931759 10.075961"></path></svg></button>
         <button class="audio_edit_history_btn audio_edit_redo" type="button" aria-label="Redo" title="Redo (⌘⇧Z / Ctrl+Shift+Z)" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path transform="translate(24 0) scale(-1 1)" d="M20 15A8 8 0 0 0 4 15M7.498463 13.289899 2.8 15 1.931759 10.075961"></path></svg></button>
         <span class="audio_edit_separator" aria-hidden="true"></span>
@@ -132,6 +134,7 @@ async function openDetailAudioEditor(prefix) {
     panel,
     canvas: panel.querySelector("canvas"),
     previousMuted: video.muted,
+    previousLoop: video.loop,
     duration: Number(video.duration) || 0,
     magnetic: true,
     selectRange: false,
@@ -139,6 +142,8 @@ async function openDetailAudioEditor(prefix) {
     selection: null,
     selectedClipIds: [],
     audioClips: [],
+    audioTracks: [1],
+    activeAudioTrack: 1,
     videoClips: [],
     clipboard: null,
     undoStack: [],
@@ -176,11 +181,12 @@ async function openDetailAudioEditor(prefix) {
   editor.onPlay = () => {
     if (detailAudioEditor !== editor) return;
     editor.holdClock = false;
+    video.loop = false;
   };
   video.addEventListener("play", editor.onPlay);
   document.addEventListener("pointermove", editor.onPointerMove);
   document.addEventListener("pointerup", editor.onPointerUp);
-  document.addEventListener("keydown", editor.onKey);
+  document.addEventListener("keydown", editor.onKey, true);
   bindDetailAudioEditor(editor);
   if (!editor.duration || !Number.isFinite(editor.duration)) {
     await new Promise((resolve) => {
@@ -209,6 +215,7 @@ async function openDetailAudioEditor(prefix) {
     editor.videoClips[0].mediaDuration = editor.duration;
     editor.videoClips[0].vIndex = 1;
   }
+  engageDetailTimeline(editor);
   drawDetailAudioEditor();
 }
 
@@ -230,6 +237,10 @@ function makeDetailVideoClip(start, inPoint, duration, source = "original", medi
 }
 
 function bindDetailAudioEditor(editor) {
+  editor.panel.querySelector(".audio_edit_add_track").addEventListener("click", (event) => {
+    event.stopPropagation();
+    addDetailAudioTrack(editor);
+  });
   const panel = editor.panel;
   panel.querySelector(".audio_edit_undo").addEventListener("click", (event) => {
     event.stopPropagation();
@@ -269,6 +280,7 @@ function bindDetailAudioEditor(editor) {
     button.addEventListener("click", (event) => {
       event.stopPropagation();
       editor.target = button.dataset.target;
+      if (editor.target !== "audio") editor.activeAudioTrack = 1;
       editor.selection = null;
       editor.selectedClipIds = [];
       drawDetailAudioEditor();
@@ -278,12 +290,19 @@ function bindDetailAudioEditor(editor) {
     if (editor.gesture) return;
     if (detailAudioHandleAt(event)) editor.canvas.style.cursor = "ew-resize";
     else if (editor.selectRange && !detailAudioTimeInsideSelection(detailAudioTimeAt(event))) editor.canvas.style.cursor = "crosshair";
-    else if (detailAudioClipAtTime(detailAudioTimeAt(event))) editor.canvas.style.cursor = "grab";
+    else if (detailAudioClipAtTime(detailAudioTimeAt(event), detailAudioTrackAt(event))) editor.canvas.style.cursor = "grab";
     else editor.canvas.style.cursor = "crosshair";
   });
   editor.canvas.tabIndex = -1;
   editor.canvas.addEventListener("pointerdown", (event) => {
     if (!editor.duration) return;
+    const track = detailAudioTrackAt(event);
+    if (track !== (editor.activeAudioTrack || 1)) {
+      editor.selection = null;
+      editor.selectedClipIds = [];
+    }
+    editor.activeAudioTrack = track;
+    if (track !== 1) editor.target = "audio";
     editor.canvas.focus({ preventScroll: true });
     editor.canvas.setPointerCapture?.(event.pointerId);
     const time = detailAudioTimeAt(event);
@@ -325,14 +344,23 @@ function bindDetailAudioEditor(editor) {
     event.preventDefault();
     event.stopPropagation();
     const time = detailAudioTimeAt(event);
+    const trackId = detailAudioTrackAt(event);
     const attached = event.dataTransfer?.getData("application/x-gc-detail-attach");
     if (attached) {
-      addDetailAudioFromMedia(attached, time).catch((error) => showErrorPanel("첨부 실패", error.message));
+      addDetailAudioFromMedia(attached, time, trackId).catch((error) => showErrorPanel("첨부 실패", error.message));
       return;
     }
     const files = [...(event.dataTransfer?.files || [])];
-    addDetailAudioPaths(files.map((file) => file.path).filter(Boolean), time)
-      .catch((error) => showErrorPanel("첨부 실패", error.message));
+    if (!files.length) return;
+    try {
+      const native = detailAudioNative();
+      if (!native?.getPathForFile) throw new Error("파일 드래그 첨부를 사용하려면 앱을 완전히 종료한 뒤 다시 실행해 주세요.");
+      const paths = files.map((file) => native.getPathForFile(file));
+      if (paths.some((filePath) => !filePath)) throw new Error("드래그한 파일의 경로를 가져오지 못했습니다. 첨부 버튼으로 파일을 선택해 주세요.");
+      addDetailAudioPaths(paths, time, {trackId}).catch((error) => showErrorPanel("첨부 실패", error.message));
+    } catch (error) {
+      showErrorPanel("첨부 실패", error.message);
+    }
   });
   window.addEventListener("resize", drawDetailAudioEditor);
 }
@@ -341,9 +369,41 @@ function cloneDetailClips(clips) {
   return clips.map((clip) => ({ ...clip }));
 }
 
+function detailAudioTrackId(clip) {
+  return Number(clip.trackId) || 1;
+}
+
+function detailAudioTracks(editor) {
+  return editor.audioTracks?.length ? editor.audioTracks : [1];
+}
+
+function detailAudioTrackAt(event) {
+  const editor = detailAudioEditor;
+  const tracks = detailAudioTracks(editor);
+  const rect = editor.canvas.getBoundingClientRect();
+  const index = Math.max(0, Math.min(tracks.length - 1, Math.floor((event.clientY - rect.top) / (rect.height / tracks.length))));
+  return tracks[index];
+}
+
+function addDetailAudioTrack(editor) {
+  const before = captureDetailAudioHistory(editor);
+  editor.audioTracks = [...detailAudioTracks(editor)];
+  const trackId = Math.max(...editor.audioTracks) + 1;
+  editor.audioTracks.push(trackId);
+  editor.activeAudioTrack = trackId;
+  editor.target = "audio";
+  editor.selection = null;
+  editor.selectedClipIds = [];
+  recordDetailAudioHistory(editor, before);
+  drawDetailAudioEditor();
+  return trackId;
+}
+
 function captureDetailAudioHistory(editor) {
   return {
     audioClips: editor.audioClips.map(clip => ({ ...clip, preview: null })),
+    audioTracks: [...detailAudioTracks(editor)],
+    activeAudioTrack: editor.activeAudioTrack || 1,
     videoClips: cloneDetailClips(editor.videoClips),
     duration: editor.duration,
     selection: editor.selection ? { ...editor.selection, clipIds: [...(editor.selection.clipIds || [])] } : null,
@@ -354,8 +414,8 @@ function captureDetailAudioHistory(editor) {
 }
 
 function detailAudioHistoryKey(state) {
-  const clips = list => list.map(clip => [clip.id, clip.source, clip.start, clip.inPoint, clip.duration, clip.gain, clip.group, clip.vIndex]);
-  return JSON.stringify([state.duration, clips(state.audioClips), clips(state.videoClips)]);
+  const clips = list => list.map(clip => [clip.id, clip.source, clip.start, clip.inPoint, clip.duration, clip.gain, clip.group, clip.vIndex, detailAudioTrackId(clip)]);
+  return JSON.stringify([state.duration, state.audioTracks || [1], clips(state.audioClips), clips(state.videoClips)]);
 }
 
 function recordDetailAudioHistory(editor, before) {
@@ -381,6 +441,8 @@ function restoreDetailAudioHistory(redo = false) {
   });
   editor.previewNodes = [];
   editor.audioClips = state.audioClips.map(clip => ({ ...clip, preview: null }));
+  editor.audioTracks = [...(state.audioTracks || [1])];
+  editor.activeAudioTrack = state.activeAudioTrack || 1;
   editor.videoClips = cloneDetailClips(state.videoClips);
   editor.duration = state.duration;
   editor.selection = state.selection ? { ...state.selection, clipIds: [...state.selection.clipIds] } : null;
@@ -552,9 +614,10 @@ function finishDetailAudioGesture(event) {
 
 function detailAudioTargetClips() {
   const editor = detailAudioEditor;
-  if (editor.target === "audio") return { audio: editor.audioClips, video: [] };
+  const audio = editor.audioClips.filter(clip => detailAudioTrackId(clip) === (editor.activeAudioTrack || 1));
+  if (editor.target === "audio") return { audio, video: [] };
   if (editor.target === "video") return { audio: [], video: editor.videoClips };
-  return { audio: editor.audioClips, video: editor.videoClips };
+  return { audio, video: editor.videoClips };
 }
 
 function clipIntersects(clip, start, end) {
@@ -600,9 +663,7 @@ function sliceDetailClips(audioClips, videoClips, start, end) {
     };
   };
   return {
-    audio: targets.audio.includes(audioClips[0]) || editorUsesAudio(targets, audioClips)
-      ? audioClips.map(sliceOne).filter(Boolean)
-      : [],
+    audio: audioClips.filter(clip => targets.audio.includes(clip)).map(sliceOne).filter(Boolean),
     video: targets.video.length ? videoClips.map(sliceOne).filter(Boolean) : [],
   };
 }
@@ -649,7 +710,7 @@ function detailAudioMoveBases(gesture) {
   const add = (clips) => clips.forEach((clip) => {
     if (range && clipIntersects(clip, range.start, range.end)) bases.set(clip.id, clip.start);
   });
-  if (editor.target !== "video") add(gesture.audio);
+  if (editor.target !== "video") add(gesture.audio.filter(clip => detailAudioTrackId(clip) === (editor.activeAudioTrack || 1)));
   if (editor.target !== "audio") add(gesture.video);
   return bases;
 }
@@ -684,7 +745,18 @@ function snapDetailAudioDelta(bases, delta) {
 
 function handleDetailAudioKey(event) {
   const editor = detailAudioEditor;
-  if (!editor || event.target?.closest("input, textarea, [contenteditable='true']")) return;
+  if (!editor || editor.panel.querySelector("dialog[open]")) return;
+  const typing = event.target?.closest("textarea, [contenteditable='true'], input:not([type='range']):not([type='checkbox']):not([type='radio']):not([type='button']):not([type='submit'])");
+  if ((event.code === "Space" || event.key === " ") && !typing && !event.ctrlKey && !event.metaKey && !event.altKey) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (!event.repeat) {
+      if (editor.running) { stopDetailTimeline(editor); syncDetailAudioPreview(); }
+      else startDetailTimeline(editor);
+    }
+    return;
+  }
+  if (event.target?.closest("input, textarea, [contenteditable='true']")) return;
   const key = event.key.toLowerCase();
   if ((event.ctrlKey || event.metaKey) && !event.altKey && key === "z") {
     event.preventDefault();
@@ -711,13 +783,24 @@ function handleDetailAudioKey(event) {
 
 function copyDetailAudioSelection(remove) {
   const range = detailAudioSelectionRange();
-  if (!range) return;
   const editor = detailAudioEditor;
-  const copies = sliceDetailClips(editor.audioClips, editor.videoClips, range.start, range.end);
+  if (!editor) return;
+  let copies;
+  let start;
+  if (range) {
+    copies = sliceDetailClips(editor.audioClips, editor.videoClips, range.start, range.end);
+    start = range.start;
+  } else if (editor.target === "audio") {
+    const selected = new Set(editor.selectedClipIds || []);
+    const audio = editor.audioClips.filter(clip => selected.has(clip.id));
+    if (!audio.length) return;
+    copies = { audio: audio.map(clip => ({ ...clip, id: detailAudioClipId(), preview: null })), video: [] };
+    start = Math.min(...audio.map(clip => clip.start));
+  } else return;
   editor.clipboard = {
     audio: copies.audio,
     video: copies.video,
-    start: range.start,
+    start,
   };
   if (remove) deleteDetailAudioSelection();
 }
@@ -745,7 +828,7 @@ function pasteDetailAudioClipboard() {
     return labels.get(key);
   };
   clipboard.audio.forEach((clip) => {
-    const copy = { ...clip, id: detailAudioClipId(), preview: null, vIndex: labelFor(clip), group: regroup(clip.group), start: Math.max(0, clip.start - clipboard.start + at) };
+    const copy = { ...clip, trackId: editor.activeAudioTrack || 1, id: detailAudioClipId(), preview: null, vIndex: labelFor(clip), group: regroup(clip.group), start: Math.max(0, clip.start - clipboard.start + at) };
     editor.audioClips.push(copy);
   });
   clipboard.video.forEach((clip) => {
@@ -767,7 +850,7 @@ function deleteDetailAudioSelection() {
   const historyBefore = captureDetailAudioHistory(editor);
   editor.previewNodes.forEach(node => node.element.pause());
   if (range) {
-    if (editor.target !== "video") editor.audioClips = removeDetailClipRange(editor.audioClips, range.start, range.end);
+    if (editor.target !== "video") editor.audioClips = editor.audioClips.flatMap(clip => detailAudioTrackId(clip) === (editor.activeAudioTrack || 1) ? removeDetailClipRange([clip], range.start, range.end) : [clip]);
     if (editor.target !== "audio") editor.videoClips = removeDetailClipRange(editor.videoClips, range.start, range.end);
   } else {
     if (editor.target !== "video") editor.audioClips = editor.audioClips.filter(clip => !selected.has(clip.id));
@@ -805,18 +888,39 @@ function removeDetailClipRange(clips, start, end) {
 }
 
 async function addDetailAudioFromDialog() {
+  const editor = detailAudioEditor;
+  if (!editor) return;
+  const destination = await chooseDetailAudioAttachmentTrack(editor);
+  if (!destination || detailAudioEditor !== editor) return;
   const selected = await detailAudioNative().pickAudioFiles();
   if (!selected || selected.cancelled) return;
-  const editor = detailAudioEditor;
-  await addDetailAudioPaths(selected.paths, detailAudioNow());
+  if (detailAudioEditor !== editor) return;
+  const trackId = destination === "new" ? addDetailAudioTrack(editor) : 1;
+  await addDetailAudioPaths(selected.paths, detailAudioNow(), {trackId});
 }
 
-async function addDetailAudioFromMedia(raw, time) {
+function chooseDetailAudioAttachmentTrack(editor) {
+  return new Promise(resolve => {
+    const dialog = document.createElement("dialog");
+    dialog.className = "audio_edit_track_dialog";
+    dialog.innerHTML = `<p>Where would you like to add the file?</p><div><button type="button" data-destination="original">Original Track</button><button type="button" data-destination="new">New Track</button><button type="button" data-destination="cancel">Cancel</button></div>`;
+    editor.panel.append(dialog);
+    let result = null;
+    dialog.querySelectorAll("button").forEach(button => button.addEventListener("click", () => {
+      result = button.dataset.destination === "cancel" ? null : button.dataset.destination;
+      dialog.close();
+    }));
+    dialog.addEventListener("close", () => { dialog.remove(); resolve(result); }, {once:true});
+    dialog.showModal();
+  });
+}
+
+async function addDetailAudioFromMedia(raw, time, trackId = 1) {
   const payload = JSON.parse(raw);
   const info = await detailAudioNative().audioPeaks(payload);
   if (!info?.path) throw new Error("파일을 찾지 못했습니다.");
   if (!info.hasAudio && !detailAudioIsVideo(info.path)) throw new Error("이 영상에는 오디오가 없습니다.");
-  await addDetailAudioPaths([info.path], time, { mediaUrl: payload.url || "" });
+  await addDetailAudioPaths([info.path], time, { mediaUrl: payload.url || "", trackId });
 }
 
 document.addEventListener("dragstart", (event) => {
@@ -839,10 +943,13 @@ document.addEventListener("dragstart", (event) => {
 async function addDetailAudioPaths(paths, time, options = {}) {
   const editor = detailAudioEditor;
   if (!editor) return;
+  const trackId = options.trackId || editor.activeAudioTrack || 1;
+  editor.activeAudioTrack = trackId;
+  if (trackId !== 1) editor.target = "audio";
   let cursor = Math.max(0, time);
   for (const filePath of paths) {
     const info = await detailAudioNative().localAudioPeaks({ path: filePath });
-    const file = await detailAudioNative().readAudioFile({ path: filePath, includeVideo: !options.mediaUrl });
+    const file = await detailAudioNative().readAudioFile({ path: filePath, includeVideo: trackId === 1 && !options.mediaUrl });
     if (detailAudioEditor !== editor) return;
     const hasAudio = info.hasAudio !== false && file.hasAudio !== false;
     let blobUrl = "";
@@ -866,6 +973,7 @@ async function addDetailAudioPaths(paths, time, options = {}) {
       duration: Number(info.duration) || 0,
       peaks: info.peaks || [],
       hasAudio: Boolean(blobUrl),
+      trackId,
     }, blobUrl, cursor, mediaUrl);
   }
   refreshDetailTimeline(editor);
@@ -884,7 +992,7 @@ function seekDetailAudioTime(time) {
   const editor = detailAudioEditor;
   if (!editor) return;
   const next = Math.max(0, time);
-  editor.time = editor.duration ? Math.min(editor.duration, next) : next;
+  editor.time = Math.min(detailPlayEnd(editor), next);
   editor.holdClock = false;
   if (detailTimelineCustom(editor)) {
     presentDetailTimeline(editor, editor.running);
@@ -911,9 +1019,11 @@ function placeDetailAttachment(editor, file, blobUrl, time, mediaUrl) {
   const length = Number(file.duration) || 0;
   if (length < 0.04) return time;
   const isVideo = detailAudioIsVideo(file.path);
-  if (!file.hasAudio && !isVideo) return time;
+  const trackId = file.trackId || 1;
+  if (!file.hasAudio && (!isVideo || trackId !== 1)) return time;
   const historyBefore = captureDetailAudioHistory(editor);
-  const end = detailClipEnd(editor);
+  const trackClips = editor.audioClips.filter(clip => detailAudioTrackId(clip) === trackId);
+  const end = [...trackClips, ...(trackId === 1 ? editor.videoClips : [])].reduce((value, clip) => Math.max(value, clip.start + clip.duration), 0);
   const start = end > 0 ? end + 2 : 0;
   const vIndex = nextDetailVIndex(editor);
   const group = detailAudioClipId();
@@ -922,9 +1032,10 @@ function placeDetailAttachment(editor, file, blobUrl, time, mediaUrl) {
     clip.blobUrl = blobUrl;
     clip.group = group;
     clip.vIndex = vIndex;
+    clip.trackId = trackId;
     editor.audioClips.push(clip);
   }
-  if (isVideo) {
+  if (isVideo && trackId === 1) {
     const clip = makeDetailVideoClip(start, 0, length, file.path, length);
     clip.group = group;
     clip.mediaUrl = mediaUrl || "";
@@ -945,7 +1056,7 @@ function detailClipEnd(editor) {
 }
 
 function detailPlayEnd(editor) {
-  return Math.max(0.04, detailClipEnd(editor));
+  return Math.max(0.04, ...editor.videoClips.map(clip => clip.start + clip.duration));
 }
 
 function nextDetailVIndex(editor) {
@@ -976,7 +1087,7 @@ function refreshDetailTimeline(editor) {
 }
 
 function detailTimelineCustom(editor) {
-  return Boolean(editor && !videoTrackUntouched(editor));
+  return Boolean(editor);
 }
 
 function detailTimelineRate(editor) {
@@ -994,7 +1105,7 @@ function detailVideoClipAt(editor, time) {
 
 function engageDetailTimeline(editor) {
   if (!editor.controlsBound) {
-    editor.previousLoop = editor.video.loop;
+    if (editor.previousLoop == null) editor.previousLoop = editor.video.loop;
     editor.video.loop = false;
     editor.onPlayClick = (event) => {
       if (detailAudioEditor !== editor || !detailTimelineCustom(editor)) return;
@@ -1008,7 +1119,7 @@ function engageDetailTimeline(editor) {
       if (detailAudioEditor !== editor || !detailTimelineCustom(editor)) return;
       event.stopImmediatePropagation();
       const seek = editor.player.querySelector(".video-seek");
-      seekDetailAudioTime((Number(seek?.value) || 0) / 1000 * (editor.duration || 0));
+      seekDetailAudioTime((Number(seek?.value) || 0) / 1000 * detailPlayEnd(editor));
     };
     editor.player.addEventListener("click", editor.onPlayClick, true);
     const seek = editor.player.querySelector(".video-seek");
@@ -1025,7 +1136,7 @@ function engageDetailTimeline(editor) {
 }
 
 function startDetailTimeline(editor) {
-  const atEnd = (time) => time >= detailPlayEnd(editor) - 0.05;
+  const atEnd = (time) => time >= detailPlayEnd(editor) - 0.000001;
   if (atEnd(editor.time || 0)) editor.time = 0;
   editor.running = true;
   editor.video.loop = false;
@@ -1047,9 +1158,9 @@ function startDetailTimeline(editor) {
       presentDetailTimeline(editor, true);
     } else {
       const local = element.currentTime - clip.inPoint;
-      if (local >= clip.duration - 0.05) {
-        editor.time = clip.start + clip.duration + 0.001;
-        if (editor.time >= playEnd - 0.02) editor.time = 0;
+      if (local >= clip.duration - 0.000001 || element.ended) {
+        editor.time = clip.start + clip.duration + 0.000001;
+        if (editor.time >= playEnd - 0.000001) editor.time = 0;
         presentDetailTimeline(editor, true);
       } else if (local >= 0) editor.time = clip.start + local;
     }
@@ -1068,11 +1179,12 @@ function stopDetailTimeline(editor) {
   cancelAnimationFrame(editor.frame || 0);
   editor.video.pause();
   editor.picture?.pause();
+  editor.previewNodes?.forEach(node => node.element.pause());
   paintDetailTimelineChrome(editor);
 }
 
 function presentDetailTimeline(editor, playing) {
-  const time = Math.max(0, editor.duration ? Math.min(editor.time || 0, Math.max(editor.duration - 0.001, 0)) : (editor.time || 0));
+  const time = Math.max(0, Math.min(editor.time || 0, Math.max(detailPlayEnd(editor) - 0.000001, 0)));
   editor.time = time;
   const clip = detailVideoClipAt(editor, time);
   editor.activeClip = clip;
@@ -1131,9 +1243,9 @@ function paintDetailTimelineChrome(editor) {
   const seek = editor.player.querySelector(".video-seek");
   const play = editor.player.querySelector(".video-play");
   if (current && typeof formatVideoTime === "function") current.textContent = formatVideoTime(editor.time || 0);
-  if (duration && typeof formatVideoTime === "function") duration.textContent = formatVideoTime(editor.duration || 0);
-  if (seek && editor.duration) {
-    const ratio = Math.max(0, Math.min(1, (editor.time || 0) / editor.duration));
+  if (duration && typeof formatVideoTime === "function") duration.textContent = formatVideoTime(detailPlayEnd(editor));
+  if (seek) {
+    const ratio = Math.max(0, Math.min(1, (editor.time || 0) / detailPlayEnd(editor)));
     if (document.activeElement !== seek) seek.value = String(Math.round(ratio * 1000));
     seek.style.setProperty("--range-progress", `${ratio * 100}%`);
   }
@@ -1205,25 +1317,28 @@ function detailAudioHandleAt(event) {
   if (!editor?.canvas) return null;
   const rect = editor.canvas.getBoundingClientRect();
   const x = event.clientX - rect.left;
-  const y = event.clientY - rect.top;
-  const range = detailAudioSelectionRange();
+  const trackId = detailAudioTrackAt(event);
+  const rowHeight = rect.height / detailAudioTracks(editor).length;
+  const y = event.clientY - rect.top - detailAudioTracks(editor).indexOf(trackId) * rowHeight;
+  const range = trackId === (editor.activeAudioTrack || 1) ? detailAudioSelectionRange() : null;
   const rangeHandles = range ? detailAudioHandleRects({
     left: range.start / editor.duration * rect.width,
     span: (range.end - range.start) / editor.duration * rect.width,
-  }, rect.height).map(handle => ({ ...handle, selection: true })) : [];
+  }, rowHeight).map(handle => ({ ...handle, selection: true })) : [];
   const selected = editor.selection?.materialized ? new Set(editor.selection.clipIds) : new Set();
-  const handles = [...rangeHandles, ...detailAudioGuides(editor, rect.width)
+  const view = {...editor, audioClips:editor.audioClips.filter(clip => detailAudioTrackId(clip) === trackId), videoClips:trackId === 1 ? editor.videoClips : []};
+  const handles = [...rangeHandles, ...detailAudioGuides(view, rect.width)
     .filter(guide => !selected.has(guide.clip.id))
-    .flatMap((guide) => detailAudioHandleRects(guide, rect.height))];
+    .flatMap((guide) => detailAudioHandleRects(guide, rowHeight))];
   return handles.find((handle) => x >= handle.x - 4 && x <= handle.x + handle.w + 4 && y >= handle.y - 4 && y <= handle.y + handle.h + 4) || null;
 }
 
-function detailAudioClipAtTime(time) {
+function detailAudioClipAtTime(time, trackId = detailAudioEditor?.activeAudioTrack || 1) {
   const editor = detailAudioEditor;
   if (!editor) return null;
   const clips = [];
-  if (editor.target !== "video") clips.push(...editor.audioClips);
-  if (editor.target !== "audio") clips.push(...editor.videoClips);
+  if (editor.target !== "video" || trackId !== 1) clips.push(...editor.audioClips.filter(clip => detailAudioTrackId(clip) === trackId));
+  if (editor.target !== "audio" && trackId === 1) clips.push(...editor.videoClips);
   for (let index = clips.length - 1; index >= 0; index -= 1) {
     const clip = clips[index];
     if (time >= clip.start && time < clip.start + clip.duration) return clip;
@@ -1237,7 +1352,7 @@ function detailAudioEdgeAt(time) {
   const width = Math.max(editor.canvas.getBoundingClientRect().width, 1);
   const threshold = Math.max(0.05, (8 / width) * editor.duration);
   const clips = [];
-  if (editor.target !== "video") clips.push(...editor.audioClips);
+  if (editor.target !== "video") clips.push(...editor.audioClips.filter(clip => detailAudioTrackId(clip) === (editor.activeAudioTrack || 1)));
   if (editor.target !== "audio") clips.push(...editor.videoClips);
   let best = null;
   let bestDistance = threshold;
@@ -1255,8 +1370,11 @@ function detailAudioEdgeAt(time) {
 
 function detailAudioTrimIds(clip) {
   const editor = detailAudioEditor;
+  if (editor.target === "audio") {
+    return editor.audioClips.some(item => item.id === clip.id && detailAudioTrackId(item) === (editor.activeAudioTrack || 1)) ? [clip.id] : [];
+  }
   const allowed = [];
-  if (editor.target !== "video") allowed.push(...editor.audioClips);
+  if (editor.target !== "video") allowed.push(...editor.audioClips.filter(clip => detailAudioTrackId(clip) === (editor.activeAudioTrack || 1)));
   if (editor.target !== "audio") allowed.push(...editor.videoClips);
   if (!allowed.some((item) => item.id === clip.id) && !(clip.group && allowed.some((item) => item.group === clip.group))) return [];
   if (!clip.group) return [clip.id];
@@ -1398,7 +1516,7 @@ function drawDetailVLabels(context, editor, rect, duration) {
     context.font = "700 11px Inter, ui-sans-serif, system-ui, Segoe UI, sans-serif";
     context.fillStyle = "#fff";
     context.textBaseline = "top";
-    context.fillText(`V${index}`, left + 20, 4);
+    context.fillText(`V${index}`, left + 30, 4);
     context.restore();
   };
   editor.audioClips.forEach(draw);
@@ -1412,6 +1530,8 @@ function drawDetailAudioEditor() {
   const editor = detailAudioEditor;
   if (!editor?.canvas?.isConnected) return;
   const canvas = editor.canvas;
+  const tracks = detailAudioTracks(editor);
+  canvas.style.height = `${55 * tracks.length}px`;
   const rect = canvas.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
   canvas.width = Math.max(1, Math.floor(rect.width * dpr));
@@ -1419,16 +1539,45 @@ function drawDetailAudioEditor() {
   const context = canvas.getContext("2d");
   context.setTransform(dpr, 0, 0, dpr, 0, 0);
   context.clearRect(0, 0, rect.width, rect.height);
+  const rowHeight = rect.height / tracks.length;
+  editor.panel.querySelector(".audio_edit_shield").style.bottom = `${55 * tracks.length}px`;
+  tracks.forEach((trackId, index) => {
+    context.save();
+    context.translate(0, index * rowHeight);
+    context.beginPath();
+    context.rect(0, 0, rect.width, rowHeight);
+    context.clip();
+    drawDetailAudioTrack(context, editor, {width:rect.width, height:rowHeight}, trackId);
+    context.fillStyle = "#fff";
+    context.font = "700 11px Inter, ui-sans-serif, system-ui, Segoe UI, sans-serif";
+    context.textBaseline = "top";
+    context.fillText(`A${trackId}`, 4, 4);
+    context.fillStyle = trackId === (editor.activeAudioTrack || 1) ? "#fff" : "rgba(255,255,255,.5)";
+    context.fillRect(0, rowHeight - 1, rect.width, 1);
+    context.restore();
+  });
+  editor.panel.querySelectorAll(".audio_edit_target button[data-target]").forEach((button) => {
+    button.classList.toggle("is-selected", button.dataset.target === editor.target);
+  });
+  editor.panel.querySelector(".audio_edit_undo").disabled = !editor.undoStack.length || Boolean(editor.gesture) || Boolean(editor.saving);
+  editor.panel.querySelector(".audio_edit_redo").disabled = !editor.redoStack.length || Boolean(editor.gesture) || Boolean(editor.saving);
+  const time = detailAudioNow();
+  const cover = detailVideoClipAt(editor, time);
+  if (editor.black) editor.black.hidden = Boolean(cover) || !editor.duration;
+}
+
+function drawDetailAudioTrack(context, editor, rect, trackId) {
+  const view = {...editor, audioClips:editor.audioClips.filter(clip => detailAudioTrackId(clip) === trackId), videoClips:trackId === 1 ? editor.videoClips : []};
   const duration = editor.duration || 1;
-  const range = detailAudioSelectionRange();
+  const range = trackId === (editor.activeAudioTrack || 1) ? detailAudioSelectionRange() : null;
   const selected = editor.selection?.materialized ? new Set(editor.selection.clipIds) : new Set();
-  const guides = detailAudioGuides(editor, rect.width).filter(guide => !selected.has(guide.clip.id));
-  detailAudioGuides(editor, rect.width).forEach((guide) => {
+  const guides = detailAudioGuides(view, rect.width).filter(guide => !selected.has(guide.clip.id));
+  detailAudioGuides(view, rect.width).forEach((guide) => {
     context.fillStyle = "rgba(0, 0, 0, 0.55)";
     context.fillRect(guide.left, 0, guide.span, rect.height);
   });
-  drawDetailAudioWave(context, editor, rect, duration);
-  editor.videoClips.forEach((clip) => {
+  drawDetailAudioWave(context, view, rect, duration);
+  view.videoClips.forEach((clip) => {
     const x = (clip.start / duration) * rect.width;
     const width = (clip.duration / duration) * rect.width;
     context.fillStyle = clip.source && clip.source !== "original" ? "rgba(196, 196, 196, 0.9)" : "rgba(255, 255, 255, 0.85)";
@@ -1442,11 +1591,6 @@ function drawDetailAudioEditor() {
       context.fillRect(handle.x, handle.y, handle.w, handle.h);
     });
   });
-  editor.panel.querySelectorAll(".audio_edit_target button[data-target]").forEach((button) => {
-    button.classList.toggle("is-selected", button.dataset.target === editor.target);
-  });
-  editor.panel.querySelector(".audio_edit_undo").disabled = !editor.undoStack.length || Boolean(editor.gesture) || Boolean(editor.saving);
-  editor.panel.querySelector(".audio_edit_redo").disabled = !editor.redoStack.length || Boolean(editor.gesture) || Boolean(editor.saving);
   if (range) {
     const left = (range.start / duration) * rect.width;
     const width = ((range.end - range.start) / duration) * rect.width;
@@ -1469,10 +1613,7 @@ function drawDetailAudioEditor() {
   const playhead = Math.min(rect.width, Math.max(0, (detailAudioNow() / duration) * rect.width));
   context.fillStyle = "#fff";
   context.fillRect(playhead, 0, 1.5, rect.height);
-  drawDetailVLabels(context, editor, rect, duration);
-  const time = detailAudioNow();
-  const cover = detailVideoClipAt(editor, time);
-  if (editor.black) editor.black.hidden = Boolean(cover) || !editor.duration;
+  drawDetailVLabels(context, view, rect, duration);
 }
 
 function syncDetailAudioPreview() {
@@ -1489,13 +1630,17 @@ function syncDetailAudioPreview() {
   const context = editor.audioContext || new (window.AudioContext || window.webkitAudioContext)();
   editor.audioContext = context;
   if (context.state === "suspended") context.resume().catch(() => {});
-  const activeClip = [...editor.audioClips].reverse().find(clip => time >= clip.start && time < clip.start + clip.duration);
+  const activeClips = new Map();
+  [...editor.audioClips].reverse().forEach(clip => {
+    const trackId = detailAudioTrackId(clip);
+    if (!activeClips.has(trackId) && time >= clip.start && time < clip.start + clip.duration) activeClips.set(trackId, clip);
+  });
   const playing = detailTimelineCustom(editor) ? editor.running : !editor.video.paused;
   editor.audioClips.forEach((clip) => {
     const node = ensureDetailAudioNode(editor, clip, context);
     if (!node) return;
     const local = time - clip.start;
-    const active = playing && clip === activeClip;
+    const active = playing && clip === activeClips.get(detailAudioTrackId(clip));
     node.gain.gain.value = clip.gain || 0;
     if (!active) {
       node.element.pause();
@@ -1628,7 +1773,7 @@ async function saveDetailAudioEditor() {
 function detailPriorityAudioClips(clips) {
   let result = [];
   clips.forEach((clip) => {
-    result = removeDetailClipRange(result, clip.start, clip.start + clip.duration);
+    result = result.flatMap(previous => detailAudioTrackId(previous) === detailAudioTrackId(clip) ? removeDetailClipRange([previous], clip.start, clip.start + clip.duration) : [previous]);
     result.push({ ...clip });
   });
   return result;
@@ -1636,6 +1781,7 @@ function detailPriorityAudioClips(clips) {
 
 function serializeDetailAudioClip(clip) {
   return {
+    trackId: detailAudioTrackId(clip),
     start: clip.start,
     inPoint: clip.inPoint,
     duration: clip.duration,

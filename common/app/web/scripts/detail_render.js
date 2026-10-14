@@ -45,7 +45,6 @@ function startDetailThumbCacheLoads(thumbs) {
   const start = (thumb, priority) => {
     const load = thumb?._detailThumbCacheLoad;
     if (typeof load !== "function") return;
-    delete thumb._detailThumbCacheLoad;
     if (thumb._fastLocalThumb) {
       load(priority);
       return;
@@ -58,6 +57,74 @@ function startDetailThumbCacheLoads(thumbs) {
   for (const thumb of thumbs) {
     if (!thumb.classList.contains("active")) start(thumb, false);
   }
+}
+
+// A cache URL is usable only after the browser has decoded its image bytes.
+function detailThumbImageReady(url) {
+  if (!url) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const image = new Image();
+    const timer = setTimeout(() => finish(false), 10000);
+    const finish = (ready) => {
+      clearTimeout(timer);
+      image.onload = image.onerror = null;
+      resolve(ready);
+    };
+    image.onload = () => finish(image.naturalWidth > 0);
+    image.onerror = () => finish(false);
+    image.src = url;
+  });
+}
+
+function retryableDetailThumbLoader(button, task) {
+  let disposed = false;
+  let running = false;
+  let ready = false;
+  let retries = 0;
+  let timer = 0;
+  let generation = 0;
+  const binding = {
+    pause() {
+      generation += 1;
+      running = false;
+      clearTimeout(timer);
+      timer = 0;
+      if (!ready) delete button.dataset.cardPreviewStarted;
+    },
+    async load(priority = button.classList.contains("active")) {
+      if (disposed || ready || running || timer || !button.isConnected) return;
+      running = true;
+      button.dataset.cardPreviewStarted = "true";
+      const run = ++generation;
+      const current = () => !disposed && run === generation && button.isConnected;
+      let succeeded = false;
+      try { succeeded = await task(priority, current); } catch (_) { /* Retry below. */ }
+      if (!current()) {
+        if (run === generation) {
+          running = false;
+          delete button.dataset.cardPreviewStarted;
+        }
+        return;
+      }
+      running = false;
+      ready = Boolean(succeeded);
+      if (ready) return;
+      delete button.dataset.cardPreviewStarted;
+      if (retries < 2) {
+        const delay = 500 * (2 ** retries++);
+        timer = setTimeout(() => {
+          timer = 0;
+          binding.load();
+        }, delay);
+      }
+    },
+  };
+  registerCardPreviewDisposer(button, () => {
+    disposed = true;
+    binding.pause();
+  });
+  button._detailThumbCacheLoad = binding.load;
+  return binding;
 }
 
 function detailModelCandidateText(value, depth = 0) {
@@ -478,145 +545,87 @@ function detailThumbButtonForItem(prefix, item, post, options = {}) {
       // thumbnails do not wait behind that list.
       button._fastLocalThumb = true;
       let currentRequest = null;
-      let disposed = false;
-      const binding = {
-        pause() {
-          fastLocalPreviewObserver?.unobserve(button);
-          if (!currentRequest) return;
-          currentRequest.cancel();
-          currentRequest = null;
-          delete button.dataset.cardPreviewStarted;
-        },
-        load(priority = button.classList.contains("active")) {
-          if (disposed || button.dataset.cardPreviewStarted === "true") return;
-          button.dataset.cardPreviewStarted = "true";
-          const request = requestFastLocalPreview(
-            button,
-            buildPreviewSource,
-            "thumbnail",
-            priority,
-            previewCacheIdentity,
-          );
-          currentRequest = request;
-          request.promise.then(({ url, cancelled }) => {
-            if (disposed || cancelled || currentRequest !== request || !fill.isConnected) return;
-            const show = (resolvedUrl) => {
-              if (disposed || currentRequest !== request || !fill.isConnected || !resolvedUrl) return;
-              fill.classList.remove("detail_thumb_video_preview");
-              fill.classList.add("detail_thumb_preview");
-              fill.replaceChildren();
-              fill.style.backgroundImage = `url("${resolvedUrl}")`;
-            };
-            if (url) {
-              show(url);
-              currentRequest = null;
-              return;
-            }
-            if (!fastImagineDetailThumb) {
-              if (queuedPreviewSourceIsVideo) appendVideoFallback();
-              else if (previewUrl) fill.style.backgroundImage = `url("${previewUrl}")`;
-            }
-            if (typeof window.grokChameleonNative?.cardPreview !== "function") {
-              currentRequest = null;
-              return;
-            }
-            queueNativeCardPreview(fill, {
-              url: buildPreviewSource,
-              kind: "thumbnail",
-              cache_identity: previewCacheIdentity,
-            })
-              .then((result) => show(String(result?.url || "")))
-              .catch(() => {}).finally(() => {
-                if (currentRequest === request) currentRequest = null;
-              });
-          });
-        },
-      };
-      fastLocalPreviewBindings.set(button, binding);
-      registerCardPreviewDisposer(button, () => {
-        disposed = true;
-        binding.pause();
-        fastLocalPreviewBindings.delete(button);
-      });
-      button._detailThumbCacheLoad = binding.load;
-    } else if ((prefix === "b" || prefix === "i") && typeof existingPersistentCardPreview === "function") {
-      // A detail version strip can be long. Ask its 320px cache in a bounded parallel
-      // batch instead of making every button request its source first. Cache misses use
-      // the separate native queue, so they never hold up cached thumbnails behind them.
-      button._detailThumbCacheLoad = () => {
-        const showSourceFallback = () => {
-          if (!fill.isConnected) return;
-          if (queuedPreviewSourceIsVideo) appendVideoFallback();
-          else if (previewUrl) fill.style.backgroundImage = `url("${previewUrl}")`;
-        };
-        const showCachedPreview = (resolvedUrl) => {
-          if (!fill.isConnected || !resolvedUrl) return;
+      const binding = retryableDetailThumbLoader(button, async (priority, current) => {
+        const request = requestFastLocalPreview(
+          button, buildPreviewSource, "thumbnail", priority, previewCacheIdentity,
+        );
+        currentRequest = request;
+        const show = async (resolvedUrl) => {
+          if (!current() || !await detailThumbImageReady(resolvedUrl) || !current()) return false;
           fill.classList.remove("detail_thumb_video_preview");
           fill.classList.add("detail_thumb_preview");
           fill.replaceChildren();
           fill.style.backgroundImage = `url("${resolvedUrl}")`;
+          return true;
         };
+        try {
+          const { url, cancelled } = await request.promise;
+          if (cancelled || !current()) return false;
+          if (await show(url)) return true;
+          // Retain a visible source while a missing or unreadable cache is regenerated.
+          let sourceReady = false;
+          if (!fastImagineDetailThumb) {
+            if (queuedPreviewSourceIsVideo) appendVideoFallback();
+            else sourceReady = await show(previewUrl);
+          }
+          if (!current()) return false;
+          if (typeof window.grokChameleonNative?.cardPreview !== "function") return sourceReady;
+          const result = await queueNativeCardPreview(fill, {
+            url: buildPreviewSource, kind: "thumbnail", cache_identity: previewCacheIdentity,
+          });
+          return await show(String(result?.url || ""));
+        } finally {
+          if (currentRequest === request) currentRequest = null;
+        }
+      });
+      const pause = binding.pause;
+      binding.pause = () => {
+        fastLocalPreviewObserver?.unobserve(button);
+        currentRequest?.cancel();
+        currentRequest = null;
+        pause();
+      };
+      fastLocalPreviewBindings.set(button, binding);
+      registerCardPreviewDisposer(button, () => {
+        binding.pause();
+        fastLocalPreviewBindings.delete(button);
+      });
+    } else if ((prefix === "b" || prefix === "i") && typeof existingPersistentCardPreview === "function") {
+      retryableDetailThumbLoader(button, async (_priority, current) => {
         const remoteImagineSource = prefix === "i"
           && typeof isImagineRemoteCardPreview === "function"
           && isImagineRemoteCardPreview(buildPreviewSource);
-        const queueMissingPreview = () => {
-          if (typeof window.grokChameleonNative?.cardPreview !== "function") {
-            if (remoteImagineSource) showSourceFallback();
-            return;
-          }
-          // Intentionally do not return this promise. The 12-slot cache loader can keep
-          // checking the rest of the strip while only this cache miss waits to generate.
-          queueNativeCardPreview(fill, {
-            url: buildPreviewSource,
-            kind: "thumbnail",
-            cache_identity: previewCacheIdentity,
-          }).then((result) => {
-            const generatedUrl = String(result?.url || "").trim();
-            if (generatedUrl) showCachedPreview(generatedUrl);
-          }).catch(() => {
-            if (remoteImagineSource) showSourceFallback();
-          });
-        };
-        const showSavedPreview = (resolvedUrl) => {
-          if (!fill.isConnected || !resolvedUrl) return false;
-          showCachedPreview(resolvedUrl);
+        const show = async (resolvedUrl) => {
+          if (!current() || !await detailThumbImageReady(resolvedUrl) || !current()) return false;
+          fill.classList.remove("detail_thumb_video_preview");
+          fill.classList.add("detail_thumb_preview");
+          fill.replaceChildren();
+          fill.style.backgroundImage = `url("${resolvedUrl}")`;
           return true;
         };
-        const showFirstSavedPreview = (urls, index = 0) => {
-          if (!fill.isConnected) return;
-          const resolvedUrl = urls[index] || "";
-          if (!resolvedUrl) {
-            if (!remoteImagineSource) showSourceFallback();
-            queueMissingPreview();
-            return;
-          }
-          showSavedPreview(resolvedUrl);
-          if (!remoteImagineSource) return;
-          const probe = new Image();
-          probe.onerror = () => showFirstSavedPreview(urls, index + 1);
-          probe.src = resolvedUrl;
-        };
-        if (remoteImagineSource && typeof imaginePersistentCardPreviewUrls === "function") {
-          return imaginePersistentCardPreviewUrls(buildPreviewSource, "thumbnail", previewCacheIdentity).then((urls) => {
-            showFirstSavedPreview(urls);
-          }).catch(() => queueMissingPreview());
+        let urls = [];
+        try {
+          urls = remoteImagineSource && typeof imaginePersistentCardPreviewUrls === "function"
+            ? await imaginePersistentCardPreviewUrls(buildPreviewSource, "thumbnail", previewCacheIdentity)
+            : [await existingPersistentCardPreview(buildPreviewSource, "thumbnail", previewCacheIdentity)];
+        } catch (_) { /* Continue with the source and generation fallback. */ }
+        for (const url of urls) {
+          if (!current()) return false;
+          if (await show(url)) return true;
         }
-        return existingPersistentCardPreview(buildPreviewSource, "thumbnail", previewCacheIdentity).then((existingPreview) => {
-          if (!fill.isConnected) return;
-          if (existingPreview) {
-            showCachedPreview(existingPreview);
-            return;
-          }
-          // An Imagine cache miss would otherwise make every thumbnail fetch from Grok
-          // at once. Let the detail-native queue start only two remote generations; Build
-          // and local Imagine media can reveal their local source immediately.
-          if (!remoteImagineSource) showSourceFallback();
-          queueMissingPreview();
-        }).catch(() => {
-          if (!remoteImagineSource) showSourceFallback();
-          queueMissingPreview();
+        let sourceReady = false;
+        if (!remoteImagineSource && current()) {
+          if (queuedPreviewSourceIsVideo) appendVideoFallback();
+          else sourceReady = await show(previewUrl);
+        }
+        if (!current()) return false;
+        if (typeof window.grokChameleonNative?.cardPreview !== "function") return sourceReady;
+        const result = await queueNativeCardPreview(fill, {
+          url: buildPreviewSource, kind: "thumbnail", cache_identity: previewCacheIdentity,
         });
-      };
+        if (await show(String(result?.url || ""))) return true;
+        return remoteImagineSource ? show(previewUrl) : false;
+      });
     } else {
       if (previewUrl && !queuedPreviewSourceIsVideo) {
         fill.style.backgroundImage = `url("${previewUrl}")`;

@@ -323,11 +323,11 @@ const server = http.createServer((req, res) => {
       document.getElementById('thumbs').append(thumb);
       startDetailThumbCacheLoads([thumb]);
     });
-    await page.waitForFunction(() => document.querySelector('.i_detail_thumb_fill').style.backgroundImage.includes('/api/card-preview'));
-    assert.equal(records.filter(r => r.url.startsWith('/api/card-preview') && r.method === 'HEAD').length, 1);
-    assert.equal(await page.evaluate(() => fastLocalPreviewBindings.size), 0);
+    await page.waitForFunction(() => document.querySelector('.i_detail_thumb_fill').style.backgroundImage.includes('blob:'));
+    assert.equal(records.filter(r => r.url.startsWith('/api/card-preview') && r.method === 'HEAD').length, 0);
+    assert.equal(await page.evaluate(() => fastLocalPreviewBindings.size), 1);
     await page.close();
-    console.log('PASS: official-media proxy retains original remote cache checks');
+    console.log('PASS: official-media proxy decodes cached bytes without a separate HEAD');
     assert.deepEqual(errors, []);
   } finally {
     await browser?.close();

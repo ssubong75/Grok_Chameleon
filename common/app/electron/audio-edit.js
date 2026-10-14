@@ -166,7 +166,7 @@ function frameRate(value) {
 async function probeMedia(ffprobe, input) {
   const stdout = await runFile(ffprobe, [
     "-v", "error",
-    "-show_entries", "format=duration:stream=index,codec_type,codec_name,width,height,avg_frame_rate",
+    "-show_entries", "format=duration:stream=index,codec_type,codec_name,width,height,avg_frame_rate,duration,duration_ts,time_base,nb_frames,disposition",
     "-of", "json",
     input,
   ], 30000);
@@ -174,14 +174,22 @@ async function probeMedia(ffprobe, input) {
   const streams = Array.isArray(parsed.streams) ? parsed.streams : [];
   const video = streams.find((stream) => stream.codec_type === "video" && stream.codec_name !== "mjpeg" && !stream.disposition?.attached_pic) || streams.find((stream) => stream.codec_type === "video");
   const audio = streams.find((stream) => stream.codec_type === "audio");
-  const duration = Number(parsed.format?.duration || 0);
+  // Container duration can include an AAC tail after the last video frame.
+  const videoDuration = Number(video?.duration) || Number(video?.duration_ts) * frameTimeBase(video?.time_base);
+  const duration = videoDuration > 0 ? videoDuration : Number(parsed.format?.duration || 0);
   return {
     duration: Number.isFinite(duration) ? duration : 0,
     width: Number(video?.width || 0),
     height: Number(video?.height || 0),
     fps: frameRate(video?.avg_frame_rate) || 24,
+    frameCount: Number(video?.nb_frames) || 0,
     hasAudio: Boolean(audio),
   };
+}
+
+function frameTimeBase(value) {
+  const parts = String(value || "").split("/").map(Number);
+  return parts.length === 2 && parts[0] > 0 && parts[1] > 0 ? parts[0] / parts[1] : 0;
 }
 
 function collectPeaks(ffmpeg, input, buckets = 1400) {
@@ -312,12 +320,14 @@ async function saveAudioEdit(payload, deps) {
   const { input, localPath } = await resolveInput(payload, deps);
   const localSource = deps.resolveSource(payload.url).pathname === "/api/media";
   const info = await probeMedia(ffprobe, input);
-  const clipEnd = [...(payload.videoClips || []), ...(payload.audioClips || [])]
+  const clipEnd = (payload.videoClips || [])
     .reduce((max, clip) => Math.max(max, finite(clip.start) + finite(clip.duration)), 0);
-  const duration = clipEnd > 0.04 ? clipEnd : info.duration;
+  let duration = clipEnd > 0.04 ? clipEnd : info.duration;
   if (!(duration > 0)) throw new Error("영상 길이를 알 수 없습니다.");
   const videoClips = sanitizeClips(payload.videoClips, duration, "video");
-  const audioClips = sanitizeClips(payload.audioClips, duration, "audio");
+  if (!videoClips.length) throw new Error("저장할 영상 클립이 없습니다.");
+  let audioClips = sanitizeClips(payload.audioClips, duration, "audio");
+  const fps = info.fps || 24;
   const extraPaths = [];
   const assignInput = (clip) => {
     const filePath = audioSourcePath(clip);
@@ -330,6 +340,56 @@ async function saveAudioEdit(payload, deps) {
   };
   videoClips.forEach(assignInput);
   audioClips.forEach(assignInput);
+
+  const orderedVideo = [...videoClips].sort((a, b) => a.start - b.start);
+  const sequentialVideo = orderedVideo.length > 0 && orderedVideo.every((clip, index) =>
+    !index || clip.start >= orderedVideo[index - 1].start + orderedVideo[index - 1].duration - 1e-7);
+  if (sequentialVideo) {
+    const inputInfo = new Map([[0, info]]);
+    let previousOldEnd = 0;
+    let previousEndFrame = 0;
+    for (const clip of orderedVideo) {
+      const inputIndex = clip.inputIndex || 0;
+      if (!inputInfo.has(inputIndex)) inputInfo.set(inputIndex, await probeMedia(ffprobe, extraPaths[inputIndex - 1]));
+      const media = inputInfo.get(inputIndex);
+      const sourceFps = media.fps || fps;
+      const totalFrames = media.frameCount || Math.round(media.duration * sourceFps);
+      clip.oldStart = clip.start;
+      clip.oldDuration = clip.duration;
+      clip.sourceStartFrame = Math.ceil(clip.inPoint * sourceFps - 1e-7);
+      clip.sourceEndFrame = Math.min(totalFrames, Math.ceil((clip.inPoint + clip.duration) * sourceFps - 1e-7));
+      if (clip.sourceEndFrame <= clip.sourceStartFrame) throw new Error("선택한 구간에 영상 프레임이 없습니다.");
+      const gapFrames = Math.max(0, Math.round((clip.oldStart - previousOldEnd) * fps));
+      clip.startFrame = previousEndFrame + gapFrames;
+      clip.frameCount = Math.max(1, Math.round((clip.sourceEndFrame - clip.sourceStartFrame) * fps / sourceFps));
+      clip.start = clip.startFrame / fps;
+      clip.duration = clip.frameCount / fps;
+      previousOldEnd = clip.oldStart + clip.oldDuration;
+      previousEndFrame = clip.startFrame + clip.frameCount;
+    }
+    duration = previousEndFrame / fps;
+    // Audio follows the video timeline. Remove audio-only tails instead of
+    // freezing a video frame to accommodate them; preserve intentional gaps.
+    const mapTime = (time) => {
+      let offset = 0;
+      for (const clip of orderedVideo) {
+        if (time < clip.oldStart) return time + offset;
+        if (time < clip.oldStart + clip.oldDuration - 1e-9) return clip.start + Math.min(time - clip.oldStart, clip.duration);
+        offset = clip.start + clip.duration - clip.oldStart - clip.oldDuration;
+      }
+      return time + offset;
+    };
+    const boundaries = orderedVideo.flatMap(clip => [clip.oldStart, clip.oldStart + Math.min(clip.duration, clip.oldDuration), clip.oldStart + clip.oldDuration]);
+    audioClips = audioClips.flatMap(audio => {
+      const end = audio.start + audio.duration;
+      const points = [...new Set([audio.start, end, ...boundaries.filter(time => time > audio.start && time < end)])].sort((a, b) => a - b);
+      return points.slice(0, -1).map((start, index) => {
+        const mapped = Math.max(0, mapTime(start));
+        const length = Math.max(0, Math.min(mapTime(points[index + 1]), duration) - mapped);
+        return {...audio, start:mapped, duration:length, inPoint:audio.inPoint + start - audio.start};
+      }).filter(audio => audio.duration > 1 / 48000);
+    });
+  }
 
   const accounts = await deps.fetchJson(new URL("/api/accounts", deps.serverBase), { signal: AbortSignal.timeout(10000) });
   const libraryRoot = fs.realpathSync(accounts.library_root);
@@ -357,7 +417,6 @@ async function saveAudioEdit(payload, deps) {
 
   const width = evenSize(info.width || 1280);
   const height = evenSize(info.height || 720);
-  const fps = info.fps || 24;
   const identity = videoClips.length === 1
     && (!videoClips[0].source || videoClips[0].source === "original")
     && videoClips[0].start < 0.02
@@ -369,16 +428,31 @@ async function saveAudioEdit(payload, deps) {
   for (const filePath of extraPaths) args.push("-i", filePath);
 
   let videoMap = "0:v:0";
-  if (!identity) {
-    filters.push(`color=c=black:s=${width}x${height}:r=${fps}:d=${duration.toFixed(3)},format=yuv420p[base]`);
+  if (!identity && sequentialVideo) {
+    const segments = [];
+    let previousEnd = 0;
+    orderedVideo.forEach((clip, index) => {
+      const gap = clip.startFrame - previousEnd;
+      if (gap > 0) {
+        filters.push(`color=c=black:s=${width}x${height}:r=${fps},trim=end_frame=${gap},setpts=PTS-STARTPTS,setsar=1,format=yuv420p[gap${index}]`);
+        segments.push(`[gap${index}]`);
+      }
+      filters.push(`[${clip.inputIndex || 0}:v]trim=start_frame=${clip.sourceStartFrame}:end_frame=${clip.sourceEndFrame},setpts=PTS-STARTPTS,fps=${fps}:start_time=0,trim=end_frame=${clip.frameCount},scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p[v${index}]`);
+      segments.push(`[v${index}]`);
+      previousEnd = clip.startFrame + clip.frameCount;
+    });
+    filters.push(`${segments.join("")}concat=n=${segments.length}:v=1:a=0[vout]`);
+    videoMap = "[vout]";
+  } else if (!identity) {
+    filters.push(`color=c=black:s=${width}x${height}:r=${fps}:d=${(duration + 1 / fps).toFixed(9)},trim=end_frame=${Math.ceil(duration * fps - 1e-7)},format=yuv420p[base]`);
     let previous = "base";
     videoClips.forEach((clip, index) => {
       const end = clip.inPoint + clip.duration;
       const label = `v${index}`;
       const next = index === videoClips.length - 1 ? "vout" : `vx${index}`;
       const inputIndex = clip.inputIndex || 0;
-      filters.push(`[${inputIndex}:v]trim=start=${clip.inPoint.toFixed(3)}:end=${end.toFixed(3)},setpts=PTS-STARTPTS+${clip.start.toFixed(3)}/TB,scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,format=yuv420p[${label}]`);
-      filters.push(`[${previous}][${label}]overlay=x=0:y=0:eof_action=pass:enable='between(t,${clip.start.toFixed(3)},${(clip.start + clip.duration).toFixed(3)})'[${next}]`);
+      filters.push(`[${inputIndex}:v]trim=start=${clip.inPoint.toFixed(9)}:end=${end.toFixed(9)},setpts=PTS-STARTPTS,fps=${fps}:start_time=0,scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,format=yuv420p,settb=AVTB,setpts=PTS+${clip.start.toFixed(9)}/TB[${label}]`);
+      filters.push(`[${previous}][${label}]overlay=x=0:y=0:eof_action=pass:enable='gte(t,${(clip.start - 1e-6).toFixed(9)})*lt(t,${(clip.start + clip.duration - 1e-6).toFixed(9)})'[${next}]`);
       previous = next;
     });
     if (!videoClips.length) filters.push("[base]null[vout]");
@@ -386,14 +460,14 @@ async function saveAudioEdit(payload, deps) {
   }
 
   const audioLabels = [];
-  filters.push(`aevalsrc=0:channel_layout=stereo:sample_rate=48000:duration=${duration.toFixed(3)}[sil]`);
+  filters.push(`aevalsrc=0:channel_layout=stereo:sample_rate=48000:duration=${duration.toFixed(9)}[sil]`);
   audioClips.forEach((clip, index) => {
     if (clip.source === "original" && !info.hasAudio) return;
     const inputIndex = clip.source === "original" ? 0 : clip.inputIndex;
     const end = clip.inPoint + clip.duration;
     const label = `a${index}`;
-    const delay = Math.max(0, Math.round(clip.start * 1000));
-    filters.push(`[${inputIndex}:a]atrim=start=${clip.inPoint.toFixed(3)}:end=${end.toFixed(3)},asetpts=PTS-STARTPTS,volume=${clip.gain.toFixed(4)},adelay=${delay}:all=1[${label}]`);
+    const delay = Math.max(0, Math.round(clip.start * 48000));
+    filters.push(`[${inputIndex}:a]atrim=start=${clip.inPoint.toFixed(9)}:end=${end.toFixed(9)},asetpts=PTS-STARTPTS,aresample=48000,volume=${clip.gain.toFixed(4)},adelay=${delay}S:all=1[${label}]`);
     audioLabels.push(`[${label}]`);
   });
   if (audioLabels.length) {
@@ -407,7 +481,7 @@ async function saveAudioEdit(payload, deps) {
   else args.push("-map", videoMap, "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", String(fps));
   args.push("-map", "[aout]", "-c:a", "aac", "-profile:a", "aac_low", "-ar", "48000", "-ac", "2", "-b:a", "128k", "-movflags", "+faststart");
   const temp = path.join(path.dirname(target), `.${path.basename(target)}.${crypto.randomUUID()}.mp4`);
-  args.push(temp);
+  args.push("-t", duration.toFixed(9), temp);
   try {
     await runFile(deps.ffmpeg, args);
     await fs.promises.copyFile(temp, target, fs.constants.COPYFILE_EXCL);

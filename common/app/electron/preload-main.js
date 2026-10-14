@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
 contextBridge.exposeInMainWorld("grokChameleonNative", {
   activateImagineAccount(payload) {
@@ -27,6 +27,9 @@ contextBridge.exposeInMainWorld("grokChameleonNative", {
   },
   pickAudioFiles() {
     return ipcRenderer.invoke("grok-chameleon:pick-audio-files");
+  },
+  getPathForFile(file) {
+    return webUtils.getPathForFile(file);
   },
   cardPreview(payload) {
     return ipcRenderer.invoke("grok-chameleon:card-preview", payload || {});
