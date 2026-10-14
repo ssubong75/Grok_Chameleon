@@ -7,6 +7,7 @@
   let capturedMediaStore = null;
   let capturedMediaStorePath = "";
   let capturedMediaStoreModule = "";
+  let capturedSessionUserReader = null;
   let capturedStoreV2Methods = null;
   let capturedStoreV2MethodsPath = "";
   let capturedStoreV2MethodsModule = "";
@@ -906,9 +907,31 @@
     }
   }
 
+  function sessionUserId() {
+    if (capturedSessionUserReader) {
+      try { return String(capturedSessionUserReader()?.userId || "").trim(); } catch (_) {}
+    }
+    // Grok's loginCheck reads this session module; current media stores omit
+    // currentUserId and their post records no longer necessarily carry an owner.
+    for (const runtime of capturedRuntimes) {
+      for (const module of Object.values(runtime.c || {})) {
+        for (const exports of [module, module?.exports, module?.namespaceObject]) {
+          try {
+            if (typeof exports?.readSessionUser !== "function") continue;
+            capturedSessionUserReader = exports.readSessionUser;
+            return String(capturedSessionUserReader()?.userId || "").trim();
+          } catch (_) {}
+        }
+      }
+    }
+    return "";
+  }
+
   function firstKnownUserId(state, ids = []) {
     const direct = state?.currentUserId || state?.userId || state?.user?.id || state?.currentUser?.id || state?.viewer?.id || "";
     if (direct) return String(direct);
+    const sessionId = sessionUserId();
+    if (sessionId) return sessionId;
     for (const id of ids) {
       const post = id && state?.byId ? state.byId[String(id)] : null;
       if (post?.userId) return String(post.userId);
@@ -931,10 +954,9 @@
     return "";
   }
 
-  // Store capture only says the page module exists.  A freshly opened or switched account
-  // can expose that module before Grok has populated its session fields.  Do not create
-  // source posts, alter a conversation, or patch the store here: wait for the page's own
-  // account state before any Imagine generation is allowed to call an official method.
+  // Current media stores can omit the session fields used by this bridge.
+  // Apply the existing login-state preparation before waiting for those fields;
+  // retry it as account data arrives, without inventing a missing user id.
   function storeAccountReadiness(state) {
     return {
       loggedIn: state?.loggedIn === true,
@@ -946,6 +968,7 @@
     const startedAt = Date.now();
     const deadline = startedAt + Math.max(1000, Number(timeoutMs) || 12000);
     let state = record ? mediaStoreStateForRecord(record) : getMediaStoreState();
+    state = ensureStoreLoginState(state, record, requestId, action);
     let readiness = storeAccountReadiness(state);
     while (!readiness.loggedIn || !readiness.currentUserId) {
       if (Date.now() >= deadline) {
@@ -960,6 +983,7 @@
       }
       await sleep(250);
       state = record ? mediaStoreStateForRecord(record) : getMediaStoreState();
+      state = ensureStoreLoginState(state, record, requestId, action);
       readiness = storeAccountReadiness(state);
     }
     pushStoreTrace("store_account_ready", {
