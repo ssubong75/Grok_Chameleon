@@ -230,10 +230,18 @@
 
   function playDetailVideoIfCurrent(prefix, video) {
     if (!video || screen_state.current_screen !== `${prefix}_detail`) return;
+    if (detailAudioEditor?.video === video) {
+      startDetailTimeline(detailAudioEditor);
+      return;
+    }
     video.loop = true;
     video.autoplay = true;
     const play = () => {
       if (!video.isConnected || screen_state.current_screen !== `${prefix}_detail`) return;
+      if (detailAudioEditor?.video === video) {
+        startDetailTimeline(detailAudioEditor);
+        return;
+      }
       video.loop = true;
       video.play().catch(() => {});
     };
@@ -355,7 +363,8 @@
     const sync = () => {
       const duration = Number.isFinite(video.duration) ? video.duration : 0;
       const current = Number.isFinite(video.currentTime) ? video.currentTime : 0;
-      const hasAbPoint = points.a !== null || points.b !== null;
+      const editing = detailAudioEditor?.video === video;
+      const hasAbPoint = !editing && (points.a !== null || points.b !== null);
       renderTicks(duration);
       if (hasAbPoint && currentLabel && durationLabel) {
         currentLabel.textContent = `A ${points.a === null ? "--" : formatVideoTime(points.a)} - B ${points.b === null ? "--" : formatVideoTime(points.b)}`;
@@ -404,10 +413,11 @@
       setDetailVideoButtonIcon(muteBtn, video.muted ? "muted" : "volume", video.muted ? "Unmute" : "Mute");
       aBtn?.classList.toggle("active", points.a !== null);
       bBtn?.classList.toggle("active", points.b !== null);
-      if (points.a !== null && points.b !== null && current >= points.b) {
+      if (!editing && points.a !== null && points.b !== null && current >= points.b) {
         video.currentTime = points.a;
         if (!video.paused) video.play().catch(() => {});
       }
+      if (editing) paintDetailTimelineChrome(detailAudioEditor);
     };
 
     video.addEventListener("loadedmetadata", () => {
