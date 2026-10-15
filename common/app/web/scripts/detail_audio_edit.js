@@ -205,6 +205,7 @@ async function openDetailAudioEditor(prefix) {
   editor.duration = Number(info.duration) || editor.duration;
   editor.mediaDuration = editor.duration;
   editor.info = info;
+  editor.video.dataset.frameRate = String(info.fps || "");
   editor.audioClips = info.hasAudio ? [makeDetailAudioClip("original", 0, editor.duration, info.peaks, editor.duration)] : [];
   editor.audioClips.forEach((clip) => {
     clip.vIndex = 1;
@@ -975,6 +976,7 @@ async function addDetailAudioPaths(paths, time, options = {}) {
     cursor = placeDetailAttachment(editor, {
       path: file.path || info.path || filePath,
       duration: Number(info.duration) || 0,
+      fps: Number(info.fps) || 0,
       peaks: info.peaks || [],
       hasAudio: Boolean(blobUrl),
       trackId,
@@ -1044,6 +1046,7 @@ function placeDetailAttachment(editor, file, blobUrl, time, mediaUrl) {
     clip.group = group;
     clip.trackId = trackId;
     clip.mediaUrl = mediaUrl || "";
+    clip.fps = Number(file.fps) || 0;
     clip.vIndex = vIndex;
     editor.videoClips.push(clip);
   }
@@ -1223,6 +1226,7 @@ function presentDetailTimeline(editor, playing) {
         if (detailAudioEditor === editor && editor.activeClip === clip) {
           picture.classList.add("is-shown");
           editor.video.classList.add("audio_edit_source_hidden");
+          presentDetailTimeline(editor, editor.running);
         }
       };
     }
@@ -1238,7 +1242,7 @@ function presentDetailTimeline(editor, playing) {
     editor.video.classList.remove("audio_edit_source_hidden");
     if (editor.black) editor.black.hidden = true;
   }
-  if (Math.abs((element.currentTime || 0) - local) > 0.18) {
+  if (Math.abs((element.currentTime || 0) - local) > (playing ? 0.18 : 0.000001)) {
     try { element.currentTime = local; } catch (error) {}
   }
   element.playbackRate = detailTimelineRate(editor);

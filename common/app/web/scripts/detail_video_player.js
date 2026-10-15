@@ -171,6 +171,39 @@
     button.setAttribute("aria-label", label);
   }
 
+  async function stepDetailVideoFrame(player, direction, prefix, item) {
+    const video = player.querySelector(".custom-video");
+    if (!video) return;
+    const editor = detailAudioEditor?.video === video ? detailAudioEditor : null;
+    if (editor) stopDetailTimeline(editor);
+    else video.pause();
+    let fps = Number(video.dataset.frameRate) || Number(editor?.info?.fps);
+    if (!fps) {
+      const native = window.grokChameleonNative;
+      if (!native?.audioPeaks) throw new Error("영상 프레임 정보를 읽을 수 없습니다.");
+      const info = await native.audioPeaks({provider: prefix === "i" ? "imagine" : "build", url: video.currentSrc || video.src, metadataOnly: true});
+      fps = Number(info.fps);
+      if (!(fps > 0)) throw new Error("영상 FPS를 확인할 수 없습니다.");
+      video.dataset.frameRate = String(fps);
+    }
+    if (!video.isConnected || (editor && detailAudioEditor !== editor)) return;
+    if (editor) {
+      const time = editor.time || 0;
+      const clip = detailVideoClipAt(editor, Math.max(0, time - (direction < 0 ? 0.000001 : 0)));
+      const clipFps = Number(clip?.fps) || fps;
+      const origin = clip ? clip.start - clip.inPoint : 0;
+      const frame = (time - origin) * clipFps;
+      const next = direction > 0 ? Math.floor(frame + 0.001) + 1 : Math.ceil(frame - 0.001) - 1;
+      seekDetailAudioTime(Math.max(0, Math.min(detailPlayEnd(editor) - 0.000001, origin + next / clipFps)));
+    } else {
+      const frame = video.currentTime * fps;
+      const next = direction > 0 ? Math.floor(frame + 0.001) + 1 : Math.ceil(frame - 0.001) - 1;
+      const last = Math.max(0, Math.ceil(video.duration * fps - 0.000001) - 1);
+      video.currentTime = Math.max(0, Math.min(last, next)) / fps;
+      syncDetailExtendFromSeek(video, video.currentTime);
+    }
+  }
+
   function createDetailVideoPlayer(prefix, item) {
     const player = document.createElement("div");
     player.className = "video-player";
@@ -285,6 +318,21 @@
     const durationLabel = player.querySelector("[data-duration]");
     const timeLabel = player.querySelector(".video-time");
     const seekTicks = player.querySelector("[data-seek-ticks]");
+    let frameQueue = Promise.resolve();
+    const stepFrame = (direction) => {
+      frameQueue = frameQueue.then(() => stepDetailVideoFrame(player, direction, prefix, item))
+        .catch(error => showErrorPanel("프레임 이동 실패", error.message));
+      showControls();
+    };
+    document.addEventListener("keydown", event => {
+      if (!isActive() || !["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
+      const target = event.target;
+      if (target?.closest?.("textarea, select, [contenteditable='true'], input:not(.video-seek)")) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      stepFrame(event.key === "ArrowLeft" ? -1 : 1);
+    }, true);
     const points = { a: null, b: null, hideTimer: null, volumeTimer: null };
     // Keep fullscreen on the stable media surface. The player itself is replaced whenever a
     // different thumbnail is selected, while the surface remains mounted for the whole detail

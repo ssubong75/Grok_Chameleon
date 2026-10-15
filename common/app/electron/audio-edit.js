@@ -256,7 +256,7 @@ async function audioPeaks(payload, deps) {
   if (!ffprobe) throw new Error("FFprobe를 찾을 수 없습니다.");
   const { input, localPath } = await resolveInput(payload, deps);
   const info = await probeMedia(ffprobe, input);
-  const peaks = info.hasAudio ? await collectPeaks(deps.ffmpeg, input) : [];
+  const peaks = info.hasAudio && !payload.metadataOnly ? await collectPeaks(deps.ffmpeg, input) : [];
   return { ...info, peaks, path: localPath || input };
 }
 
@@ -574,7 +574,7 @@ async function localAudioPeaks(filePath, deps) {
   const extension = path.extname(resolved).toLowerCase();
   if (!info.hasAudio && !VIDEO_EXTENSIONS.has(extension)) throw new Error("이 파일에는 오디오가 없습니다.");
   const peaks = info.hasAudio ? await collectPeaks(deps.ffmpeg, resolved) : [];
-  return { path: resolved, duration: info.duration, peaks, hasAudio: Boolean(info.hasAudio) };
+  return { path: resolved, duration: info.duration, fps: info.fps, peaks, hasAudio: Boolean(info.hasAudio) };
 }
 
 module.exports = {
