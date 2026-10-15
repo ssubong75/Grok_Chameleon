@@ -722,16 +722,18 @@ function snapDetailAudioDelta(bases, delta) {
   if (!editor.magnetic) return delta;
   const width = Math.max(editor.canvas.getBoundingClientRect().width, 1);
   const threshold = Math.max(0.05, (10 / width) * editor.duration);
-  const points = [0, editor.duration, detailAudioNow()];
-  [...editor.audioClips, ...editor.videoClips].forEach((clip) => {
+  const points = [0];
+  editor.videoClips.forEach((clip) => {
     if (bases.has(clip.id)) return;
     points.push(clip.start, clip.start + clip.duration);
   });
   let best = delta;
   let bestDistance = threshold;
+  const movingVideo = editor.videoClips.filter(clip => bases.has(clip.id));
   bases.forEach((start, id) => {
     const clip = [...editor.audioClips, ...editor.videoClips].find((item) => item.id === id);
     if (!clip) return;
+    if (movingVideo.length && !movingVideo.includes(clip)) return;
     [start + delta, start + clip.duration + delta].forEach((edge) => {
       points.forEach((point) => {
         const distance = Math.abs(edge - point);
@@ -1267,8 +1269,8 @@ function snapDetailAudioTime(time, ignoreIds = null) {
   if (!editor?.magnetic) return Math.max(0, time);
   const width = Math.max(editor.canvas.getBoundingClientRect().width, 1);
   const threshold = Math.max(0.05, (10 / width) * editor.duration);
-  const points = [0, editor.duration, detailAudioNow()];
-  [...editor.audioClips, ...editor.videoClips].forEach((clip) => {
+  const points = [0];
+  editor.videoClips.forEach((clip) => {
     if (ignoreIds?.has(clip.id)) return;
     points.push(clip.start, clip.start + clip.duration);
   });
