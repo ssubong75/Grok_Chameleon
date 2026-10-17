@@ -29007,7 +29007,7 @@ def save_image_editor_upload_result(payload: dict, mime_type: str, image_data: s
         "updated_at": now,
         "size": len(raw),
         "upload_hash": upload_hash,
-        "editor": "TOAST UI Image Editor",
+        "editor": "Photo Editor",
         "editor_save_target": "upload",
     }
     folder_path = folder.relative_to(root).as_posix()
@@ -29263,7 +29263,7 @@ def save_image_editor_result(payload: dict) -> dict:
         "source_item_id": source_key,
         "source_post_id": post.get("post_id") or "",
         "source_url": source_url,
-        "editor": "TOAST UI Image Editor",
+        "editor": "Photo Editor",
         "editor_save_target": "detail",
     }
     existing_items = [dict(item) for item in post.get("items") or [] if isinstance(item, dict)]
