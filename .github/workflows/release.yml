@@ -126,8 +126,6 @@ jobs:
           $outputZip = Join-Path $env:GITHUB_WORKSPACE "output\$env:OUTPUT_ZIP"
           $root = Join-Path $env:GITHUB_WORKSPACE "unpack\Grok Chameleon"
           $appRoot = Join-Path $root "Resources\Grok Chameleon\resources\app"
-          $editor = Join-Path $appRoot "web\photo-editor-web"
-          Copy-Item (Join-Path $env:GITHUB_WORKSPACE "common\app\web\photo-editor-web\*") $editor -Force
           $state = Join-Path $appRoot "web\scripts\state.js"
           $outerExe = Join-Path $root "Grok Chameleon.exe"
           $innerExe = Join-Path $root "Resources\Grok Chameleon\Grok Chameleon.exe"
@@ -273,6 +271,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Windows input ZIP CRC check failed." }
           & $sevenZip x -y "-o$env:GITHUB_WORKSPACE\unpack" $inputZip
           if ($LASTEXITCODE -ne 0) { throw "Windows extraction failed." }
+          $editor = Join-Path $appRoot "web\photo-editor-web"
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE "common\app\web\photo-editor-web\*") $editor -Force
           $managedSourceExtensions = [System.Collections.Generic.HashSet[string]]::new(
             [System.StringComparer]::OrdinalIgnoreCase
           )
