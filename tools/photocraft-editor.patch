@@ -1,0 +1,298 @@
+diff --git a/apps/photocraft-web/index.html b/apps/photocraft-web/index.html
+index d090cf4..f2f6d18 100644
+--- a/apps/photocraft-web/index.html
++++ b/apps/photocraft-web/index.html
+@@ -3,7 +3,7 @@
+ <head>
+   <meta charset="utf-8">
+   <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+-  <title>PhotoCraft</title>
++  <title>Photo Editor</title>
+   <link data-trunk rel="rust" data-bin="photocraft-web" data-cargo-profile="wasm-release" data-cargo-features="heif" data-wasm-opt="z" data-wasm-opt-params="--converge" data-weak-refs />
+   <style>
+     html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #262626; }
+@@ -21,7 +21,7 @@
+ <body>
+   <canvas id="photocraft_canvas"></canvas>
+   <div id="photocraft_loading">
+-    <p>Loading PhotoCraft&hellip;</p>
++    <p>Loading Photo Editor&hellip;</p>
+     <p id="photocraft_stalled">This is taking longer than usual. If PhotoCraft doesn't start, its files may have failed to
+       download or come from a different version of this page. <a href="">Reload</a> to try again; the browser
+       console lists what failed.</p>
+diff --git a/apps/photocraft-web/src/web.rs b/apps/photocraft-web/src/web.rs
+index 6fd3620..aae395b 100644
+--- a/apps/photocraft-web/src/web.rs
++++ b/apps/photocraft-web/src/web.rs
+@@ -45,6 +45,7 @@ type Served = Arc<Mutex<ServedFonts>>;
+ 
+ pub fn start() {
+     eframe::WebLogger::init(log::LevelFilter::Info).ok();
++    photocraft_ui_egui::host_save::set(save_to_host);
+     wasm_bindgen_futures::spawn_local(async {
+         let Some(document) = web_sys::window().and_then(|w| w.document()) else {
+             log::error!("no document");
+@@ -101,7 +102,7 @@ pub fn start() {
+                     }
+                     let unsaved = Arc::new(AtomicBool::new(false));
+                     guard_unload(unsaved.clone());
+-                    Ok(Box::new(WebShell { app, inbox, place_inbox, unsaved, served, database, presets }))
++                    Ok(Box::new(WebShell { app, inbox, place_inbox, unsaved, served, database, presets, host_image: false }))
+                 }),
+             )
+             .await;
+@@ -194,6 +195,29 @@ fn guard_unload(unsaved: Arc<AtomicBool>) {
+     }
+ }
+ 
++fn session_file_name(bytes: &[u8]) -> String {
++    let text = String::from_utf8_lossy(bytes);
++    let Some(at) = text.find("\"file\"") else { return "source.png".into() };
++    let rest = &text[at + 6..];
++    let Some(q1) = rest.find('"') else { return "source.png".into() };
++    let rest = &rest[q1 + 1..];
++    let Some(q2) = rest.find('"') else { return "source.png".into() };
++    let name = &rest[..q2];
++    if name.is_empty() { "source.png".into() } else { name.to_string() }
++}
++
++fn save_to_host(bytes: &[u8]) {
++    let Some(window) = web_sys::window() else { return };
++    let Ok(host) = js_sys::Reflect::get(&window, &"photocraftHost".into()) else { return };
++    if host.is_undefined() || host.is_null() {
++        return;
++    }
++    let Ok(saved) = js_sys::Reflect::get(&host, &"saved".into()) else { return };
++    let Some(saved) = saved.dyn_ref::<js_sys::Function>() else { return };
++    let data = js_sys::Uint8Array::from(bytes);
++    let _ = saved.call1(&host, &data);
++}
++
+ fn query() -> String {
+     web_sys::window().and_then(|w| w.location().search().ok()).unwrap_or_default()
+ }
+@@ -267,6 +291,7 @@ struct WebShell {
+     served: Served,
+     database: Option<web_sys::IdbDatabase>,
+     presets: crate::preset_bridge::Bridge,
++    host_image: bool,
+ }
+ 
+ impl WebShell {
+@@ -288,6 +313,26 @@ impl WebShell {
+         self.unsaved.store(self.app.has_unsaved_work() || self.presets.unsaved(), Ordering::Relaxed);
+     }
+ 
++    /// The image the Chameleon host opened, once.
++    fn load_host_image(&mut self, ctx: &egui::Context) {
++        if self.host_image || !query().contains("host=chameleon") {
++            return;
++        }
++        self.host_image = true;
++        let inbox = self.inbox.clone();
++        let ctx = ctx.clone();
++        wasm_bindgen_futures::spawn_local(async move {
++            let name = fetch_bytes("host/session.json", None).await.ok().map(|bytes| session_file_name(&bytes)).unwrap_or_else(|| "source.png".into());
++            match fetch_bytes("host/source", None).await {
++                Ok(bytes) => {
++                    inbox.lock().unwrap_or_else(|e| e.into_inner()).push((name, bytes));
++                    ctx.request_repaint();
++                }
++                Err(e) => log::error!("couldn't open the host image: {e}"),
++            }
++        });
++    }
++
+     /// Fetches the served families asked for (picked in a font menu, or needed by a layout) and
+     /// installs the files that arrived.
+     fn serve_fonts(&mut self, ctx: &egui::Context) {
+@@ -348,6 +393,7 @@ impl eframe::App for WebShell {
+             });
+         }
+         self.serve_fonts(ctx);
++        self.load_host_image(ctx);
+         self.app.logic(ctx, frame);
+         self.save_presets(ctx);
+     }
+diff --git a/crates/engine/src/prefs.rs b/crates/engine/src/prefs.rs
+index 2c25072..da8f410 100644
+--- a/crates/engine/src/prefs.rs
++++ b/crates/engine/src/prefs.rs
+@@ -306,9 +306,9 @@ impl Default for Interface {
+             show_canvas_dots: true,
+             show_home_recent_files: true,
+             canvas_border: CanvasBorder::DropShadow,
+-            ui_scale: UiScale::Auto,
++            ui_scale: UiScale::P90,
+             language: "auto".into(),
+-            ui_font_size: UiFontSize::Small,
++            ui_font_size: UiFontSize::Medium,
+             show_channels_in_color: false,
+             dynamic_color_sliders: true,
+             show_menu_colors: true,
+diff --git a/crates/ui-egui/src/canvas.rs b/crates/ui-egui/src/canvas.rs
+index 91644b5..5ab69a1 100644
+--- a/crates/ui-egui/src/canvas.rs
++++ b/crates/ui-egui/src/canvas.rs
+@@ -2816,16 +2816,7 @@ fn start_screen(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+     let open_label = crate::shortcuts::command_label(app, "Open…", "file.open");
+     ui.scope_builder(egui::UiBuilder::new().max_rect(card), |ui| {
+         ui.vertical_centered(|ui| {
+-            ui.horizontal(|ui| {
+-                let title = ui.painter().layout_no_wrap(tl!("PhotoCraft").into(), crate::theme::semibold(38.0), t.text);
+-                let by = ui.painter().layout_no_wrap(tl!("open source").into(), egui::FontId::proportional(13.0), t.text_faint);
+-                let total = title.size().x + by.size().x + 10.0;
+-                ui.add_space(((card.width() - total) / 2.0).max(0.0));
+-                let (r, _) = ui.allocate_exact_size(title.size(), Sense::hover());
+-                ui.painter().galley(r.min, title, t.text);
+-                let (r2, _) = ui.allocate_exact_size(egui::vec2(by.size().x + 10.0, r.height()), Sense::hover());
+-                ui.painter().galley(egui::pos2(r2.left() + 10.0, r.bottom() - by.size().y - 8.0), by, t.text_faint);
+-            });
++            ui.label(egui::RichText::new("Photo Editor").size(38.0).color(t.text));
+             ui.add_space(6.0);
+             ui.label(egui::RichText::new(tl!("Create a new document or open an existing file.")).color(t.text_dim).size(14.0));
+             ui.add_space(22.0);
+@@ -2854,9 +2845,6 @@ fn start_screen(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+                 home_recent(app, ui, &recent);
+             }
+             ui.add_space(26.0);
+-            crate::links::discord_button(app, ui, 190.0);
+-            ui.add_space(10.0);
+-            crate::links::link_row(app, ui);
+         });
+     });
+ }
+diff --git a/crates/ui-egui/src/export_dialog.rs b/crates/ui-egui/src/export_dialog.rs
+index 275221e..aaddacb 100644
+--- a/crates/ui-egui/src/export_dialog.rs
++++ b/crates/ui-egui/src/export_dialog.rs
+@@ -901,6 +901,19 @@ fn confirm_layers(app: &mut PhotocraftApp, f: &Map<String, Value>, ids: &[photoc
+ /// File › Export › Quick Export as PNG: the format, quality, metadata, colour space and location
+ /// from File › Export › Export Preferences (engine `file.export.quickExport`). On the web (no
+ /// file system) it falls back to a PNG download through the export service.
++/// The open document as a flattened PNG, for an embedding host.
++pub fn app_png(app: &PhotocraftApp) -> Result<Vec<u8>, String> {
++    let doc = &app.session.active().ok_or("열린 이미지가 없습니다")?.doc;
++    let mut fields = Map::new();
++    fields.insert("format".into(), json!("png"));
++    fields.insert("transparency".into(), json!(true));
++    fields.insert("scale".into(), json!(100));
++    let out = export_document(doc, &fields, None)?;
++    let export = app.services.export.as_ref().ok_or("저장하지 못했습니다")?;
++    let (bytes, _) = export(&out, "image.png", &settings(&fields))?;
++    Ok(bytes)
++}
++
+ pub fn quick_export_png(app: &mut PhotocraftApp) -> Result<Value, String> {
+     if !cfg!(target_arch = "wasm32") {
+         let prefs = app.session.prefs().export.clone();
+diff --git a/crates/ui-egui/src/host_save.rs b/crates/ui-egui/src/host_save.rs
+new file mode 100644
+index 0000000..de086de
+--- /dev/null
++++ b/crates/ui-egui/src/host_save.rs
+@@ -0,0 +1,15 @@
++//! Optional hook so an embedding host can receive the open document as PNG.
++
++use std::sync::Mutex;
++
++static HOOK: Mutex<Option<fn(&[u8])>> = Mutex::new(None);
++
++pub fn set(hook: fn(&[u8])) {
++    *HOOK.lock().unwrap_or_else(|e| e.into_inner()) = Some(hook);
++}
++
++pub fn send(bytes: &[u8]) {
++    if let Some(hook) = *HOOK.lock().unwrap_or_else(|e| e.into_inner()) {
++        hook(bytes);
++    }
++}
+diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs
+index e6685b9..9e8e580 100644
+--- a/crates/ui-egui/src/lib.rs
++++ b/crates/ui-egui/src/lib.rs
+@@ -134,6 +134,7 @@ pub mod menu_catalog;
+ pub mod menu_keys;
+ pub mod menu_nav;
+ pub mod menus;
++pub mod host_save;
+ pub mod monitor_status;
+ pub mod move_box;
+ pub mod move_hover;
+diff --git a/crates/ui-egui/src/menus.rs b/crates/ui-egui/src/menus.rs
+index bbaf6fa..2b747e5 100644
+--- a/crates/ui-egui/src/menus.rs
++++ b/crates/ui-egui/src/menus.rs
+@@ -1131,6 +1131,7 @@ pub fn menu_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> f32 {
+     let mut edge = if rtl { ui.cursor().right() } else { ui.cursor().left() };
+     let lang = crate::i18n::current();
+     let mut clicked: Option<String> = None;
++    let save_to_app = std::cell::Cell::new(false);
+     let t = crate::theme::Tokens::get(ui.ctx());
+     let mut nav = crate::menu_nav::Nav::load(ui.ctx());
+     // The keyboard on the bar (#4988): Alt / F10 focus, Alt+letter, mnemonics.
+@@ -1154,6 +1155,7 @@ pub fn menu_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> f32 {
+             ui.spacing_mut().button_padding = egui::vec2(6.0, 3.0);
+             nav.bar_bottom = Some(ui.max_rect().bottom());
+             let mut buttons = Vec::with_capacity(TOP_MENUS.len());
++            ui.label(egui::RichText::new("Photo Editor").color(egui::Color32::from_rgb(0x4d, 0xb6, 0xff)));
+             for (k, top) in TOP_MENUS.iter().enumerate() {
+                 // egui's menu_button toggles on release; these titles open on the press (one
+                 // gesture can press, drag to an item and release), so each drives its popup.
+@@ -1217,6 +1219,12 @@ pub fn menu_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> f32 {
+                         }
+                     });
+                 buttons.push(title);
++                if *top == "Window" {
++                    let label = egui::RichText::new("Save to App").color(egui::Color32::from_rgb(0xfb, 0xad, 0x2e));
++                    if ui.add(egui::Button::new(label).frame(false)).clicked() {
++                        save_to_app.set(true);
++                    }
++                }
+             }
+             edge = if rtl { buttons.iter().map(|b| b.rect.left()).fold(edge, f32::min) } else { buttons.iter().map(|b| b.rect.right()).fold(edge, f32::max) };
+             switch_on_hover(ui.ctx(), &buttons);
+@@ -1237,6 +1245,12 @@ pub fn menu_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> f32 {
+     nav.store(ui.ctx());
+     // No menu open this frame: nothing is kept.
+     app.menu_cache = built.into_inner();
++    if save_to_app.get() {
++        match crate::export_dialog::app_png(app) {
++            Ok(bytes) => crate::host_save::send(&bytes),
++            Err(error) => app.ui.status = error,
++        }
++    }
+     // The press-drag gesture ends with the button (its release was handled by the rows above).
+     if ui.input(|i| i.pointer.primary_released() || !i.pointer.primary_down()) {
+         ui.ctx().data_mut(|d| d.remove::<bool>(press_gesture_id()));
+@@ -1572,7 +1586,7 @@ pub fn apply_workspace(app: &mut PhotocraftApp) {
+         // Color includes Swatches; Navigator keeps the pixel canvas easy to inspect.
+         "Pixel Art" => (true, true, true, false, false),
+         "Motion" => (false, false, true, false, true),
+-        _ => (false, true, true, false, true),
++        _ => (false, true, true, false, false),
+     };
+     p.navigator = nav;
+     p.color = color;
+diff --git a/crates/ui-egui/src/state.rs b/crates/ui-egui/src/state.rs
+index d464cb3..eabfced 100644
+--- a/crates/ui-egui/src/state.rs
++++ b/crates/ui-egui/src/state.rs
+@@ -423,7 +423,7 @@ impl Default for Panels {
+         Self {
+             layers: true,
+             history: false,
+-            properties: true,
++            properties: false,
+             color: true,
+             navigator: false,
+             toolbar: true,
+@@ -1308,7 +1308,7 @@ pub struct UiState {
+ impl Default for UiState {
+     fn default() -> Self {
+         Self {
+-            tool: Tool::Brush,
++            tool: Tool::RectMarquee,
+             group_tools: Vec::new(),
+             spring: None,
+             recent_files: Vec::new(),
