@@ -76,50 +76,7 @@ env:
   COMMON_FFMPEG_LICENSE: common/app/vendor/ffmpeg/COPYING.LGPLv2.1
 
 jobs:
-  build-photo-editor:
-    if: github.event_name == 'push'
-    runs-on: windows-2025
-    timeout-minutes: 120
-    steps:
-      - name: Check out the shared source commit
-        uses: actions/checkout@v5
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-
-      - name: Install trunk
-        run: cargo install trunk --locked
-
-      - name: Build the Photo Editor
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $src = Join-Path $env:GITHUB_WORKSPACE "photo-src"
-          git init $src
-          git -C $src remote add origin https://github.com/storytold/photocraft.git
-          git -C $src fetch --depth 1 origin 8d2e615ab93d424c4ec25ab15b4edb5368d1f9a6
-          git -C $src checkout --detach FETCH_HEAD
-          git -C $src apply --whitespace=nowarn (Join-Path $env:GITHUB_WORKSPACE "tools\photocraft-editor.patch")
-          $web = Join-Path $src "apps\photocraft-web"
-          Push-Location $web
-          try { trunk build --release } finally { Pop-Location }
-          $dist = Join-Path $src "dist\web"
-          if (-not (Test-Path (Join-Path $dist "index.html"))) { throw "Photo Editor build produced no index.html" }
-          New-Item -ItemType Directory -Force (Join-Path $env:GITHUB_WORKSPACE "photo-editor-dist") | Out-Null
-          Copy-Item (Join-Path $dist "*") (Join-Path $env:GITHUB_WORKSPACE "photo-editor-dist") -Force
-
-      - name: Upload the Photo Editor
-        uses: actions/upload-artifact@v6
-        with:
-          name: photo-editor-web
-          path: photo-editor-dist
-          if-no-files-found: error
-          retention-days: 3
-
   build-windows:
-    needs: build-photo-editor
     if: github.event_name == 'push'
     runs-on: windows-2025
     timeout-minutes: 35
@@ -142,12 +99,6 @@ jobs:
     steps:
       - name: Check out the shared source commit
         uses: actions/checkout@v5
-
-      - name: Download the Photo Editor
-        uses: actions/download-artifact@v7
-        with:
-          name: photo-editor-web
-          path: photo-editor-dist
 
       - name: Download the exact Windows runtime package
         id: windows_input
@@ -176,8 +127,7 @@ jobs:
           $root = Join-Path $env:GITHUB_WORKSPACE "unpack\Grok Chameleon"
           $appRoot = Join-Path $root "Resources\Grok Chameleon\resources\app"
           $editor = Join-Path $appRoot "web\photo-editor-web"
-          Get-ChildItem -LiteralPath $editor -Filter "photocraft-web-*" | Remove-Item -Force
-          Copy-Item (Join-Path $env:GITHUB_WORKSPACE "photo-editor-dist\*") $editor -Force
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE "common\app\web\photo-editor-web\*") $editor -Force
           $state = Join-Path $appRoot "web\scripts\state.js"
           $outerExe = Join-Path $root "Grok Chameleon.exe"
           $innerExe = Join-Path $root "Resources\Grok Chameleon\Grok Chameleon.exe"
@@ -700,7 +650,6 @@ jobs:
           retention-days: 3
 
   build-macos:
-    needs: build-photo-editor
     if: github.event_name == 'push'
     runs-on: macos-15
     timeout-minutes: 35
@@ -723,12 +672,6 @@ jobs:
     steps:
       - name: Check out the shared source commit
         uses: actions/checkout@v5
-
-      - name: Download the Photo Editor
-        uses: actions/download-artifact@v7
-        with:
-          name: photo-editor-web
-          path: photo-editor-dist
 
       - name: Download the exact Mac runtime package
         id: macos_input
@@ -759,8 +702,7 @@ jobs:
           migration_app="$root/Migration.app"
           app_root="$main_app/Contents/Resources/app"
           editor="$app_root/web/photo-editor-web"
-          rm -f "$editor"/photocraft-web-*
-          cp -f "$GITHUB_WORKSPACE"/photo-editor-dist/* "$editor"/
+          cp -f "$GITHUB_WORKSPACE/common/app/web/photo-editor-web/"* "$editor"/
           common_root="$GITHUB_WORKSPACE/$VARIANT_COMMON_DIR/app"
           shared_relatives=(
             electron/main.js

@@ -28,11 +28,11 @@ dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
     #photocraft_stalled { color: #8c8c8c; visibility: hidden; animation: photocraft-stalled 0s 20s forwards; }
     @keyframes photocraft-stalled { to { visibility: visible; } }
   </style>
-<link rel="modulepreload" href="./photocraft-web-6e7c77473fe4c619.js" crossorigin="anonymous" integrity="sha384-oUOtnBaZ4SsSYW3+Whydgb8Zr2FNlKtHwFom2kR4OIRsN+WRIEdtOB2wAoFSBgKR"><link rel="preload" href="./photocraft-web-6e7c77473fe4c619_bg.wasm" crossorigin="anonymous" integrity="sha384-bYhlOabxCb3+IQgXaIdPkvI2sybXm1x+gkFMFRxb1HshdTijL25unyJC1Sfk6kVW" as="fetch" type="application/wasm"></head>
+<link rel="modulepreload" href="./photocraft-web-6e7c77473fe4c619.js" crossorigin="anonymous" integrity="sha384-oUOtnBaZ4SsSYW3+Whydgb8Zr2FNlKtHwFom2kR4OIRsN+WRIEdtOB2wAoFSBgKR"><link rel="preload" href="./photocraft-web-6e7c77473fe4c619_bg.wasm" crossorigin="anonymous" integrity="sha384-eOfrRotcYJ4Amh0XEc2yyvIWuRGRKbLnLbCIlwBnx0QgN6VvAIcfV1YMgUnm89Ji" as="fetch" type="application/wasm"></head>
 <body>
   <canvas id="photocraft_canvas"></canvas>
   <div id="photocraft_loading">
-    <p>Loading PhotoCraft&hellip;</p>
+    <p>Loading Photo Editor&hellip;</p>
     <p id="photocraft_stalled">This is taking longer than usual. If PhotoCraft doesn't start, its files may have failed to
       download or come from a different version of this page. <a href="">Reload</a> to try again; the browser
       console lists what failed.</p>
