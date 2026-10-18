@@ -190,7 +190,9 @@ function createPhotoEditorHost({ resourcesPath, serverBase, log }) {
         const url = new URL(request.url || "/", "http://127.0.0.1");
         response.setHeader("Cross-Origin-Opener-Policy", "same-origin");
         response.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
-        response.setHeader("Cross-Origin-Resource-Policy", "same-origin");
+        response.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+        response.setHeader("Access-Control-Allow-Origin", "*");
+        response.setHeader("Cache-Control", "no-store");
         if (url.pathname === "/host/session.json") {
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
           response.end(JSON.stringify({ file: fileName, languages: systemLanguages() }));
@@ -358,7 +360,41 @@ function createPhotoEditorHost({ resourcesPath, serverBase, log }) {
     next.webContents.on("console-message", (_event, _level, message) => {
       if (message) log(`photo editor: ${message}`);
     });
+    next.webContents.on("did-fail-load", (_event, code, description, url) => {
+      log(`photo editor load failed code=${code} ${description} ${url || ""}`);
+    });
+    next.webContents.on("render-process-gone", (_event, details) => {
+      log(`photo editor renderer gone ${details && details.reason ? details.reason : ""} ${details && details.exitCode != null ? details.exitCode : ""}`);
+    });
+    try { await next.webContents.session.clearCache(); } catch (_) {}
+    log(`photo editor open port=${port} root=${root}`);
     await next.webContents.loadURL(`http://127.0.0.1:${port}/index.html?host=chameleon`);
+    try {
+      const gpu = await next.webContents.executeJavaScript(`(async () => {
+        const hasGpu = !!navigator.gpu;
+        if (!hasGpu) return { gpu: false, adapter: false };
+        try {
+          const adapter = await navigator.gpu.requestAdapter();
+          if (!adapter) return { gpu: true, adapter: false };
+          let info = {};
+          try { info = adapter.info || await adapter.requestAdapterInfo(); } catch (_) {}
+          return {
+            gpu: true,
+            adapter: true,
+            vendor: info && info.vendor,
+            architecture: info && info.architecture,
+            device: info && info.device,
+            description: info && info.description,
+            type: info && (info.deviceType || info.device_type),
+          };
+        } catch (error) {
+          return { gpu: true, adapter: false, error: String(error && error.message || error) };
+        }
+      })()`);
+      log(`photo editor webgpu=${JSON.stringify(gpu)}`);
+    } catch (error) {
+      log(`photo editor webgpu probe failed ${error && error.message ? error.message : error}`);
+    }
     return { ok: true };
   }
 

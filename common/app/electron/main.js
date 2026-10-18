@@ -452,6 +452,10 @@ if (process.platform === "darwin") {
   app.commandLine.appendSwitch("disable-audio-input");
 }
 
+app.commandLine.appendSwitch("enable-unsafe-webgpu");
+app.commandLine.appendSwitch("ignore-gpu-blocklist");
+app.commandLine.appendSwitch("disable-gpu-sandbox");
+
 if (CDP_PORT && CDP_PORT !== "0") {
   app.commandLine.appendSwitch("remote-debugging-port", CDP_PORT);
   app.commandLine.appendSwitch("remote-debugging-address", "127.0.0.1");
