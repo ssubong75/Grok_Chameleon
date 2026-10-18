@@ -188,10 +188,10 @@ index 275221e..aaddacb 100644
          let prefs = app.session.prefs().export.clone();
 diff --git a/crates/ui-egui/src/host_save.rs b/crates/ui-egui/src/host_save.rs
 new file mode 100644
-index 0000000..de086de
+index 0000000..91af605
 --- /dev/null
 +++ b/crates/ui-egui/src/host_save.rs
-@@ -0,0 +1,15 @@
+@@ -0,0 +1,19 @@
 +//! Optional hook so an embedding host can receive the open document as PNG.
 +
 +use std::sync::Mutex;
@@ -203,6 +203,10 @@ index 0000000..de086de
 +}
 +
 +pub fn send(bytes: &[u8]) {
++    if let Ok(path) = std::env::var("GROK_CHAMELEON_SAVE_PATH") {
++        let _ = std::fs::write(path, bytes);
++        return;
++    }
 +    if let Some(hook) = *HOOK.lock().unwrap_or_else(|e| e.into_inner()) {
 +        hook(bytes);
 +    }
