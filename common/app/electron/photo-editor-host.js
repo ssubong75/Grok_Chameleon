@@ -1,8 +1,9 @@
+const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
-const { WebContentsView, app } = require("electron");
+const { app } = require("electron");
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -172,6 +173,7 @@ function createPhotoEditorHost({ resourcesPath, serverBase, log }) {
   let server = null;
   let port = 0;
   let view = null;
+  let editorProcess = null;
   let fit = null;
   let session = null;
   let sourcePath = "";
@@ -261,7 +263,15 @@ function createPhotoEditorHost({ resourcesPath, serverBase, log }) {
     finishing = true;
     const current = view;
     view = null;
+    const child = editorProcess;
+    editorProcess = null;
     session = null;
+    if (child) {
+      try { child.kill(); } catch (_) {}
+    }
+    if (sourcePath) {
+      try { fs.unwatchFile(path.join(path.dirname(sourcePath), "save.png")); } catch (_) {}
+    }
     if (fit && win && !win.isDestroyed()) {
       for (const event of ["resize", "maximize", "unmaximize", "enter-full-screen", "leave-full-screen"]) {
         win.removeListener(event, fit);
@@ -314,9 +324,15 @@ function createPhotoEditorHost({ resourcesPath, serverBase, log }) {
     return { ok: true };
   }
 
+  function editorBinary() {
+    const name = process.platform === "win32" ? "photocraft.exe" : "photocraft";
+    return path.join(__dirname, "..", "editor", name);
+  }
+
   async function open(payload, win) {
-    if (view) return fail("Photo Editor가 이미 열려 있습니다.");
-    if (!fs.existsSync(path.join(root, "index.html"))) return fail("Photo Editor 화면이 앱 안에 없습니다.");
+    if (view || editorProcess) return fail("Photo Editor가 이미 열려 있습니다.");
+    const exe = editorBinary();
+    if (!fs.existsSync(exe)) return fail("Photo Editor 프로그램이 앱 안에 없습니다.");
     const raw = String(payload.image_base64 || "");
     if (!raw) return fail("편집할 이미지가 비어 있습니다.");
     const mime = String(payload.mime || "image/png");
@@ -334,67 +350,48 @@ function createPhotoEditorHost({ resourcesPath, serverBase, log }) {
       saveTarget: String(payload.save_target || "detail"),
     };
     if (!win || win.isDestroyed()) return fail("창이 없습니다.");
-    try {
-      await listen();
-    } catch (error) {
-      return fail(error && error.message ? error.message : error);
-    }
+    const savePath = path.join(dir, "save.png");
     finishing = false;
-    const next = new WebContentsView({
-      webPreferences: {
-        preload: path.join(__dirname, "photo-editor-preload.js"),
-        contextIsolation: true,
-        nodeIntegration: false,
-        sandbox: true,
-        backgroundThrottling: false,
-      },
+    const child = spawn(exe, ["--new-instance", "--", sourcePath], {
+      env: { ...process.env, GROK_CHAMELEON_SAVE_PATH: savePath },
+      windowsHide: false,
     });
-    try { next.setBackgroundColor("#262626"); } catch (_) {}
-    view = next;
-    win.contentView.addChildView(next);
-    fit = () => layout(win);
-    for (const event of ["resize", "maximize", "unmaximize", "enter-full-screen", "leave-full-screen"]) {
-      win.on(event, fit);
-    }
-    layout(win);
-    next.webContents.on("console-message", (_event, _level, message) => {
-      if (message) log(`photo editor: ${message}`);
+    editorProcess = child;
+    child.once("exit", () => {
+      if (editorProcess === child) finish(win, null);
     });
-    next.webContents.on("did-fail-load", (_event, code, description, url) => {
-      log(`photo editor load failed code=${code} ${description} ${url || ""}`);
+    fs.watchFile(savePath, { interval: 400 }, async () => {
+      if (!session || editorProcess !== child) return;
+      let bytes;
+      try { bytes = fs.readFileSync(savePath); } catch (_) { return; }
+      if (!bytes.length) return;
+      try { fs.unlinkSync(savePath); } catch (_) {}
+      const image = `data:image/png;base64,${bytes.toString("base64")}`;
+      const response = await fetch(`${serverBase}/api/image-editor/save`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          item_id: session.itemId,
+          source_url: session.sourceUrl,
+          name: session.name,
+          image,
+          provider: session.provider,
+          save_target: session.saveTarget,
+        }),
+      });
+      const text = await response.text();
+      let parsed = {};
+      try { parsed = JSON.parse(text); } catch (_) {}
+      if (!response.ok) {
+        log(`photo editor save failed ${parsed.error || text}`);
+        return;
+      }
+      const itemId = parsed?.item?.id ? String(parsed.item.id) : "";
+      if (!itemId) return;
+      const saveTarget = parsed?.item?.metadata?.editor_save_target || session.saveTarget || "";
+      finish(win, { itemId, saveTarget });
     });
-    next.webContents.on("render-process-gone", (_event, details) => {
-      log(`photo editor renderer gone ${details && details.reason ? details.reason : ""} ${details && details.exitCode != null ? details.exitCode : ""}`);
-    });
-    try { await next.webContents.session.clearCache(); } catch (_) {}
-    log(`photo editor open port=${port} root=${root}`);
-    await next.webContents.loadURL(`http://127.0.0.1:${port}/index.html?host=chameleon`);
-    try {
-      const gpu = await next.webContents.executeJavaScript(`(async () => {
-        const hasGpu = !!navigator.gpu;
-        if (!hasGpu) return { gpu: false, adapter: false };
-        try {
-          const adapter = await navigator.gpu.requestAdapter();
-          if (!adapter) return { gpu: true, adapter: false };
-          let info = {};
-          try { info = adapter.info || await adapter.requestAdapterInfo(); } catch (_) {}
-          return {
-            gpu: true,
-            adapter: true,
-            vendor: info && info.vendor,
-            architecture: info && info.architecture,
-            device: info && info.device,
-            description: info && info.description,
-            type: info && (info.deviceType || info.device_type),
-          };
-        } catch (error) {
-          return { gpu: true, adapter: false, error: String(error && error.message || error) };
-        }
-      })()`);
-      log(`photo editor webgpu=${JSON.stringify(gpu)}`);
-    } catch (error) {
-      log(`photo editor webgpu probe failed ${error && error.message ? error.message : error}`);
-    }
+    log(`photo editor native ${exe}`);
     return { ok: true };
   }
 
