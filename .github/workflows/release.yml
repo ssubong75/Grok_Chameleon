@@ -105,7 +105,7 @@ jobs:
           $web = Join-Path $src "apps\photocraft-web"
           Push-Location $web
           try { trunk build --release } finally { Pop-Location }
-          $dist = Join-Path $web "dist"
+          $dist = Join-Path $src "dist\web"
           if (-not (Test-Path (Join-Path $dist "index.html"))) { throw "Photo Editor build produced no index.html" }
           New-Item -ItemType Directory -Force (Join-Path $env:GITHUB_WORKSPACE "photo-editor-dist") | Out-Null
           Copy-Item (Join-Path $dist "*") (Join-Path $env:GITHUB_WORKSPACE "photo-editor-dist") -Force
