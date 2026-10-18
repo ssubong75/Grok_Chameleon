@@ -80,7 +80,27 @@ const CJK_FONTS = {
   "last-resort": ["/System/Library/Fonts/Supplemental/Arial Unicode.ttf", "/Library/Fonts/Arial Unicode.ttf"],
 };
 
+function windowsFonts() {
+  return path.join(process.env.WINDIR || "C:\\Windows", "Fonts");
+}
+
 function cjkFontFile(key) {
+  if (process.platform === "win32") {
+    const dir = windowsFonts();
+    const named = {
+      korean: ["malgun.ttf", "gulim.ttc"],
+      japanese: ["YuGothR.ttc", "meiryo.ttc", "msgothic.ttc"],
+      "japanese-w4": ["YuGothM.ttc", "YuGothR.ttc"],
+      "simplified-chinese": ["msyh.ttc", "msyh.ttf", "simsun.ttc"],
+      "simplified-chinese-gb": ["simsun.ttc", "msyh.ttc"],
+      "simplified-chinese-heiti": ["simsun.ttc"],
+      "traditional-chinese": ["msjh.ttc", "msjh.ttf", "mingliu.ttc"],
+      "traditional-chinese-heiti": ["mingliu.ttc", "msjh.ttc"],
+      "last-resort": ["ARIALUNI.TTF", "arialuni.ttf"],
+    };
+    const names = named[key];
+    return names ? firstFile(names.map((name) => path.join(dir, name))) : null;
+  }
   if (key === "simplified-chinese" || key === "traditional-chinese") return macPingfang();
   const list = CJK_FONTS[key];
   return list ? firstFile(list) : null;
@@ -89,7 +109,10 @@ function cjkFontFile(key) {
 let fontCatalog = null;
 function fontIndex() {
   if (fontCatalog) return fontCatalog;
-  const dirs = ["/System/Library/Fonts", "/Library/Fonts", path.join(os.homedir(), "Library", "Fonts")];
+  const dirs = process.platform === "win32"
+    ? [windowsFonts(), process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, "Microsoft", "Windows", "Fonts") : ""]
+      .filter(Boolean)
+    : ["/System/Library/Fonts", "/Library/Fonts", path.join(os.homedir(), "Library", "Fonts")];
   const files = [];
   const seen = new Set();
   function walk(dir, depth) {
@@ -204,9 +227,10 @@ function createPhotoEditorHost({ resourcesPath, serverBase, log }) {
           fs.createReadStream(sourcePath).pipe(response);
           return;
         }
-        const relative = decodeURIComponent(url.pathname).replace(/^\/+/, "");
-        const file = path.normalize(path.join(root, relative || "index.html"));
-        if (!file.startsWith(root) || !fs.existsSync(file) || !fs.statSync(file).isFile()) {
+        const relative = decodeURIComponent(url.pathname).replace(/^[/\\]+/, "");
+        const file = path.resolve(root, relative || "index.html");
+        const fromRoot = path.relative(root, file);
+        if (fromRoot.startsWith("..") || path.isAbsolute(fromRoot) || !fs.existsSync(file) || !fs.statSync(file).isFile()) {
           response.writeHead(404);
           response.end();
           return;
