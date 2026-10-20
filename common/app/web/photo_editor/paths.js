@@ -1,20 +1,16 @@
+export function pathContours(path){return path?[path,...(Array.isArray(path.subpaths)?path.subpaths:[])]:[];}
 export function tracePath(context,path,offsetX=0,offsetY=0){
-  const nodes=path?.nodes||[];context.beginPath();if(!nodes.length)return;
-  context.moveTo(nodes[0].x+offsetX,nodes[0].y+offsetY);
+  context.beginPath();
   const segment=(a,b)=>context.bezierCurveTo((a.outX??a.x)+offsetX,(a.outY??a.y)+offsetY,(b.inX??b.x)+offsetX,(b.inY??b.y)+offsetY,b.x+offsetX,b.y+offsetY);
-  for(let i=1;i<nodes.length;i++)segment(nodes[i-1],nodes[i]);
-  if(path.closed&&nodes.length>1){segment(nodes.at(-1),nodes[0]);context.closePath();}
+  for(const contour of pathContours(path)){const nodes=contour.nodes||[];if(!nodes.length)continue;context.moveTo(nodes[0].x+offsetX,nodes[0].y+offsetY);for(let i=1;i<nodes.length;i++)segment(nodes[i-1],nodes[i]);if(contour.closed&&nodes.length>1){segment(nodes.at(-1),nodes[0]);context.closePath();}}
 }
 export function pathBounds(path){
-  if(!path?.nodes?.length)return{x:0,y:0,w:0,h:0};
   let left=Infinity,top=Infinity,right=-Infinity,bottom=-Infinity;
-  for(const node of path.nodes){for(const [x,y] of [[node.x,node.y],[node.inX??node.x,node.inY??node.y],[node.outX??node.x,node.outY??node.y]]){left=Math.min(left,x);top=Math.min(top,y);right=Math.max(right,x);bottom=Math.max(bottom,y);}}
-  return{x:left,y:top,w:right-left,h:bottom-top};
+  for(const contour of pathContours(path))for(const node of contour.nodes||[])for(const [x,y]of [[node.x,node.y],[node.inX??node.x,node.inY??node.y],[node.outX??node.x,node.outY??node.y]]){left=Math.min(left,x);top=Math.min(top,y);right=Math.max(right,x);bottom=Math.max(bottom,y);}
+  return Number.isFinite(left)?{x:left,y:top,w:right-left,h:bottom-top}:{x:0,y:0,w:0,h:0};
 }
 export function transformPath(path,transform){
-  for(const node of path.nodes){for(const [xKey,yKey] of [['x','y'],['inX','inY'],['outX','outY']]){
-    if(node[xKey]==null||node[yKey]==null)continue;const point=transform(node[xKey],node[yKey]);node[xKey]=point.x;node[yKey]=point.y;
-  }}return path;
+  for(const contour of pathContours(path))for(const node of contour.nodes||[])for(const [xKey,yKey]of [['x','y'],['inX','inY'],['outX','outY']]){if(node[xKey]==null||node[yKey]==null)continue;const point=transform(node[xKey],node[yKey]);node[xKey]=point.x;node[yKey]=point.y;}return path;
 }
 export function rectanglePath(x,y,w,h){return{closed:true,nodes:[{x,y},{x:x+w,y},{x:x+w,y:y+h},{x,y:y+h}]};}
 export function ellipsePath(x,y,w,h){
@@ -25,9 +21,9 @@ export function ellipsePath(x,y,w,h){
     {x:cx,y:cy-ry,inX:cx-k*rx,inY:cy-ry,outX:cx+k*rx,outY:cy-ry}]};
 }
 export function pathData(path){
-  const nodes=path.nodes||[];if(!nodes.length)return'';const n=value=>Number(value.toFixed(4)),point=node=>`${n(node.x)} ${n(node.y)}`;let data='M '+point(nodes[0]);
+  const n=value=>Number(value.toFixed(4)),point=node=>`${n(node.x)} ${n(node.y)}`;
   const segment=(a,b)=>a.outX!=null||b.inX!=null?` C ${n(a.outX??a.x)} ${n(a.outY??a.y)} ${n(b.inX??b.x)} ${n(b.inY??b.y)} ${point(b)}`:` L ${point(b)}`;
-  for(let i=1;i<nodes.length;i++)data+=segment(nodes[i-1],nodes[i]);if(path.closed){data+=segment(nodes.at(-1),nodes[0]);data+=' Z';}return data;
+  return pathContours(path).map(contour=>{const nodes=contour.nodes||[];if(!nodes.length)return '';let data='M '+point(nodes[0]);for(let i=1;i<nodes.length;i++)data+=segment(nodes[i-1],nodes[i]);if(contour.closed){data+=segment(nodes.at(-1),nodes[0]);data+=' Z';}return data;}).filter(Boolean).join(' ');
 }
 const lerp=(a,b,t)=>({x:a.x+(b.x-a.x)*t,y:a.y+(b.y-a.y)*t});
 function controls(a,b){return[a,{x:a.outX??a.x,y:a.outY??a.y},{x:b.inX??b.x,y:b.inY??b.y},b];}

@@ -1,0 +1,2 @@
+// PhotoCraft i18n language registry; translation license in locales/.
+export const languages=[["en", "English"], ["ja", "日本語"], ["zh-hans", "简体中文"], ["zh-hant", "繁體中文"], ["es", "Español"], ["ru", "Русский"], ["uk", "Українська"], ["sr", "Srpski"], ["cs", "Čeština"], ["fr", "Français"], ["id", "Bahasa Indonesia"], ["ko", "한국어"], ["pl", "Polski"], ["de", "Deutsch"], ["pt-br", "Português (Brasil)"], ["el", "Ελληνικά"], ["nl", "Nederlands"], ["it", "Italiano"], ["hu", "Magyar"], ["tr", "Türkçe"], ["vi", "Tiếng Việt"]];

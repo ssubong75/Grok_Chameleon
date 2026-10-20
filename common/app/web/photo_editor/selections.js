@@ -1,8 +1,10 @@
+import {wandCoverage} from './selection-wand.js';
+import {transformPath} from './paths.js';
 // Binary selections store scanline spans, so project history remains cloneable.
 export function offsetSelection(selection,dx,dy){
   if(!selection)return null;const next=structuredClone(selection);next.x+=dx;next.y+=dy;
   if(next.points)for(const point of next.points){point.x+=dx;point.y+=dy;}
-  if(next.path)for(const node of next.path.nodes)for(const [xKey,yKey]of [['x','y'],['inX','inY'],['outX','outY']])if(node[xKey]!=null){node[xKey]+=dx;node[yKey]+=dy;}
+  if(next.path)transformPath(next.path,(x,y)=>({x:x+dx,y:y+dy}));
   if(next.runs)next.runs=next.runs.map(([y,start,end])=>[y+dy,start+dx,end+dx]);if(next.kind==='alpha'){next.offsetX=(next.offsetX||0)+dx;next.offsetY=(next.offsetY||0)+dy;}return next;
 }
 export function alphaSelection(pixels,width,height){const bounds=selectionFromPixels(pixels,width,height);return bounds?{...bounds,kind:'alpha',pixels:new Uint8ClampedArray(pixels),width,height,offsetX:0,offsetY:0}:null;}
@@ -31,18 +33,8 @@ export function traceSelectionOutline(context,selection){
   }
   for(const [x1,y1,x2,y2]of edges){context.moveTo(x1,y1);context.lineTo(x2,y2);}
 }
-export function colorSelection(image,x,y,tolerance=32,contiguous=true){
-  const {width,height,data}=image;x=Math.floor(x);y=Math.floor(y);
-  if(x<0||y<0||x>=width||y>=height)return null;
-  const seed=y*width+x,target=data.slice(seed*4,seed*4+4),mask=new Uint8Array(width*height);
-  const matches=i=>{for(let c=0;c<4;c++)if(Math.abs(data[i*4+c]-target[c])>tolerance)return false;return true;};
-  if(!contiguous){for(let i=0;i<mask.length;i++)if(matches(i))mask[i]=1;}
-  else {const pending=[seed];mask[seed]=2;while(pending.length){const index=pending.pop();if(!matches(index)){mask[index]=3;continue;}mask[index]=1;const row=Math.floor(index/width),col=index%width;
-    for(const next of [col>0?index-1:-1,col<width-1?index+1:-1,row>0?index-width:-1,row<height-1?index+width:-1])if(next>=0&&!mask[next]){mask[next]=2;pending.push(next);}}
-    for(let i=0;i<mask.length;i++)if(mask[i]!==1)mask[i]=0;
-  }
-  return selectionFromPixels(mask,width,height);
-}
+export function colorSelection(image,x,y,tolerance=32,contiguous=true,antiAlias=true){return alphaSelection(wandCoverage(image,{x,y,tolerance,contiguous,antiAlias}),image.width,image.height);}
+
 function extrema(input,width,height,radius,horizontal,dilate){
   const output=new Uint8Array(input.length),length=horizontal?width:height,lines=horizontal?height:width;
   const at=(line,i)=>horizontal?line*width+i:i*width+line;

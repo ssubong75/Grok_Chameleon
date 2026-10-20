@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, session, dialog, screen, ipcMain, nativeImage, nativeTheme } = require("electron");
+const { app, BrowserWindow, Menu, session, dialog, screen, ipcMain, nativeImage, nativeTheme, clipboard } = require("electron");
 const { spawn, execFile, execFileSync } = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
@@ -4288,8 +4288,34 @@ function openPhotoEditor(payload = {}) {
 }
 
 ipcMain.handle("grok-chameleon:open-photo-editor", async (_event, payload = {}) => openPhotoEditor(payload));
+ipcMain.on('grok-chameleon:photo-editor-menu', (event,model)=>photoEditorHost.updateMenu(event,model));
+ipcMain.on('grok-chameleon:photo-editor-title',(event,title)=>photoEditorHost.updateTitle(event,title));
 ipcMain.handle("grok-chameleon:photo-editor-save", async (event, bytes) => photoEditorHost.save(event, bytes));
+ipcMain.handle('grok-chameleon:photo-editor-file-save',async(event,operation,value)=>photoEditorHost.fileSave(event,operation,value));
 ipcMain.handle("grok-chameleon:photo-editor-close", async (event) => photoEditorHost.close(event));
+ipcMain.handle('grok-chameleon:photo-editor-recovery',async(event,operation,value)=>photoEditorHost.recovery(event,operation,value));
+ipcMain.handle('grok-chameleon:photo-editor-workspace',async(event,value=null)=>photoEditorHost.workspaceState(event,value));
+ipcMain.handle('grok-chameleon:photo-editor-recents',async(event,operation,value)=>photoEditorHost.recentFiles(event,operation,value));
+ipcMain.handle('grok-chameleon:photo-editor-export-raster',async(event,bytes,name)=>photoEditorHost.exportRaster(event,bytes,name));
+ipcMain.handle('grok-chameleon:photo-editor-webp',async(event,bytes)=>photoEditorHost.webp(event,bytes));
+ipcMain.handle('grok-chameleon:photo-editor-history-log',async(event,line)=>photoEditorHost.historyLog(event,line));
+ipcMain.handle('grok-chameleon:photo-editor-preferences',async(event,value=null)=>photoEditorHost.preferences(event,value));
+ipcMain.handle("grok-chameleon:photo-editor-linked-file", async (event, token = null) => photoEditorHost.linkedFile(event, token));
+ipcMain.handle("grok-chameleon:photo-editor-clipboard-write", async (_event, bytes) => {
+  const image = nativeImage.createFromBuffer(Buffer.from(bytes));
+  if (image.isEmpty()) throw new Error("The copied image is empty.");
+  const size = image.getSize();
+  if (size.width > 32767 || size.height > 32767 || size.width * size.height > 64000000) throw new Error("Clipboard image exceeds the image size limits.");
+  clipboard.writeImage(image);
+  return clipboard.readImage().toPNG();
+});
+ipcMain.handle("grok-chameleon:photo-editor-clipboard-read", async () => {
+  const image = clipboard.readImage();
+  if (image.isEmpty()) return null;
+  const size = image.getSize();
+  if (size.width > 32767 || size.height > 32767 || size.width * size.height > 64000000) throw new Error("Clipboard image exceeds the image size limits.");
+  return image.toPNG();
+});
 ipcMain.handle("grok-chameleon:warm-imagine-usage", async (_event, payload = {}) => warmUsagePage(usageCommandFromPayload(payload)));
 ipcMain.handle("grok-chameleon:activate-imagine-account", async (_event, payload = {}) => (
   activateImagineAccountTab(usageCommandFromPayload(payload))

@@ -1,0 +1,277 @@
+PhotoCraft source used for JavaScript ports
+Copyright (c) 2026 ArtCraft Team and the PhotoCraft contributors
+Distributed under the MIT license in photocraft.LICENSE-MIT.
+
+Source repository: https://github.com/storytold/photocraft
+Source commit: 56dbc89a38248f6e50db50d132de47be88494cf6
+
+Ported or adapted routines:
+- crates/algo/src/segment/subject.rs and slic.rs: subject saliency and superpixels
+- crates/algo/src/segment/grabcut.rs: object selection and iterative foreground models
+- crates/algo/src/segment/mod.rs: graph energy, boundary recuts and antialiasing
+- crates/algo/src/segment/quick.rs: brush-seeded, coarse-to-fine selection
+- crates/algo/src/segment/focus.rs: local sharpness and focus-area selection
+- crates/algo/src/segment/sky.rs: classical sky selection and edge refinement
+- crates/algo/src/segment/gmm.rs and segment/mod.rs: color models and component cleanup
+- crates/io/src/channel_map.rs and psd_export.rs: alpha display records and Quick Mask resource
+- crates/psd/src/path.rs and io/psd_export.rs: saved/work path records and resource writing
+- crates/geom/src/warp.rs: fifteen warp preset grids and bicubic evaluation
+- crates/geom/src/warp.rs BezierMesh: cubic Bernstein patch evaluation in psd-smart.js meshPoint. warp-place.js rasterizes that mapping with a bounded triangle grid and bilinear samples; this is not the source bicubic rasterizer, and output parity is unverified.
+- crates/io/src/blocks.rs placed_frame and parse_placed_warp: a 16-point custom frame uses the control-point bounds; a multi-patch quilt uses the source rectangle. A quilt is rendered only when the point count and slice knots validate. PhotoCraft itself does not import other quilt meshes.
+- crates/io/src/smart_map.rs: known smart-filter names and parameters. Replayable items map onto existing editor filters. A stack with any non-replayable filter keeps the stored preview and writes the parsed list back.
+- crates/vector/src/lib.rs vector_mask_values and crates/compose/src/masks.rs: vector density is `1 - density * (1 - value)` before feather, then multiplied by the pixel mask. vector-mask.js rasterizes the path with canvas fill antialiasing, not the analytical rasterizer.
+- crates/text/src/warp.rs: path-text placement reference
+- crates/engine/src/selection_cmds.rs: Color Range selection scoping and tonal fuzziness
+- crates/algo/src/selection.rs: span-based Magic Wand and alpha anti-aliasing
+- crates/algo/src/selection.rs and color/convert.rs: Color Range and sRGB-to-Lab D50 conversion
+- crates/algo/src/selection.rs and selection/distance.rs: Euclidean selection modifications
+- crates/algo/src/selection_blur.rs: Gaussian feather kernel and sliding cosine sums
+- crates/algo/src/matting.rs: clipped-window means and guided filtering
+- crates/algo/src/matting/morphology.rs: octagonal selection morphology
+
+
+- crates/algo/src/blur.rs and blur2.rs: radial, surface, smart, and depth-aware lens blur sampling
+- crates/algo/src/sharpen.rs: fixed sharpen presets and Gaussian unsharp reference
+- crates/algo/src/pixelate.rs and fxutil.rs: halftone, crystallize, pointillize, and mezzotint
+- crates/algo/src/stylize2.rs: diffuse, contour tracing, and wind
+- crates/algo/src/render.rs: fibers and lens flare
+- crates/algo/src/distort2.rs and distort.rs: Shear curve interpolation and ZigZag inverse mapping
+- crates/algo/src/lens.rs and engine/src/lens_cmds.rs: manual/generic lens correction and bicubic sampling
+- crates/algo/src/oil.rs and fxutil.rs: flow-guided oil paint and bristle relief
+- crates/engine/src/edit_cmds.rs: clipboard document creation, placement, and grayscale mask paste semantics
+- crates/algo/src/video.rs: de-interlace and NTSC chroma limits
+- crates/engine/src/filters_ext.rs: filter defaults, ranges, and option records
+
+JavaScript integration and rasterization use the local Canvas editor.
+Matching output has not been established by runtime or pixel comparison.
+
+Shape Blur: shape-blur.js derives its nine kernel predicates and span convolution from crates/algo/src/blur2.rs and crates/algo/src/shape_blur.rs in the PhotoCraft source identified above.
+
+Gaussian level smoothing: gaussian-levels.js derives gauss_box_radii / gauss_blur_n from crates/algo/src/fxutil.rs.
+
+Blur Gallery: blur-gallery.js derives variable_blur, field, iris and tilt_shift from crates/algo/src/gallery.rs.
+
+Path/Spin Blur: motion-gallery.js derives path and spin from crates/algo/src/gallery.rs. Extrude: extrude.js derives cell averaging, swept block rasterization and pyramid shading from crates/algo/src/stylize2.rs and crates/algo/src/stylize2/extrude.rs.
+
+Layer clipboard behavior: layer-clipboard.js follows whole_layer / whole_layers selection semantics from crates/engine/src/edit_cmds.rs; storage and canvas integration are local JavaScript implementations.
+
+Image Size: resample.js derives phase rounding, Keys/Lanczos weights, staged downsampling and pass planning from crates/algo/src/resample.rs. Canvas Size background/relative behavior and layer effect scaling follow crates/engine/src/image_cmds.rs and crates/doc/src/lib.rs background traits.
+
+Procedural renderer primitives, SplitMix64 RNG, and Picture Frame: render-primitives.js and picture-frame.js derive from crates/algo/src/render2.rs. Layer compositing and dialogs use the local Canvas engine.
+
+Flame: flame.js derives color ramps, turbulence, placement and strand generation from crates/algo/src/render2.rs. render-polylines.js implements local adaptive cubic flattening and arc-length lookup.
+
+Tree: tree-renderer.js and tree-kinds.js derive the 34 base parameter sets, limb recursion, leaf generation, four growth architectures and lighting from crates/algo/src/render2.rs.
+
+Vanishing Point: vanishing-geometry.js and vanishing-pixels.js derive plane validation, camera lifting, metric frames, tear-off planes, paste and clone strokes from crates/algo/src/vanishing.rs and crates/engine/src/vp_cmds.rs. Bicubic weights derive from crates/algo/src/transform.rs; current strong-reduction warp prefiltering is not ported.
+
+Adaptive Wide Angle: wide-angle-mesh.js derives camera/arc and mesh equations from crates/algo/src/wideangle.rs. sparse-ls.js derives CGLS from crates/algo/src/photo_util.rs. warp-triangles.js derives barycentric rasterization and subsampling from crates/algo/src/warp.rs, with Keys weights from transform.rs. wide-angle-controls.js is local UI integration.
+
+Filter Gallery: gallery-catalog.js derives the 47-filter parameter registry from crates/algo/src/artistic.rs. gallery-utils.js, gallery-artistic.js, gallery-brush.js, gallery-sketch.js, gallery-texture.js and filter-gallery.js derive pixel algorithms and reach rules from crates/algo/src/artistic_fx.rs. gallery-controls.js is local UI integration.
+
+Extended Levels: levels.js derives levels_q / levels_gamma and channel-before-master order from crates/compose/src/adjust.rs. PSD channel field mapping follows the bundled ag-psd levels handler.
+
+RGB ICC conversion: icc-rgb.js follows curve/tag parsing and evaluation from crates/cms/src/profile.rs and curve.rs, and the XYZ D50-to-sRGB matrix and encoding from crates/color/src/convert.rs. Current conversion covers matrix/TRC RGB profiles only.
+
+PSD control-point Curves: curve-points.js derives natural cubic spline solving and channel-before-master composition from crates/compose/src/adjust.rs. Native PSD point field mapping follows the bundled ag-psd curves handler.
+
+Exposure, Threshold, Posterize and brightness-contrast.js derive RGB 8-bit calculations, gamma-2.2 exposure, luminosity split, input bins, modern curves and legacy pivots from crates/compose/src/adjust.rs. psd-smart.js composes existing local affine/perspective/resize operations for PSD placement.
+
+Pass-through group backdrop and premultiplied coverage mixing derive from crates/compose/src/lib.rs composite_layer_plain; clipped pass-through delta composition remains unported.
+
+Raster mask density and mask-feather.js derive density coverage, BoxPass variance/end weights and clamped three-pass separable blur from crates/compose/src/masks.rs.
+
+Smart-filter mask mix/unmix: smart-filter-mask.js follows crates/compose/src/filter_mask.rs. Native FEid RGB/slot-25 alpha generation follows crates/io/src/smart_map.rs feid_item; placement-first filtering and union-bound filter blending follow crates/engine/src/smart_cmds.rs. The bundled FEid writer is locally corrected for per-item extra masks, absent-mask flags and section padding (the enclosing block includes final padding). Adjustment RGB blending, fill-opacity interpolation, and masked pass-through clip deltas follow crates/compose/src/lib.rs composite_layer_plain and advanced.rs.
+
+Smart-filter replay targets follow the pure placed-surface processing of engine/smart_cmds.rs apply_smart_filter; UI target isolation and failure restoration are local document-engine integration.
+
+Native linear-contour Satin mapping follows io/src/effects_map.rs parse_one/write_one/contour_value and the existing compose/effects.rs satin_map port. Shared custom effect mixing uses the existing color/blend.rs-derived compositor.
+
+Vibrance and tonal Color Balance: vibrance.js and color-balance.js follow compose/src/adjust.rs vibrance_px, vibrance_lin, vibrance_skin, color_balance_channel and balance_gamma; controls/PSD fields follow engine/adjust_params.rs and io/adjust_map.rs. photo-filter-color.js and the bundled phfl v3 reader follow io/adjust_map.rs parse_photo_filter's D50-relative XYZ scale; Lab conversion uses the existing color/convert.rs port. Photo Filter density maps native normalized values to local percentages.
+
+Hue/Saturation: hue-saturation.js follows doc/src/adjust.rs HueRange and compose/src/adjust.rs hue_saturation, hue_range_tables, range_lightness and HSL conversion. Native packed hue2 fields follow io/src/adjust_map.rs; hue-saturation-controls.js is local UI integration. Color Lookup: color-lookup.js and lut-files.js follow cms/src/lutfile.rs Cube/3DL/LOOK parsers, Cube writer and eight CC0 built-in look equations, plus compose/src/adjust.rs lut3d_sample and Bayer dithering. Native clrL mapping follows io/src/adjust_map.rs. color-lookup-controls.js is local UI integration.
+
+Vanishing Point new-layer clone copy-back follows engine/src/vp_cmds.rs: compose the visible base with pasted/current pixels, snapshot it, run the metric stroke and copy only changed samples to the target surface.
+
+Grouped clipping base ordering and isolated clipping knockout floors follow compose/src/lib.rs composite_layer_plain and compose/src/advanced.rs composite_clipped. Canonical PNG clipboard identity is local Electron integration.
+
+Group/adjustment/pass-through knockout draw wrappers and individual clipping dispatch follow compose/src/lib.rs composite_layer and compose/src/advanced.rs knockout_shape, knockout and composite_clipped_individually.
+
+FEid mask raw/RLE and sample-depth handling follows psd/src/filter_effects.rs and io/src/pixels.rs. Frozen placement translation follows engine/src/smart_cmds.rs shift_smart; clipboard and canvas frame updates are local integration.
+
+FEid ZIP/ZIP-prediction reversal follows psd/src/compression.rs unpredict for byte, u16 sample and float byte-plane layouts, using the already bundled pako inflater with expected-size-bounded output.
+
+Native Smart Filter pixel units follow io/src/smart_map.rs item_for_filter (#Pxl fields), mapped to ag-psd descriptor unitsValue records.
+
+2026-10-19 follow-up: smart_map.rs Levels/point-Curves descriptor mapping, original unknown Smart Filter descriptor retention with enabled-state patching, and shared descriptor-key type handling. Source inspection and static syntax checks only; runtime fidelity unverified.
+
+2026-10-19 follow-up: RGB FEid frozen-cache mixing/unmixing follows smart_map.rs and psd_import.rs; effect blend defaults/global light resolution follows effects_map.rs. Static-only verification.
+
+2026-10-19 follow-up: restricted native solid RGB Gradient Overlay mapping follows effects_map.rs gradient_from/gradient_keys and the existing local gradient renderer. Unsupported interpolation/opacity/placement variants retain fallback.
+
+2026-10-19 follow-up: restricted smooth Bevel/Emboss native PSD descriptor mapping follows effects_map.rs parse_bevel/write_one and the existing surface-effects.js renderer. Unsupported bevel variants retain fallback; runtime parity unverified.
+
+2026-10-19 follow-up: restricted embedded RGBA Pattern Overlay mapping, tile retention, and native Patt resources follow effects_map.rs and psd/src/patterns.rs; pattern alpha uses the user-mask slot and first non-colour decoded plane. RLE capacity and channel bounds checks added. Runtime unverified.
+
+2026-10-19 follow-up: native default Shadows/Highlights filterID781/no-options mapping follows smart_map.rs. Non-default parameters retain fallback.
+
+2026-10-19 follow-up: effect-free vector-stroked clipping order follows compose/src/lib.rs shape_parts/split_parts, using the existing shape renderer. Static-only verification.
+
+2026-10-19 follow-up: clipping-before-effects with separate original effect shape follows compose/src/lib.rs composite_layer_effects and effects.rs. Static-only verification.
+
+2026-10-19 follow-up: relative interior effect coverage/one-time shape alpha follows compose/src/effects.rs lay_alpha/rel and interior_group ordering. Static-only verification.
+
+2026-10-19 follow-up: Drop Shadow knockout/Outer Glow Fill coverage and shadow-before-glow order follow compose/src/effects.rs knock_out_exterior/shadow_see_through. Static-only verification.
+
+2026-10-20: Outside Stroke alpha sharing follows compose/src/effects.rs outline_share and exterior stroke share. Existing dilation geometry retained; runtime unverified.
+
+2026-10-20: zero-spread linear Drop/Inner Shadow maps follow compose/src/effects.rs shadow_map/blur using existing tentMap. Inner outside coverage is preserved through complement convolution.
+
+2026-10-20: softer linear zero-spread Glow maps, Range transfer, and inner Edge/Center inversion follow compose/src/effects.rs glow_map/glow_lut; controls and PSD mapping connected. Unsupported variants retain fallback.
+
+2026-10-20: effects Spread/Choke follows compose/src/effects.rs chamfer_from, dist_outside_by(Chamfer), dilate and spread_split; PSD percent and UI mappings added. Static-only verification.
+
+2026-10-20: deterministic Shadow/Glow Noise follows compose/src/effects.rs hash_noise/noise and source operation order, using document-coordinate origins. Static-only verification.
+
+2026-10-20: smooth effect contour LUT follows compose/adjust.rs curve_lut, with4096 entries and natural-spline interpolation; Shadow/Glow transfer ordering follows effects.rs. Corner flags remain unsupported.
+
+2026-10-20: custom smooth Satin transfer follows compose/src/effects.rs satin_lut, using the mirrored contour endpoint difference before inversion. Static-only verification.
+
+2026-10-20: effect-contour Corner segmentation follows compose/adjust.rs contour_curve_lut; Cnty=false mapping follows io/src/effects_map.rs contour/contour_value.
+
+2026-10-20: smooth Bevel Gloss Contour transfer follows compose/src/effects.rs shade_into/apply_contour, with native PSD/dialog retention of smooth/Corner points. Height contours/textures remain unsupported.
+
+2026-10-20: separate Bevel gloss/height contour descriptors and height-before-Soften transfer follow effects_map.rs and compose/src/effects.rs bevel_height. Static-only verification.
+
+2026-10-20: ordinary/group clipped effects hiding-mask order follows compose/src/lib.rs effects_source/hiding_mask/composite_layer_effects. Static-only verification.
+
+2026-10-20: effect-bearing vector clipping passes split fill/stroke and relative masked stroke coverage according to compose/src/lib.rs split_parts and effects.rs VectorStroke painting order. Static-only verification.
+
+2026-10-20: restricted Normal-layer staged exterior/interior/post-bevel composition and final premultiplied layer-opacity mixing follows compose/src/effects.rs composite_with_effects_prepared. Other composition paths retain fallback.
+
+2026-10-20: ordinary-layer non-normal premerge follows compose/src/effects.rs premerges_layer and premerge-before-interior order; restricted staged path only.
+
+2026-10-20: staged ordinary hiding-mask premultiplied mixing and eligible isolated-group stage origin handling follow compose/src/lib.rs hiding_mask/apply_hiding_mask and effects.rs whole-stack opacity order. Static-only verification.
+
+2026-10-20: grouped clipping and isolated-group hiding masks now feed staged effects using source clipped-before-effects and hiding-after-effects ordering. Group knockout/individual clipping stage combinations retain fallback.
+
+2026-10-20: wide outside stroke field follows compose/src/effects.rs edt_nearest/dist_outside_by(Euclidean) and20px metric threshold, using a separable parabola envelope with nearest-site alpha correction. Static-only verification.
+
+2026-10-20: Precise Glow follows compose/src/effects.rs glow_map(Precise), dist_inside and dist_outside, with technique UI/native PSD mapping. Static-only verification.
+
+2026-10-20: placed-warp tessellation follows algo/src/warp.rs mapped_lengths PROBE16/CELL4/MAX_CELLS512, including stretched-source destination lengths. Sampling remains the existing local renderer; runtime unverified.
+
+2026-10-20: placed-warp pixel-center/bicubic/minification sampling follows algo/src/warp.rs warp_triangles and transform.rs bicubic (A=-0.75, MAX_SS8), including transparent source reads, premultiplied alpha and later-triangle ownership. Static-only verification.
+
+2026-10-20: fixed Custom Warp input domain follows geom/src/warp.rs Warp::map. Size-changing embedded replacement retains warp/source placement per engine/src/smart_cmds.rs set_shared_source; local history rebasing uses the raster replay bounds evaluator. Static-only verification.
+
+2026-10-20: frozen FEid working-mode conversion follows source unfiltered_from_item colour-plane selection and existing local PSD Gray/CMYK/Lab conversion paths; export regenerates RGB8 cache planes for the RGB8 working file. Static-only verification.
+
+2026-10-20: ordinary individual/grouped clipped followers feed staged effects under existing base-alpha restrictions, following compose/advanced.rs composite_clipped/composite_clipped_individually and compose/lib.rs composite_atop. Static-only verification.
+
+2026-10-20: group followers, group knockout and grouped clipping knockout reuse staged effects against the knocked backdrop, retaining prepared clipping content and hiding masks; follows compose/advanced.rs knockout and compose/lib.rs composite_layer_effects. Static-only verification.
+
+2026-10-20: text coverage gamma follows compose/src/psblend.rs TEXT_GAMMA1.45/text_encode/text_decode/composite_gamma, using the existing8-bit blend-RGB backend and staged premerge/interior connections. Static-only verification.
+
+2026-10-20: app-level text gamma preference range/off semantics follow engine/src/color_cmds.rs blend_text_gamma and compose/src/psblend.rs set_text_gamma; local preference UI persists via the existing application preference path.
+
+2026-10-20: shared Smart Object contents identity, active New-via-Copy independence, batched instance source update and child-tab reuse follow engine/src/smart_cmds.rs instances/set_shared_source/new_via_copy/edit_contents; native export separates linked-file and placed/FEid identities. Static-only verification.
+
+2026-10-20: Smart Object Export/Replace Contents UI connections follow engine/src/smart_cmds.rs export_contents/replace_contents_bytes: source preparation precedes the shared transaction, export uses retained source representation, and stale editors/async source changes cannot overwrite replacements. Static-only verification.
+
+2026-10-20: plain Dissolve uses compose/src/lib.rs dissolve_noise/resolve-before-composite, while effect Dissolve follows effects.rs paint/psblend normal RGB coverage semantics. Smart Filter buffers pass document origin. Static-only verification.
+
+2026-10-20: bevel-distance.js and surface-effects.js adapt compose/effects.rs sharp-edge normal refinement, inside/outside distance correction and Chisel bevel height profiles; PSD and controls expose technique. Static verification only.
+
+2026-10-20: Bevel texture height and wrapped premultiplied bilinear pattern luminance adapt compose/effects.rs and compose/pattern.rs. Linked origin defaults to layer origin; fxrp parity pending.
+
+2026-10-20: chrome-catalog.js adapts menu catalogue rows, shell tool registration and toolbar grouping from ui-egui/src/menu_catalog.rs, engine/src/shell_commands.rs and ui-egui/src/panels.rs at 56dbc89a38248f6e50db50d132de47be88494cf6. editor-chrome.js / styles.css adapt ProMedium layout and dock tab structure from ui-egui/src/dock.rs and theme.rs. Original functionality is not implied for unconnected UI entries.
+
+2026-10-20: panel-controls.js uses the Basics gradient names/semantics from engine/src/presets/gradients.rs and selection/application split from ui-egui/src/preset_panels.rs. Pattern entries expose existing local generators, not a port of the complete source pattern library.
+
+2026-10-20: type-panel-settings.js and panel inputs adapt source type_tool.rs direct character/paragraph editing to existing local text renderers. monitor-panels.js adapts tone.rs RGB composite_bins counting convention and sampler_cmds.rs device_cmyk. Single-row/column selection geometry follows ui-egui/src/canvas.rs single_line_px. New toolbar SVG glyphs are original local artwork. Runtime/native high-bit parity remains unverified.
+
+2026-10-20: layer-comps.js adapts visibility/appearance data and capture/apply subset from doc/src/comps.rs and engine/src/comps_cmds.rs; local panel follows comps_ui.rs entry points. Position/native PSD mapping not yet ported.
+
+2026-10-20: style-clipboard.js adapts engine/lib.rs CopiedStyle and extra_cmds.rs copy/paste rules; blending-options-ui.js / dialog expose source layer_style.rs advanced blending controls through existing local compositor paths. Numeric split fields replace native sliders; local working-RGB limitations remain. Vector-mask footer routing follows layer_menu_ui.rs mask_button_command, reusing local vectorCoverage.
+
+2026-10-20: scale-effects.js adapts engine/src/image_cmds.rs scale_effects with explicit local size-limit rejection. path-selection-ui.js implements a local document-path subset of the source vector_ui.rs Path Selection workflow, reusing local path helpers. Shape/mask ownership parity pending.
+
+2026-10-20: ruler-ui.js / ruler-record.js adapt source analysis_ui.rs ruler/protractor gestures and analysis_cmds.rs ruler_info/set_quiet semantics in local pixel units. Measurement logs/scales/native metadata not yet ported. ruler.svg is original local artwork.
+
+2026-10-20: count-ui.js/count-record.js adapt source analysis_ui.rs Count click/remove/move and analysis_cmds.rs group actions with bounded local document data. Overlay annotations are separate from bitmap pixels. Native PSD measurement metadata remains unported; count.svg is original artwork.
+
+2026-10-20: color-sampler-ui.js adapts analysis_ui.rs Color Sampler gestures and engine/sampler_cmds.rs per-document unsaved view-state semantics/limit. Info uses displayed local RGB, not native high-bit compositing. color-sampler.svg is original artwork.
+
+2026-10-20 Magic Eraser: source eraser_cmds.rs / algo/erase.rs connected to existing worker wand coverage. Independent Contiguous, Anti-alias, Sample All Layers (default false) options; tolerance and opacity. Multiplies region, opacity and selection coverage; alpha lock paints toward background RGB while retaining alpha. Prepares a replacement canvas before a single Undo checkpoint; cancellation, stale-document/layer/revision guards and no-change handling. Currently raster image layers only, local RGBA8 working data; native high-bit/color-space parity and actual pixel/gesture execution remain unverified.
+
+2026-10-20 View/Show: Selection Edges, Target Path and Count now connect to existing overlays, with checkbox state and document gating. View-only flags do not write image pixels or Undo history. Selection hiding leaves the active crop outline visible. Target Path controls both legacy and direct/whole-path overlays; Count controls all visible count groups. Full Extras and unsupported Show categories remain unconnected. Static and isolated chrome verification only.
+
+2026-10-20 Pixel Grid: source pixel_grid.rs RGBA8 display adaptation: physical zoom >5, content alpha/luma-adaptive grey lines, white/black strengths 0.25/0.64, eight-step smoothstep fade, 64-pixel padded viewport cache and 60,000 segment cap. View/Show checkbox, scroll refresh, one physical-screen-pixel line width. Rulers/Grid/Guides/Target Path keyboard commands connected. Actual bitmap grid rendering and native high-bit comparison remain unverified; only source/static and isolated chrome checks.
+
+2026-10-20 Actions panel exterior: source actions.rs list/footer layout, Stop/Record/Play/New/Delete and Button Mode controls. All action controls remain explicitly disabled; no recording/playback or fabricated action list. Load/save, steps, sets, button mode and command engine remain pending. Inline control glyphs are original local SVG artwork.
+
+2026-10-20 Actions restricted subset: action-state.js adapts actions_cmds.rs name uniqueness, recording/stop, disabled steps and first-error playback; local session limits100 actions/1000 steps. action-executor.js dispatches12 existing no-dialog commands with original per-command Undo. Panel subset connected; persistence, sets, ATN, nesting, full journal/dialog commands remain pending. Static linking only, no image/engine execution.
+
+Actions follow-up: local version1 action-list persistence with bounded validation; transient recording/playback excluded. Pure synthetic state/storage tests passed, with no editor/Canvas/image execution.
+
+Actions parameter capture now includes layer rename following layer_multi_cmds::rename_layer; stores only validated name and resolves current active layer at playback. Local stale-dialog guard and bounded parameter validation. Synthetic parameter tests passed; image playback remains unexecuted.
+
+Actions source follow-up: step order/index remapping and playback-from; stop message params from atn_cmds; nested calls with16-level/cycle guards and rename references; set assignment and8 button colors. Local10,000 executed-step cap and expected document revision guard. Synthetic state/routing and isolated panel UI verified; no actual image/editor execution.
+
+Layer Comps position subset: doc/comps and engine/comps_cmds content-bound capture and delta application adapted for local non-group image layers.64-row alpha scan, old-schema compatibility, staged linked mask/vector/Smart Object translation, Last State position. Group/artboard position and native PSD comp persistence remain pending. Data-only validation checked; no image bounds scan or engine execution.
+
+PSD comp resource1065/cmls adaptation from io/comps_map.rs: visibility/offset, captured flags, last-applied and id0 Last State. Nullable unrecorded states skip application. Comp appearance/native unknown descriptor preservation/artboards and special-mode exporters remain limited. Synthetic decoded-metadata/patch tests only; no PSD binary roundtrip.
+
+Layer Comp options follow source comps_cmds: wrap-around previous/next, duplicate, name/comment/flags, targeted recapture preserving other recorded fields. Data-only checks passed.
+
+Layer Comp artboard preparation follows parent-before-child source apply order: staged descendant translation and absolute child overrides, copied group masks/vectors and Smart Object records. Pure mock-plan test passed. Native PSD artboard offsets are omitted until artboard block mapping exists; actual engine/render remains unverified.
+
+Linked Smart Object manual local subset follows smart_cmds relink/update/convert semantics: selected-file session tokens, shared source transaction, project link metadata, native external file descriptor. Automatic watch/update-all/frozen native source recovery/save-back remain pending. Mock broker/metadata checks only; no user file/editor/image execution.
+
+Preferences section order and dialog layout adapted from PhotoCraft crates/engine/src/prefs.rs and crates/ui-egui/src/prefs_ui.rs, commit 56dbc89a38248f6e50db50d132de47be88494cf6. Copyright (c) 2026 ArtCraft Team and contributors. MIT. Supported fields are a subset; unavailable sections are explicitly indicated.
+
+Color panel chip/field/vertical hue/readout geometry and achromatic hue retention follow PhotoCraft crates/ui-egui/src/panels.rs color_field, field_hsva and color_readout, commit 56dbc89a38248f6e50db50d132de47be88494cf6. Copyright (c) 2026 ArtCraft Team and contributors. MIT. DOM implementation retains existing tool color inputs.
+
+Toolbar foreground/background chip metrics and default/swap control placement follow panels.rs color_chips/chip_metrics; Preferences Reset Section and empty search presentation follow prefs_ui.rs. Same PhotoCraft commit and MIT attribution above.
+
+Additional Preferences fields (General/Interface/Workspace/Tools/Performance/Units/Guides/Export/Type/File Handling) follow PhotoCraft prefs.rs and prefs_ui.rs concepts at the commit above. History/recovery limits and Electron persistence are JavaScript host implementations with explicitly different defaults and capabilities. Navigator controls layout follows panels.rs Navigator row; actual zoom stepping retains the JavaScript editor limits.
+
+Fourteen theme color token sets and inherited overrides copied from PhotoCraft crates/ui-egui/src/theme.rs, same commit, Copyright (c) 2026 ArtCraft Team and contributors, MIT. User requires a common Pro UI for every palette; original theme-specific layout variants are not applied. Cursor modes and Grid/Guide/Slice preferences follow prefs.rs/canvas.rs concepts; JS brush contour uses the current JS brush falloff, not the Rust tip profile.
+
+Language registry and translation catalogs adapted from PhotoCraft crates/ui-egui/src/i18n at the same commit. Translation license copied to locales/LICENSE-translations.txt. Catalogs preserve original translations; absent strings fall back to English. Preferences field layout follows prefs_ui.rs declaration-order two-column rows, with Interface Appearance/Presentation/Options groups.
+
+Tooltip preference conjunction follows PhotoCraft prefs_ui.rs sync_tooltips: Interface and Tools switches both required. JavaScript title suppression/restoration and localized-title retention are the local DOM adaptation. Same MIT attribution and source commit above.
+
+General Image Interpolation choices/default copied from PhotoCraft prefs.rs Interpolation. Image Size defaults map nearestNeighbor to the existing JS nearest resampler. Transform interpolation remains pending. Same MIT attribution/commit above.
+
+Interface Clip Thumbnails to Layer Bounds follows PhotoCraft prefs.rs/layer thumbnail framing semantics. Pure rectangle placement supports current JS layer canvases; native representative group/adjustment thumbnails remain separate work. Same MIT attribution/commit above.
+
+Workspace Remember Workspace Changes follows PhotoCraft dock.rs persist/restore gating. Local Electron workspace.json persistence is a JS implementation using the existing atomic settings store. Named workspace saves remain explicit. Ruler preference separation and shutdown flushing remain pending.
+
+View Rulers persistence is independent of Remember Workspace Changes, following PhotoCraft prefs_ui.rs UnitsAndRulers.showRulers semantics. Local schema uses an independent workspace.json key; normal editor return/save waits for pending workspace writes. Forced process termination remains outside that guarantee.
+
+Enhanced Controls Zoom with Trackpad Pinch follows PhotoCraft prefs.rs and canvas.rs setting semantics. Chromium wheel/key adapter is local and has different event-classification limits from native wheel_nav.rs. Same MIT attribution and source commit above.
+
+Navigator wheel/pinch preference routing follows PhotoCraft panels.rs navigator(): ordinary preview wheel zoom is independent of canvas wheel preference, pinch follows Enhanced Controls. JS zoom limits retained; equal-limit updates are skipped. Same attribution above.
+
+Smart Quotes conversion copied from PhotoCraft ui-egui/src/type_tool.rs smart_quotes/opens_quote. Typed-only DOM beforeinput adapter preserves paste and composition paths; native insertText support is required for conversion. Same MIT attribution/source commit above.
+
+General Export Clipboard follows PhotoCraft lib.rs export_os_clipboard gating. Local JS adapter skips OS mirroring/encoding when disabled while preserving existing internal copy state creation. Same MIT attribution/source commit above.
+
+General Always Create Smart Objects When Placing follows PhotoCraft file_cmds.rs embedded/linked policy. Current shared JS embedded placement honors the toggle; fit sizing and new linked-place workflow remain pending. Same attribution above.
+
+Resize Image During Place fit/center/Bicubic policy follows PhotoCraft file_cmds.rs. JS staging reuses resizeSmartPixels and retains original source plus resizePixels replay for smart placement. Real bitmap/replay parity remains unverified. Same attribution above.
+
+UI Scale choices and absolute/native division follow PhotoCraft prefs.rs UiScale and prefs_ui.rs display_scale/sync_display_scale. Chromium implementation uses devicePixelRatio at fixed editor page zoom 1; real display migration remains unverified. Legacy 110% maps to source100%. Same attribution above.
+
+Font preview size geometry in font-preview.js follows crates/ui-egui/src/font_preview.rs
+from PhotoCraft (ArtCraft Team and contributors, MIT). Latin sample AaBbCc, 14/18/24/32/40.
+
+zoom-levels.js ports LADDER and step_in_range from crates/ui-egui/src/zoom_levels.rs,
+PhotoCraft, ArtCraft Team and contributors, MIT. Caller range currently remains JS 1%-3200%.
+
+checker-preferences.js reproduces TransparencyAndGamut::colors from engine/src/prefs.rs,
+PhotoCraft, ArtCraft Team and contributors, MIT.
+
+Preferences Tools flick-panning constants/decay and File Handling image-preview policy follow PhotoCraft commit 56dbc89a38248f6e50db50d132de47be88494cf6 (ArtCraft Team and contributors, 2026, MIT). Local Chromium adapters: flick-preferences.js and psd-preview.js; PSD thumbnail serialization is local implementation.

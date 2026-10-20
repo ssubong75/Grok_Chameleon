@@ -1,0 +1,508 @@
+{
+  "reference": "PhotoCraft prefs.rs checkout; installed app source revision not verified",
+  "rows": [
+    {
+      "key": "showHomeRecentFiles",
+      "section": "interface",
+      "label": "Show home recent files",
+      "value": true,
+      "source": "interface.showHomeRecentFiles",
+      "type": "checkbox",
+      "status": "Connected: Home recent list visibility"
+    },
+    {
+      "key": "dynamicColorSliders",
+      "section": "interface",
+      "label": "Dynamic color sliders",
+      "value": true,
+      "source": "interface.dynamicColorSliders",
+      "type": "checkbox",
+      "status": "Connected: color hue track and Hue/Saturation, Black & White, Channel Mixer, Color Balance tracks follow this switch"
+    },
+    {
+      "key": "showMenuColors",
+      "section": "interface",
+      "label": "Show menu colors",
+      "value": true,
+      "source": "interface.showMenuColors",
+      "type": "checkbox",
+      "status": "Connected: Edit > Menus stores hidden ids and color names; menu rows use the tint only while this is on. The same window has Keyboard Shortcuts and Toolbar tabs."
+    },
+    {
+      "key": "showBoundingBoxWhenDraggingLayer",
+      "section": "interface",
+      "label": "Show bounding box when dragging layer",
+      "value": false,
+      "source": "interface.showBoundingBoxWhenDraggingLayer",
+      "type": "checkbox",
+      "status": "Connected: deferred whole-layer/group movement, outline/arrow preview, commit/cancel; pixel selection/mask moves excluded"
+    },
+    {
+      "key": "systemTitleBar",
+      "section": "interface",
+      "label": "System title bar",
+      "value": false,
+      "source": "interface.systemTitleBar",
+      "type": "checkbox",
+      "status": "UI and persisted value only; runtime consumer still needs migration"
+    },
+    {
+      "key": "autoCollapseIconPanels",
+      "section": "workspace",
+      "label": "Auto collapse icon panels",
+      "value": false,
+      "source": "workspace.autoCollapseIconPanels",
+      "type": "checkbox",
+      "status": "Connected: rail-opened panels collapse on outside pointer; isolated main-dock runtime not yet tested"
+    },
+    {
+      "key": "openDocumentsAsTabs",
+      "section": "workspace",
+      "label": "Open documents as tabs",
+      "value": true,
+      "source": "workspace.openDocumentsAsTabs",
+      "type": "checkbox",
+      "status": "UI and persisted value only; runtime consumer still needs migration"
+    },
+    {
+      "key": "varyRoundBrushHardnessOnHud",
+      "section": "tools",
+      "label": "Vary round brush hardness on hud",
+      "value": true,
+      "source": "tools.varyRoundBrushHardnessOnHud",
+      "type": "checkbox",
+      "status": "Connected: brush HUD vertical movement switches hardness/opacity; pending isolated HUD test"
+    },
+    {
+      "key": "snapVectorToolsAndTransformsToPixelGrid",
+      "section": "tools",
+      "label": "Snap vector tools and transforms to pixel grid",
+      "value": true,
+      "source": "tools.snapVectorToolsAndTransformsToPixelGrid",
+      "type": "checkbox",
+      "status": "Connected: vector/transform pointer coordinates rounded when on; main input runtime not yet tested"
+    },
+    {
+      "key": "showHighlightOnRollover",
+      "section": "tools",
+      "label": "Show highlight on rollover",
+      "value": true,
+      "source": "tools.showHighlightOnRollover",
+      "type": "checkbox",
+      "status": "Connected: Move Auto-Select alpha/mask/ancestor-aware picking and hovered bounds; vector-mask hit fidelity pending"
+    },
+    {
+      "key": "overscroll",
+      "section": "tools",
+      "label": "Overscroll",
+      "value": true,
+      "source": "tools.overscroll",
+      "type": "checkbox",
+      "status": "Connected: viewport padding changes scrollable extent; pending isolated DOM test"
+    },
+    {
+      "key": "doubleClickLayerMaskLaunchesSelectAndMask",
+      "section": "tools",
+      "label": "Double click layer mask launches select and mask",
+      "value": true,
+      "source": "tools.doubleClickLayerMaskLaunchesSelectAndMask",
+      "type": "checkbox",
+      "status": "Connected: existing RefineView layerMask output with active-mask alpha seed; main runtime not yet executed"
+    },
+    {
+      "key": "enabled",
+      "section": "historyLog",
+      "label": "Enabled",
+      "value": false,
+      "source": "historyLog.enabled",
+      "type": "checkbox",
+      "status": "Connected: history logging on/off"
+    },
+    {
+      "key": "destination",
+      "section": "historyLog",
+      "label": "Destination",
+      "value": "metadata",
+      "source": "historyLog.destination",
+      "options": [
+        [
+          "metadata",
+          "Metadata"
+        ],
+        [
+          "textFile",
+          "Text file"
+        ],
+        [
+          "both",
+          "Both"
+        ]
+      ],
+      "status": "Connected: project history metadata and/or desktop text append"
+    },
+    {
+      "key": "filePath",
+      "section": "historyLog",
+      "label": "File path",
+      "value": "",
+      "source": "historyLog.filePath",
+      "type": "text",
+      "status": "Connected: native append destination from persisted preferences; path/regular-file/queue checks"
+    },
+    {
+      "key": "detail",
+      "section": "historyLog",
+      "label": "Detail",
+      "value": "concise",
+      "source": "historyLog.detail",
+      "options": [
+        [
+          "sessionsOnly",
+          "Sessions only"
+        ],
+        [
+          "concise",
+          "Concise"
+        ],
+        [
+          "detailed",
+          "Detailed"
+        ]
+      ],
+      "status": "Connected: sessionsOnly, concise, and detailed. Detailed appends the command id and plain parameters. Dialog values that are not command parameters stay out of the line."
+    },
+    {
+      "key": "ignoreExifProfileTag",
+      "section": "fileHandling",
+      "label": "Ignore exif profile tag",
+      "value": false,
+      "source": "fileHandling.ignoreExifProfileTag",
+      "type": "checkbox",
+      "status": "UI and persisted value only; runtime consumer still needs migration"
+    },
+    {
+      "key": "exrAcesCg",
+      "section": "fileHandling",
+      "label": "Exr aces cg",
+      "value": false,
+      "source": "fileHandling.exrAcesCg",
+      "type": "checkbox",
+      "status": "UI and persisted value only; runtime consumer still needs migration"
+    },
+    {
+      "key": "askBeforeSavingLayeredTiff",
+      "section": "fileHandling",
+      "label": "Ask before saving layered tiff",
+      "value": true,
+      "source": "fileHandling.askBeforeSavingLayeredTiff",
+      "type": "checkbox",
+      "status": "Connected: flattening warning before layered TIFF export; TIFF writer currently flattened only"
+    },
+    {
+      "key": "maximizePsdCompatibility",
+      "section": "fileHandling",
+      "label": "Maximize psd compatibility",
+      "value": "always",
+      "source": "fileHandling.maximizePsdCompatibility",
+      "options": [
+        [
+          "always",
+          "Always"
+        ],
+        [
+          "never",
+          "Never"
+        ],
+        [
+          "ask",
+          "Ask"
+        ]
+      ],
+      "status": "Connected: PSD/PSB 8-bit RGB/gray merged placeholder and resource1057; PSD_COMPATIBILITY_OK; disabling on unsupported color modes rejects explicitly"
+    },
+    {
+      "key": "rasterizeSvgGroupsDeeperThan",
+      "section": "fileHandling",
+      "label": "Rasterize svg groups deeper than",
+      "value": 100,
+      "source": "fileHandling.rasterizeSvgGroupsDeeperThan",
+      "type": "number",
+      "min": 0,
+      "max": 1048576,
+      "step": 1,
+      "status": "UI and persisted value only; runtime consumer still needs migration"
+    },
+    {
+      "key": "recentFileCount",
+      "section": "fileHandling",
+      "label": "Recent file count",
+      "value": 20,
+      "source": "fileHandling.recentFileCount",
+      "type": "number",
+      "min": 0,
+      "max": 1048576,
+      "step": 1,
+      "status": "Connected: native recent.json list size/open limit"
+    },
+    {
+      "key": "quickExportFormat",
+      "section": "export",
+      "label": "Quick export format",
+      "value": "png",
+      "source": "export.quickExportFormat",
+      "options": [
+        [
+          "png",
+          "Png"
+        ],
+        [
+          "jpg",
+          "Jpg"
+        ],
+        [
+          "gif",
+          "Gif"
+        ],
+        [
+          "webp",
+          "Webp"
+        ]
+      ],
+      "status": "Connected: PNG/JPEG/GIF/WebP encoder dispatch"
+    },
+    {
+      "key": "quickExportLocation",
+      "section": "export",
+      "label": "Quick export location",
+      "value": "ask",
+      "source": "export.quickExportLocation",
+      "options": [
+        [
+          "ask",
+          "Ask"
+        ],
+        [
+          "sameFolder",
+          "Same folder"
+        ]
+      ],
+      "status": "Connected: desktop save dialog; same-folder only with verified file URL source and no existing target; fallback dialog otherwise"
+    },
+    {
+      "key": "webpLossless",
+      "section": "export",
+      "label": "Webp lossless",
+      "value": true,
+      "source": "export.webpLossless",
+      "type": "checkbox",
+      "status": "Connected: native cwebp -lossless -exact; external cwebp runtime required; WEBP_LOSSLESS_OK"
+    },
+    {
+      "key": "metadata",
+      "section": "export",
+      "label": "Metadata",
+      "value": "copyright",
+      "source": "export.metadata",
+      "options": [
+        [
+          "none",
+          "None"
+        ],
+        [
+          "copyright",
+          "Copyright"
+        ],
+        [
+          "all",
+          "All"
+        ]
+      ],
+      "status": "UI and persisted value only; runtime consumer still needs migration"
+    },
+    {
+      "key": "convertToSrgb",
+      "section": "export",
+      "label": "Convert to srgb",
+      "value": true,
+      "source": "export.convertToSrgb",
+      "type": "checkbox",
+      "status": "Connected: ICC conversion before raster/Export As/TIFF; supported existing ICC paths only"
+    },
+    {
+      "key": "memoryUsageMb",
+      "section": "performance",
+      "label": "Memory usage mb",
+      "value": 8192,
+      "source": "performance.memoryUsageMb",
+      "type": "number",
+      "min": 0,
+      "max": 1048576,
+      "step": 1,
+      "status": "Connected: undo snapshot budget; document pixel allocation budget still not enforced"
+    },
+    {
+      "key": "cacheTileSize",
+      "section": "performance",
+      "label": "Cache tile size",
+      "value": 8192,
+      "source": "performance.cacheTileSize",
+      "type": "number",
+      "min": 0,
+      "max": 1048576,
+      "step": 1,
+      "status": "UI and persisted value only; runtime consumer still needs migration"
+    },
+    {
+      "key": "renderingMode",
+      "section": "performance",
+      "label": "Rendering mode",
+      "value": "auto",
+      "source": "performance.renderingMode",
+      "options": [
+        [
+          "auto",
+          "Auto"
+        ],
+        [
+          "gpu",
+          "Gpu"
+        ],
+        [
+          "cpu",
+          "Cpu"
+        ]
+      ],
+      "status": "UI and persisted value only; runtime consumer still needs migration"
+    },
+    {
+      "key": "lowResolutionPreviews",
+      "section": "performance",
+      "label": "Low resolution previews",
+      "value": true,
+      "source": "performance.lowResolutionPreviews",
+      "type": "checkbox",
+      "status": "Connected: CameraRaw/Refine/ColorRange proxy scale; other adjustment previews still need coverage"
+    },
+    {
+      "key": "lowLatencyDrawing",
+      "section": "performance",
+      "label": "Low latency drawing",
+      "value": false,
+      "source": "performance.lowLatencyDrawing",
+      "type": "checkbox",
+      "status": "UI and persisted value only; runtime consumer still needs migration"
+    },
+    {
+      "key": "gpuMemoryMb",
+      "section": "performance",
+      "label": "Gpu memory mb",
+      "value": 0,
+      "source": "performance.gpuMemoryMb",
+      "type": "number",
+      "min": 0,
+      "max": 1048576,
+      "step": 1,
+      "status": "UI and persisted value only; runtime consumer still needs migration"
+    },
+    {
+      "key": "brushPreviewColor",
+      "section": "cursors",
+      "label": "Brush preview color",
+      "value": "#ff0000",
+      "source": "cursors.brushPreviewColor",
+      "type": "color",
+      "status": "Connected to brush HUD tip tint; pending isolated HUD test"
+    },
+    {
+      "key": "gamutWarningColor",
+      "section": "transparencyAndGamut",
+      "label": "Gamut warning color",
+      "value": "#808080",
+      "source": "transparencyAndGamut.gamutWarningColor",
+      "type": "color",
+      "status": "UI and persisted value only; runtime consumer still needs migration"
+    },
+    {
+      "key": "gamutWarningOpacity",
+      "section": "transparencyAndGamut",
+      "label": "Gamut warning opacity",
+      "value": 100,
+      "source": "transparencyAndGamut.gamutWarningOpacity",
+      "type": "number",
+      "min": 0,
+      "max": 1048576,
+      "step": 1,
+      "status": "UI and persisted value only; runtime consumer still needs migration"
+    },
+    {
+      "key": "useAdditionalPluginsFolder",
+      "section": "plugIns",
+      "label": "Use additional plugins folder",
+      "value": false,
+      "source": "plugIns.useAdditionalPluginsFolder",
+      "type": "checkbox",
+      "status": "UI and persisted value only; runtime consumer still needs migration"
+    },
+    {
+      "key": "additionalPluginsFolder",
+      "section": "plugIns",
+      "label": "Additional plugins folder",
+      "value": "",
+      "source": "plugIns.additionalPluginsFolder",
+      "type": "text",
+      "status": "UI and persisted value only; runtime consumer still needs migration"
+    },
+    {
+      "key": "missingGlyphProtection",
+      "section": "type",
+      "label": "Missing glyph protection",
+      "value": true,
+      "source": "type.missingGlyphProtection",
+      "type": "checkbox",
+      "status": "Connected: Canvas font fallback on/off, generated cmap12 fallback font; GLYPH_POLICY_OK; editable live text reflows transactionally on Apply; unsupported PSD text excluded"
+    },
+    {
+      "key": "rotateViewWithTrackpad",
+      "section": "enhancedControls",
+      "label": "Rotate view with trackpad",
+      "value": false,
+      "source": "enhancedControls.rotateViewWithTrackpad",
+      "type": "checkbox",
+      "status": "Connected to gesturestart/change/end rotation events; physical macOS/Chromium gesture delivery not verified"
+    },
+    {
+      "key": "openInCameraRaw",
+      "section": "rawDefaults",
+      "label": "Open in camera raw",
+      "value": true,
+      "source": "rawDefaults.openInCameraRaw",
+      "type": "checkbox",
+      "status": "UI and persisted value only; runtime consumer still needs migration"
+    },
+    {
+      "key": "gpuBackend",
+      "source": "performance.gpuBackend",
+      "section": "performance",
+      "status": "UI and persisted value only; native rendering backend migration required"
+    }
+  ],
+  "remainingRuntime": [
+    "interface.showMenuColors",
+    "interface.systemTitleBar",
+    "workspace.openDocumentsAsTabs",
+    "fileHandling.ignoreExifProfileTag",
+    "fileHandling.exrAcesCg",
+    "fileHandling.rasterizeSvgGroupsDeeperThan",
+    "export.metadata",
+    "performance.cacheTileSize",
+    "performance.renderingMode",
+    "performance.lowLatencyDrawing",
+    "performance.gpuMemoryMb",
+    "transparencyAndGamut.gamutWarningColor",
+    "transparencyAndGamut.gamutWarningOpacity",
+    "plugIns.useAdditionalPluginsFolder",
+    "plugIns.additionalPluginsFolder",
+    "rawDefaults.openInCameraRaw",
+    "performance.gpuBackend"
+  ]
+}

@@ -1,12 +1,16 @@
-import {EditorDocument,surface,copyCanvas} from './engine.js';
-import {FreeTransform} from './free-transform.js';
-import {alphaSelection} from './selections.js';
+import {TransformSession} from './transform-session.js';
 export class SelectionTransform{
   kind='selection';
-  constructor(document){this.document=document;this.original=document.selection?structuredClone(document.selection):null;this.current=this.original;this.coverage=document.selectionCoverage();const bounds=alphaSelection(this.coverage,document.width,document.height);if(!bounds)throw Error('Select an area to transform first.');const mask=surface(bounds.w,bounds.h),image=mask.getContext('2d').createImageData(bounds.w,bounds.h);for(let y=0;y<bounds.h;y++)for(let x=0;x<bounds.w;x++){const i=(y*bounds.w+x)*4;image.data[i]=image.data[i+1]=image.data[i+2]=255;image.data[i+3]=this.coverage[(y+bounds.y)*document.width+x+bounds.x];}mask.getContext('2d').putImageData(image,0,0);this.proxy=new EditorDocument(document.width,document.height,'Selection');this.layer=this.proxy.addLayer('Selection',mask,false);this.layer.x=bounds.x;this.layer.y=bounds.y;this.free=new FreeTransform(this.proxy);this.proxy.addEventListener('change',()=>this.preview());}
-  get drag(){return this.free.drag;}set drag(value){this.free.drag=value;}
-  begin(point,zoom){return this.free.begin(point,zoom);}move(point,shift){this.free.move(point,shift);}draw(ctx,zoom){this.free.draw(ctx,zoom);}
-  preview(){const canvas=surface(this.document.width,this.document.height),ctx=canvas.getContext('2d');ctx.drawImage(this.layer.canvas,this.layer.x,this.layer.y);const {data}=ctx.getImageData(0,0,canvas.width,canvas.height),coverage=new Uint8ClampedArray(canvas.width*canvas.height);for(let i=0;i<coverage.length;i++)coverage[i]=data[i*4+3];this.current=alphaSelection(coverage,canvas.width,canvas.height);this.document.selection=this.current;this.document.dispatchEvent(new Event('change'));}
-  finish(commit){if(commit){this.free.finish(true);const result=this.current;this.document.selection=this.original;this.document.checkpoint('Transform Selection');this.document.previousSelection=this.original?structuredClone(this.original):null;this.document.selection=result;}else this.document.selection=this.original;this.document.dispatchEvent(new Event('change'));}
-  async editValues(showDialog){const s=this.free.settings,values=await showDialog('Transform Selection',[{key:'x',label:'X (px)',type:'number',step:'any',value:s.x},{key:'y',label:'Y (px)',type:'number',step:'any',value:s.y},{key:'scaleX',label:'Width (%)',type:'number',step:'any',value:s.scaleX*100},{key:'scaleY',label:'Height (%)',type:'number',step:'any',value:s.scaleY*100},{key:'angle',label:'Rotation (°)',type:'number',step:'any',value:s.angle},{key:'skewX',label:'Horizontal Skew (°)',type:'number',min:-85,max:85,value:s.skewX||0},{key:'skewY',label:'Vertical Skew (°)',type:'number',min:-85,max:85,value:s.skewY||0}]);if(!values)return;for(const key of Object.keys(values))values[key]=Number(values[key]);if(!Object.values(values).every(Number.isFinite)||!values.scaleX||!values.scaleY||Math.abs(values.skewX)>85||Math.abs(values.skewY)>85)throw Error('Enter valid selection transform values.');values.scaleX/=100;values.scaleY/=100;this.free.restore();this.free.settings=values;this.proxy.transformLayer(values,false);}
+  constructor(document){this.document=document;this.free=new TransformSession(document,'free',{kind:'selection'});}
+  get drag(){return this.free.drag;}
+  set drag(value){this.free.drag=value;}
+  begin(point,zoom,event){return this.free.begin(point,zoom,event);}
+  move(point,shift,event){this.free.move(point,shift,event);}
+  draw(ctx,zoom){this.free.draw(ctx,zoom);}
+  release(point){this.free.release?.(point);}
+  undoStep(){return this.free.undoStep();}
+  redoStep(){return this.free.redoStep();}
+  turnBox(kx,ky,angle){return this.free.turnBox(kx,ky,angle);}
+  finish(commit){this.free.finish(commit);}
+  async editValues(showDialog){const q=this.free.quad,angle=Math.atan2(q[1][1]-q[0][1],q[1][0]-q[0][0])*180/Math.PI;const values=await showDialog('Transform Selection',[{key:'x',label:'X (px)',type:'number',step:'any',value:q[0][0]},{key:'y',label:'Y (px)',type:'number',step:'any',value:q[0][1]},{key:'scaleX',label:'Width (%)',type:'number',step:'any',value:100},{key:'scaleY',label:'Height (%)',type:'number',step:'any',value:100},{key:'angle',label:'Rotation (°)',type:'number',step:'any',value:Math.round(angle*10)/10}]);if(!values)return;const sx=Number(values.scaleX)/100,sy=Number(values.scaleY)/100,nextAngle=(Number(values.angle)-angle)*Math.PI/180;if(![sx,sy,nextAngle].every(Number.isFinite)||!sx||!sy)throw Error('Enter valid selection transform values.');const dx=Number(values.x)-q[0][0],dy=Number(values.y)-q[0][1],cx=(q[0][0]+q[2][0])/2,cy=(q[0][1]+q[2][1])/2,cs=Math.cos(nextAngle),sn=Math.sin(nextAngle);this.free.quad=q.map(p=>{let x=cx+(p[0]-cx)*sx,y=cy+(p[1]-cy)*sy;const rx=x-cx,ry=y-cy;x=cx+rx*cs-ry*sn+dx;y=cy+rx*sn+ry*cs+dy;return [x,y];});this.free.preview();}
 }

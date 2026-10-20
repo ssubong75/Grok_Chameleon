@@ -9,6 +9,7 @@ class Heap{
   push(value){const a=this.items;let i=a.length;a.push(value);while(i){const p=(i-1)>>1;if(a[p][0]<=value[0])break;a[i]=a[p];i=p;}a[i]=value;}
   pop(){const a=this.items,first=a[0],last=a.pop();if(a.length){let i=0;while(i*2+1<a.length){let j=i*2+1;if(j+1<a.length&&a[j+1][0]<a[j][0])j++;if(a[j][0]>=last[0])break;a[i]=a[j];i=j;}a[i]=last;}return first;}
 }
+export function magneticSpacing(frequency,zoom){const f=Number.isFinite(frequency)?Math.max(0,Math.min(100,frequency)):57;return (8+(100-f)*.9)/Math.max(.01,zoom);}
 export class MagneticLasso{
   constructor(canvas,{width=10,contrast=.1}={}){this.canvas=canvas;this.ctx=canvas.getContext('2d',{willReadFrequently:true});this.width=clamp(width,1,256);this.contrast=clamp(contrast,.01,1);this.blocks=new Map();}
   clamp(p){return{x:clamp(p.x,0,this.canvas.width-.001),y:clamp(p.y,0,this.canvas.height-.001)};}

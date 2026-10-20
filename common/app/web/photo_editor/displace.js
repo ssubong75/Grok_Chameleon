@@ -1,0 +1,10 @@
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+export function displace(image,settings={}){
+  const map=settings.map;if(!map||!Number.isInteger(map.width)||!Number.isInteger(map.height)||map.width<1||map.height<1||!map.data||map.data.length!==map.width*map.height*4)throw Error('The displacement map is invalid.');
+  const {width,height,data}=image,source=new Uint8ClampedArray(data),ox=Number(settings.x)||0,oy=Number(settings.y)||0,bw=Number(settings.documentWidth)||width,bh=Number(settings.documentHeight)||height,horizontal=clamp(Number(settings.horizontal)||0,-999,999)/100*128,vertical=clamp(Number(settings.vertical)||0,-999,999)/100*128;
+  const mapRead=(x,y,c)=>map.data[(clamp(y,0,map.height-1)*map.width+clamp(x,0,map.width-1))*4+c]/255;
+  const mapSample=(u,v,c)=>{const fx=u-.5,fy=v-.5,left=Math.floor(fx),top=Math.floor(fy),tx=fx-left,ty=fy-top;return mapRead(left,top,c)*(1-tx)*(1-ty)+mapRead(left+1,top,c)*tx*(1-ty)+mapRead(left,top+1,c)*(1-tx)*ty+mapRead(left+1,top+1,c)*tx*ty;};
+  const read=(x,y,c)=>{if(settings.edge==='transparent'&&(x<0||y<0||x>=bw||y>=bh))return 0;if(settings.edge==='wrap'){x=((x%bw)+bw)%bw;y=((y%bh)+bh)%bh;}else{x=clamp(x,0,bw-1);y=clamp(y,0,bh-1);}x-=ox;y-=oy;return x<0||y<0||x>=width||y>=height?0:source[(y*width+x)*4+c];};
+  for(let y=0;y<height;y++)for(let x=0;x<width;x++){const fx=x+ox+.5,fy=y+oy+.5,u=settings.fit==='tile'?((fx%map.width)+map.width)%map.width:fx/bw*map.width,v=settings.fit==='tile'?((fy%map.height)+map.height)%map.height:fy/bh*map.height,sx=fx+(mapSample(u,v,0)-.5)*2*horizontal-.5,sy=fy+(mapSample(u,v,1)-.5)*2*vertical-.5,left=Math.floor(sx),top=Math.floor(sy),tx=sx-left,ty=sy-top,sum=[0,0,0];let alpha=0;for(const [px,py,weight]of [[left,top,(1-tx)*(1-ty)],[left+1,top,tx*(1-ty)],[left,top+1,(1-tx)*ty],[left+1,top+1,tx*ty]]){const a=read(px,py,3)/255*weight;alpha+=a;for(let c=0;c<3;c++)sum[c]+=read(px,py,c)*a;}const index=(y*width+x)*4;for(let c=0;c<3;c++)data[index+c]=alpha?sum[c]/alpha:0;data[index+3]=alpha*255;}
+  return image;
+}

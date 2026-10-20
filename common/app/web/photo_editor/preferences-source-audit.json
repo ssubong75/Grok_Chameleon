@@ -1,0 +1,900 @@
+{
+  "scope": "18 Preferences sections, source declaration audit; field matches alone do not prove implementation",
+  "sourceCommit": "56dbc89a38248f6e50db50d132de47be88494cf6",
+  "items": [
+    {
+      "sourcePath": "general.colorPicker",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "general.imageInterpolation",
+      "jsField": "imageInterpolation",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "general.beepWhenDone",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "general.exportClipboard",
+      "jsField": "exportClipboard",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "general.resizeImageDuringPlace",
+      "jsField": "resizeImageDuringPlace",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "general.alwaysCreateSmartObjectsWhenPlacing",
+      "jsField": "alwaysCreateSmartObjectsWhenPlacing",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "general.zoomWithScrollWheel",
+      "jsField": "zoomWithScrollWheel",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "general.animatedZoom",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "general.zoomResizesWindows",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "general.useLegacyFreeTransform",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "general.autoShowHomeScreen",
+      "jsField": "autoShowHomeScreen",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "interface.theme",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "interface.appearanceMode",
+      "jsField": "appearanceMode",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "interface.darkTheme",
+      "jsField": "darkTheme",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "interface.lightTheme",
+      "jsField": "lightTheme",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "interface.favoriteThemes",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "interface.canvasColor",
+      "jsField": "canvasColorMode",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "interface.canvasCustomColor",
+      "jsField": "canvasColor",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "interface.showCanvasDots",
+      "jsField": "showCanvasDots",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "interface.showHomeRecentFiles",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "interface.canvasBorder",
+      "jsField": "canvasBorder",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "interface.uiScale",
+      "jsField": "scale",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "interface.language",
+      "jsField": "language",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "interface.uiFontSize",
+      "jsField": "font",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "interface.showChannelsInColor",
+      "jsField": "showChannelsInColor",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "interface.dynamicColorSliders",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "interface.showMenuColors",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "interface.clipThumbnailsToLayerBounds",
+      "jsField": "clipThumbnailsToLayerBounds",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "interface.showTooltips",
+      "jsField": "interfaceShowTooltips",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "interface.enableAnimations",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "interface.showBoundingBoxWhenDraggingLayer",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "interface.systemTitleBar",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "interface.notificationAutoHide",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "interface.notificationDurationSeconds",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "workspace.autoCollapseIconPanels",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "workspace.autoShowHiddenPanels",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "workspace.openDocumentsAsTabs",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "workspace.enableFloatingDocumentWindowDocking",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "workspace.largeTabs",
+      "jsField": "largeTabs",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "workspace.enableNarrowOptionsBar",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "workspace.rememberWorkspaceChanges",
+      "jsField": "rememberWorkspaceChanges",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "tools.showTooltips",
+      "jsField": "toolsShowTooltips",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "tools.useShiftKeyForToolSwitch",
+      "jsField": "useShiftKeyForToolSwitch",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "tools.zoomClickedPointToCenter",
+      "jsField": "zoomClickedPointToCenter",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "tools.enableFlickPanning",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "tools.varyRoundBrushHardnessOnHud",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "tools.snapVectorToolsAndTransformsToPixelGrid",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "tools.showTransformationValues",
+      "jsField": "showTransformationValues",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "tools.showHighlightOnRollover",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "tools.overscroll",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "tools.doubleClickLayerMaskLaunchesSelectAndMask",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "tools.rightClickWithPaintingTools",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "tools.useTabletPressure",
+      "jsField": "useTabletPressure",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "tools.pressureCurve",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "tools.bundleNudges",
+      "jsField": "bundleNudges",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "tools.nudgeBundlePauseMs",
+      "jsField": "nudgeBundlePauseMs",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "historyLog.enabled",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "historyLog.destination",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "historyLog.filePath",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "historyLog.detail",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "fileHandling.imagePreviews",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "fileHandling.lowercaseExtension",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "fileHandling.saveInBackground",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "fileHandling.autosave",
+      "jsField": "autosave",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "fileHandling.autosaveMinutes",
+      "jsField": "autosaveMinutes",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "fileHandling.recoverOnLaunch",
+      "jsField": "recoverOnLaunch",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "fileHandling.ignoreExifProfileTag",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "fileHandling.exrAcesCg",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "fileHandling.askBeforeSavingLayeredTiff",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "fileHandling.maximizePsdCompatibility",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "fileHandling.rasterizeSvgGroupsDeeperThan",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "fileHandling.recentFileCount",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "fileHandling.recentFiles",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "export.quickExportFormat",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "export.quickExportLocation",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "export.jpegQuality",
+      "jsField": "jpegQuality",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "export.webpLossless",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "export.webpQuality",
+      "jsField": "webpQuality",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "export.metadata",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "export.convertToSrgb",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "performance.memoryUsageMb",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "performance.historyStates",
+      "jsField": "historyStates",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "performance.cacheLevels",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "performance.cacheTileSize",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "performance.useGpu",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "performance.renderingMode",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "performance.gpuBackend",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "performance.lowResolutionPreviews",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "performance.lowLatencyDrawing",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "performance.linuxDisplayServer",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "performance.gpuMemoryMb",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "performance.effectCacheMb",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "performance.legacyCompositing",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "scratchDisks.disks",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "cursors.painting",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "cursors.showCrosshairInBrushTip",
+      "jsField": "showCrosshairInBrushTip",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "cursors.showOnlyCrosshairWhilePainting",
+      "jsField": "showOnlyCrosshairWhilePainting",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "cursors.other",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "cursors.brushPreviewColor",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "transparencyAndGamut.gridSize",
+      "jsField": "gridSize",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "transparencyAndGamut.gridColors",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "transparencyAndGamut.customLight",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "transparencyAndGamut.customDark",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "transparencyAndGamut.gamutWarningColor",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "transparencyAndGamut.gamutWarningOpacity",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "unitsAndRulers.rulers",
+      "jsField": "rulerUnits",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "unitsAndRulers.typeUnits",
+      "jsField": "typeUnits",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "unitsAndRulers.columnWidth",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "unitsAndRulers.gutter",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "unitsAndRulers.printResolution",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "unitsAndRulers.screenResolution",
+      "jsField": "screenResolution",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "unitsAndRulers.pointSize",
+      "jsField": "pointSize",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "unitsAndRulers.showRulers",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "guidesGridAndSlices.guideColor",
+      "jsField": "guideColor",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "guidesGridAndSlices.guideStyle",
+      "jsField": "guideStyle",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "guidesGridAndSlices.smartGuideColor",
+      "jsField": "smartGuideColor",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "guidesGridAndSlices.gridColor",
+      "jsField": "gridColor",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "guidesGridAndSlices.gridStyle",
+      "jsField": "gridStyle",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "guidesGridAndSlices.gridlineEvery",
+      "jsField": "gridSize",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "guidesGridAndSlices.gridUnit",
+      "jsField": "gridUnit",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "guidesGridAndSlices.subdivisions",
+      "jsField": "gridSubdivisions",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "guidesGridAndSlices.sliceColor",
+      "jsField": "sliceColor",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "guidesGridAndSlices.showSliceNumbers",
+      "jsField": "showSliceNumbers",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "plugIns.useAdditionalPluginsFolder",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "plugIns.additionalPluginsFolder",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "plugIns.showExtensionPanels",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "plugIns.allowScriptsToConnect",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "plugIns.generatorEnabled",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "type.smartQuotes",
+      "jsField": "smartQuotes",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "type.missingGlyphProtection",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "type.showFontNamesInEnglish",
+      "jsField": "showFontNamesInEnglish",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "type.useEscToCommit",
+      "jsField": "useEscToCommit",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "type.textEngine",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "type.fontPreview",
+      "jsField": "fontPreview",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "type.fillNewTypeLayersWithPlaceholder",
+      "jsField": "fillNewTypeLayersWithPlaceholder",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "type.recentFonts",
+      "jsField": "recentFonts",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "enhancedControls.scrubbySliderAcceleration",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "enhancedControls.touchGestures",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "enhancedControls.zoomWithTrackpadPinch",
+      "jsField": "zoomWithTrackpadPinch",
+      "status": "exposed-candidate-needs-behavior-review",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "enhancedControls.rotateViewWithTrackpad",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "rawDefaults.colorSpace",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "rawDefaults.bitDepth",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "rawDefaults.resolution",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "rawDefaults.sharpenFor",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "rawDefaults.openAsSmartObject",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "rawDefaults.applyAutoTone",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "rawDefaults.openInCameraRaw",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "integrations.allowAgentControl",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    },
+    {
+      "sourcePath": "integrations.controlPort",
+      "jsField": null,
+      "status": "no-direct-field-match",
+      "note": "Original hidden/service-managed fields may intentionally have no dialog row; not a completion verdict."
+    }
+  ]
+}

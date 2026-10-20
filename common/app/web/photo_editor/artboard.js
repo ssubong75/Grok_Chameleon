@@ -1,0 +1,27 @@
+const CLICK_PX=3,HANDLE_PX=6;
+const sat=n=>Math.max(-2147483648,Math.min(2147483647,Math.trunc(n)));
+export function artboardRecord(value){
+  if(value==null)return null;
+  const background=value.background==='black'||value.background==='transparent'?value.background:'white';
+  if(value.background!=null&&background!==value.background)return null;
+  const {x,y,w,h}=value;
+  if(![x,y,w,h].every(Number.isInteger)||w<1||h<1||w>32767||h>32767)return null;
+  return{x,y,w,h,background};
+}
+export function drawnBoard(start,cur){const x0=sat(Math.round(Math.min(start.x,cur.x))),y0=sat(Math.round(Math.min(start.y,cur.y))),x1=sat(Math.round(Math.max(start.x,cur.x))),y1=sat(Math.round(Math.max(start.y,cur.y)));return{x:x0,y:y0,w:x1-x0,h:y1-y0};}
+export function movedBoard(rect,start,cur){const dx=sat(Math.round(cur.x-start.x)),dy=sat(Math.round(cur.y-start.y));return{x:sat(rect.x+dx),y:sat(rect.y+dy),w:rect.w,h:rect.h};}
+function resized(edges,hx,hy,d){const e=edges.slice();for(const [h,lo,hi,dv] of [[hx,0,2,d[0]],[hy,1,3,d[1]]]){if(h===-1)e[lo]=sat(e[lo]+dv);else if(h===1)e[hi]=sat(e[hi]+dv);const a=Math.min(e[lo],e[hi]),b=Math.max(e[lo],e[hi]);e[lo]=a;e[hi]=Math.max(b,sat(a+1));}return e;}
+function resizedKeep(edges,hx,hy,d){const w=Math.max(1,edges[2]-edges[0]),h=Math.max(1,edges[3]-edges[1]),ax=hx>0?edges[0]:edges[2],ay=hy>0?edges[1]:edges[3],cx=sat((hx>0?edges[2]:edges[0])+d[0]),cy=sat((hy>0?edges[3]:edges[1])+d[1]),dw=cx-ax,dh=cy-ay,k=Math.max(Math.abs(dw)/w,Math.abs(dh)/h),nw=Math.max(1,Math.round(w*k)),nh=Math.max(1,Math.round(h*k));const span=(a,len,toward)=>toward<0?[sat(a-len),a]:[a,sat(a+len)];const [x0,x1]=span(ax,nw,dw),[y0,y1]=span(ay,nh,dh);return[Math.min(x0,x1),Math.min(y0,y1),Math.max(x0,x1),Math.max(y0,y1)];}
+export function resizedBoard(rect,hx,hy,start,cur,keep){const d=[sat(Math.round(cur.x-start.x)),sat(Math.round(cur.y-start.y))],edges=[rect.x,rect.y,rect.x+rect.w,rect.y+rect.h],next=keep&&hx&&hy?resizedKeep(edges,hx,hy,d):resized(edges,hx,hy,d);return{x:next[0],y:next[1],w:next[2]-next[0],h:next[3]-next[1]};}
+export function screenDrag(start,cur,zoom){return Math.hypot(cur.x-start.x,cur.y-start.y)*Math.max(.01,zoom);}
+export function boardAt(layers,p){for(let i=layers.length-1;i>=0;i--){const layer=layers[i],b=layer.artboard;if(!b||p.x<b.x||p.y<b.y||p.x>=b.x+b.w||p.y>=b.y+b.h)continue;return layer;}return null;}
+export function handleAt(board,p,zoom){if(!board?.artboard)return null;const tol=HANDLE_PX/Math.max(.01,zoom),r=board.artboard,points=[[-1,-1,r.x,r.y],[0,-1,r.x+r.w/2,r.y],[1,-1,r.x+r.w,r.y],[-1,0,r.x,r.y+r.h/2],[1,0,r.x+r.w,r.y+r.h/2],[-1,1,r.x,r.y+r.h],[0,1,r.x+r.w/2,r.y+r.h],[1,1,r.x+r.w,r.y+r.h]];for(const [hx,hy,x,y] of points)if(Math.hypot(p.x-x,p.y-y)<=tol)return{hx,hy};return null;}
+export function installArtboardTool({overlay,state,getDocument,point,draw,message}){
+  let drag=null;
+  const preview=()=>!drag?null:drag.kind==='new'?drawnBoard(drag.start,drag.cur):drag.kind==='move'?movedBoard(drag.rect,drag.start,drag.cur):resizedBoard(drag.rect,drag.hx,drag.hy,drag.start,drag.cur,drag.keep);
+  overlay.addEventListener('pointerdown',e=>{if(e.button!==0||(state.activeTool||state.tool)!=='artboard'||!getDocument())return;const d=getDocument(),p=point(e),active=d.layers.find(layer=>layer.id===d.activeId),hit=active?.artboard?handleAt(active,p,state.zoom):null,board=boardAt(d.layers,p);drag=hit?{kind:'resize',layer:active,rect:{...active.artboard},hx:hit.hx,hy:hit.hy,start:p,cur:p,keep:e.shiftKey}:board?{kind:'move',layer:board,rect:{...board.artboard},start:p,cur:p}:{kind:'new',start:p,cur:p};if(board&&!hit&&d.activeId!==board.id){d.activeId=board.id;d.selectedLayerIds=[board.id];d.changed();}state.gesture={tool:'artboard'};overlay.setPointerCapture(e.pointerId);e.stopImmediatePropagation();draw();},true);
+  overlay.addEventListener('pointermove',e=>{if(!drag)return;drag.cur=point(e);if(drag.kind==='resize')drag.keep=e.shiftKey;e.stopImmediatePropagation();draw();},true);
+  const finish=e=>{if(!drag)return;if(e)drag.cur=point(e);const d=getDocument(),next=preview(),kind=drag.kind,layer=drag.layer,screen=screenDrag(drag.start,drag.cur,state.zoom);drag=null;state.gesture=null;e?.stopImmediatePropagation();try{if(!d||!next)return;if(kind==='new'){if(screen<CLICK_PX||next.w<1||next.h<1)return;d.addArtboard(next);}else if(kind==='move'&&layer.artboard&&(next.x!==layer.artboard.x||next.y!==layer.artboard.y))d.moveArtboard(layer,next.x,next.y);else if(kind==='resize'&&layer.artboard&&(next.x!==layer.artboard.x||next.y!==layer.artboard.y||next.w!==layer.artboard.w||next.h!==layer.artboard.h))d.resizeArtboard(layer,next);}catch(error){message(error.message);}draw();};
+  overlay.addEventListener('pointerup',finish,true);overlay.addEventListener('pointercancel',()=>{drag=null;state.gesture=null;},true);
+  return{draw(ctx){if((state.activeTool||state.tool)!=='artboard')return;const d=getDocument();if(!d)return;const box=preview(),active=d.layers.find(layer=>layer.id===d.activeId),shown=box||active?.artboard;if(!shown)return;ctx.save();ctx.strokeStyle='#4da3ff';ctx.lineWidth=1/Math.max(.01,state.zoom);ctx.strokeRect(shown.x,shown.y,shown.w,shown.h);if(!box&&active?.artboard){const r=active.artboard,s=4/Math.max(.01,state.zoom);ctx.fillStyle='#4da3ff';for(const [x,y] of [[r.x,r.y],[r.x+r.w/2,r.y],[r.x+r.w,r.y],[r.x,r.y+r.h/2],[r.x+r.w,r.y+r.h/2],[r.x,r.y+r.h],[r.x+r.w/2,r.y+r.h],[r.x+r.w,r.y+r.h]])ctx.fillRect(x-s/2,y-s/2,s,s);}ctx.restore();},cancel(){drag=null;if(state.gesture?.tool==='artboard')state.gesture=null;}};
+}

@@ -829,10 +829,11 @@ addHandler('infx', hasKey('blendInteriorElements'), (reader, target) => {
     (0, psdWriter_1.writeZeros)(writer, 3);
 });
 addHandler('knko', hasKey('knockout'), (reader, target) => {
-    target.knockout = !!(0, psdReader_1.readUint8)(reader);
+    target.knockout = (0, psdReader_1.readUint8)(reader);
     (0, psdReader_1.skipBytes)(reader, 3);
 }, (writer, target) => {
-    (0, psdWriter_1.writeUint8)(writer, target.knockout ? 1 : 0);
+    const value = target.knockout === true ? 1 : target.knockout ? target.knockout : 0;
+    (0, psdWriter_1.writeUint8)(writer, value);
     (0, psdWriter_1.writeZeros)(writer, 3);
 });
 addHandler('lmgm', hasKey('layerMaskAsGlobalMask'), (reader, target) => {
@@ -840,6 +841,13 @@ addHandler('lmgm', hasKey('layerMaskAsGlobalMask'), (reader, target) => {
     (0, psdReader_1.skipBytes)(reader, 3);
 }, (writer, target) => {
     (0, psdWriter_1.writeUint8)(writer, target.layerMaskAsGlobalMask ? 1 : 0);
+    (0, psdWriter_1.writeZeros)(writer, 3);
+});
+addHandler('vmgm', hasKey('vectorMaskHidesEffects'), (reader, target) => {
+    target.vectorMaskHidesEffects = !!(0, psdReader_1.readUint8)(reader);
+    (0, psdReader_1.skipBytes)(reader, 3);
+}, (writer, target) => {
+    (0, psdWriter_1.writeUint8)(writer, target.vectorMaskHidesEffects ? 1 : 0);
     (0, psdWriter_1.writeZeros)(writer, 3);
 });
 addHandler('lspf', hasKey('protected'), (reader, target) => {
@@ -1741,6 +1749,9 @@ function parseFilterFXItem(f, options) {
                         } });
                 }
                 ;
+            case 'Lvls': return Object.assign({}, base, { type: 'levels', filter: {
+                adjustments: (f.Fltr.Adjs || []).map(a => ({ channels: (a.Chnl || []).map(descriptor_1.Chnl.decode), input: a.Inpt, gamma: a['Gmm '], output: a.Otpt }))
+            } });
             case 'Crvs':
                 {
                     return Object.assign(Object.assign({}, base), { type: 'curves', filter: Object.assign({ presetKind: descriptor_1.presetKindType.decode(f.Fltr.presetKind) }, (f.Fltr.Adjs ? {
@@ -1781,11 +1792,12 @@ function parseFilterFXItem(f, options) {
                     // console.log('FILTER', require('util').inspect(f, false, 99, true));
                     throw new Error(`Unknown filter classId: ${f.Fltr._classID}`);
                 }
-                return undefined;
+                return Object.assign({}, base, { type: 'unsupported', rawDescriptor: f._rawDescriptor, rawEnabOffset: f._rawEnabOffset, rawCountOffset: f._rawCountOffset });
         }
     }
     else {
         switch (f.filterID) {
+            case 781: return Object.assign({}, base, { type: 'shadows/highlights' });
             case 1098281575: return Object.assign(Object.assign({}, base), { type: 'average' });
             case 1114403360: return Object.assign(Object.assign({}, base), { type: 'blur' });
             case 1114403405: return Object.assign(Object.assign({}, base), { type: 'blur more' });
@@ -1804,6 +1816,7 @@ function parseFilterFXItem(f, options) {
                     // console.log('FILTER', require('util').inspect(f, false, 99, true));
                     throw new Error(`Unknown filterID: ${f.filterID}`);
                 }
+                return Object.assign({}, base, { type: 'unsupported', rawDescriptor: f._rawDescriptor, rawEnabOffset: f._rawEnabOffset, rawCountOffset: f._rawCountOffset });
         }
     }
 }
@@ -1821,6 +1834,7 @@ function uvRadius(t) {
     return (0, descriptor_1.unitsValue)(t.radius, 'radius');
 }
 function serializeFilterFXItem(f) {
+    if (f.type === 'unsupported') return { _name: '', _classID: 'filterFX', _rawDescriptor: f.rawDescriptor, _rawEnabOffset: f.rawEnabOffset, _rawCountOffset: f.rawCountOffset, _rawEnabled: f.enabled !== false };
     const base = {
         _name: '',
         _classID: 'filterFX',
@@ -1837,6 +1851,7 @@ function serializeFilterFXItem(f) {
         BckC: (0, descriptor_1.serializeColor)(f.backgroundColor),
     };
     switch (f.type) {
+        case 'shadows/highlights': return Object.assign({}, base, { hasoptions: false, filterID: 781 });
         case 'average': return Object.assign(Object.assign({}, base), { filterID: 1098281575 });
         case 'blur': return Object.assign(Object.assign({}, base), { filterID: 1114403360 });
         case 'blur more': return Object.assign(Object.assign({}, base), { filterID: 1114403405 });
@@ -2259,6 +2274,7 @@ function serializeFilterFXItem(f) {
                 warpedVertices: f.filter.warpedVertices.map(pointToHrznVrtc),
                 quads: f.filter.quads.map(indices => ({ indices })),
             }, filterID: 442 });
+        case 'levels': return Object.assign({}, base, { Fltr: { _name: 'Levels', _classID: 'Lvls', Adjs: (f.filter.adjustments || []).map(a => Object.assign({ _name: '', _classID: 'LvlA', Chnl: a.channels.map(descriptor_1.Chnl.encode) }, a.input ? { Inpt: a.input } : {}, a.gamma != null ? { 'Gmm ': a.gamma } : {}, a.output ? { Otpt: a.output } : {})) }, filterID: 1282829427 });
         case 'curves': return Object.assign(Object.assign({}, base), { Fltr: Object.assign({ _name: 'Curves', _classID: 'Crvs', presetKind: descriptor_1.presetKindType.encode(f.filter.presetKind) }, (f.filter.adjustments ? {
                 Adjs: f.filter.adjustments.map(a => 'curve' in a ? {
                     _name: '',
@@ -3180,12 +3196,12 @@ addHandler('phfl', adjustmentType('photo filter'), (reader, target, left) => {
         color = (0, psdReader_1.readColor)(reader);
     }
     else { // version 3
-        // TODO: test this, this is probably wrong
-        color = {
-            l: (0, psdReader_1.readInt32)(reader) / 100,
-            a: (0, psdReader_1.readInt32)(reader) / 100,
-            b: (0, psdReader_1.readInt32)(reader) / 100,
-        };
+        // White-relative D50 XYZ, 1.0 = 32768 (PhotoCraft adjust_map.rs).
+        color = { xyz: [
+            (0, psdReader_1.readUint32)(reader) / 32768,
+            (0, psdReader_1.readUint32)(reader) / 32768,
+            (0, psdReader_1.readUint32)(reader) / 32768,
+        ] };
     }
     target.adjustment = {
         type: 'photo filter',
@@ -3701,7 +3717,7 @@ addHandler('FEid', hasKey('filterEffectsMasks'), (reader, target, leftBytes) => 
             }
         }
         writer.view.setUint32(length2Offset - 4, writer.offset - length2Offset, false);
-        const extra = (_a = target.filterEffectsMasks[target.filterEffectsMasks.length - 1]) === null || _a === void 0 ? void 0 : _a.extra;
+        const extra = mask.extra;
         if (extra) {
             (0, psdWriter_1.writeUint8)(writer, 1);
             (0, psdWriter_1.writeInt32)(writer, extra.top);
@@ -3712,6 +3728,9 @@ addHandler('FEid', hasKey('filterEffectsMasks'), (reader, target, leftBytes) => 
             (0, psdWriter_1.writeUint32)(writer, extra.data.byteLength + 2);
             (0, psdWriter_1.writeUint16)(writer, extra.compressionMode);
             (0, psdWriter_1.writeBytes)(writer, extra.data);
+        }
+        else {
+            (0, psdWriter_1.writeUint8)(writer, 0);
         }
         let length = writer.offset - lengthOffset;
         writer.view.setUint32(lengthOffset - 4, length, false);
@@ -3851,7 +3870,7 @@ addHandler('iOpa', hasKey('fillOpacity'), (reader, target) => {
 });
 addHandler('brst', hasKey('channelBlendingRestrictions'), (reader, target, left) => {
     target.channelBlendingRestrictions = [];
-    while (left() > 4) {
+    while (left() >= 4) {
         target.channelBlendingRestrictions.push((0, psdReader_1.readInt32)(reader));
     }
 }, (writer, target) => {
@@ -4134,7 +4153,7 @@ const typeToField = {
     'bool': [
         'PstS', 'printSixteenBit', 'masterFXSwitch', 'enab', 'uglg', 'antialiasGloss',
         'useShape', 'useTexture', 'uglg', 'antialiasGloss', 'useShape', 'Vsbl',
-        'useTexture', 'Algn', 'Rvrs', 'Dthr', 'Invr', 'VctC', 'ShTr', 'layerConceals',
+        'useTexture', 'InvT', 'Algn', 'Rvrs', 'Dthr', 'Invr', 'VctC', 'ShTr', 'layerConceals',
         'strokeEnabled', 'fillEnabled', 'strokeStyleScaleLock', 'strokeStyleStrokeAdjust',
         'hardProof', 'MpBl', 'paperWhite', 'useLegacy', 'Auto', 'Lab ', 'useTint', 'keyShapeInvalidated',
         'autoExpandEnabled', 'autoNestEnabled', 'autoPositionEnabled', 'shrinkwrapOnSaveEnabled',
@@ -4145,20 +4164,20 @@ const typeToField = {
         'moreAccurate', 'GpuY', 'LIWy', 'Cnty',
     ],
     'doub': [
-        'warpValue', 'warpPerspective', 'warpPerspectiveOther', 'Intr', 'Wdth', 'Hght',
+        'Gmm ', 'warpValue', 'warpPerspective', 'warpPerspectiveOther', 'Intr', 'Wdth', 'Hght',
         'strokeStyleMiterLimit', 'strokeStyleResolution', 'layerTime', 'keyOriginResolution',
         'xx', 'xy', 'yx', 'yy', 'tx', 'ty', 'FrGA', 'frameRate', 'audioLevel', 'rotation',
         'X   ', 'Y   ', 'redFloat', 'greenFloat', 'blueFloat', 'imageResolution',
         'PuX0', 'PuX1', 'PuX2', 'PuX3', 'PuY0', 'PuY1', 'PuY2', 'PuY3'
     ],
     'UntF': [
-        'sdwO', 'hglO', 'lagl', 'Lald', 'srgR', 'blur', 'Sftn', 'Opct', 'Dstn', 'Angl',
+        'textureDepth', 'sdwO', 'hglO', 'lagl', 'Lald', 'srgR', 'blur', 'Sftn', 'Opct', 'Dstn', 'Angl',
         'Ckmt', 'Nose', 'Inpr', 'ShdN', 'strokeStyleLineWidth', 'strokeStyleLineDashOffset',
         'strokeStyleOpacity', 'H   ', 'Top ', 'Left', 'Btom', 'Rght', 'Rslt',
         'topRight', 'topLeft', 'bottomLeft', 'bottomRight', 'ClNs', 'Shrp',
     ],
     'VlLs': [
-        'Crv ', 'Clrs', 'Mnm ', 'Mxm ', 'Trns', 'pathList', 'strokeStyleLineDashSet', 'FrLs', 'slices',
+        'Inpt', 'Otpt', 'Crv ', 'Clrs', 'Mnm ', 'Mxm ', 'Trns', 'pathList', 'strokeStyleLineDashSet', 'FrLs', 'slices',
         'LaSt', 'Trnf', 'nonAffineTransform', 'keyDescriptorList', 'guideIndeces', 'gradientFillMulti',
         'solidFillMulti', 'frameFXMulti', 'innerShadowMulti', 'dropShadowMulti', 'FrIn', 'FSts', 'FsFr',
         'sheetTimelineOptions', 'audioClipList', 'trackList', 'globalTrackList', 'keyList', 'audioClipList',
@@ -4212,6 +4231,8 @@ const fieldToArrayType = {
     Mtrx: 'long',
     compList: 'long',
     Chnl: 'enum',
+    Inpt: 'long',
+    Otpt: 'long',
 };
 const fieldToType = {};
 for (const type of Object.keys(typeToField)) {
@@ -4227,6 +4248,7 @@ for (const field of Object.keys(fieldToArrayExtType)) {
     fieldToArrayType[field] = 'Objc';
 }
 function getTypeByKey(key, value, root, parent) {
+    if (key === 'Inpt' || key === 'Otpt') return Array.isArray(value) ? 'VlLs' : 'enum';
     if (key === 'presetKind') {
         return typeof value === 'string' ? 'enum' : 'long';
     }
@@ -4285,21 +4307,44 @@ function writeAsciiStringOrClassId(writer, value) {
     }
 }
 function readDescriptorStructure(reader, includeClass) {
+    const descriptorStart = reader.offset;
     const struct = readClassStructure(reader);
     const object = includeClass ? { _name: struct.name, _classID: struct.classID } : {};
     // console.log('>> ', struct);
+    const countOffset = reader.offset - descriptorStart;
+    let enabledOffset = -1;
     const itemsCount = (0, psdReader_1.readUint32)(reader);
     for (let i = 0; i < itemsCount; i++) {
         const key = readAsciiStringOrClassId(reader);
         const type = (0, psdReader_1.readSignature)(reader);
         // console.log(`> '${key}' '${type}'`);
+        if (key === 'enab' && type === 'bool') enabledOffset = reader.offset - descriptorStart;
         const data = readOSType(reader, type, includeClass);
         // if (!getTypeByKey(key, data)) console.log(`> '${key}' '${type}'`, data);
         object[key] = data;
     }
+    if (struct.classID === 'filterFX') {
+        object._rawDescriptor = new Uint8Array(reader.view.buffer, reader.view.byteOffset + descriptorStart, reader.offset - descriptorStart).slice();
+        object._rawEnabOffset = enabledOffset;
+        object._rawCountOffset = countOffset;
+    }
     return object;
 }
 function writeDescriptorStructure(writer, name, classId, value, root) {
+    if (value._rawDescriptor) {
+        const original = value._rawDescriptor;
+        if ((!Array.isArray(original) && !(original instanceof Uint8Array)) || original.length > 200000000) throw new Error('Invalid preserved filter descriptor.');
+        let bytes = new Uint8Array(original);
+        const enabled = value._rawEnabled === false ? 0 : 1, offset = value._rawEnabOffset;
+        if (Number.isInteger(offset) && offset >= 0 && offset < bytes.length) bytes[offset] = enabled;
+        else {
+            const count = value._rawCountOffset;
+            if (!Number.isInteger(count) || count < 0 || count + 4 > bytes.length) throw new Error('Invalid preserved filter field count.');
+            const next = new Uint8Array(bytes.length + 13); next.set(bytes); const view = new DataView(next.buffer);view.setUint32(count, view.getUint32(count) + 1);
+            next.set([0,0,0,0,101,110,97,98,98,111,111,108,enabled], bytes.length);bytes = next;
+        }
+        (0, psdWriter_1.writeBytes)(writer, bytes);return;
+    }
     if (logErrors && !classId)
         console.log('Missing classId for: ', name, classId, value);
     // write class structure
@@ -4882,7 +4927,7 @@ function parseEffects(info, log) {
     if (IrGl)
         effects.innerGlow = parseEffectObject(IrGl, log);
     if (ebbl)
-        effects.bevel = parseEffectObject(ebbl, log);
+        effects.bevel = parseEffectObject(ebbl, log, 'bevel');
     if (SoFi)
         effects.solidFill = [parseEffectObject(SoFi, log)];
     if (solidFillMulti)
@@ -5008,7 +5053,7 @@ function serializeTrackList(tracks) {
     }
     return trackList;
 }
-function parseEffectObject(obj, reportErrors) {
+function parseEffectObject(obj, reportErrors, effectType) {
     const result = {};
     for (const key of Object.keys(obj)) {
         const val = obj[key];
@@ -5132,13 +5177,19 @@ function parseEffectObject(obj, reportErrors) {
                 break;
             case 'MpgS':
             case 'TrnS':
-                result.contour = {
+                result[key === 'MpgS' && effectType === 'bevel' ? 'shapeContour' : 'contour'] = {
                     name: val['Nm  '],
-                    curve: val['Crv '].map(p => ({ x: p.Hrzn, y: p.Vrtc })),
+                    curve: val['Crv '].map(p => ({ x: p.Hrzn, y: p.Vrtc, ...(p.Cnty === false ? { corner: true } : {}) })),
                 };
                 break;
             case 'Grad':
                 result.gradient = parseGradient(val);
+                break;
+            case 'textureDepth':
+                result.textureDepth = parsePercent(val);
+                break;
+            case 'InvT':
+                result.textureInvert = val;
                 break;
             case 'useTexture':
             case 'useShape':
@@ -5289,15 +5340,22 @@ function serializeEffectObject(obj, objName, reportErrors) {
             case 'offset':
                 result.Ofst = { Hrzn: unitsPercent(val.x), Vrtc: unitsPercent(val.y) };
                 break;
+            case 'shapeContour':
             case 'contour': {
-                result[objName === 'satin' ? 'MpgS' : 'TrnS'] = {
+                result[key === 'shapeContour' || objName === 'satin' ? 'MpgS' : 'TrnS'] = {
                     'Nm  ': val.name,
-                    'Crv ': val.curve.map(p => ({ Hrzn: p.x, Vrtc: p.y })),
+                    'Crv ': val.curve.map(p => ({ Hrzn: p.x, Vrtc: p.y, ...(p.corner ? { Cnty: false } : {}) })),
                 };
                 break;
             }
             case 'gradient':
                 result.Grad = serializeGradient(val);
+                break;
+            case 'textureDepth':
+                result.textureDepth = unitsPercent(val);
+                break;
+            case 'textureInvert':
+                result.InvT = val;
                 break;
             case 'useTexture':
             case 'useShape':
@@ -7107,18 +7165,18 @@ function imageDataToCanvas(pixelData) {
         const src = pixelData.data;
         const dst = imageData.data;
         if (src instanceof Float32Array) {
-            for (let i = 0, size = src.length; i < size; i += 4) {
-                dst[i + 0] = Math.round(Math.pow(src[i + 0], 1.0 / 2.2) * 255);
-                dst[i + 1] = Math.round(Math.pow(src[i + 1], 1.0 / 2.2) * 255);
-                dst[i + 2] = Math.round(Math.pow(src[i + 2], 1.0 / 2.2) * 255);
-                dst[i + 3] = Math.round(src[i + 3] * 255);
+            for (let i = 0, size = src.length; i < size; i++) {
+                const value = src[i];
+                dst[i] = Math.round((Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 0) * 255);
             }
         }
+        else if (src instanceof Uint16Array) {
+            for (let i = 0, size = src.length; i < size; i++)
+                dst[i] = Math.round((src[i] * 255 + 32767) / 65535);
+        }
         else {
-            const shift = (src instanceof Uint16Array) ? 8 : 0;
-            for (let i = 0, size = src.length; i < size; i++) {
-                dst[i] = src[i] >>> shift;
-            }
+            for (let i = 0, size = src.length; i < size; i++)
+                dst[i] = src[i];
         }
     }
     canvas.getContext('2d').putImageData(imageData, 0, 0);
@@ -9562,7 +9620,7 @@ const pako_1 = require("pako");
 const helpers_1 = require("./helpers");
 const additionalInfo_1 = require("./additionalInfo");
 const imageResources_1 = require("./imageResources");
-exports.supportedColorModes = [0 /* ColorMode.Bitmap */, 1 /* ColorMode.Grayscale */, 3 /* ColorMode.RGB */, 2 /* ColorMode.Indexed */];
+exports.supportedColorModes = [0 /* ColorMode.Bitmap */, 1 /* ColorMode.Grayscale */, 3 /* ColorMode.RGB */, 2 /* ColorMode.Indexed */, 4 /* ColorMode.CMYK */, 8 /* ColorMode.Duotone */, 9 /* ColorMode.Lab */];
 const colorModes = ['bitmap', 'grayscale', 'indexed', 'RGB', 'CMYK', '', '', 'multichannel', 'duotone', 'lab'];
 function setupGrayscale(data) {
     const size = data.width * data.height * 4;
@@ -9976,7 +10034,9 @@ function readLayerMaskData(reader, layer) {
         mask.positionRelativeToLayer = (flags & 1 /* LayerMaskFlags.PositionRelativeToLayer */) !== 0;
         mask.disabled = (flags & 2 /* LayerMaskFlags.LayerMaskDisabled */) !== 0;
         mask.fromVectorData = (flags & 8 /* LayerMaskFlags.LayerMaskFromRenderingOtherData */) !== 0;
-        if (left() >= 18) {
+        const parameterSize = value => (value & 1 ? 1 : 0) + (value & 2 ? 8 : 0) + (value & 4 ? 1 : 0) + (value & 8 ? 8 : 0);
+        const parametersOnly = (flags & 16) !== 0 && left() > 0 && (peekUint8(reader) & 0xF0) === 0 && left() >= 1 + parameterSize(peekUint8(reader)) && left() <= 4 + parameterSize(peekUint8(reader));
+        if (!parametersOnly && left() >= 18) {
             const realMask = {};
             layer.realMask = realMask;
             const realFlags = readUint8(reader);
@@ -10150,9 +10210,14 @@ function getDataFromLayer(layer, read, throwForMissingFeatures, memoryLimit) {
     let initializedAlpha = false;
     if (layerWidth && layerHeight && read === LayerDataType.Layer) {
         if (cmyk) {
-            if (bitsPerChannel !== 8)
+            if (![8, 16, 32].includes(bitsPerChannel))
                 throw new Error('bitsPerChannel Not supproted');
-            imageData = { width: layerWidth, height: layerHeight, data: new Uint8ClampedArray(layerWidth * layerHeight * 5) };
+            const samples = layerWidth * layerHeight * 5;
+            const data = bitsPerChannel === 16 ? new Uint16Array(samples) : bitsPerChannel === 32 ? new Float32Array(samples) : new Uint8Array(samples);
+            const full = bitsPerChannel === 32 ? 1 : bitsPerChannel === 16 ? 65535 : 255;
+            for (let p = 3; p < data.length; p += 5)
+                data[p] = full;
+            imageData = { width: layerWidth, height: layerHeight, data };
         }
         else {
             imageData = createImageDataBitDepth(layerWidth, layerHeight, bitsPerChannel, 4, memoryLimit);
@@ -10209,7 +10274,7 @@ function getDataFromLayer(layer, read, throwForMissingFeatures, memoryLimit) {
                 layer.imageDataRawCompression[id] = compression;
                 layer.imageDataRaw[id] = data;
             }
-            if (targetData && colorMode === 1 /* ColorMode.Grayscale */) {
+            if (targetData && (colorMode === 1 /* ColorMode.Grayscale */ || colorMode === 8 /* ColorMode.Duotone */)) {
                 setupGrayscale(targetData);
             }
         }
@@ -10221,7 +10286,7 @@ function getDataFromLayer(layer, read, throwForMissingFeatures, memoryLimit) {
         if (!initializedAlpha)
             resetAlpha(imageData, cmyk);
         if (cmyk) {
-            const cmykData = imageData;
+            const cmykData = { width: imageData.width, height: imageData.height, data: quantizeSamples(imageData.data, bitsPerChannel) };
             imageData = (0, helpers_1.createImageData)(cmykData.width, cmykData.height);
             cmykToRgb(cmykData, imageData, false);
         }
@@ -10369,9 +10434,11 @@ function readImageData(reader, psd) {
             (0, helpers_1.decodeBitmap)(bytes, imageData.data, psd.width, psd.height);
             break;
         }
+        case 9 /* ColorMode.Lab */:
+        case 8 /* ColorMode.Duotone */:
         case 3 /* ColorMode.RGB */:
         case 1 /* ColorMode.Grayscale */: {
-            const channels = psd.colorMode === 1 /* ColorMode.Grayscale */ ? [0] : [0, 1, 2];
+            const channels = psd.colorMode === 1 /* ColorMode.Grayscale */ || psd.colorMode === 8 /* ColorMode.Duotone */ ? [0] : [0, 1, 2];
             if (psd.channels && psd.channels > 3) {
                 for (let i = 3; i < psd.channels; i++) {
                     // TODO: store these channels in additional image data
@@ -10396,7 +10463,7 @@ function readImageData(reader, psd) {
             else {
                 throw new Error(`Compression not supported: ${compression}`);
             }
-            if (psd.colorMode === 1 /* ColorMode.Grayscale */) {
+            if (psd.colorMode === 1 /* ColorMode.Grayscale */ || psd.colorMode === 8 /* ColorMode.Duotone */) {
                 setupGrayscale(imageData);
             }
             break;
@@ -10409,7 +10476,12 @@ function readImageData(reader, psd) {
             if (!psd.palette)
                 throw new Error('Missing color palette');
             if (compression === 0 /* Compression.RawData */) {
-                throw new Error(`Compression not supported: ${compression}`);
+                const indexedImageData = {
+                    width: imageData.width,
+                    height: imageData.height,
+                    data: readBytes(reader, psd.width * psd.height),
+                };
+                indexedToRgb(indexedImageData, imageData, psd.palette);
             }
             else if (compression === 1 /* Compression.RleCompressed */) {
                 const indexedImageData = {
@@ -10426,43 +10498,46 @@ function readImageData(reader, psd) {
             break;
         }
         case 4 /* ColorMode.CMYK */: {
-            if (bitsPerChannel !== 8)
+            if (![8, 16, 32].includes(bitsPerChannel))
                 throw new Error('bitsPerChannel Not supproted');
-            if (psd.channels !== 4)
+            if (psd.channels < 4)
                 throw new Error(`Invalid channel count`);
             const channels = [0, 1, 2, 3];
-            if (reader.globalAlpha)
+            if (psd.channels > 4)
                 channels.push(4);
+            const sampleCount = psd.width * psd.height * 5;
+            const data = bitsPerChannel === 16 ? new Uint16Array(sampleCount) : bitsPerChannel === 32 ? new Float32Array(sampleCount) : new Uint8Array(sampleCount);
+            const full = bitsPerChannel === 32 ? 1 : bitsPerChannel === 16 ? 65535 : 255;
+            for (let p = 3; p < data.length; p += 5)
+                data[p] = full;
+            const cmykImageData = { width: psd.width, height: psd.height, data };
             if (compression === 0 /* Compression.RawData */) {
-                throw new Error(`Compression not supported: ${compression}`);
-                // TODO: ...
-                // for (let i = 0; i < channels.length; i++) {
-                // 	readDataRaw(reader, imageData, channels[i], psd.width, psd.height);
-                // }
+                const bytesPer = Math.floor(bitsPerChannel / 8);
+                for (let i = 0; i < channels.length; i++) {
+                    const raw = readBytes(reader, psd.width * psd.height * bytesPer);
+                    readDataRaw(raw, cmykImageData, bitsPerChannel, 5, channels[i]);
+                }
             }
             else if (compression === 1 /* Compression.RleCompressed */) {
-                const cmykImageData = {
-                    width: imageData.width,
-                    height: imageData.height,
-                    data: new Uint8Array(imageData.width * imageData.height * 5),
-                };
                 const start = reader.offset;
                 readDataRLE(reader, cmykImageData, psd.width, psd.height, bitsPerChannel, 5, channels, reader.large);
-                cmykToRgb(cmykImageData, imageData, true);
                 if (helpers_1.RAW_IMAGE_DATA)
                     psd.imageDataRaw = new Uint8Array(reader.view.buffer, reader.view.byteOffset + start, reader.offset - start);
             }
             else {
                 throw new Error(`Compression not supported: ${compression}`);
             }
+            imageData = { width: psd.width, height: psd.height, data: new Uint8ClampedArray(psd.width * psd.height * 4) };
+            cmykToRgb({ width: psd.width, height: psd.height, data: quantizeSamples(data, bitsPerChannel) }, imageData, true);
             break;
         }
         default: throw new Error(`Color mode not supported: ${psd.colorMode}`);
     }
     // remove weird white matte
     if (reader.globalAlpha) {
-        if (psd.bitsPerChannel !== 8)
-            throw new Error('bitsPerChannel Not supproted');
+        if (!(imageData.data instanceof Uint8Array) && !(imageData.data instanceof Uint8ClampedArray)) {
+            imageData = { width: imageData.width, height: imageData.height, data: new Uint8ClampedArray(quantizeSamples(imageData.data, psd.bitsPerChannel)) };
+        }
         const p = imageData.data;
         const size = imageData.width * imageData.height * 4;
         for (let i = 0; i < size; i += 4) {
@@ -10478,6 +10553,22 @@ function readImageData(reader, psd) {
         }
     }
     return imageData;
+}
+function quantizeSamples(data, bits) {
+    if (bits === 8 || data instanceof Uint8Array || data instanceof Uint8ClampedArray)
+        return data;
+    const out = new Uint8Array(data.length);
+    if (bits === 16) {
+        for (let i = 0; i < data.length; i++)
+            out[i] = Math.round((data[i] * 255 + 32767) / 65535);
+    }
+    else {
+        for (let i = 0; i < data.length; i++) {
+            const value = data[i];
+            out[i] = Math.round((Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 0) * 255);
+        }
+    }
+    return out;
 }
 function cmykToRgb(cmyk, rgb, reverseAlpha) {
     const size = rgb.width * rgb.height * 4;
@@ -10656,30 +10747,55 @@ function readDataRLE(reader, pixelData, width, height, _bitDepth, step, offsets,
             }
         }
         else {
+            const bytesPer = _bitDepth === 16 ? 2 : _bitDepth === 32 ? 4 : 1;
+            const rowBytes = width * bytesPer;
             for (let y = 0, p = offset | 0; y < height; y++, li++) {
                 const length = lengths[li];
                 const buffer = readBytes(reader, length);
-                for (let i = 0, x = 0; i < length; i++) {
+                if (bytesPer === 1) {
+                    for (let i = 0, x = 0; i < length; i++) {
+                        let header = buffer[i];
+                        if (header > 128) {
+                            const value = buffer[++i];
+                            header = (256 - header) | 0;
+                            for (let j = 0; j <= header && x < width; j = (j + 1) | 0, x = (x + 1) | 0) {
+                                data[p] = value;
+                                p = (p + step) | 0;
+                            }
+                        }
+                        else if (header < 128) {
+                            for (let j = 0; j <= header && x < width; j = (j + 1) | 0, x = (x + 1) | 0) {
+                                data[p] = buffer[++i];
+                                p = (p + step) | 0;
+                            }
+                        }
+                    }
+                    continue;
+                }
+                const row = new Uint8Array(rowBytes);
+                for (let i = 0, x = 0; i < length && x < rowBytes; i++) {
                     let header = buffer[i];
                     if (header > 128) {
                         const value = buffer[++i];
                         header = (256 - header) | 0;
-                        for (let j = 0; j <= header && x < width; j = (j + 1) | 0, x = (x + 1) | 0) {
-                            data[p] = value;
-                            p = (p + step) | 0;
-                        }
+                        for (let j = 0; j <= header && x < rowBytes; j++, x++)
+                            row[x] = value;
                     }
                     else if (header < 128) {
-                        for (let j = 0; j <= header && x < width; j = (j + 1) | 0, x = (x + 1) | 0) {
-                            data[p] = buffer[++i];
-                            p = (p + step) | 0;
-                        }
+                        for (let j = 0; j <= header && x < rowBytes; j++, x++)
+                            row[x] = buffer[++i];
                     }
-                    else {
-                        // ignore 128
+                }
+                if (_bitDepth === 16) {
+                    for (let x = 0; x < width; x++, p = (p + step) | 0)
+                        data[p] = (row[x * 2] << 8) | row[x * 2 + 1];
+                }
+                else {
+                    const view = new DataView(row.buffer, row.byteOffset, row.byteLength);
+                    for (let x = 0; x < width; x++, p = (p + step) | 0) {
+                        const value = view.getFloat32(x * 4);
+                        data[p] = Number.isFinite(value) ? value : 0;
                     }
-                    // This showed up on some images from non-photoshop programs, ignoring it seems to work just fine.
-                    // if (i >= length) throw new Error(`Invalid RLE data: exceeded buffer size ${i}/${length}`);
                 }
             }
         }
@@ -10824,8 +10940,14 @@ function readPattern(reader) {
         const h = cbottom - ctop;
         const ox = cleft - left;
         const oy = ctop - top;
+        if (w < 1 || h < 1 || ox < 0 || oy < 0 || ox + w > width || oy + h > height) throw new Error('Invalid pattern channel bounds');
+        const alphaChannel = ch === (colorMode === 3 ? 3 : 1);
         if (compressionMode === 0) {
-            if (colorMode === 3 /* ColorMode.RGB */ && ch < 3) {
+            if (cdata.length < w * h) throw new Error('Truncated pattern channel');
+            if (alphaChannel) {
+                for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) data[(ox + x + (y + oy) * width) * 4 + 3] = cdata[x + y * w];
+            }
+            else if (colorMode === 3 /* ColorMode.RGB */ && ch < 3) {
                 for (let y = 0; y < h; y++) {
                     for (let x = 0; x < w; x++) {
                         const src = x + y * w;
@@ -10869,7 +10991,11 @@ function readPattern(reader) {
             const pixelData = { data, width, height };
             const tempData = { data: new Uint8Array(w * h), width: w, height: h };
             const cdataReader = createReader(cdata.buffer, cdata.byteOffset, cdata.byteLength);
-            if (colorMode === 3 /* ColorMode.RGB */ && ch < 3) {
+            if (alphaChannel) {
+                readDataRLE(cdataReader, tempData, w, h, 8, 1, [0], false);
+                copyChannelToRGBA(tempData, pixelData, ox, oy, 3);
+            }
+            else if (colorMode === 3 /* ColorMode.RGB */ && ch < 3) {
                 readDataRLE(cdataReader, tempData, w, h, 8, 1, [0], false);
                 copyChannelToRGBA(tempData, pixelData, ox, oy, ch);
             }
@@ -11727,15 +11853,15 @@ function writePattern(writer, pattern) {
     writeUint32(writer, bottom);
     writeUint32(writer, right);
     writeUint32(writer, 24); // channels count
-    // channels: RGB at indices 0,1,2 and alpha at index 25
+    // RGB slots 0,1,2; user-mask slot 24 carries transparency, sheet-mask slot 25 is absent.
     for (let i = 0; i < 24 + 2; i++) {
-        const offset = i < 3 ? i : (i === 25 ? 3 : -1);
+        const offset = i < 3 ? i : (i === 24 ? 3 : -1);
         if (offset < 0) {
             writeUint32(writer, 0); // has
             continue;
         }
-        // worst-case RLE size for a single channel: width + 1 per scanline, plus scanline length headers
-        const buffer = new Uint8Array(width * height + 2 * height + 2 * width + 16);
+        // Conservative per-row PackBits capacity, including literal/run headers and row lengths.
+        const buffer = new Uint8Array((width * 2 + 2) * height);
         // ponytail: pattern channels always use small (2-byte) RLE scanline headers, matching
         // readPattern which reads them as non-large; `large` here only affects the header width.
         const data = (0, helpers_1.writeDataRLE)(buffer, pixelData, [offset], false);
