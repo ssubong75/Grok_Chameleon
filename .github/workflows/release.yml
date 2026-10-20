@@ -77,7 +77,7 @@ env:
 
 jobs:
   build-editor-windows:
-    if: github.event_name == 'push'
+    if: false
     runs-on: windows-2025
     timeout-minutes: 120
     steps:
@@ -103,7 +103,7 @@ jobs:
           if-no-files-found: error
 
   build-editor-macos:
-    if: github.event_name == 'push'
+    if: false
     runs-on: macos-15
     timeout-minutes: 120
     steps:
@@ -127,7 +127,6 @@ jobs:
           if-no-files-found: error
 
   build-windows:
-    needs: build-editor-windows
     if: github.event_name == 'push'
     runs-on: windows-2025
     timeout-minutes: 35
@@ -150,12 +149,6 @@ jobs:
     steps:
       - name: Check out the shared source commit
         uses: actions/checkout@v5
-
-      - name: Download the native editor
-        uses: actions/download-artifact@v7
-        with:
-          name: editor-windows
-          path: editor-windows
 
       - name: Download the exact Windows runtime package
         id: windows_input
@@ -330,9 +323,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Windows extraction failed." }
           $editor = Join-Path $appRoot "web\photo-editor-web"
           Copy-Item (Join-Path $env:GITHUB_WORKSPACE "common\app\web\photo-editor-web\*") $editor -Force
-          $nativeDir = Join-Path $appRoot "editor"
-          New-Item -ItemType Directory -Force $nativeDir | Out-Null
-          Copy-Item (Join-Path $env:GITHUB_WORKSPACE "editor-windows\photocraft.exe") (Join-Path $nativeDir "photocraft.exe") -Force
           $managedSourceExtensions = [System.Collections.Generic.HashSet[string]]::new(
             [System.StringComparer]::OrdinalIgnoreCase
           )
@@ -710,7 +700,6 @@ jobs:
           retention-days: 3
 
   build-macos:
-    needs: build-editor-macos
     if: github.event_name == 'push'
     runs-on: macos-15
     timeout-minutes: 35
@@ -733,12 +722,6 @@ jobs:
     steps:
       - name: Check out the shared source commit
         uses: actions/checkout@v5
-
-      - name: Download the native editor
-        uses: actions/download-artifact@v7
-        with:
-          name: editor-macos
-          path: editor-macos
 
       - name: Download the exact Mac runtime package
         id: macos_input
@@ -770,9 +753,6 @@ jobs:
           app_root="$main_app/Contents/Resources/app"
           editor="$app_root/web/photo-editor-web"
           cp -f "$GITHUB_WORKSPACE/common/app/web/photo-editor-web/"* "$editor"/
-          mkdir -p "$app_root/editor"
-          cp -f "$GITHUB_WORKSPACE/editor-macos/photocraft" "$app_root/editor/photocraft"
-          chmod +x "$app_root/editor/photocraft"
           common_root="$GITHUB_WORKSPACE/$VARIANT_COMMON_DIR/app"
           shared_relatives=(
             electron/main.js
