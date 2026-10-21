@@ -1,0 +1,6 @@
+// PhotoCraft layer quick export: crop to pixels that are not fully transparent, then name the PNG.
+export function opaqueBounds(data,width,height){let x0=width,y0=height,x1=-1,y1=-1;for(let y=0;y<height;y++)for(let x=0;x<width;x++)if(data[(y*width+x)*4+3]>0){x0=Math.min(x0,x);y0=Math.min(y0,y);x1=Math.max(x1,x);y1=Math.max(y1,y);}if(x1<x0)return null;return {x:x0,y:y0,w:x1-x0+1,h:y1-y0+1};}
+export function exportName(name){const cleaned=String(name||'').slice(0,80).replace(/[\u0000-\u001f<>:"/\\|?*]/g,'_').trim().replace(/^\.+|\.+$/g,'');return cleaned||'layer';}
+export function batchPngNames(documentName,layerNames){return batchExportNames(documentName,layerNames,'png');}
+export function scaledSize(width,height,percent){if(!Number.isFinite(percent)||percent<1||percent>1000)throw Error('scale must be within 1..=1000 percent');const scale=percent/100;return [Math.max(1,Math.round(Math.max(1,width)*scale)),Math.max(1,Math.round(Math.max(1,height)*scale))];}
+export function batchExportNames(documentName,layerNames,extension){const stem=exportName(String(documentName||'').replace(/\.[^.]+$/,'')),ext=extension==='jpeg'?'jpg':extension;return layerNames.map((name,index)=>index===0?stem+'.'+ext:stem+'-'+(index+1)+'-'+exportName(name)+'.'+ext);}

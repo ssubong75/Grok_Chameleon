@@ -1,15 +1,16 @@
 // PhotoCraft preset libraries and Edit › Color Settings.
 
 import {readPat,writePat} from './pat.js';
+import {deviceImageData,mergeGrayDocument,patternFromComposite} from './device-paint.js';
+import {canonicalProfileId,isIccPath,profileSpace} from './cms-profiles.js';
 const KEY='chameleon.photoEditor.libraries';
 const BRUSH_KEY='chameleon.photoEditor.brushPresets';
 const COLOR_KEY='chameleon.photoEditor.colorSettings';
-const RGB=new Set(['srgb','display-p3','adobe-rgb']);
 const INTENTS=new Set(['relative','perceptual','saturation','absolute']);
 const POLICIES=new Set(['preserve','convert','off']);
 
 export function defaultColorSettings(){
-  return {workingRgb:'srgb',workingCmyk:'coated-cmyk',workingGray:'dot-gain-20',policyRgb:'preserve',policyCmyk:'preserve',policyGray:'preserve',askOnMismatch:true,askOnPaste:true,askOnMissing:false,intent:'relative',bpc:true,dither:true,blendTextGamma:1.45,monitorProfile:'auto'};
+  return {workingRgb:'srgb',workingCmyk:'coated-cmyk',workingGray:'dot-gain-20-compat',policyRgb:'preserve',policyCmyk:'preserve',policyGray:'preserve',askOnMismatch:true,askOnPaste:true,askOnMissing:false,intent:'relative',bpc:true,dither:true,blendTextGamma:1.45,monitorProfile:'auto'};
 }
 
 export function readColorSettings(state){
@@ -21,16 +22,26 @@ export function readColorSettings(state){
     if(saved.policy&&!saved.policyRgb)saved.policyRgb=saved.policy;
     Object.assign(base,saved);
   }
+  const kept=value=>isIccPath(value)?String(value).trim():canonicalProfileId(value)||value;
+  base.workingRgb=kept(base.workingRgb);
+  base.workingCmyk=kept(base.workingCmyk);
+  base.workingGray=kept(base.workingGray);
+  if(base.monitorProfile!=='auto')base.monitorProfile=kept(base.monitorProfile);
   base.working=base.workingRgb;base.policy=base.policyRgb;
   if(state)state.colorSettings=base;
   return base;
 }
 
+function storedId(value){const text=String(value||'').trim();return isIccPath(text)?text:canonicalProfileId(text);}
 export function validateColorSettings(next){
-  if(!RGB.has(next.workingRgb))throw Error('working space `'+next.workingRgb+'` is not an RGB profile this editor can use');
+  const rgb=storedId(next.workingRgb),cmyk=storedId(next.workingCmyk),gray=storedId(next.workingGray);
+  if(!isIccPath(rgb)&&profileSpace(rgb)!=='rgb')throw Error('working space `'+next.workingRgb+'` is not an RGB profile');
+  if(!isIccPath(cmyk)&&profileSpace(cmyk)!=='cmyk')throw Error('working space `'+next.workingCmyk+'` is not a CMYK profile');
+  if(!isIccPath(gray)&&profileSpace(gray)!=='gray')throw Error('working space `'+next.workingGray+'` is not a gray profile');
+  next.workingRgb=rgb;next.workingCmyk=cmyk;next.workingGray=gray;
   if(!INTENTS.has(next.intent))throw Error('unknown intent `'+next.intent+'` (perceptual|relative|saturation|absolute)');
   for(const key of ['policyRgb','policyCmyk','policyGray'])if(!POLICIES.has(next[key]))throw Error('`'+key+'` must be preserve|convert|off');
-  if(next.monitorProfile!=='auto'&&!RGB.has(next.monitorProfile))throw Error('monitor profile `'+next.monitorProfile+'` is not RGB');
+  if(next.monitorProfile!=='auto'){const monitor=storedId(next.monitorProfile);if(!isIccPath(monitor)&&profileSpace(monitor)!=='rgb')throw Error('monitor profile `'+next.monitorProfile+'` is not RGB');next.monitorProfile=monitor;}
   if(!(next.blendTextGamma>=1&&next.blendTextGamma<=2.2))throw Error('`blendTextGamma` must be 1.0..2.2');
 }
 
@@ -97,13 +108,13 @@ export function defineBrushTip(doc,layer,name){
   let x0=doc.width,y0=doc.height,x1=0,y1=0;
   for(let i=0;i<cover.length;i++)if(cover[i]){const x=i%doc.width,y=(i/doc.width)|0;x0=Math.min(x0,x);y0=Math.min(y0,y);x1=Math.max(x1,x+1);y1=Math.max(y1,y+1);}
   if(x1<=x0)throw Error('the selection is empty');
-  const image=layer.canvas.getContext('2d').getImageData(0,0,layer.canvas.width,layer.canvas.height);
+  const stored=doc.colorMode&&doc.colorMode!=='rgb'?deviceImageData(doc,layer):null,image=stored||layer.canvas.getContext('2d').getImageData(0,0,layer.canvas.width,layer.canvas.height);
   const w=x1-x0,h=y1-y0,v=new Float32Array(w*h);
   for(let y=0;y<h;y++)for(let x=0;x<w;x++){
     const dx=x0+x,dy=y0+y,lx=dx-(layer.x||0),ly=dy-(layer.y||0);
     if(lx<0||ly<0||lx>=image.width||ly>=image.height)continue;
     const p=(ly*image.width+lx)*4,r=image.data[p]/255,g=image.data[p+1]/255,b=image.data[p+2]/255,a=image.data[p+3]/255;
-    const lum=0.2126*r+0.7152*g+0.0722*b;
+    const lum=0.3*r+0.59*g+0.11*b;
     v[y*w+x]=Math.max(0,Math.min(1,(1-lum)*a*(cover[dy*doc.width+dx]/255)));
   }
   let cx0=w,cy0=h,cx1=0,cy1=0;
@@ -129,13 +140,17 @@ export function definePatternFromDocument(doc,name){
   if(x1<=x0||y1<=y0)throw Error('the area is empty');
   const w=x1-x0,h=y1-y0;
   if(w>4000||h>4000)throw Error('patterns are limited to 4000 × 4000 px');
-  const image=doc.composite().getContext('2d').getImageData(x0,y0,w,h);
-  let opaque=true;for(let i=3;i<image.data.length;i+=4)if(image.data[i]<255){opaque=false;break;}
-  const pixels=[];
-  for(let i=0;i<image.data.length;i+=4){pixels.push(image.data[i],image.data[i+1],image.data[i+2]);if(!opaque)pixels.push(image.data[i+3]);}
+  const native=doc.colorMode==='gray'?mergeGrayDocument(doc,doc.layers):null;
+  let image;
+  if(native&&native.samples.length===doc.width*doc.height){const data=new Uint8ClampedArray(w*h*4);for(let y=0;y<h;y++)for(let x=0;x<w;x++){const si=(y0+y)*doc.width+x0+x,di=(y*w+x)*4,g=native.samples[si];data[di]=data[di+1]=data[di+2]=g;data[di+3]=native.alpha[si];}image={width:w,height:h,data};}
+  else image=doc.composite().getContext('2d').getImageData(x0,y0,w,h);
+  const device=patternFromComposite(doc,image);
+  let channels,pixels,mode=doc.colorMode||'rgb';
+  if(device){channels=device.channels;pixels=device.pixels;mode=device.mode;}
+  else{let opaque=true;for(let i=3;i<image.data.length;i+=4)if(image.data[i]<255){opaque=false;break;}pixels=[];for(let i=0;i<image.data.length;i+=4){pixels.push(image.data[i],image.data[i+1],image.data[i+2]);if(!opaque)pixels.push(image.data[i+3]);}channels=opaque?3:4;mode='rgb';}
   const libs=libraries();
   const id=crypto.randomUUID();
-  const pat={id,name,width:w,height:h,channels:opaque?3:4,pixels};
+  const pat={id,name,width:w,height:h,mode,channels,pixels};
   if(!libs.patterns.some(q=>q.id===id))libs.patterns.push(pat);
   save(libs);
   return pat;

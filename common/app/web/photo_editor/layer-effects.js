@@ -1,4 +1,5 @@
 import {compositeTextGamma} from './text-gamma.js';
+import {effectHex,effectInkHex,inkInMode} from './device-paint.js';
 import {customBlends,compositeCustom} from './blend-modes.js';
 import {renderFill} from './fill-renderer.js';
 import {alphaMap,satinMap,bevelMaps,shadowMap,glowMap,narrowStrokeMap,wideStrokeMap} from './surface-effects.js';
@@ -7,13 +8,21 @@ const opacity=(value,fallback)=>Number.isFinite(Number(value))?Math.max(0,Math.m
 function silhouette(source,width,height,x,y,color='#ffffff',solid=false){const result=canvas(width,height),ctx=result.getContext('2d');if(solid){ctx.fillStyle=color;ctx.fillRect(x,y,source.width,source.height);return result;}ctx.drawImage(source,x,y);ctx.globalCompositeOperation='source-in';ctx.fillStyle=color;ctx.fillRect(0,0,width,height);return result;}
 function paintEffect(ctx,image,settings){if(settings.blend==='dissolve')settings={...settings,blend:'source-over'};if(customBlends.has(settings.blend)){compositeCustom(ctx.canvas,image,settings.blend,opacity(settings.opacity,1));return;}ctx.save();ctx.globalAlpha=opacity(settings.opacity,1);ctx.globalCompositeOperation=settings.blend||'source-over';ctx.drawImage(image,0,0);ctx.restore();}
 function innerEffect(base,settings,glow=false,origin=null){return glow?glowMap(alphaMap(base),base.width,base.height,settings,true,origin):shadowMap(alphaMap(base),base.width,base.height,settings,true,origin);}
+let effectDocument=null;
+export function useEffectDocument(doc){effectDocument=doc||null;}
+function withGlobalLight(effect){if(!effect?.useGlobalLight||!effectDocument?.globalLight)return effect;return {...effect,angle:effectDocument.globalLight.angle,altitude:effectDocument.globalLight.altitude};}
+function paintColor(color){return effectDocument?effectHex(effectDocument,color):color;}
+function paintStops(stops,inks){if(typeof stops!=='string')return stops;let index=0;return stops.replace(/#[0-9a-fA-F]{6}(?![0-9a-fA-F])/g,color=>{const ink=inks?.[index++],fromInk=ink&&ink.mode===effectDocument?.colorMode&&String(ink.hex||'').toLowerCase()===color.toLowerCase()?effectInkHex(effectDocument,ink):null;return fromInk||paintColor(color);});}
+function paintEffectRecord(effect){if(!effect||!effectDocument||effectDocument.colorMode==='rgb')return effect;const next={...effect};for(const key of ['color','highlightColor','shadowColor','colorA','colorB']){const ink=effect[key+'Ink'],hex=typeof next[key]==='string'?next[key]:'';const fromInk=ink&&ink.mode===effectDocument.colorMode&&String(ink.hex||'').toLowerCase()===hex.toLowerCase()?effectInkHex(effectDocument,ink):null;if(fromInk)next[key]=fromInk;else if(typeof next[key]==='string')next[key]=paintColor(next[key]);}if(typeof next.stops==='string')next.stops=paintStops(next.stops,effect.stopsInk);return next;}
+export function stampEffectInk(effects,ink,doc){const chosen=hex=>{const color=String(hex||'').toLowerCase();if(ink?.mode&&Array.isArray(ink.values)&&color===String(ink.hex||'').toLowerCase())return {mode:ink.mode,values:ink.values.slice(),hex:color};return ink?null:inkInMode(doc,color);};const visit=node=>{if(!node||typeof node!=='object')return;for(const [key,value] of Object.entries(node)){if(key==='stops'&&typeof value==='string'){const parts=[...value.matchAll(/#[0-9a-fA-F]{6}/g)].map(match=>match[0].toLowerCase());node.stopsInk=parts.map(hex=>chosen(hex));if(node.stopsInk.every(item=>!item))node.stopsInk=null;}else if(typeof value==='string'&&/^#[0-9a-fA-F]{6}$/.test(value)&&/color/i.test(key)){const next=chosen(value);if(next)node[key+'Ink']=next;else delete node[key+'Ink'];}else if(value&&typeof value==='object'&&!Array.isArray(value))visit(value);}};visit(effects);return effects;}
 export function renderEffects(source,effects,fillOpacity=1,transparencyShapes=true,blendInterior=false,shapeSource=source,layerBlend='source-over',origin={x:0,y:0},vectorStroke=null,backdrop=null,textGamma=1){
+  if(effectDocument&&effects)effects=Object.fromEntries(Object.entries(effects).map(([key,effect])=>[key,paintEffectRecord(effect)]));
   fillOpacity=opacity(fillOpacity,1);
-  if(!effects||!Object.values(effects).some(effect=>effect?.enabled)){if(fillOpacity===1)return{canvas:source,offsetX:0,offsetY:0};const output=canvas(source.width,source.height),ctx=output.getContext('2d');ctx.globalAlpha=fillOpacity;ctx.drawImage(source,0,0);return{canvas:output,offsetX:0,offsetY:0};}
-  const shadow=effects.shadow||{},stroke=effects.stroke||{},overlay=effects.overlay||{};
+  if(!effects||effects.enabled===false||!Object.values(effects).some(effect=>effect?.enabled)){if(fillOpacity===1)return{canvas:source,offsetX:0,offsetY:0};const output=canvas(source.width,source.height),ctx=output.getContext('2d');ctx.globalAlpha=fillOpacity;ctx.drawImage(source,0,0);return{canvas:output,offsetX:0,offsetY:0};}
+  const shadow=withGlobalLight(effects.shadow)||{},stroke=effects.stroke||{},overlay=effects.overlay||{};
   const blur=Math.max(0,Math.min(250,Number(shadow.blur)||0)),distance=Math.max(0,Math.min(500,Number(shadow.distance)||0)),size=Math.max(1,Math.min(50,Math.round(stroke.size)||1));
-  const inner=effects.innerShadow||{},outer=effects.outerGlow||{},innerGlow=effects.innerGlow||{};
-  const bevel=effects.bevel||{},satin=effects.satin||{};
+  const inner=withGlobalLight(effects.innerShadow)||{},outer=effects.outerGlow||{},innerGlow=effects.innerGlow||{};
+  const bevel=withGlobalLight(effects.bevel)||{},satin=withGlobalLight(effects.satin)||{};
   const padding=Math.ceil(Math.max(shadow.enabled?blur*3+distance:0,stroke.enabled?size:0,outer.enabled?Math.max(0,Math.min(250,Number(outer.blur)||0))*3:0,inner.enabled?Math.max(0,Math.min(250,Number(inner.blur)||0))*3+Math.max(0,Math.min(500,Number(inner.distance)||0)):0,innerGlow.enabled?Math.max(0,Math.min(250,Number(innerGlow.blur)||0))*3:0,bevel.enabled?Math.min(250,Number(bevel.size)||5)+Math.min(100,Number(bevel.soften)||0)+2:0,satin.enabled?Math.min(250,Number(satin.distance)||0)+Math.min(250,Number(satin.size)||0):0))+2;
   const width=source.width+padding*2,height=source.height+padding*2;
   if(width>32767||height>32767||width*height>64000000)throw Error('Layer effects exceed the image size limit.');

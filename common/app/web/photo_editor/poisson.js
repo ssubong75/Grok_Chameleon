@@ -14,6 +14,6 @@ export function solveMembrane(width,height,unknown,values,depth=0){
     sor(width,height,unknown,values,30,1.7);
   }else{const mean=knownSum/knownCount;for(let i=0;i<values.length;i++)if(unknown[i])values[i]=mean;sor(width,height,unknown,values,2000,1.85);}
 }
-export function seamlessClone(width,height,source,destination,mask){
-  const output=new Uint8ClampedArray(destination);for(let channel=0;channel<4;channel++){const values=new Float32Array(width*height);for(let i=0;i<values.length;i++)if(!mask[i])values[i]=(destination[i*4+channel]-source[i*4+channel])/255;solveMembrane(width,height,mask,values);for(let i=0;i<values.length;i++)if(mask[i])output[i*4+channel]=source[i*4+channel]+values[i]*255;}return output;
+export function seamlessClone(width,height,source,destination,mask,channels=4){
+  const output=new Uint8ClampedArray(destination);for(let channel=0;channel<channels;channel++){const values=new Float32Array(width*height);for(let i=0;i<values.length;i++)if(!mask[i])values[i]=(destination[i*channels+channel]-source[i*channels+channel])/255;solveMembrane(width,height,mask,values);for(let i=0;i<values.length;i++)if(mask[i])output[i*channels+channel]=Math.max(0,Math.min(255,Math.round(source[i*channels+channel]+values[i]*255)));}return output;
 }

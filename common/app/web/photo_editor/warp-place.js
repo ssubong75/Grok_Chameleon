@@ -1,5 +1,5 @@
 import {quadMapping} from './perspective.js';
-import {createStyleWarp} from './warp-presets.js';
+import {createStyleWarp,warpStyles} from './warp-presets.js';
 import {meshPoint} from './psd-smart.js';
 // Forward mesh rasterization of a placed warp. The homography maps the source-space frame
 // (custom control box, otherwise the source rectangle) onto the PSD corner quad.
@@ -9,6 +9,7 @@ function sourceMapper(spec,width,height){
   const bounds=spec.bounds||spec.frame,warp=createStyleWarp({warpStyle:spec.style,warpBend:spec.bend,warpHorizontal:spec.horizontal,warpVertical:spec.vertical,warpAxis:spec.axis},{x:bounds.x,y:bounds.y,w:bounds.width,h:bounds.height});
   return warp?(x,y)=>warp.point(x,y):(x,y)=>({x,y});
 }
+export function smartWarpOperation(width,height,settings={}){if(!Number.isInteger(width)||!Number.isInteger(height)||width<1||height<1)throw Error('the smart object has no pixels');const style=settings.style;if(!style&&!settings.mesh)throw Error('pass `style` (arc, flag, …, custom), `mesh` or `warp`');if(style==='none')return null;const frame={x:0,y:0,width,height},quad=[{x:0,y:0},{x:width,y:0},{x:width,y:height},{x:0,y:height}],base={type:'warpPlace',frame,quad,bounds:frame,domain:frame,interpolation:settings.interpolation==='nearest'||settings.interpolation==='bilinear'?settings.interpolation:'bicubic'};if(style==='custom'||settings.mesh){const mesh=settings.mesh;if(!mesh?.us||!mesh?.vs||!Array.isArray(mesh.points))throw Error('malformed mesh (need (3·cols+1)×(3·rows+1) points and knots 0..1)');return {...base,mesh};}if(!warpStyles.some(([id])=>id===style))throw Error('unknown warp style "'+style+'"');const bend=Number.isFinite(Number(settings.bend))?Number(settings.bend):50,horizontal=Number(settings.hDistort)||0,verticalDistort=Number(settings.vDistort)||0,axis=settings.vertical?'vertical':'horizontal';if(!createStyleWarp({warpStyle:style,warpBend:bend,warpHorizontal:horizontal,warpVertical:verticalDistort,warpAxis:axis},{x:0,y:0,w:width,h:height}))return null;return {...base,style,bend,horizontal,vertical:verticalDistort,axis};}
 export function warpPlaceBounds(width,height,spec,includeGrid=false){
   const frame=spec.frame,quad=spec.quad;
   if(!Number.isInteger(width)||!Number.isInteger(height)||width<1||height<1||!frame||!(frame.width>0)||!(frame.height>0)||!Array.isArray(quad)||quad.length!==4)throw Error('The placed warp is incomplete.');

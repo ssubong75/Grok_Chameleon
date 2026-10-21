@@ -1,0 +1,5 @@
+// PhotoCraft toggle_opentype. Standard ligatures start on. Other tags start off.
+export const openTypeTags={standardLigatures:'liga',contextualAlternates:'calt',discretionaryLigatures:'dlig',swash:'swsh',oldstyle:'onum',stylisticAlternates:'salt',titlingAlternates:'titl',ornaments:'ornm',ordinals:'ordn',fractions:'frac'};
+export function featureOn(text,tag){if(tag==='liga')return text?.ligatures!==false;if(tag==='dlig')return text?.discretionaryLigatures===true;return (text?.features||[]).some(feature=>feature.tag===tag&&feature.value>0);}
+export function setFeature(text,tag,on){const next={...text,features:[...(text?.features||[])]};if(tag==='liga')next.ligatures=on;else if(tag==='dlig')next.discretionaryLigatures=on;else{next.features=next.features.filter(feature=>feature.tag!==tag);if(on)next.features.push({tag,value:1});}return next;}
+export function toggleOpenType(text,tag,on){const enabled=on==null?!featureOn(text,tag):Boolean(on);return {text:setFeature(text,tag,enabled),on:enabled};}

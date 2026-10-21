@@ -1,1 +1,1 @@
-export {renderType,layoutType,typeMatrix,redrawTypeLayer} from './text-layout.js';
+export {renderType,layoutType,typeMatrix,redrawTypeLayer,stampTypeInk} from './text-layout.js';

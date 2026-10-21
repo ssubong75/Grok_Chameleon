@@ -43,8 +43,8 @@ export function writePat(patterns){
   const out=[...'8BPT'].map(c=>c.charCodeAt(0));
   put16(out,1);put32(out,patterns.length);
   for(const pattern of patterns){
-    const w=pattern.width,h=pattern.height,channels=pattern.channels||3;
-    put32(out,1);put32(out,3);put16(out,h);put16(out,w);
+    const w=pattern.width,h=pattern.height,modeName=pattern.mode||'rgb',colorCount=modeName==='cmyk'?4:modeName==='gray'?1:3,channels=pattern.channels||colorCount,fileMode=modeName==='cmyk'?4:modeName==='lab'?9:modeName==='gray'?1:3;
+    put32(out,1);put32(out,fileMode);put16(out,h);put16(out,w);
     const units=[...pattern.name].map(ch=>ch.charCodeAt(0)).concat(0);
     put32(out,units.length);for(const u of units)put16(out,u);
     const id=new TextEncoder().encode(pattern.id||crypto.randomUUID()).slice(0,255);
@@ -54,7 +54,8 @@ export function writePat(patterns){
     put32(body,24);
     const planes=[];
     for(let c=0;c<channels;c++){const plane=[];for(let i=0;i<w*h;i++)plane.push(pattern.pixels[i*channels+c]);planes.push(plane);}
-    const alpha=channels===4?planes.pop():null;
+    const alpha=channels===colorCount+1?planes.pop():null;
+    if(modeName==='cmyk')for(const plane of planes)for(let i=0;i<plane.length;i++)plane[i]=255-plane[i];
     const array=plane=>{put32(body,1);const data=encodePlane(plane,w,h);put32(body,23+data.length);put32(body,8);for(const v of [0,0,h,w])put32(body,v);put16(body,8);body.push(1,...data);};
     for(const plane of planes)array(plane);
     for(let i=planes.length;i<24;i++)put32(body,0);
@@ -89,10 +90,11 @@ export function readPat(bytes){
     };
     for(let i=0;i<slots&&v<body.length;i++){const plane=readArray();if(plane)planes.push(plane);}
     while(v+4<=body.length){const plane=readArray();if(plane)planes.push(plane);}
-    const color=planes.slice(0,Math.min(3,planes.length)),alpha=planes.length>3?planes.at(-1):null;
-    const channels=alpha?4:3,pixels=[];
-    for(let i=0;i<width*height;i++){for(let c=0;c<3;c++)pixels.push(color[c]?.[i]||0);if(alpha)pixels.push(alpha[i]);}
-    patterns.push({id,name,width,height,channels,pixels});
+    const modeName=mode===4?'cmyk':mode===9?'lab':mode===1||mode===8?'gray':'rgb',colorCount=modeName==='cmyk'?4:modeName==='gray'?1:3,color=planes.slice(0,colorCount),alpha=planes.length>colorCount?planes[colorCount]:null;
+    if(modeName==='cmyk')for(const plane of color)for(let i=0;i<plane.length;i++)plane[i]=255-plane[i];
+    const channels=colorCount+(alpha?1:0),pixels=[];
+    for(let i=0;i<width*height;i++){for(let c=0;c<colorCount;c++)pixels.push(color[c]?.[i]||0);if(alpha)pixels.push(alpha[i]);}
+    patterns.push({id,name,width,height,mode:modeName,channels,pixels});
   }
   return patterns;
 }

@@ -1,0 +1,13 @@
+// PhotoCraft paragraph styles. Basic Paragraph is implicit, can be duplicated, and cannot be deleted.
+const FIELDS={size:'size',size_pt:'size',font_family:'font',font:'font',color:'color',italic:'italic',bold:'bold',underline:'underline',fontWeight:'fontWeight',align:'align'};
+export function paragraphStyles(doc){if(!Array.isArray(doc.paragraphStyles))doc.paragraphStyles=[];return doc.paragraphStyles;}
+function nextId(styles){const max=styles.reduce((id,style)=>Math.max(id,style.id|0),0);if(max>=0xffffffff)throw Error('no free paragraph style id');return max+1;}
+function uniqueName(styles){const taken=new Set(['Basic Paragraph',...styles.map(style=>style.name)]);for(let i=1;i<100000;i++){const name='Paragraph Style '+i;if(!taken.has(name))return name;}return '';}
+function copyAttrs(attrs){const out={};for(const [key,value] of Object.entries(attrs||{})){if(!FIELDS[key])throw Error('unknown attribute '+key);out[key]=value;}return out;}
+export function newParagraphStyle(styles,options={}){const name=typeof options.name==='string'&&options.name.trim()?options.name.trim():uniqueName(styles);if(!name||name==='Basic Paragraph')throw Error('name the style');const style={id:nextId(styles),name,attrs:copyAttrs(options.attrs)};styles.push(style);return style;}
+export function listParagraphStyles(styles){return [{id:0,name:'Basic Paragraph',attrs:{}},...styles.map(style=>({id:style.id,name:style.name,attrs:{...style.attrs}}))];}
+function requireStyle(styles,id,allowBasic=false){if((id|0)===0){if(allowBasic)return {id:0,name:'Basic Paragraph',attrs:{}};throw Error("Basic Paragraph can't be changed this way");}const style=styles.find(item=>item.id===(id|0));if(!style)throw Error('no style with id '+id);return style;}
+export function renameParagraphStyle(styles,id,name){const style=requireStyle(styles,id),next=String(name||'').trim();if(!next)throw Error('name the style');style.name=next;return style;}
+export function duplicateParagraphStyle(styles,id){const style=requireStyle(styles,id,true),copy={id:nextId(styles),name:style.name+' copy',attrs:{...style.attrs}};if((id|0)===0)styles.unshift(copy);else styles.splice(styles.indexOf(style)+1,0,copy);return copy;}
+export function deleteParagraphStyle(styles,id){const style=requireStyle(styles,id);styles.splice(styles.indexOf(style),1);}
+export function applyParagraphAttrs(text,style){const next={...text,paragraphStyleId:style.id};for(const [key,value] of Object.entries(style.attrs||{})){const field=FIELDS[key];if(!field)throw Error('unknown attribute '+key);next[field]=key==='size'||key==='size_pt'?Number(value):value;}return next;}

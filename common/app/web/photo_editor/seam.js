@@ -213,6 +213,26 @@ export function skinMask(w,h,ch,img){
   }
   return m;
 }
+export function scaleChannelBytes(w,h,ch,bytes,nw,nh,amount,protect,skinBytes){
+  const img=new Float32Array(bytes.length);
+  for(let i=0;i<bytes.length;i++)img[i]=bytes[i]/255;
+  let guard=protect&&protect.length===w*h?Float32Array.from(protect):null;
+  if(skinBytes&&skinBytes.length===w*h*4){
+    const rgb=new Float32Array(skinBytes.length);
+    for(let i=0;i<skinBytes.length;i++)rgb[i]=skinBytes[i]/255;
+    const skin=skinMask(w,h,4,rgb);
+    if(!guard)guard=skin;else for(let i=0;i<guard.length;i++)guard[i]=Math.max(guard[i],skin[i]);
+  }
+  const a=Math.max(0,Math.min(1,Number(amount)||0));
+  const carved=a>0?carve(w,h,ch,img,guard,nw,nh):null;
+  const plain=a<1?resizeBilinear(w,h,ch,img,nw,nh):null;
+  const out=new Uint8Array(nw*nh*ch);
+  for(let i=0;i<out.length;i++){
+    const v=carved&&plain?plain[i]+(carved[i]-plain[i])*a:carved?carved[i]:plain[i];
+    out[i]=Math.max(0,Math.min(255,Math.round(v*255)));
+  }
+  return out;
+}
 export function seamScale(image,nw,nh,amount,protect){
   const w=image.width,h=image.height,ch=4,img=new Float32Array(image.data.length);
   for(let i=0;i<image.data.length;i++)img[i]=image.data[i]/255;

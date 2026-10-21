@@ -139,3 +139,35 @@ export function convertProfileToSrgb(image,profile,options={}){
   if(['A2B0','A2B1','A2B2'].some(name=>tags.has(name)))return convertLutRgbToSrgb(image,bytes,options);
   return convertMatrixRgbToSrgb(image,bytes,options);
 }
+
+const SPACE_CHANNELS={'RGB ':3,'GRAY':1,'CMYK':4,'Lab ':3,'XYZ ':3};
+function monotonicInverse(fn){
+  const n=4096,samples=new Float64Array(n+1);
+  for(let i=0;i<=n;i++)samples[i]=fn(i/n);
+  return y=>{
+    const t=Math.max(samples[0],Math.min(samples[n],y));
+    let lo=0,hi=n;
+    while(lo<hi){const mid=(lo+hi)>>1;if(samples[mid]<t)lo=mid+1;else hi=mid;}
+    if(!lo)return 0;
+    const y0=samples[lo-1],y1=samples[lo],f=y1===y0?0:(t-y0)/(y1-y0);
+    return (lo-1+f)/n;
+  };
+}
+/** Parsed ICC profile. LUT tags win over matrix/TRC, matching PhotoCraft `device_to_pcs`. */
+export function readIccModel(value){
+  const bytes=validateProfile(value),space=sig(16)(bytes),pcs=sig(20)(bytes)==='Lab '?'lab':'xyz',version=bytes[8],tags=tagsOf(bytes);
+  const channels=SPACE_CHANNELS[space];
+  if(!channels)throw Error('Unsupported ICC colour space '+JSON.stringify(space)+'.');
+  const whiteTag=tags.get('wtpt');
+  let white=D50.slice();
+  if(whiteTag){if(whiteTag.length<20||sig(0)(whiteTag)!=='XYZ ')throw Error('Unsupported ICC media white point.');white=[s15(whiteTag,8),s15(whiteTag,12),s15(whiteTag,16)];}
+  const readLuts=(names,a2b)=>names.map(name=>tags.has(name)?parseLutTag(tags.get(name),a2b):null);
+  const model={bytes,space,pcs,version,white,channels,a2b:readLuts(['A2B0','A2B1','A2B2'],true),b2a:readLuts(['B2A0','B2A1','B2A2'],false),columns:null,curves:null,invCurves:null,gray:null,grayInv:null,id:null,description:''};
+  if(space==='RGB '&&tags.has('rXYZ')){
+    model.columns=['rXYZ','gXYZ','bXYZ'].map(key=>{const tag=tags.get(key);if(!tag||tag.length<20||sig(0)(tag)!=='XYZ ')throw Error('Unsupported ICC colorant type.');return [s15(tag,8),s15(tag,12),s15(tag,16)];});
+    model.curves=['rTRC','gTRC','bTRC'].map(key=>{const tag=tags.get(key);if(!tag)throw Error('Missing ICC '+key+' tag.');return curveFrom(tag,0).eval;});
+    model.invCurves=model.curves.map(monotonicInverse);
+  }
+  if(space==='GRAY'&&tags.has('kTRC')){model.gray=curveFrom(tags.get('kTRC'),0).eval;model.grayInv=monotonicInverse(model.gray);}
+  return model;
+}
