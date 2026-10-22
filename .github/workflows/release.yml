@@ -328,6 +328,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Windows input ZIP CRC check failed." }
           & $sevenZip x -y "-o$env:GITHUB_WORKSPACE\unpack" $inputZip
           if ($LASTEXITCODE -ne 0) { throw "Windows extraction failed." }
+          # Remove only files retired by the explicit pre-JavaScript rollback.
+          foreach ($retired in Get-Content (Join-Path $env:GITHUB_WORKSPACE "tools\photo-editor-rollback-files.txt")) {
+            if ($retired -and -not (Test-Path -LiteralPath (Join-Path $env:GITHUB_WORKSPACE "common/app/$retired"))) {
+              $retiredPath = Join-Path $appRoot $retired
+              if (Test-Path -LiteralPath $retiredPath) { Remove-Item -LiteralPath $retiredPath -Force }
+            }
+          }
           $editor = Join-Path $appRoot "web\photo-editor-web"
           Copy-Item (Join-Path $env:GITHUB_WORKSPACE "common\app\web\photo-editor-web\*") $editor -Force
           $nativeDir = Join-Path $appRoot "editor"
@@ -768,6 +775,12 @@ jobs:
           main_app="$root/Grok Chameleon.app"
           migration_app="$root/Migration.app"
           app_root="$main_app/Contents/Resources/app"
+          # Keep the runtime ZIP but discard the exact retired editor file list.
+          while IFS= read -r retired; do
+            if [[ -n "$retired" && ! -f "$GITHUB_WORKSPACE/common/app/$retired" ]]; then
+              rm -f "$app_root/$retired"
+            fi
+          done < "$GITHUB_WORKSPACE/tools/photo-editor-rollback-files.txt"
           editor="$app_root/web/photo-editor-web"
           cp -f "$GITHUB_WORKSPACE/common/app/web/photo-editor-web/"* "$editor"/
           mkdir -p "$app_root/editor"
