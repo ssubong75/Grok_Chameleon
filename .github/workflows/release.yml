@@ -271,6 +271,17 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Windows input ZIP CRC check failed." }
           & $sevenZip x -y "-o$env:GITHUB_WORKSPACE\unpack" $inputZip
           if ($LASTEXITCODE -ne 0) { throw "Windows extraction failed." }
+          # Retire PhotoCraft and its JavaScript port from the runtime input ZIP.
+          foreach ($retiredDir in @("web/photo_editor", "web/photo-editor-web", "editor")) {
+            $retiredPath = Join-Path $appRoot $retiredDir
+            if (Test-Path -LiteralPath $retiredPath) { Remove-Item -LiteralPath $retiredPath -Recurse -Force }
+          }
+          foreach ($retired in Get-Content (Join-Path $env:GITHUB_WORKSPACE "tools/photo-editor-rollback-files.txt")) {
+            if ($retired -and -not (Test-Path -LiteralPath (Join-Path $env:GITHUB_WORKSPACE "common/app/$retired"))) {
+              $retiredPath = Join-Path $appRoot $retired
+              if (Test-Path -LiteralPath $retiredPath) { Remove-Item -LiteralPath $retiredPath -Force }
+            }
+          }
           $managedSourceExtensions = [System.Collections.Generic.HashSet[string]]::new(
             [System.StringComparer]::OrdinalIgnoreCase
           )
@@ -699,6 +710,13 @@ jobs:
           main_app="$root/Grok Chameleon.app"
           migration_app="$root/Migration.app"
           app_root="$main_app/Contents/Resources/app"
+          # Retire the exact PhotoCraft files while preserving the existing editor.
+          rm -rf "$app_root/web/photo_editor" "$app_root/web/photo-editor-web" "$app_root/editor"
+          while IFS= read -r retired; do
+            if [[ -n "$retired" && ! -f "$GITHUB_WORKSPACE/common/app/$retired" ]]; then
+              rm -f "$app_root/$retired"
+            fi
+          done < "$GITHUB_WORKSPACE/tools/photo-editor-rollback-files.txt"
           common_root="$GITHUB_WORKSPACE/$VARIANT_COMMON_DIR/app"
           shared_relatives=(
             electron/main.js
