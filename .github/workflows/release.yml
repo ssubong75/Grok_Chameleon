@@ -76,58 +76,7 @@ env:
   COMMON_FFMPEG_LICENSE: common/app/vendor/ffmpeg/COPYING.LGPLv2.1
 
 jobs:
-  build-editor-windows:
-    if: github.event_name == 'push'
-    runs-on: windows-2025
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Build the native editor
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $src = Join-Path $env:GITHUB_WORKSPACE "photo-src"
-          git init $src
-          git -C $src remote add origin https://github.com/storytold/photocraft.git
-          git -C $src fetch --depth 1 origin 8d2e615ab93d424c4ec25ab15b4edb5368d1f9a6
-          git -C $src checkout --detach FETCH_HEAD
-          git -C $src apply --whitespace=nowarn (Join-Path $env:GITHUB_WORKSPACE "tools\photocraft-editor.patch")
-          cargo build --manifest-path (Join-Path $src "Cargo.toml") -p photocraft --release
-          New-Item -ItemType Directory -Force (Join-Path $env:GITHUB_WORKSPACE "editor-windows") | Out-Null
-          Copy-Item (Join-Path $src "target\release\photocraft.exe") (Join-Path $env:GITHUB_WORKSPACE "editor-windows\photocraft.exe") -Force
-      - uses: actions/upload-artifact@v6
-        with:
-          name: editor-windows
-          path: editor-windows/photocraft.exe
-          if-no-files-found: error
-
-  build-editor-macos:
-    if: github.event_name == 'push'
-    runs-on: macos-15
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Build the native editor
-        run: |
-          set -euo pipefail
-          git init photo-src
-          git -C photo-src remote add origin https://github.com/storytold/photocraft.git
-          git -C photo-src fetch --depth 1 origin 8d2e615ab93d424c4ec25ab15b4edb5368d1f9a6
-          git -C photo-src checkout --detach FETCH_HEAD
-          git -C photo-src apply --whitespace=nowarn "$GITHUB_WORKSPACE/tools/photocraft-editor.patch"
-          cargo build --manifest-path photo-src/Cargo.toml -p photocraft --release
-          mkdir -p editor-macos
-          cp photo-src/target/release/photocraft editor-macos/photocraft
-      - uses: actions/upload-artifact@v6
-        with:
-          name: editor-macos
-          path: editor-macos/photocraft
-          if-no-files-found: error
-
   build-windows:
-    needs: build-editor-windows
     if: github.event_name == 'push'
     runs-on: windows-2025
     timeout-minutes: 35
@@ -150,12 +99,6 @@ jobs:
     steps:
       - name: Check out the shared source commit
         uses: actions/checkout@v5
-
-      - name: Download the native editor
-        uses: actions/download-artifact@v7
-        with:
-          name: editor-windows
-          path: editor-windows
 
       - name: Download the exact Windows runtime package
         id: windows_input
@@ -328,18 +271,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Windows input ZIP CRC check failed." }
           & $sevenZip x -y "-o$env:GITHUB_WORKSPACE\unpack" $inputZip
           if ($LASTEXITCODE -ne 0) { throw "Windows extraction failed." }
-          # Remove only files retired by the explicit pre-JavaScript rollback.
-          foreach ($retired in Get-Content (Join-Path $env:GITHUB_WORKSPACE "tools\photo-editor-rollback-files.txt")) {
-            if ($retired -and -not (Test-Path -LiteralPath (Join-Path $env:GITHUB_WORKSPACE "common/app/$retired"))) {
-              $retiredPath = Join-Path $appRoot $retired
-              if (Test-Path -LiteralPath $retiredPath) { Remove-Item -LiteralPath $retiredPath -Force }
-            }
-          }
-          $editor = Join-Path $appRoot "web\photo-editor-web"
-          Copy-Item (Join-Path $env:GITHUB_WORKSPACE "common\app\web\photo-editor-web\*") $editor -Force
-          $nativeDir = Join-Path $appRoot "editor"
-          New-Item -ItemType Directory -Force $nativeDir | Out-Null
-          Copy-Item (Join-Path $env:GITHUB_WORKSPACE "editor-windows\photocraft.exe") (Join-Path $nativeDir "photocraft.exe") -Force
           $managedSourceExtensions = [System.Collections.Generic.HashSet[string]]::new(
             [System.StringComparer]::OrdinalIgnoreCase
           )
@@ -717,7 +648,6 @@ jobs:
           retention-days: 3
 
   build-macos:
-    needs: build-editor-macos
     if: github.event_name == 'push'
     runs-on: macos-15
     timeout-minutes: 35
@@ -740,12 +670,6 @@ jobs:
     steps:
       - name: Check out the shared source commit
         uses: actions/checkout@v5
-
-      - name: Download the native editor
-        uses: actions/download-artifact@v7
-        with:
-          name: editor-macos
-          path: editor-macos
 
       - name: Download the exact Mac runtime package
         id: macos_input
@@ -775,17 +699,6 @@ jobs:
           main_app="$root/Grok Chameleon.app"
           migration_app="$root/Migration.app"
           app_root="$main_app/Contents/Resources/app"
-          # Keep the runtime ZIP but discard the exact retired editor file list.
-          while IFS= read -r retired; do
-            if [[ -n "$retired" && ! -f "$GITHUB_WORKSPACE/common/app/$retired" ]]; then
-              rm -f "$app_root/$retired"
-            fi
-          done < "$GITHUB_WORKSPACE/tools/photo-editor-rollback-files.txt"
-          editor="$app_root/web/photo-editor-web"
-          cp -f "$GITHUB_WORKSPACE/common/app/web/photo-editor-web/"* "$editor"/
-          mkdir -p "$app_root/editor"
-          cp -f "$GITHUB_WORKSPACE/editor-macos/photocraft" "$app_root/editor/photocraft"
-          chmod +x "$app_root/editor/photocraft"
           common_root="$GITHUB_WORKSPACE/$VARIANT_COMMON_DIR/app"
           shared_relatives=(
             electron/main.js

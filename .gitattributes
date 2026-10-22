@@ -1,5 +1,1 @@
 common/migration/migration.py text eol=lf
-# The editor page checks these bytes. A Windows checkout must not turn them into CRLF.
-common/app/web/photo-editor-web/*.html text eol=lf
-common/app/web/photo-editor-web/*.js text eol=lf
-common/app/web/photo-editor-web/*.wasm binary

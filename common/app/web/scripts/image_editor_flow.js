@@ -184,37 +184,12 @@ function restoreImageEditorReturnPost(snapshotText, postPath, provider, returnBa
   }
 }
 
-function imageEditorBlobToBase64(blob) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const text = String(reader.result || "");
-      const comma = text.indexOf(",");
-      resolve(comma >= 0 ? text.slice(comma + 1) : text);
-    };
-    reader.onerror = () => reject(reader.error || new Error("이미지를 읽지 못했습니다."));
-    reader.readAsDataURL(blob);
-  });
-}
-
-function clearImageEditorReturnKeys() {
-  [
-    IMAGE_EDITOR_SAVED_KEY,
-    IMAGE_EDITOR_SAVE_TARGET_KEY,
-    IMAGE_EDITOR_RETURN_PROVIDER_KEY,
-    IMAGE_EDITOR_RETURN_POST_KEY,
-    IMAGE_EDITOR_RETURN_ITEM_KEY,
-    IMAGE_EDITOR_RETURN_BACK_KEY,
-    IMAGE_EDITOR_RETURN_POST_SNAPSHOT_KEY,
-    IMAGE_EDITOR_RETURN_CONTEXT_KEY,
-  ].forEach((key) => sessionStorage.removeItem(key));
-}
-
 let detailImageEditorOpening = false;
 
 async function openDetailImageEditor(provider = "build") {
   if (detailImageEditorOpening) return;
   detailImageEditorOpening = true;
+  let frameKey = "";
   try {
   const normalizedProvider = provider === "imagine" ? "imagine" : "build";
   const prefix = normalizedProvider === "imagine" ? "i" : "b";
@@ -235,8 +210,6 @@ async function openDetailImageEditor(provider = "build") {
       : (post.items || []).find(item => detailItemType(item) === "video"
         && sameImageEditorMediaUrl(detailMediaUrlForItem(prefix, item, post), sourceUrl)));
   if (!target || !sourceUrl) throw new Error("화면에 표시된 파일과 라이브러리 항목이 일치하지 않습니다. 다른 이미지로 대체하지 않고 편집을 중단했습니다.");
-  let imageBase64 = "";
-  let mime = "image/png";
   if (video && !image) {
     if (typeof detailAudioEditor !== "undefined" && detailAudioEditor?.player === media.querySelector(".video-player")) {
       stopDetailTimeline(detailAudioEditor);
@@ -244,18 +217,21 @@ async function openDetailImageEditor(provider = "build") {
     const black = Boolean(media.querySelector(".audio_edit_black:not([hidden])"));
     const blob = await captureDetailImageEditorFrame(video, stillSelected, black);
     if (!stillSelected()) throw new Error("선택한 영상이 변경됐습니다. 다시 시도해 주세요.");
-    imageBase64 = await imageEditorBlobToBase64(blob);
-    mime = blob.type || "image/png";
+    frameKey = await imageEditorTransfer.put(blob);
+    if (!stillSelected()) throw new Error("선택한 영상이 변경됐습니다. 다시 시도해 주세요.");
     sourceUrl = detailMediaUrlForItem(prefix, target, post) || sourceUrl;
-  } else {
-    const response = await fetch(sourceUrl);
-    if (!response.ok) throw new Error("편집할 이미지를 읽지 못했습니다.");
-    const blob = await response.blob();
-    if (!stillSelected()) throw new Error("선택한 파일이 변경됐습니다. 다시 시도해 주세요.");
-    imageBase64 = await imageEditorBlobToBase64(blob);
-    mime = blob.type || mime;
   }
   const saveTarget = normalizedProvider === "imagine" ? "upload" : "detail";
+  const url = new URL("/editor.html", window.location.origin);
+  url.searchParams.set("item_id", `${post.folder_path}::${mediaItemKey(target)}`);
+  url.searchParams.set("source", sourceUrl);
+  url.searchParams.set("name", target.title || target.file || post.title || "Image");
+  url.searchParams.set("provider", normalizedProvider);
+  url.searchParams.set("save_target", saveTarget);
+  if (frameKey) url.searchParams.set("frame_key", frameKey);
+  const returnUrl = new URL(window.location.href);
+  returnUrl.hash = `${prefix}_detail`;
+  url.searchParams.set("return", `${returnUrl.pathname}${returnUrl.search}${returnUrl.hash}`);
   sessionStorage.setItem(IMAGE_EDITOR_RETURN_PROVIDER_KEY, normalizedProvider);
   sessionStorage.setItem(IMAGE_EDITOR_RETURN_POST_KEY, post.folder_path || "");
   sessionStorage.setItem(IMAGE_EDITOR_RETURN_ITEM_KEY, mediaItemKey(target));
@@ -270,19 +246,13 @@ async function openDetailImageEditor(provider = "build") {
     searchQuery: library_state.searchQuery || "",
   }));
   sessionStorage.setItem(IMAGE_EDITOR_INTERNAL_NAVIGATION_KEY, "editor");
-  if (!window.grokChameleonNative?.openPhotoEditor) throw new Error("Photo Editor를 찾지 못했습니다.");
-  const opened = await window.grokChameleonNative.openPhotoEditor({
-    image_base64: imageBase64,
-    mime,
-    item_id: `${post.folder_path}::${mediaItemKey(target)}`,
-    source_url: sourceUrl,
-    name: target.title || target.file || post.title || "Image",
-    provider: normalizedProvider,
-    save_target: saveTarget,
-  });
-  if (opened && opened.ok === false) throw new Error(opened.error || "Photo Editor를 열지 못했습니다.");
+  if (typeof browserHistoryCursor === "number") {
+    sessionStorage.setItem(IMAGE_EDITOR_HISTORY_CURSOR_KEY, String(browserHistoryCursor));
+    sessionStorage.setItem(IMAGE_EDITOR_HISTORY_TAIL_KEY, String(browserHistoryTail));
+  }
+  window.location.replace(url.toString());
   } catch (error) {
-    clearImageEditorReturnKeys();
+    if (frameKey) await imageEditorTransfer.remove(frameKey).catch(() => {});
     showErrorPanel("이미지 편집기를 열지 못했습니다", error?.message || "현재 파일을 전달하지 못했습니다.");
   } finally {
     detailImageEditorOpening = false;
@@ -419,18 +389,4 @@ async function consumeImageEditorReturn() {
   );
   renderDetailViews();
   if (typeof renderComposerAttachments === "function") renderComposerAttachments();
-}
-
-if (window.grokChameleonNative?.onPhotoEditorDone) {
-  window.grokChameleonNative.onPhotoEditorDone((payload) => {
-    const saved = payload?.saved;
-    if (saved?.itemId) {
-      sessionStorage.setItem(IMAGE_EDITOR_SAVED_KEY, saved.itemId);
-      if (saved.saveTarget) sessionStorage.setItem(IMAGE_EDITOR_SAVE_TARGET_KEY, saved.saveTarget);
-      else sessionStorage.removeItem(IMAGE_EDITOR_SAVE_TARGET_KEY);
-      consumeImageEditorReturn().catch((error) => showErrorPanel("저장한 이미지를 열지 못했습니다", error?.message || "저장 결과를 반영하지 못했습니다."));
-      return;
-    }
-    clearImageEditorReturnKeys();
-  });
 }

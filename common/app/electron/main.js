@@ -9,7 +9,6 @@ const {
   LibraryBackup,
   inspectPaths: inspectLibraryBackupPaths,
 } = require("./library-backup");
-const { createPhotoEditorHost } = require("./photo-editor-host");
 
 const APP_NAME = "Grok Chameleon";
 const APP_BUNDLE_IDENTIFIER = "local.grokchameleon.app";
@@ -451,10 +450,6 @@ const BRIDGE_WINDOW_HEIGHT = 760;
 if (process.platform === "darwin") {
   app.commandLine.appendSwitch("disable-audio-input");
 }
-
-app.commandLine.appendSwitch("enable-unsafe-webgpu");
-app.commandLine.appendSwitch("ignore-gpu-blocklist");
-app.commandLine.appendSwitch("disable-gpu-sandbox");
 
 if (CDP_PORT && CDP_PORT !== "0") {
   app.commandLine.appendSwitch("remote-debugging-port", CDP_PORT);
@@ -1195,7 +1190,6 @@ function shutdownServerNow(notifyServer = true) {
 async function exitAppNow(reason = "app-exit") {
   if (appTerminating) return;
   appTerminating = true;
-  stopPhotoEditor();
   app.isQuitting = true;
   appendLog(`app exit reason=${reason}`);
   // A backup that is midway through has already replaced files in the destination but has not
@@ -4273,23 +4267,6 @@ function queuePromptTranslation(payload = {}) {
   return task;
 }
 
-const photoEditorHost = createPhotoEditorHost({
-  resourcesPath: process.resourcesPath,
-  serverBase: SERVER_BASE,
-  log: (line) => appendLog(line),
-});
-
-function stopPhotoEditor() {
-  if (mainWindow && !mainWindow.isDestroyed()) photoEditorHost.stop(mainWindow);
-}
-
-function openPhotoEditor(payload = {}) {
-  return photoEditorHost.open(payload, mainWindow);
-}
-
-ipcMain.handle("grok-chameleon:open-photo-editor", async (_event, payload = {}) => openPhotoEditor(payload));
-ipcMain.handle("grok-chameleon:photo-editor-save", async (event, bytes) => photoEditorHost.save(event, bytes));
-ipcMain.handle("grok-chameleon:photo-editor-close", async (event) => photoEditorHost.close(event));
 ipcMain.handle("grok-chameleon:warm-imagine-usage", async (_event, payload = {}) => warmUsagePage(usageCommandFromPayload(payload)));
 ipcMain.handle("grok-chameleon:activate-imagine-account", async (_event, payload = {}) => (
   activateImagineAccountTab(usageCommandFromPayload(payload))

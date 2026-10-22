@@ -52,15 +52,6 @@ contextBridge.exposeInMainWorld("grokChameleonNative", {
   cancelLibraryBackup() {
     return ipcRenderer.invoke("grok-chameleon:library-backup-cancel");
   },
-  openPhotoEditor(payload) {
-    return ipcRenderer.invoke("grok-chameleon:open-photo-editor", payload || {});
-  },
-  onPhotoEditorDone(callback) {
-    if (typeof callback !== "function") return () => {};
-    const listener = (_event, payload) => callback(payload || {});
-    ipcRenderer.on("grok-chameleon:photo-editor-done", listener);
-    return () => ipcRenderer.removeListener("grok-chameleon:photo-editor-done", listener);
-  },
   onLibraryBackupProgress(callback) {
     if (typeof callback !== "function") return () => {};
     const listener = (_event, payload) => callback(payload || {});
