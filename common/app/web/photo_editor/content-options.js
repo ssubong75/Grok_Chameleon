@@ -1,2 +1,0 @@
-// PhotoCraft content_options: name the editor the active layer opens.
-export function contentEditor(layer){if(!layer)throw Error('no active layer');if(layer.kind==='adjustment')return {editor:'adjustment:'+(layer.adjustment?.name||layer.adjustment?.kind||'unknown')};if(layer.fill)return {editor:'fill'};if(layer.text&&typeof layer.text.value==='string')return {editor:'text'};if(layer.kind==='smart')return {editor:'smartObject'};if(layer.shape)return {editor:'shape'};throw Error((layer.kind||'pixel')+' layers have no content options');}

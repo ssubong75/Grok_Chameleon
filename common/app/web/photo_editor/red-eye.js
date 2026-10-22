@@ -1,9 +1,0 @@
-// Click-local pupil correction ported from PhotoCraft algo/redeye.rs.
-export function correctRedEye(image,click,{pupil=50,darken=50}={}){const {width:w,height:h,data:p}=image,n=w*h,radius=Math.max(8,Math.min(128,4+1.2*Math.max(1,Math.min(100,pupil)))),amount=Math.max(0,Math.min(1,darken/100)),hard=new Uint8Array(n);let seed=-1,nearest=Infinity;
-  for(let y=0;y<h;y++)for(let x=0;x<w;x++){const i=y*w+x,j=i*4,r=p[j]/255,g=p[j+1]/255,b=p[j+2]/255,d=(x-click.x)**2+(y-click.y)**2;if(d>radius*radius||r<=g+.15||r<=b+.15||.2126*r+.7152*g+.0722*b>=.92||Math.max(r,g,b)-Math.min(r,g,b)<.08)continue;hard[i]=1;if(d<nearest){nearest=d;seed=i;}}
-  if(seed<0)return false;const keep=new Uint8Array(n),stack=[seed];keep[seed]=1;while(stack.length){const i=stack.pop(),x=i%w,y=Math.floor(i/w);for(const j of [x>0?i-1:-1,x+1<w?i+1:-1,y>0?i-w:-1,y+1<h?i+w:-1])if(j>=0&&hard[j]&&!keep[j]){keep[j]=1;stack.push(j);}}
-  const eroded=new Float32Array(n);for(let y=1;y<h-1;y++)for(let x=1;x<w-1;x++){let on=1;for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++)on&=keep[(y+dy)*w+x+dx];eroded[y*w+x]=on;}
-  const kernel=[];let sum=0;for(let i=-3;i<=3;i++){const v=Math.exp(-i*i/(2*.8*.8));kernel.push(v);sum+=v;}for(let i=0;i<kernel.length;i++)kernel[i]/=sum;const temp=new Float32Array(n),soft=new Float32Array(n);
-  for(let y=0;y<h;y++)for(let x=0;x<w;x++)for(let k=-3;k<=3;k++)temp[y*w+x]+=eroded[y*w+Math.max(0,Math.min(w-1,x+k))]*kernel[k+3];for(let y=0;y<h;y++)for(let x=0;x<w;x++)for(let k=-3;k<=3;k++)soft[y*w+x]+=temp[Math.max(0,Math.min(h-1,y+k))*w+x]*kernel[k+3];
-  let changed=false;for(let y=0;y<h;y++)for(let x=0;x<w;x++){const i=y*w+x,j=i*4,t=soft[i]*amount;if(t<=.0001||(x-click.x)**2+(y-click.y)**2>radius*radius||(.2126*p[j]+.7152*p[j+1]+.0722*p[j+2])/255>=.92)continue;const neutral=(p[j+1]+p[j+2])/2,scale=1-.45*t;p[j]=(p[j]+(neutral-p[j])*t)*scale;p[j+1]*=scale;p[j+2]*=scale;changed=true;}return changed;
-}

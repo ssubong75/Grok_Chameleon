@@ -1,2 +1,0 @@
-// PhotoCraft General Export Clipboard gates only OS clipboard mirroring.
-export async function publishClipboardImage(canvas,{enabled,host}){if(!enabled()||!host?.writeClipboard)return null;const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/png'));if(!blob||!enabled())return null;const bytes=new Uint8Array(await blob.arrayBuffer());if(!enabled())return null;const result=await host.writeClipboard(bytes),canonical=result?.byteLength||result?.length?result:await host.readClipboard?.();return canonical?new Uint8Array(canonical):bytes;}

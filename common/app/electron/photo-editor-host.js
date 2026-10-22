@@ -1,17 +1,9 @@
-const {createRecentFiles}=require('./photo-editor-recents.js');
-const {createFileSave}=require('./photo-editor-file-save.js');
-const {encodeLosslessWebp}=require('./photo-editor-webp.js');
-const {createHistoryLogWriter}=require('./photo-editor-history-log.js');
-const {createRecoveryStore}=require('./photo-editor-recovery.js');
-const {createSettingsStore}=require('./photo-editor-settings.js');
-const {installEditorMenu}=require('./photo-editor-menu.js');
+const { spawn } = require("node:child_process");
 const fs = require("node:fs");
-const { fontMetadata } = require("./font-metadata.js");
 const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
-const { app, WebContentsView, dialog } = require("electron");
-const { randomUUID } = require("node:crypto");
+const { app } = require("electron");
 
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -141,7 +133,7 @@ function fontIndex() {
   }
   for (const dir of dirs) walk(dir, 0);
   files.sort();
-  fontCatalog = files.flatMap((file, index) => { const faces = fontMetadata(file); return faces.length ? faces.map(face => ({ id: `${index}-${face.faceIndex}`, name: path.basename(file), file, ...face })) : [{ id: String(index), name: path.basename(file), file, family: path.basename(file).replace(/\.(ttf|otf|ttc|otc)$/i, ""), aliases: [], weight: 400, weightMin: 400, weightMax: 400, style: "normal", faceIndex: 0 }]; });
+  fontCatalog = files.map((file, index) => ({ id: String(index), name: path.basename(file), file }));
   return fontCatalog;
 }
 
@@ -151,8 +143,8 @@ function systemFontFile(pathname) {
   const rest = pathname.slice(prefix.length);
   const slash = rest.indexOf("/");
   if (slash <= 0) return null;
-  let id, name;
-  try { id = decodeURIComponent(rest.slice(0, slash)); name = decodeURIComponent(rest.slice(slash + 1)); } catch (_) { return null; }
+  const id = rest.slice(0, slash);
+  const name = rest.slice(slash + 1);
   if (!id || !name || name.includes("/") || name.includes("\\") || name.includes("..")) return null;
   const found = fontIndex().find((entry) => entry.id === id && entry.name === name);
   return found ? found.file : null;
@@ -174,38 +166,20 @@ function streamFile(response, file) {
   fs.createReadStream(file).pipe(response);
 }
 
-function createPhotoEditorHost({ serverBase, log }) {
-  let nativeMenu,previousWindowTitle;
-  function updateTitle(event,title){if(!view||event.sender!==view.webContents||!session||typeof title!=='string'||title.length>1000)return;const owner=view.webContents.getOwnerBrowserWindow();if(owner&&!owner.isDestroyed())owner.setTitle(title||'Photo Editor');}
-  function updateMenu(event,model){if(!view||event.sender!==view.webContents||!session)return;nativeMenu?.update(event,model);}
-  let settingsStore,recoveryStore,workspaceStore,recentStore;
-  async function recovery(event,operation,value){if(!view||event.sender!==view.webContents||!session)throw Error('Photo Editor session is unavailable.');recoveryStore??=createRecoveryStore(path.join(app.getPath('userData'),'photo-editor','recovery'));return recoveryStore.handle(operation,value);}
-  async function workspaceState(event,value=null){if(!view||event.sender!==view.webContents||!session)throw Error('Photo Editor session is unavailable.');workspaceStore??=createSettingsStore(path.join(app.getPath('userData'),'photo-editor'),'workspace.json');if(value!==null){if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).some(key=>!['dockLayout','workspace','workspaces','rulers','recentFonts'].includes(key)||typeof value[key]!=='string'))throw Error('Invalid workspace state.');}return value===null?workspaceStore.read():workspaceStore.write(value);}
-  async function preferences(event,value=null){if(!view||event.sender!==view.webContents||!session)throw Error('Photo Editor session is unavailable.');settingsStore??=createSettingsStore(path.join(app.getPath('userData'),'photo-editor'));return value===null?settingsStore.read():settingsStore.write(value);}
-
-  const appendLogEntry=createHistoryLogWriter(async()=>{settingsStore??=createSettingsStore(path.join(app.getPath('userData'),'photo-editor'));return settingsStore.read();});
-  async function historyLog(event,line){if(!view||event.sender!==view.webContents||!session)throw Error('Photo Editor session is unavailable.');return appendLogEntry(line);}
-  async function webp(event,bytes){if(!view||event.sender!==view.webContents||!session)throw Error('Photo Editor session is unavailable.');return encodeLosslessWebp(bytes);}
-  async function exportRaster(event,value,name){
-    if(!view||event.sender!==view.webContents||!session)throw Error('Photo Editor session is unavailable.');const current=view,currentSession=session,bytes=Buffer.from(value);if(!bytes.length||bytes.length>256*1024*1024||typeof name!=='string'||path.basename(name)!==name)throw Error('Invalid export.');settingsStore??=createSettingsStore(path.join(app.getPath('userData'),'photo-editor'));const prefs=await settingsStore.read();let destination,automatic=false;
-    if(prefs?.quickExportLocation==='sameFolder'&&String(session.sourceUrl).startsWith('file:')){try{const source=require('node:url').fileURLToPath(session.sourceUrl);if((await fs.promises.stat(source)).isFile()){const candidate=path.join(path.dirname(source),name);try{await fs.promises.lstat(candidate);}catch(error){if(error.code==='ENOENT'){destination=candidate;automatic=true;}else throw error;}}}catch{}}
-    if(!destination){const selected=await dialog.showSaveDialog(current.webContents.getOwnerBrowserWindow(),{title:'Quick Export',defaultPath:name});if(selected.canceled||!selected.filePath)return {cancelled:true};destination=selected.filePath;}
-    if(view!==current||session!==currentSession)throw Error('Photo Editor session changed.');const handle=await fs.promises.open(destination,fs.constants.O_WRONLY|fs.constants.O_CREAT|(automatic?fs.constants.O_EXCL:fs.constants.O_TRUNC)|fs.constants.O_NOFOLLOW,0o600);try{await handle.writeFile(bytes);await handle.sync();}finally{await handle.close();}return {saved:true};
-  }
-  async function recentFiles(event,operation,value){if(!view||event.sender!==view.webContents||!session)throw Error('Photo Editor session is unavailable.');recentStore??=createRecentFiles(path.join(app.getPath('userData'),'photo-editor'),async()=>{settingsStore??=createSettingsStore(path.join(app.getPath('userData'),'photo-editor'));return settingsStore.read();});if(!['list','remember','open','clear'].includes(operation))throw Error('Unknown recent-file operation.');return recentStore[operation](value);}
-  const root = path.join(__dirname, "..", "web", "photo_editor");
+function createPhotoEditorHost({ resourcesPath, serverBase, log }) {
+  const bundled = path.join(__dirname, "..", "web", "photo-editor-web");
+  const legacy = path.join(resourcesPath, "photo-editor-web");
+  const root = fs.existsSync(path.join(bundled, "index.html")) ? bundled : legacy;
   let server = null;
   let port = 0;
   let view = null;
-  let opening = false;
+  let editorProcess = null;
   let fit = null;
   let session = null;
   let sourcePath = "";
-  let sourceDir = "";
   let sourceType = "image/png";
   let fileName = "source.png";
   let finishing = false;
-  const linkedFiles = new Map();
 
   function fail(error) {
     return { ok: false, error: String(error || "Photo Editor를 열지 못했습니다.") };
@@ -223,11 +197,11 @@ function createPhotoEditorHost({ serverBase, log }) {
         response.setHeader("Cache-Control", "no-store");
         if (url.pathname === "/host/session.json") {
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-          response.end(JSON.stringify({ file: fileName, name: session?.name || fileName, languages: systemLanguages() }));
+          response.end(JSON.stringify({ file: fileName, languages: systemLanguages() }));
           return;
         }
         if (url.pathname === "/host/font-index.json") {
-          const index = fontIndex().map(({ file, ...entry }) => entry);
+          const index = fontIndex().map(({ id, name }) => ({ id, name }));
           response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
           response.end(JSON.stringify(index));
           return;
@@ -287,16 +261,16 @@ function createPhotoEditorHost({ serverBase, log }) {
   function finish(win, saved) {
     if (finishing) return;
     finishing = true;
-    nativeMenu?.dispose();nativeMenu=null;
-    if(previousWindowTitle!==undefined&&win&&!win.isDestroyed())win.setTitle(previousWindowTitle);previousWindowTitle=undefined;
     const current = view;
     view = null;
+    const child = editorProcess;
+    editorProcess = null;
     session = null;
-    linkedFiles.clear();
-    if (sourceDir) {
-      try { fs.rmSync(sourceDir, { recursive: true, force: true }); } catch (_) {}
-      sourceDir = "";
-      sourcePath = "";
+    if (child) {
+      try { child.kill(); } catch (_) {}
+    }
+    if (sourcePath) {
+      try { fs.unwatchFile(path.join(path.dirname(sourcePath), "save.png")); } catch (_) {}
     }
     if (fit && win && !win.isDestroyed()) {
       for (const event of ["resize", "maximize", "unmaximize", "enter-full-screen", "leave-full-screen"]) {
@@ -304,66 +278,29 @@ function createPhotoEditorHost({ serverBase, log }) {
       }
     }
     fit = null;
-    if (current) {
-      if (win && !win.isDestroyed()) {
-        try { win.contentView.removeChildView(current); } catch (_) {}
-      }
+    if (current && win && !win.isDestroyed()) {
+      try { win.contentView.removeChildView(current); } catch (_) {}
       try { current.webContents.close(); } catch (_) {}
     }
     if (win && !win.isDestroyed()) {
-      win.webContents.focus();
       win.webContents.send("grok-chameleon:photo-editor-done", { saved: saved || null });
     }
-  }
-
-  async function linkedFile(event, token = null) {
-    if (!view || event.sender !== view.webContents || !session) throw new Error("Photo Editor session is unavailable.");
-    const current = view, currentSession = session;
-    let file, key = token;
-    if (token === null) {
-      const selected = await dialog.showOpenDialog(current.webContents.getOwnerBrowserWindow(), {
-        title: "Relink Smart Object", properties: ["openFile"],
-        filters: [{ name: "Smart Object Source", extensions: ["png", "jpg", "jpeg", "webp", "gif", "bmp", "psd", "psb", "tif", "tiff", "gcphoto"] }],
-      });
-      if (selected.canceled || !selected.filePaths.length) return { cancelled: true };
-      file = await fs.promises.realpath(selected.filePaths[0]);key = randomUUID();
-    } else {
-      if (typeof token !== "string" || !linkedFiles.has(token)) throw new Error("Relink this file before refreshing it in this session.");
-      file = linkedFiles.get(token);
-    }
-    if (view !== current || session !== currentSession || current.webContents.isDestroyed()) throw new Error("Photo Editor session changed.");
-    const handle = await fs.promises.open(file, "r");
-    let bytes, before;
-    try {
-      before = await handle.stat();
-      if (!before.isFile() || !Number.isSafeInteger(before.size) || before.size < 1 || before.size > 256 * 1024 * 1024) throw new Error("Linked source must be a file of at most 256 MiB.");
-      bytes = Buffer.alloc(before.size);let offset = 0;
-      while (offset < bytes.length) { const part = await handle.read(bytes, offset, bytes.length - offset, offset);if (!part.bytesRead) throw new Error("Linked source changed while reading.");offset += part.bytesRead; }
-      const after = await handle.stat();
-      if (before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) throw new Error("Linked source changed while reading. Try again.");
-    } finally { await handle.close(); }
-    if (view !== current || session !== currentSession || current.webContents.isDestroyed()) throw new Error("Photo Editor session changed.");
-    linkedFiles.set(key, file);
-    return { token: key, path: file, name: path.basename(file), size: before.size, modified: before.mtimeMs, bytes: new Uint8Array(bytes) };
   }
 
   async function save(event, bytes) {
     if (!view || event.sender !== view.webContents) throw new Error("Photo Editor가 열려 있지 않습니다.");
     if (!session) throw new Error("편집 세션이 없습니다.");
-    const current = view;
-    const currentSession = session;
-    const owner = current.webContents.getOwnerBrowserWindow();
     const image = `data:image/png;base64,${Buffer.from(bytes).toString("base64")}`;
     const response = await fetch(`${serverBase}/api/image-editor/save`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        item_id: currentSession.itemId,
-        source_url: currentSession.sourceUrl,
-        name: currentSession.name,
+        item_id: session.itemId,
+        source_url: session.sourceUrl,
+        name: session.name,
         image,
-        provider: currentSession.provider,
-        save_target: currentSession.saveTarget,
+        provider: session.provider,
+        save_target: session.saveTarget,
       }),
     });
     const text = await response.text();
@@ -375,10 +312,9 @@ function createPhotoEditorHost({ serverBase, log }) {
     }
     const itemId = parsed?.item?.id ? String(parsed.item.id) : "";
     if (!itemId) throw new Error(parsed.error || parsed.message || "Chameleon did not accept the image");
-    const saveTarget = parsed?.item?.metadata?.editor_save_target || currentSession.saveTarget || "";
-    setTimeout(() => {
-      if (view === current && session === currentSession) finish(owner, { itemId, saveTarget });
-    }, 0);
+    const saveTarget = parsed?.item?.metadata?.editor_save_target || session.saveTarget || "";
+    const owner = view.webContents.getOwnerBrowserWindow();
+    setTimeout(() => finish(owner, { itemId, saveTarget }), 0);
     return { ok: true };
   }
 
@@ -388,74 +324,75 @@ function createPhotoEditorHost({ serverBase, log }) {
     return { ok: true };
   }
 
+  function editorBinary() {
+    const name = process.platform === "win32" ? "photocraft.exe" : "photocraft";
+    return path.join(__dirname, "..", "editor", name);
+  }
+
   async function open(payload, win) {
-    if (view || opening) return fail("Photo Editor가 이미 열려 있습니다.");
-    if (!win || win.isDestroyed()) return fail("창이 없습니다.");
-    if (!fs.existsSync(path.join(root, "index.html"))) return fail("JavaScript Photo Editor가 앱 안에 없습니다.");
+    if (view || editorProcess) return fail("Photo Editor가 이미 열려 있습니다.");
+    const exe = editorBinary();
+    if (!fs.existsSync(exe)) return fail("Photo Editor 프로그램이 앱 안에 없습니다.");
     const raw = String(payload.image_base64 || "");
     if (!raw) return fail("편집할 이미지가 비어 있습니다.");
-    const requestedMime = String(payload.mime || "").toLowerCase().split(";")[0].trim();
-    const sourceFormats = {
-      "image/jpeg": ["source.jpg", "image/jpeg"],
-      "image/jpg": ["source.jpg", "image/jpeg"],
-      "image/png": ["source.png", "image/png"],
-      "image/webp": ["source.webp", "image/webp"],
-      "image/gif": ["source.gif", "image/gif"],
-      "image/bmp": ["source.bmp", "image/bmp"],
+    const mime = String(payload.mime || "image/png");
+    const jpeg = mime.includes("jpeg") || mime.includes("jpg");
+    fileName = jpeg ? "source.jpg" : "source.png";
+    sourceType = jpeg ? "image/jpeg" : "image/png";
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "photo-editor-"));
+    sourcePath = path.join(dir, fileName);
+    fs.writeFileSync(sourcePath, Buffer.from(raw, "base64"));
+    session = {
+      itemId: String(payload.item_id || ""),
+      sourceUrl: String(payload.source_url || ""),
+      name: String(payload.name || "Image"),
+      provider: String(payload.provider || "build"),
+      saveTarget: String(payload.save_target || "detail"),
     };
-    [fileName, sourceType] = sourceFormats[requestedMime] || sourceFormats["image/png"];
-    opening = true;
+    if (!win || win.isDestroyed()) return fail("창이 없습니다.");
+    const savePath = path.join(dir, "save.png");
     finishing = false;
-    try {
-      sourceDir = fs.mkdtempSync(path.join(os.tmpdir(), "photo-editor-"));
-      sourcePath = path.join(sourceDir, fileName);
-      fs.writeFileSync(sourcePath, Buffer.from(raw, "base64"));
-      session = {
-        itemId: String(payload.item_id || ""),
-        sourceUrl: String(payload.source_url || ""),
-        name: String(payload.name || "Image"),
-        provider: String(payload.provider || "build"),
-        saveTarget: String(payload.save_target || "detail"),
-      };
-      const editorPort = await listen();
-      if (finishing || win.isDestroyed()) throw new Error("편집기 열기가 취소되었습니다.");
-      const current = new WebContentsView({
-        webPreferences: {
-          preload: path.join(__dirname, "photo-editor-preload.js"),
-          contextIsolation: true,
-          nodeIntegration: false,
-          sandbox: true,
-        },
+    const child = spawn(exe, ["--new-instance", "--", sourcePath], {
+      env: { ...process.env, GROK_CHAMELEON_SAVE_PATH: savePath },
+      windowsHide: false,
+    });
+    editorProcess = child;
+    child.once("exit", () => {
+      if (editorProcess === child) finish(win, null);
+    });
+    fs.watchFile(savePath, { interval: 400 }, async () => {
+      if (!session || editorProcess !== child) return;
+      let bytes;
+      try { bytes = fs.readFileSync(savePath); } catch (_) { return; }
+      if (!bytes.length) return;
+      try { fs.unlinkSync(savePath); } catch (_) {}
+      const image = `data:image/png;base64,${bytes.toString("base64")}`;
+      const response = await fetch(`${serverBase}/api/image-editor/save`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          item_id: session.itemId,
+          source_url: session.sourceUrl,
+          name: session.name,
+          image,
+          provider: session.provider,
+          save_target: session.saveTarget,
+        }),
       });
-      view = current;
-      previousWindowTitle=win.getTitle();win.setTitle(session.name);
-      nativeMenu=installEditorMenu(current.webContents);
-      current.webContents.setZoomFactor(1);
-      current.setBackgroundColor("#202020");
-      current.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-      current.webContents.once("destroyed", () => {
-        if (view === current) finish(win, null);
-      });
-      current.webContents.on("render-process-gone", () => {
-        if (view === current) finish(win, null);
-      });
-      win.contentView.addChildView(current);
-      fit = () => layout(win);
-      for (const event of ["resize", "maximize", "unmaximize", "enter-full-screen", "leave-full-screen"]) {
-        win.on(event, fit);
+      const text = await response.text();
+      let parsed = {};
+      try { parsed = JSON.parse(text); } catch (_) {}
+      if (!response.ok) {
+        log(`photo editor save failed ${parsed.error || text}`);
+        return;
       }
-      layout(win);
-      await current.webContents.loadURL(`http://127.0.0.1:${editorPort}/index.html`);
-      if (view !== current || current.webContents.isDestroyed()) throw new Error("편집기가 닫혔습니다.");
-      current.webContents.focus();
-      log("photo editor JavaScript photo_editor");
-      return { ok: true };
-    } catch (error) {
-      finish(win, null);
-      return fail(error);
-    } finally {
-      opening = false;
-    }
+      const itemId = parsed?.item?.id ? String(parsed.item.id) : "";
+      if (!itemId) return;
+      const saveTarget = parsed?.item?.metadata?.editor_save_target || session.saveTarget || "";
+      finish(win, { itemId, saveTarget });
+    });
+    log(`photo editor native ${exe}`);
+    return { ok: true };
   }
 
   function stop(win) {
@@ -466,8 +403,7 @@ function createPhotoEditorHost({ serverBase, log }) {
     }
   }
 
-  const fileSave=createFileSave({dialog,getContext:()=>({view,session})});
-  return { open, stop, save, close, linkedFile, preferences, recovery, workspaceState,historyLog,webp,exportRaster,recentFiles,updateMenu,updateTitle,fileSave };
+  return { open, stop, save, close };
 }
 
 module.exports = { createPhotoEditorHost };

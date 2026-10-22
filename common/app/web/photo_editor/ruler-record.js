@@ -1,2 +1,0 @@
-// Bounded saved ruler data; independent of UI/bitmap rendering.
-export function rulerRecord(value){if(value==null)return null;const point=p=>p&&Number.isFinite(p.x)&&Number.isFinite(p.y)&&Math.abs(p.x)<=1e9&&Math.abs(p.y)<=1e9;if(!point(value.start)||!point(value.end)||value.protractor!=null&&!point(value.protractor))throw Error('Invalid ruler measurement.');return{start:{...value.start},end:{...value.end},protractor:value.protractor?{...value.protractor}:null};}
