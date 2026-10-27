@@ -582,6 +582,7 @@ module.exports = {
   localAudioPeaks,
   readLocalAudio,
   resolveEditInput: resolveInput,
+  audioSourcePath,
   saveAudioEdit,
   stampStem,
   uniqueStampedName,

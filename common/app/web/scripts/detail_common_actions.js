@@ -255,7 +255,12 @@ async function extractSelectedDetailAudio(prefix) {
   detailAudioExtractionBusy = true;
   buttons.forEach(button => { button.disabled = true; });
   try {
+    const editor = typeof detailAudioEditor !== "undefined" ? detailAudioEditor : null;
+    const edited = editor && editor.prefix === prefix && editor.payload.url === url;
+    const audioClips = edited ? detailPriorityAudioClips(editor.audioClips).map(serializeDetailAudioClip) : null;
+    if (edited && !audioClips.length) throw new Error("추출할 오디오 클립이 없습니다.");
     const result = await window.grokChameleonNative.extractAudio({
+      ...(edited ? {audioClips} : {}),
       provider: prefix === "i" ? "imagine" : "build", url,
       name: item.file || item.title || post.title || "video",
     });
