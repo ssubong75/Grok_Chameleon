@@ -186,7 +186,7 @@ async function captureSelectedDetailFrame() {
     const image = canvas.toDataURL("image/png");
     const capturedAt = new Date();
     const twoDigits = value => String(value).padStart(2, "0");
-    const name = `${twoDigits(capturedAt.getFullYear() % 100)}${twoDigits(capturedAt.getMonth() + 1)}${twoDigits(capturedAt.getDate())}_${twoDigits(capturedAt.getHours())}${twoDigits(capturedAt.getMinutes())}.png`;
+    const name = `${twoDigits(capturedAt.getFullYear() % 100)}${twoDigits(capturedAt.getMonth() + 1)}${twoDigits(capturedAt.getDate())}_${twoDigits(capturedAt.getHours())}${twoDigits(capturedAt.getMinutes())}${twoDigits(capturedAt.getSeconds())}.png`;
     const imagine = screen === "i_detail";
     const data = await qApi(imagine ? "/api/uploads/save" : "/api/library/capture-frame", imagine ? {
       provider: "imagine",

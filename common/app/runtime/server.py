@@ -24184,7 +24184,7 @@ def unique_file_name(parent: Path, preferred_stem: str, extension: str) -> str:
 
 
 def timestamp_media_file_name(parent: Path, extension: str = "png", *, upload_folders: bool = False) -> str:
-    stem = datetime.now().strftime("%y%m%d_%H%M")
+    stem = datetime.now().strftime("%y%m%d_%H%M%S")
     if upload_folders:
         existing = {f"{entry.name}.{extension}".casefold() for entry in parent.iterdir() if entry.is_dir()}
         existing.update(entry.name.casefold() for entry in parent.glob("*/*") if entry.is_file())
@@ -28563,7 +28563,7 @@ def merge_selected_posts(payload: dict) -> dict:
     if any(source_dir.resolve() == target_parent.resolve() or path_inside(source_dir, target_parent) for source_dir in source_dirs):
         raise RuntimeError("Select a destination outside the cards being merged.")
 
-    target_stem = datetime.now().strftime("%y%m%d_%H%M")
+    target_stem = datetime.now().strftime("%y%m%d_%H%M%S")
     target_name = target_stem
     duplicate_index = 1
     while (target_parent / target_name).exists():
