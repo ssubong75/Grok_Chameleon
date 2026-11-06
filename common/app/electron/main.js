@@ -1717,6 +1717,9 @@ function createMainWindow() {
     },
   });
   installEditableContextMenu(mainWindow);
+  mainWindow.webContents.once("did-finish-load", () => {
+    mainWindow.webContents.setZoomLevel(0);
+  });
   mainWindow.maximize();
   mainWindow.loadURL(`${SERVER_BASE}/?launch=${Date.now()}`);
   mainWindow.on("close", (event) => {
