@@ -970,6 +970,27 @@
     let state = record ? mediaStoreStateForRecord(record) : getMediaStoreState();
     state = ensureStoreLoginState(state, record, requestId, action);
     let readiness = storeAccountReadiness(state);
+    if (!readiness.loggedIn || !readiness.currentUserId) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), Math.max(1, deadline - Date.now()));
+      try {
+        const response = await nativeFetch('/api/auth/session', {
+          credentials: 'include',
+          signal: controller.signal,
+        });
+        const data = response.ok ? await response.json() : null;
+        const userId = data?.status === 'authenticated' ? String(data?.session?.userId || '').trim() : '';
+        if (userId) {
+          state = record ? mediaStoreStateForRecord(record) : getMediaStoreState();
+          state = ensureStoreLoginState(state, record, requestId, action, [], userId);
+          readiness = storeAccountReadiness(state);
+        }
+      } catch (_) {
+        // The normal readiness wait handles unavailable or incomplete sessions.
+      } finally {
+        clearTimeout(timer);
+      }
+    }
     while (!readiness.loggedIn || !readiness.currentUserId) {
       if (Date.now() >= deadline) {
         pushStoreTrace("store_account_prepare_timeout", {
@@ -995,7 +1016,7 @@
     return state;
   }
 
-  function ensureStoreLoginState(state, record, requestId, reason, ids = []) {
+  function ensureStoreLoginState(state, record, requestId, reason, ids = [], sessionUserId = '') {
     const beforeLoginChecked = loginCheckValue(state, reason);
     const alreadyReady = state?.loggedIn && state?.currentUserId && beforeLoginChecked === "true";
     if (alreadyReady) {
@@ -1009,7 +1030,7 @@
       return state;
     }
 
-    const desiredUserId = firstKnownUserId(state, ids);
+    const desiredUserId = firstKnownUserId(state, ids) || sessionUserId;
     let patched = false;
     if (desiredUserId) {
       const patch = {
