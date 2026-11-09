@@ -33,6 +33,9 @@ function closeDetailAudioEditor() {
   editor.audioContext?.close().catch(() => {});
   editor.picture?.pause();
   editor.picture?.remove();
+  editor.sparePicture?.pause();
+  editor.sparePicture?.remove();
+  editor.joinEvents?.abort();
   editor.video?.classList.remove("audio_edit_source_hidden");
   editor.black?.remove();
   editor.panel?.remove();
@@ -125,7 +128,9 @@ async function openDetailAudioEditor(prefix) {
   picture.playsInline = true;
   picture.muted = true;
   picture.preload = "auto";
-  player.append(black, picture, panel);
+  const sparePicture = picture.cloneNode();
+  sparePicture.muted = true;
+  player.append(black, picture, sparePicture, panel);
   const editor = {
     prefix,
     payload,
@@ -153,11 +158,26 @@ async function openDetailAudioEditor(prefix) {
     blobUrls: [],
     black,
     picture,
+    sparePicture,
+    shownPicture: video,
+    joinChecks: new Map(),
     mediaUrl: video.currentSrc || video.src,
     time: Number(video.currentTime) || 0,
     running: false,
   };
   detailAudioEditor = editor;
+  editor.joinEvents = new AbortController();
+  for (const element of [video, picture, sparePicture]) {
+    for (const event of ["loadedmetadata", "loadeddata", "seeked", "error"]) {
+      element.addEventListener(event, () => {
+        if (detailAudioEditor !== editor) return;
+        if (editor.pendingPicture) presentDetailTimeline(editor, editor.running);
+        else if (event === "loadedmetadata" && editor.activeClip && editor.shownPicture !== element) {
+          prewarmDetailPicture(editor, editor.activeClip, editor.shownPicture);
+        }
+      }, {signal: editor.joinEvents.signal});
+    }
+  }
   editor.onLayout = () => {
     const width = Number(video.videoWidth) || 0;
     const height = Number(video.videoHeight) || 0;
@@ -1155,9 +1175,11 @@ function startDetailTimeline(editor) {
     if (detailAudioEditor !== editor || !editor.running) return;
     const playEnd = detailPlayEnd(editor);
     const clip = editor.activeClip;
-    const element = clip ? ((clip.source && clip.source !== "original") ? editor.picture : editor.video) : null;
+    const element = clip ? editor.shownPicture : null;
     const rate = detailTimelineRate(editor);
-    if (clip && element && element.readyState < 2) {
+    if (editor.pendingPicture) {
+      presentDetailTimeline(editor, true);
+    } else if (clip && element && element.readyState < 2) {
       element.play().catch(() => {});
     } else if (clip && element && (element.ended || element.currentTime - clip.inPoint >= clip.duration - 0.000001)) {
       editor.time = clip.start + clip.duration + 0.000001;
@@ -1191,63 +1213,126 @@ function stopDetailTimeline(editor) {
   cancelAnimationFrame(editor.frame || 0);
   editor.video.pause();
   editor.picture?.pause();
+  editor.sparePicture?.pause();
   editor.previewNodes?.forEach(node => node.element.pause());
   paintDetailTimelineChrome(editor);
+}
+
+// Join checks are derived from the current timeline, never written to a clip.
+function detailPreviewJoin(editor, right) {
+  if (editor.gesture || !detailAudioNative()?.previewVideoJoin) return 0;
+  const clips = [...editor.videoClips].sort((a, b) => a.start - b.start);
+  if (clips.some((c, i) => i && c.start < clips[i - 1].start + clips[i - 1].duration - 1e-7)) return 0;
+  const left = clips[clips.indexOf(right) - 1];
+  if (!left || left.source === right.source || Math.abs(left.start + left.duration - right.start) >= 1e-7) return 0;
+  const describe = clip => ({source: clip.source || "original", inPoint: clip.inPoint, duration: clip.duration});
+  const pair = [describe(left), describe(right)];
+  const key = JSON.stringify(pair);
+  if (!editor.joinChecks.has(key)) {
+    const entry = {cut: null};
+    if (editor.joinChecks.size >= 100) editor.joinChecks.delete(editor.joinChecks.keys().next().value);
+    editor.joinChecks.set(key, entry);
+    detailAudioNative().previewVideoJoin({url: editor.payload.url, left: pair[0], right: pair[1]})
+      .then(cut => { entry.cut = Number.isFinite(cut) && cut > 0 ? cut : 0; }, () => { entry.cut = 0; })
+      .then(() => {
+        if (detailAudioEditor !== editor || editor.gesture) return;
+        if (editor.pendingPicture) presentDetailTimeline(editor, editor.running);
+        else if (editor.activeClip && editor.shownPicture) prewarmDetailPicture(editor, editor.activeClip, editor.shownPicture);
+      });
+  }
+  return editor.joinChecks.get(key).cut;
+}
+
+function prepareDetailPicture(element, url, local) {
+  if (url && element.dataset.src !== url) {
+    element.pause();
+    element.dataset.src = url;
+    element.src = url;
+  }
+  if (element.error) return false;
+  if (element.readyState < 1) return false;
+  if (Math.abs((element.currentTime || 0) - local) > 0.001) {
+    try { element.currentTime = local; } catch (error) { return false; }
+  }
+  return !element.seeking && element.readyState >= 2;
+}
+
+function prewarmDetailPicture(editor, clip, element) {
+  const end = clip.start + clip.duration;
+  const next = detailVideoClipAt(editor, end + 1e-8);
+  if (!next || next === clip || Math.abs(next.start - end) >= 1e-7) return;
+  const cut = detailPreviewJoin(editor, next);
+  if (cut === null) return;
+  if (next.source === "original") {
+    if (element !== editor.video) prepareDetailPicture(editor.video, "", next.inPoint + cut);
+  } else if (next.mediaUrl) {
+    const idle = element === editor.picture ? editor.sparePicture : editor.picture;
+    prepareDetailPicture(idle, next.mediaUrl, next.inPoint + cut);
+  }
 }
 
 function presentDetailTimeline(editor, playing) {
   const time = Math.max(0, Math.min(editor.time || 0, Math.max(detailPlayEnd(editor) - 0.000001, 0)));
   editor.time = time;
   const clip = detailVideoClipAt(editor, time);
-  editor.activeClip = clip;
-  const picture = editor.picture;
   const external = Boolean(clip && clip.source && clip.source !== "original");
+  const pictures = [editor.picture, editor.sparePicture];
+  const previous = editor.shownPicture;
+  editor.pendingPicture = false;
   if (!clip || (external && !clip.mediaUrl)) {
-    picture?.pause();
-    picture?.classList.remove("is-shown");
-    if (!clip) {
-      editor.video.pause();
-      editor.video.classList.add("audio_edit_source_hidden");
-      if (editor.black) editor.black.hidden = false;
+    for (const element of pictures) {
+      element.pause();
+      element.classList.remove("is-shown");
     }
+    editor.video.pause();
+    editor.video.classList.add("audio_edit_source_hidden");
+    if (editor.black) editor.black.hidden = false;
+    editor.activeClip = null;
+    editor.shownPicture = null;
     return;
   }
-  const element = external ? picture : editor.video;
-  element.loop = false;
-  const local = Math.max(0, clip.inPoint + (time - clip.start));
-  if (external) {
-    if (picture.dataset.src !== clip.mediaUrl) {
-      picture.dataset.src = clip.mediaUrl;
-      picture.dataset.ready = "";
-      picture.src = clip.mediaUrl;
-      picture.onloadeddata = () => {
-        if (picture.dataset.src !== clip.mediaUrl) return;
-        picture.dataset.ready = "1";
-        if (detailAudioEditor === editor && editor.activeClip === clip) {
-          picture.classList.add("is-shown");
-          editor.video.classList.add("audio_edit_source_hidden");
-          presentDetailTimeline(editor, editor.running);
-        }
-      };
+  const cut = detailPreviewJoin(editor, clip);
+  const offset = time - clip.start;
+  if (cut === null && offset < 0.1) {
+    previous?.pause();
+    editor.pendingPicture = true;
+    return;
+  }
+  const skipped = cut > 0 && offset < cut;
+  const local = clip.inPoint + (skipped ? cut : offset);
+  const element = external
+    ? (pictures.find(candidate => candidate.dataset.src === clip.mediaUrl && !candidate.error)
+      || pictures.find(candidate => candidate !== previous))
+    : editor.video;
+  const switching = editor.activeClip !== clip || previous !== element;
+  if (switching || !playing || skipped || Math.abs(element.currentTime - local) > 0.18) {
+    if (!prepareDetailPicture(element, external ? clip.mediaUrl : "", local)) {
+      previous?.pause();
+      editor.pendingPicture = !element.error;
+      if (editor.pendingPicture) return;
+      editor.activeClip = null;
+      editor.shownPicture = null;
+      for (const picture of pictures) picture.classList.remove("is-shown");
+      editor.video.classList.add("audio_edit_source_hidden");
+      if (editor.black) editor.black.hidden = false;
+      return;
     }
-    const ready = picture.dataset.ready === "1";
-    picture.classList.toggle("is-shown", ready);
-    editor.video.classList.toggle("audio_edit_source_hidden", ready);
-    if (ready) editor.video.pause();
-    if (editor.black) editor.black.hidden = true;
-    if (!ready) return;
-  } else {
-    picture?.classList.remove("is-shown");
-    picture?.pause();
-    editor.video.classList.remove("audio_edit_source_hidden");
-    if (editor.black) editor.black.hidden = true;
   }
-  if (Math.abs((element.currentTime || 0) - local) > (playing ? 0.18 : 0.000001)) {
-    try { element.currentTime = local; } catch (error) {}
+  if (skipped) {
+    editor.time = clip.start + cut;
+    editor.previewNodes.forEach(node => node.element.pause());
   }
+  for (const picture of pictures) picture.classList.toggle("is-shown", picture === element);
+  editor.video.classList.toggle("audio_edit_source_hidden", external);
+  if (editor.black) editor.black.hidden = true;
+  if (previous !== element) previous?.pause();
+  editor.activeClip = clip;
+  editor.shownPicture = element;
+  element.loop = false;
   element.playbackRate = detailTimelineRate(editor);
   if (playing) element.play().catch(() => {});
   else element.pause();
+  prewarmDetailPicture(editor, clip, element);
 }
 
 function paintDetailTimelineChrome(editor) {
@@ -1577,7 +1662,7 @@ function drawDetailAudioEditor() {
   editor.panel.querySelector(".audio_edit_redo").disabled = !editor.redoStack.length || Boolean(editor.gesture) || Boolean(editor.saving);
   const time = detailAudioNow();
   const cover = detailVideoClipAt(editor, time);
-  if (editor.black) editor.black.hidden = Boolean(cover) || !editor.duration;
+  if (editor.black && !editor.pendingPicture) editor.black.hidden = Boolean(cover?.mediaUrl || (cover && cover.source === "original")) || !editor.duration;
 }
 
 function drawDetailAudioTrack(context, editor, rect, trackId) {
@@ -1649,7 +1734,7 @@ function syncDetailAudioPreview() {
     const trackId = detailAudioTrackId(clip);
     if (!activeClips.has(trackId) && time >= clip.start && time < clip.start + clip.duration) activeClips.set(trackId, clip);
   });
-  const playing = detailTimelineCustom(editor) ? editor.running : !editor.video.paused;
+  const playing = detailTimelineCustom(editor) ? editor.running && !editor.pendingPicture : !editor.video.paused;
   editor.audioClips.forEach((clip) => {
     const node = ensureDetailAudioNode(editor, clip, context);
     if (!node) return;

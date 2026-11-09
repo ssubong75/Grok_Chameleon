@@ -16,6 +16,9 @@ contextBridge.exposeInMainWorld("grokChameleonNative", {
   audioPeaks(payload) {
     return ipcRenderer.invoke("grok-chameleon:audio-peaks", payload || {});
   },
+  previewVideoJoin(payload) {
+    return ipcRenderer.invoke("grok-chameleon:preview-video-join", payload || {});
+  },
   localAudioPeaks(payload) {
     return ipcRenderer.invoke("grok-chameleon:local-audio-peaks", payload || {});
   },

@@ -312,6 +312,56 @@ function librarySaveDirectory(rootText, relativePath) {
   return directory;
 }
 
+// Compare decoded frames rather than encoded bytes: the continuation may have
+// re-encoded the original end frame. Keep the tolerance small to preserve cuts.
+function readJoinFrame(ffmpeg, input, frame) {
+  return new Promise(resolve => {
+    execFile(ffmpeg, [
+      "-hide_banner", "-loglevel", "error", "-nostdin", "-i", input,
+      "-map", "0:v:0", "-an", "-sn", "-dn",
+      "-vf", `trim=start_frame=${frame},scale=64:64:flags=area`,
+      "-frames:v", "1", "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1",
+    ], {encoding: "buffer", timeout: 30000, maxBuffer: 1024 * 1024, windowsHide: true},
+    (error, stdout) => resolve(!error && stdout.length === 64 * 64 * 3 ? stdout : null));
+  });
+}
+
+async function duplicateJoinFrame(ffmpeg, leftInput, leftFrame, rightInput, rightFrame) {
+  const [left, right] = await Promise.all([
+    readJoinFrame(ffmpeg, leftInput, leftFrame),
+    readJoinFrame(ffmpeg, rightInput, rightFrame),
+  ]);
+  if (!left || !right) return false;
+  let total = 0;
+  for (let i = 0; i < left.length; i += 1) {
+    const diff = Math.abs(left[i] - right[i]);
+    if (diff > 16) return false;
+    total += diff;
+  }
+  return total <= 2 * left.length;
+}
+
+async function previewVideoJoin(payload, deps) {
+  const ffprobe = probeBinary(deps.ffmpeg || "");
+  if (!deps.ffmpeg || !ffprobe) return 0;
+  const {left, right} = payload;
+  if (!left || !right || left.source === right.source) return 0;
+  if (![left.inPoint, left.duration, right.inPoint, right.duration].every(Number.isFinite)
+      || left.inPoint < 0 || right.inPoint < 0 || left.duration <= 0 || right.duration <= 0) return 0;
+  const original = left.source === "original" || right.source === "original"
+    ? (await resolveInput(payload, deps)).input : "";
+  const source = clip => clip.source === "original" ? original : audioSourcePath(clip);
+  const leftInput = source(left), rightInput = source(right);
+  if (!leftInput || !rightInput || leftInput === rightInput) return 0;
+  const [a, b] = await Promise.all([probeMedia(ffprobe, leftInput), probeMedia(ffprobe, rightInput)]);
+  const endFrame = (clip, info) => Math.min(info.frameCount || Math.round(info.duration * info.fps),
+    Math.ceil((clip.inPoint + clip.duration) * info.fps - 1e-7));
+  const leftLast = endFrame(left, a) - 1;
+  const rightFirst = Math.ceil(right.inPoint * b.fps - 1e-7);
+  if (leftLast < 0 || endFrame(right, b) - rightFirst <= 1) return 0;
+  return await duplicateJoinFrame(deps.ffmpeg, leftInput, leftLast, rightInput, rightFirst) ? 1 / b.fps : 0;
+}
+
 async function saveAudioEdit(payload, deps) {
   if (!deps.ffmpeg) throw new Error("FFmpeg를 찾을 수 없습니다.");
   const ffprobe = probeBinary(deps.ffmpeg);
@@ -348,6 +398,8 @@ async function saveAudioEdit(payload, deps) {
     const inputInfo = new Map([[0, info]]);
     let previousOldEnd = 0;
     let previousEndFrame = 0;
+    let previousClip = null;
+    const inputPath = index => index ? extraPaths[index - 1] : input;
     for (const clip of orderedVideo) {
       const inputIndex = clip.inputIndex || 0;
       if (!inputInfo.has(inputIndex)) inputInfo.set(inputIndex, await probeMedia(ffprobe, extraPaths[inputIndex - 1]));
@@ -360,12 +412,22 @@ async function saveAudioEdit(payload, deps) {
       clip.sourceEndFrame = Math.min(totalFrames, Math.ceil((clip.inPoint + clip.duration) * sourceFps - 1e-7));
       if (clip.sourceEndFrame <= clip.sourceStartFrame) throw new Error("선택한 구간에 영상 프레임이 없습니다.");
       const gapFrames = Math.max(0, Math.round((clip.oldStart - previousOldEnd) * fps));
+      clip.removedHead = 0;
+      if (previousClip && Math.abs(clip.oldStart - previousOldEnd) < 1e-7
+          && inputPath(previousClip.inputIndex) !== inputPath(inputIndex)
+          && clip.sourceEndFrame - clip.sourceStartFrame > 1
+          && await duplicateJoinFrame(deps.ffmpeg, inputPath(previousClip.inputIndex),
+            previousClip.sourceEndFrame - 1, inputPath(inputIndex), clip.sourceStartFrame)) {
+        clip.sourceStartFrame += 1;
+        clip.removedHead = 1 / sourceFps;
+      }
       clip.startFrame = previousEndFrame + gapFrames;
       clip.frameCount = Math.max(1, Math.round((clip.sourceEndFrame - clip.sourceStartFrame) * fps / sourceFps));
       clip.start = clip.startFrame / fps;
       clip.duration = clip.frameCount / fps;
       previousOldEnd = clip.oldStart + clip.oldDuration;
       previousEndFrame = clip.startFrame + clip.frameCount;
+      previousClip = clip;
     }
     duration = previousEndFrame / fps;
     // Audio follows the video timeline. Remove audio-only tails instead of
@@ -374,12 +436,12 @@ async function saveAudioEdit(payload, deps) {
       let offset = 0;
       for (const clip of orderedVideo) {
         if (time < clip.oldStart) return time + offset;
-        if (time < clip.oldStart + clip.oldDuration - 1e-9) return clip.start + Math.min(time - clip.oldStart, clip.duration);
+        if (time < clip.oldStart + clip.oldDuration - 1e-9) return clip.start + Math.min(Math.max(0, time - clip.oldStart - clip.removedHead), clip.duration);
         offset = clip.start + clip.duration - clip.oldStart - clip.oldDuration;
       }
       return time + offset;
     };
-    const boundaries = orderedVideo.flatMap(clip => [clip.oldStart, clip.oldStart + Math.min(clip.duration, clip.oldDuration), clip.oldStart + clip.oldDuration]);
+    const boundaries = orderedVideo.flatMap(clip => [clip.oldStart, clip.oldStart + clip.removedHead, clip.oldStart + Math.min(clip.removedHead + clip.duration, clip.oldDuration), clip.oldStart + clip.oldDuration]);
     audioClips = audioClips.flatMap(audio => {
       const end = audio.start + audio.duration;
       const points = [...new Set([audio.start, end, ...boundaries.filter(time => time > audio.start && time < end)])].sort((a, b) => a - b);
@@ -584,6 +646,7 @@ module.exports = {
   resolveEditInput: resolveInput,
   audioSourcePath,
   saveAudioEdit,
+  previewVideoJoin,
   stampStem,
   uniqueStampedName,
 };
