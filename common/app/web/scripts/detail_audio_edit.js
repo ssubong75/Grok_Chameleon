@@ -321,7 +321,6 @@ function bindDetailAudioEditor(editor) {
     if (track !== (editor.activeAudioTrack || 1)) {
       editor.selection = null;
       editor.selectedClipIds = [];
-      editor.target = editor.videoClips.some(clip => detailAudioTrackId(clip) === track) ? "both" : "audio";
     }
     editor.activeAudioTrack = track;
     if (track !== 1 && !editor.videoClips.some(clip => detailAudioTrackId(clip) === track)) editor.target = "audio";
@@ -1399,6 +1398,14 @@ function detailAudioGuides(editor, width) {
   return guides;
 }
 
+function detailEditableAudioGuides(editor, width) {
+  return detailAudioGuides({
+    ...editor,
+    audioClips: editor.target === "video" ? [] : editor.audioClips,
+    videoClips: editor.target === "audio" ? [] : editor.videoClips,
+  }, width);
+}
+
 function detailAudioHandleRects(guide, height) {
   const handleW = 6;
   const handleH = 14;
@@ -1426,7 +1433,7 @@ function detailAudioHandleAt(event) {
   }, rowHeight).map(handle => ({ ...handle, selection: true })) : [];
   const selected = editor.selection?.materialized ? new Set(editor.selection.clipIds) : new Set();
   const view = {...editor, audioClips:editor.audioClips.filter(clip => detailAudioTrackId(clip) === trackId), videoClips:editor.videoClips.filter(clip => detailAudioTrackId(clip) === trackId)};
-  const handles = [...rangeHandles, ...detailAudioGuides(view, rect.width)
+  const handles = [...rangeHandles, ...detailEditableAudioGuides(view, rect.width)
     .filter(guide => !selected.has(guide.clip.id))
     .flatMap((guide) => detailAudioHandleRects(guide, rowHeight))];
   return handles.find((handle) => x >= handle.x - 4 && x <= handle.x + handle.w + 4 && y >= handle.y - 4 && y <= handle.y + handle.h + 4) || null;
@@ -1670,7 +1677,7 @@ function drawDetailAudioTrack(context, editor, rect, trackId) {
   const duration = editor.duration || 1;
   const range = trackId === (editor.activeAudioTrack || 1) ? detailAudioSelectionRange() : null;
   const selected = editor.selection?.materialized ? new Set(editor.selection.clipIds) : new Set();
-  const guides = detailAudioGuides(view, rect.width).filter(guide => !selected.has(guide.clip.id));
+  const guides = detailEditableAudioGuides(view, rect.width).filter(guide => !selected.has(guide.clip.id));
   detailAudioGuides(view, rect.width).forEach((guide) => {
     context.fillStyle = "rgba(0, 0, 0, 0.55)";
     context.fillRect(guide.left, 0, guide.span, rect.height);
