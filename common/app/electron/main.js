@@ -4280,7 +4280,7 @@ ipcMain.handle("grok-chameleon:open-imagine-usage", async (_event, payload = {})
 });
 
 const { extractAudio } = require("./extract-audio");
-const { audioPeaks, localAudioPeaks, readLocalAudio, saveAudioEdit, previewVideoJoin } = require("./audio-edit");
+const { audioPeaks, localAudioPeaks, readLocalAudio, saveAudioEdit, previewVideoJoin, extractVideoFrame } = require("./audio-edit");
 function audioEditDeps() {
   return {
     serverBase: SERVER_BASE, resolveSource: localCardPreviewSource, fetchJson,
@@ -4297,6 +4297,10 @@ ipcMain.handle("grok-chameleon:extract-audio", async (event, payload = {}) => {
 ipcMain.handle("grok-chameleon:audio-peaks", async (event, payload = {}) => {
   assertAppSender(event);
   return audioPeaks(payload, audioEditDeps());
+});
+ipcMain.handle("grok-chameleon:extract-video-frame", async (event, payload = {}) => {
+  assertAppSender(event);
+  return extractVideoFrame(payload, audioEditDeps());
 });
 ipcMain.handle("grok-chameleon:preview-video-join", async (event, payload = {}) => {
   assertAppSender(event);

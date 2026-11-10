@@ -173,17 +173,14 @@ async function captureSelectedDetailFrame() {
       throw new Error("The selected video changed. Please capture the frame again.");
     }
     video.pause();
-    const width = video.videoWidth;
-    const height = video.videoHeight;
-    if (!width || !height || video.readyState < 2) throw new Error("The video frame is not ready yet.");
     const time = video.currentTime;
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    const context = canvas.getContext("2d");
-    if (!context) throw new Error("Frame capture is unavailable.");
-    context.drawImage(video, 0, 0, width, height);
-    const image = canvas.toDataURL("image/png");
+    const url = video.currentSrc || video.src;
+    const native = window.grokChameleonNative;
+    if (!url || !native?.extractVideoFrame) throw new Error("원본 프레임을 추출하려면 앱을 다시 실행해 주세요.");
+    const image = await native.extractVideoFrame({url, time});
+    if (!stillSelected() || currentDetailVideoElement() !== video) {
+      throw new Error("The selected video changed. Please capture the frame again.");
+    }
     const capturedAt = new Date();
     const twoDigits = value => String(value).padStart(2, "0");
     const name = `${twoDigits(capturedAt.getFullYear() % 100)}${twoDigits(capturedAt.getMonth() + 1)}${twoDigits(capturedAt.getDate())}_${twoDigits(capturedAt.getHours())}${twoDigits(capturedAt.getMinutes())}${twoDigits(capturedAt.getSeconds())}.png`;

@@ -341,6 +341,37 @@ async function duplicateJoinFrame(ffmpeg, leftInput, leftFrame, rightInput, righ
   return total <= 2 * left.length;
 }
 
+async function extractVideoFrame(payload, deps) {
+  if (!deps.ffmpeg) throw new Error("FFmpeg를 찾을 수 없습니다.");
+  const time = payload.time;
+  if (!Number.isFinite(time) || time < 0) throw new Error("Invalid frame time.");
+  const {input} = await resolveInput(payload, deps);
+  const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), "grok-frame-"));
+  const output = path.join(directory, "frame.png");
+  try {
+    // Take the last decoded frame at or before the playhead, including at EOF.
+    // A small lookback covers typical video; widen it only for sparse timestamps.
+    for (const start of new Set([Math.max(0, time - 0.15), Math.max(0, time - 2), 0])) {
+      const offset = time - start;
+      await runFile(deps.ffmpeg, [
+        "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+        "-ss", start.toFixed(9), "-t", (offset + 0.002).toFixed(9), "-i", input,
+        "-map", "0:V:0", "-an", "-sn", "-dn",
+        "-vf", `select='lte(t,${(offset + 0.000001).toFixed(9)})'`,
+        "-fps_mode", "passthrough", "-c:v", "png", "-update", "1", output,
+      ], 30000);
+      const frame = await fs.promises.readFile(output).catch(error => {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      });
+      if (frame?.length) return "data:image/png;base64," + frame.toString("base64");
+    }
+    throw new Error("선택한 시각의 영상 프레임을 찾을 수 없습니다.");
+  } finally {
+    await fs.promises.rm(directory, {recursive: true, force: true});
+  }
+}
+
 async function previewVideoJoin(payload, deps) {
   const ffprobe = probeBinary(deps.ffmpeg || "");
   if (!deps.ffmpeg || !ffprobe) return 0;
@@ -647,6 +678,7 @@ module.exports = {
   audioSourcePath,
   saveAudioEdit,
   previewVideoJoin,
+  extractVideoFrame,
   stampStem,
   uniqueStampedName,
 };
