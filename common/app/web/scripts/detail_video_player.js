@@ -221,6 +221,54 @@
     video.defaultMuted = false;
     video.muted = false;
     video.volume = 1;
+    // Chromium may render the video but cannot decode an ALAC audio track.
+    // Keep the stored audio lossless and play a decoded WAV alongside the video.
+    const nativeAudio = window.grokChameleonNative;
+    let losslessAudio = null, losslessUrl = "", losslessTimer = 0;
+    const syncLosslessAudio = () => {
+      if (!losslessAudio) return;
+      if (!player.isConnected) {
+        losslessAudio.pause();
+        return;
+      }
+      const editing = typeof detailAudioEditor !== "undefined" && detailAudioEditor?.video === video;
+      losslessAudio.volume = video.volume;
+      losslessAudio.muted = video.muted;
+      losslessAudio.playbackRate = video.playbackRate;
+      if (editing || video.paused || video.seeking || video.ended) {
+        losslessAudio.pause();
+        return;
+      }
+      if (losslessAudio.paused || Math.abs(losslessAudio.currentTime - video.currentTime) > 0.15) {
+        losslessAudio.currentTime = video.currentTime;
+      }
+      if (losslessAudio.paused) losslessAudio.play().catch(() => {});
+    };
+    for (const event of ["play", "pause", "seeking", "seeked", "timeupdate", "volumechange", "ratechange", "ended"]) {
+      video.addEventListener(event, syncLosslessAudio);
+    }
+    if (nativeAudio?.audioPeaks && nativeAudio?.readAudioFile) {
+      nativeAudio.audioPeaks({url: video.src, metadataOnly: true}).then(async info => {
+        if (info.audioCodec !== "alac" || !player.isConnected) return;
+        const decoded = await nativeAudio.readAudioFile({path: info.path, includeVideo: false});
+        if (!player.isConnected || !decoded.bytes) return;
+        const bytes = decoded.bytes instanceof Uint8Array ? decoded.bytes : new Uint8Array(decoded.bytes.data || decoded.bytes);
+        losslessUrl = URL.createObjectURL(new Blob([bytes], {type: decoded.mime}));
+        losslessAudio = new Audio(losslessUrl);
+        losslessAudio.preload = "auto";
+        // No native ALAC audio is supported in Chromium; WAV supplies this track.
+        syncLosslessAudio();
+        losslessTimer = window.setInterval(() => {
+          syncLosslessAudio();
+          if (!player.isConnected) {
+            window.clearInterval(losslessTimer);
+            losslessAudio.src = "";
+            URL.revokeObjectURL(losslessUrl);
+          }
+        }, 100);
+      }).catch(error => console.warn("Lossless audio preview:", error));
+    }
+
     const poster = detailPreviewUrlForItem(prefix, { ...item, type: "video" }, selectedLibraryPost());
     if (poster) video.poster = poster;
 

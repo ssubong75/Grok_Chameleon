@@ -184,6 +184,7 @@ async function probeMedia(ffprobe, input) {
     fps: frameRate(video?.avg_frame_rate) || 24,
     frameCount: Number(video?.nb_frames) || 0,
     hasAudio: Boolean(audio),
+    audioCodec: audio?.codec_name || "",
   };
 }
 
@@ -572,7 +573,8 @@ async function saveAudioEdit(payload, deps) {
   args.push("-filter_complex", filters.join(";"));
   if (identity) args.push("-map", "0:v:0", "-c:v", "copy");
   else args.push("-map", videoMap, "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", String(fps));
-  args.push("-map", "[aout]", "-c:a", "aac", "-profile:a", "aac_low", "-ar", "48000", "-ac", "2", "-b:a", "128k", "-movflags", "+faststart");
+  // Preserve audio across repeated editing saves.
+  args.push("-map", "[aout]", "-c:a", "alac", "-sample_fmt", "s32p", "-ar", "48000", "-ac", "2", "-movflags", "+faststart");
   const temp = path.join(path.dirname(target), `.${path.basename(target)}.${crypto.randomUUID()}.mp4`);
   args.push("-t", duration.toFixed(9), temp);
   try {
@@ -634,17 +636,17 @@ function videoMime(filePath) {
 
 async function readVideoAudio(filePath, deps, includeVideo = true) {
   if (!deps.ffmpeg) throw new Error("FFmpeg를 찾을 수 없습니다.");
-  const result = { path: filePath, mime: "audio/mp4", bytes: null, hasAudio: false, videoMime: videoMime(filePath) };
+  const result = { path: filePath, mime: "audio/wav", bytes: null, hasAudio: false, videoMime: videoMime(filePath) };
   if (includeVideo && !isRemoteSource(filePath)) {
     const stat = await fs.promises.stat(filePath);
     if (stat.size <= 160 * 1024 * 1024) result.videoBytes = await fs.promises.readFile(filePath);
   }
-  const temp = path.join(os.tmpdir(), `gc-attach-${crypto.randomUUID()}.m4a`);
+  const temp = path.join(os.tmpdir(), `gc-attach-${crypto.randomUUID()}.wav`);
   try {
     await runFile(deps.ffmpeg, [
       "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
       "-i", filePath, "-map", "0:a:0", "-vn",
-      "-c:a", "aac", "-b:a", "128k", temp,
+      "-c:a", "pcm_f32le", "-ar", "48000", "-ac", "2", temp,
     ]);
     result.bytes = await fs.promises.readFile(temp);
     result.hasAudio = true;

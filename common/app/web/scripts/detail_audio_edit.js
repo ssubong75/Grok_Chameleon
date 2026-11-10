@@ -227,6 +227,17 @@ async function openDetailAudioEditor(prefix) {
   editor.info = info;
   editor.video.dataset.frameRate = String(info.fps || "");
   editor.audioClips = info.hasAudio ? [makeDetailAudioClip("original", 0, editor.duration, info.peaks, editor.duration)] : [];
+  if (info.hasAudio) {
+    // Decode ALAC as WAV for browsers without native ALAC playback support.
+    const originalAudio = await detailAudioNative().readAudioFile({path: info.path, includeVideo: false});
+    if (detailAudioEditor !== editor) return;
+    if (originalAudio.bytes) {
+      const url = URL.createObjectURL(new Blob([detailAudioBytes(originalAudio.bytes)], {type: originalAudio.mime}));
+      editor.blobUrls.push(url);
+      editor.originalAudioUrl = url;
+      editor.audioClips.forEach(clip => { clip.blobUrl = url; });
+    }
+  }
   editor.audioClips.forEach((clip) => {
     clip.vIndex = 1;
     clip.group = originalGroup;
@@ -1727,7 +1738,7 @@ function syncDetailAudioPreview() {
   if (!editor) return;
   const time = detailAudioNow();
   syncDetailAudioPicture(editor, time);
-  const untouched = audioTrackUntouched(editor) && videoTrackUntouched(editor);
+  const untouched = !editor.originalAudioUrl && audioTrackUntouched(editor) && videoTrackUntouched(editor);
   editor.video.muted = untouched ? editor.previousMuted : true;
   if (untouched) {
     editor.previewNodes?.forEach((node) => node.element.pause());
