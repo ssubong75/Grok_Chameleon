@@ -92,6 +92,8 @@ async function openDetailAudioEditor(prefix) {
   if (button) button.setAttribute("aria-pressed", "true");
   const panel = document.createElement("section");
   panel.className = "audio_edit";
+  panel.inert = true;
+  panel.setAttribute("aria-busy", "true");
   panel.innerHTML = `
     <div class="audio_edit_bar">
       <div class="audio_edit_target">
@@ -204,51 +206,61 @@ async function openDetailAudioEditor(prefix) {
     video.loop = false;
   };
   video.addEventListener("play", editor.onPlay);
-  document.addEventListener("pointermove", editor.onPointerMove);
-  document.addEventListener("pointerup", editor.onPointerUp);
-  document.addEventListener("keydown", editor.onKey, true);
-  bindDetailAudioEditor(editor);
-  if (!editor.duration || !Number.isFinite(editor.duration)) {
-    await new Promise((resolve) => {
-      if (video.duration) resolve();
-      else video.addEventListener("loadedmetadata", () => resolve(), { once: true });
-    });
-    editor.duration = Number(video.duration) || 0;
-  }
-  editor.mediaDuration = editor.duration;
-  const originalGroup = detailAudioClipId();
-  editor.videoClips = [makeDetailVideoClip(0, 0, editor.duration, "original", editor.duration)];
-  editor.videoClips[0].group = originalGroup;
-  drawDetailAudioEditor();
-  const info = await detailAudioNative().audioPeaks(payload);
-  if (detailAudioEditor !== editor) return;
-  editor.duration = Number(info.duration) || editor.duration;
-  editor.mediaDuration = editor.duration;
-  editor.info = info;
-  editor.video.dataset.frameRate = String(info.fps || "");
-  editor.audioClips = info.hasAudio ? [makeDetailAudioClip("original", 0, editor.duration, info.peaks, editor.duration)] : [];
-  if (info.hasAudio) {
-    // Decode ALAC as WAV for browsers without native ALAC playback support.
-    const originalAudio = await detailAudioNative().readAudioFile({path: info.path, includeVideo: false});
-    if (detailAudioEditor !== editor) return;
-    if (originalAudio.bytes) {
-      const url = URL.createObjectURL(new Blob([detailAudioBytes(originalAudio.bytes)], {type: originalAudio.mime}));
-      editor.blobUrls.push(url);
-      editor.originalAudioUrl = url;
-      editor.audioClips.forEach(clip => { clip.blobUrl = url; });
+  // Publish editing controls only after the original timeline is fully loaded.
+  try {
+    if (!editor.duration || !Number.isFinite(editor.duration)) {
+      await new Promise((resolve) => {
+        if (video.duration) resolve();
+        else video.addEventListener("loadedmetadata", () => resolve(), { once: true });
+      });
+      if (detailAudioEditor !== editor) return;
+      editor.duration = Number(video.duration) || 0;
     }
+    editor.mediaDuration = editor.duration;
+    const originalGroup = detailAudioClipId();
+    editor.videoClips = [makeDetailVideoClip(0, 0, editor.duration, "original", editor.duration)];
+    editor.videoClips[0].group = originalGroup;
+    drawDetailAudioEditor();
+    const info = await detailAudioNative().audioPeaks(payload);
+    if (detailAudioEditor !== editor) return;
+    editor.duration = Number(info.duration) || editor.duration;
+    editor.mediaDuration = editor.duration;
+    editor.info = info;
+    editor.video.dataset.frameRate = String(info.fps || "");
+    const originalClip = info.hasAudio ? makeDetailAudioClip("original", 0, editor.duration, info.peaks, editor.duration) : null;
+    editor.audioClips = originalClip ? [originalClip] : [];
+    if (originalClip) {
+      originalClip.vIndex = 1;
+      originalClip.group = originalGroup;
+    }
+    if (info.hasAudio) {
+      // Decode ALAC as WAV for browsers without native ALAC playback support.
+      const originalAudio = await detailAudioNative().readAudioFile({path: info.path, includeVideo: false});
+      if (detailAudioEditor !== editor) return;
+      if (originalAudio.bytes) {
+        const url = URL.createObjectURL(new Blob([detailAudioBytes(originalAudio.bytes)], {type: originalAudio.mime}));
+        editor.blobUrls.push(url);
+        editor.originalAudioUrl = url;
+        originalClip.blobUrl = url;
+      }
+    }
+    if (editor.videoClips.length === 1 && editor.videoClips[0].start === 0 && editor.videoClips[0].inPoint === 0) {
+      editor.videoClips[0].duration = editor.duration;
+      editor.videoClips[0].mediaDuration = editor.duration;
+      editor.videoClips[0].vIndex = 1;
+    }
+    engageDetailTimeline(editor);
+    bindDetailAudioEditor(editor);
+    document.addEventListener("pointermove", editor.onPointerMove);
+    document.addEventListener("pointerup", editor.onPointerUp);
+    document.addEventListener("keydown", editor.onKey, true);
+    panel.inert = false;
+    panel.removeAttribute("aria-busy");
+    drawDetailAudioEditor();
+  } catch (error) {
+    if (detailAudioEditor === editor) closeDetailAudioEditor();
+    throw error;
   }
-  editor.audioClips.forEach((clip) => {
-    clip.vIndex = 1;
-    clip.group = originalGroup;
-  });
-  if (editor.videoClips.length === 1 && editor.videoClips[0].start === 0 && editor.videoClips[0].inPoint === 0) {
-    editor.videoClips[0].duration = editor.duration;
-    editor.videoClips[0].mediaDuration = editor.duration;
-    editor.videoClips[0].vIndex = 1;
-  }
-  engageDetailTimeline(editor);
-  drawDetailAudioEditor();
 }
 
 function makeDetailAudioClip(source, start, duration, peaks, mediaDuration, inPoint = 0, gain = 1) {
