@@ -965,15 +965,6 @@ function bindFastLocalHoverVideoPreview(host, media, poster, videoUrl) {
     // Chromium dispatches mouseleave. Do not resume the previous card's video.
     if (!pointer || !host.contains(document.elementFromPoint(pointer.x, pointer.y))) return;
     if (localCardPreviewIsMoving(host)) return;
-    // Posters take precedence over optional playback, including neighbours in view.
-    const pendingPosters = [...fastLocalPreviewBindings.keys()].some(preview => (
-      preview.closest(".card_list") === list && localCardPreviewDistance(preview) === 0
-      && !preview.classList.contains("card_preview_loaded")
-    ));
-    if (!poster.naturalWidth || pendingPosters) {
-      timer = setTimeout(start, 100);
-      return;
-    }
     if (activeLocalHoverPreview && activeLocalHoverPreview !== binding) activeLocalHoverPreview.cancel();
     activeLocalHoverPreview = binding;
     video = document.createElement("video");
@@ -987,6 +978,7 @@ function bindFastLocalHoverVideoPreview(host, media, poster, videoUrl) {
     video.preload = "auto";
     const reveal = () => {
       if (video !== currentVideo || !hovered || localCardPreviewIsMoving(host)) return;
+      video.classList.add("card_preview_loaded");
       video.hidden = false;
       video.play().catch(() => {});
     };
