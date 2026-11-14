@@ -212,11 +212,13 @@ function beginCardButtonDragSelection(event, button) {
     const count = library_state.selectedItems?.size || 0;
     const selectionBar = document.getElementById("selectionBar");
     const selectionCount = document.getElementById("selectionCount");
+    const moveButton = document.getElementById("selectionMoveBtn");
     const mergeButton = document.getElementById("selectionMergeBtn");
     const renameButton = document.getElementById("selectionRenameBtn");
     const imagineMoveActions = cardSelectionUsesImagineMoveActions();
     if (selectionBar) selectionBar.hidden = count === 0;
     if (selectionCount) selectionCount.textContent = `Selected: ${count}`;
+    if (moveButton) moveButton.hidden = !["b_main", "b_t2i_view_main"].includes(currentScreen);
     if (mergeButton) {
       mergeButton.textContent = imagineMoveActions ? "Move" : "Merge";
       mergeButton.dataset.selectionAction = imagineMoveActions ? "move" : "merge";
@@ -350,6 +352,21 @@ function beginCardButtonDragSelection(event, button) {
     applyLibrarySnapshot(data);
     restoreLibraryCardListScroll(scrollState);
     toast("Card folder renamed.");
+  }
+
+  async function moveSelectedBuildCardItems() {
+    if (!["b_main", "b_t2i_view_main"].includes(screen_state.current_screen)) return;
+    const posts = selectedCardPosts().filter((post) => (
+      ["created", "upload", "collection"].includes(post?.area)
+    ));
+    if (!posts.length) {
+      showErrorPanel("Move unavailable", "Select one or more Build cards.");
+      return;
+    }
+    openMoveToCollectionDialog({
+      postPaths: posts.map((post) => post.folder_path),
+      postObjects: posts,
+    });
   }
 
   async function moveSelectedImagineCardItems() {

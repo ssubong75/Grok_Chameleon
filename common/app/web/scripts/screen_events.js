@@ -6,6 +6,13 @@ document.getElementById("selectionDownloadBtn")?.addEventListener("click", () =>
   });
 });
 
+document.getElementById("selectionMoveBtn")?.addEventListener("click", () => {
+  moveSelectedBuildCardItems().catch((error) => {
+    console.warn(error);
+    showErrorPanel("Move failed", error?.message || "Move failed.");
+  });
+});
+
 document.getElementById("selectionMergeBtn")?.addEventListener("click", () => {
   const button = document.getElementById("selectionMergeBtn");
   const movingImagineCards = button?.dataset.selectionAction === "move";

@@ -232,6 +232,14 @@
   cursor: pointer;
 }
 
+.selection-bar .selection_move_action {
+  color: var(--prompt-teal);
+}
+
+.selection-bar .selection_move_action[hidden] {
+  display: none;
+}
+
 .selection-bar .selection_merge_action {
   color: var(--accent);
 }
