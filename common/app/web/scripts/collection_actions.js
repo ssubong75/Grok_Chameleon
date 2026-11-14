@@ -217,6 +217,7 @@
           post_path: source.folder_path,
           collection_path: targetCollectionPath,
           target_parent_path: targetPostPath || "",
+          move_source: !isLikedReferenceSaveContext(sources),
         };
         const remoteImagineSource = typeof isImagineRemoteMainPost === "function"
           ? isImagineRemoteMainPost(source)
@@ -230,7 +231,13 @@
         }
         if (itemKey) payload.item_key = itemKey;
         data = await qApi(endpoint, payload);
+        if (payload.move_source && remoteImagineSource && data.moved !== true) {
+          throw new Error("The server did not confirm the move. Restart the app before moving cards.");
+        }
         applyLibrarySnapshot(data);
+        if (payload.move_source && remoteImagineSource && typeof removeImagineItemsFromPost === "function") {
+          removeImagineItemsFromPost(source, source.items || []);
+        }
       }
       if (typeof syncImagineRemotePostsIntoLibrary === "function") syncImagineRemotePostsIntoLibrary();
       if (typeof saveImagineSavedDisplayCache === "function") saveImagineSavedDisplayCache();
@@ -244,7 +251,7 @@
       }
       if (!library_state.selectedItems?.size) library_state.cardSelectionScreen = "";
       if (typeof syncCardSelectionControls === "function") syncCardSelectionControls();
-      toast(sources.length > 1 ? "Moved items to Collection." : "Moved to Collection.");
+      toast(isLikedReferenceSaveContext(sources) ? "Saved to Collection." : "Moved to Collection.");
     } finally {
       moveToCollectionRequestPending = false;
     }
@@ -455,12 +462,8 @@
         )) === index;
       });
     const sourcePost = sourcePosts[0] || null;
-    if (!saveMode && isLikedReferenceSaveContext(sourcePosts)) {
-      saveLikedCardsToReference(sourcePosts).catch((error) => (
-        showErrorPanel("Reference save failed", error?.message || "Reference save failed.")
-      ));
-      return;
-    }
+    const allowReference = !saveMode && sourcePosts.length > 0;
+    let referenceSelected = false;
     if (!saveMode && !sourcePost) {
       setLibraryMessage("Select a post to move.");
       return;
@@ -549,6 +552,12 @@
       ? collectionPostsWithSlots(collection)
       : (collection?.posts || []).map((post, index) => ({ ...post, grid_slot: index, order: index }));
     const syncActions = () => {
+      if (referenceSelected) {
+        for (const button of [itemButton, makeButton, renameButton, deleteButton, ...sortButtons, saveSortButton]) {
+          if (button) button.disabled = true;
+        }
+        return;
+      }
       collectionButton?.classList.toggle("active", collectionSelected);
       collectionButton?.setAttribute("aria-pressed", collectionSelected ? "true" : "false");
       itemButton?.classList.toggle("active", !collectionSelected);
@@ -655,7 +664,32 @@
       library_state.collectionDraftLayout = null;
       refreshAfterFolderAction(data);
     };
+    const saveToReference = async () => {
+      if (moveToCollectionRequestPending) return;
+      moveToCollectionRequestPending = true;
+      try {
+        await saveLikedCardsToReference(sourcePosts, {
+          moveSource: !isLikedReferenceSaveContext(sourcePosts),
+        });
+        closeMoveToCollectionDialog();
+      } catch (error) {
+        showErrorPanel("Reference save failed", error?.message || "Reference save failed.");
+      } finally {
+        moveToCollectionRequestPending = false;
+      }
+    };
     const renderSecondary = () => {
+      if (referenceSelected) {
+        secondaryList.replaceChildren();
+        const saveButton = document.createElement("button");
+        saveButton.type = "button";
+        saveButton.className = "secondary-folder-card";
+        saveButton.innerHTML = `${collectionFolderCardIconHtml()}<strong>${isLikedReferenceSaveContext(sourcePosts) ? "Save" : "Move"} to Reference</strong>`;
+        saveButton.addEventListener("click", saveToReference);
+        secondaryList.append(saveButton);
+        syncActions();
+        return;
+      }
       const collection = selectedCollection();
       const posts = dialogPosts(collection);
       if (!posts.some((post) => post.folder_path === selectedSecondPath)) selectedSecondPath = "";
@@ -759,8 +793,22 @@
     };
     const renderPrimary = () => {
       primaryList.replaceChildren();
+      if (allowReference) {
+        const card = document.createElement("button");
+        card.className = `primary-folder-card${referenceSelected ? " active" : ""}`;
+        card.type = "button";
+        card.innerHTML = `${collectionFolderCardIconHtml()}<span class="folder-card-copy"><strong>Reference</strong></span>`;
+        card.addEventListener("click", () => {
+          referenceSelected = true;
+          selectedSecondPath = "";
+          renderPrimary();
+          renderSecondary();
+        });
+        card.addEventListener("dblclick", saveToReference);
+        primaryList.append(card);
+      }
       if (!library_state.collections.length) {
-        primaryList.append(moveDialogEmptyNode("No category yet."));
+        if (!allowReference) primaryList.append(moveDialogEmptyNode("No category yet."));
         renderSecondary();
         return;
       }
@@ -769,13 +817,14 @@
       }
       for (const collection of dialogCollections()) {
         const card = document.createElement("button");
-        card.className = `primary-folder-card${collection.path === selectedPrimaryPath ? " active" : ""}`;
+        card.className = `primary-folder-card${!referenceSelected && collection.path === selectedPrimaryPath ? " active" : ""}`;
         card.type = "button";
         card.draggable = true;
         card.dataset.collectionPath = collection.path;
         card.innerHTML = `${collectionFolderCardIconHtml()}<span class="folder-card-copy"><strong></strong></span>`;
         card.querySelector("strong").textContent = collection.name || readableName(collection.id);
         card.addEventListener("click", () => {
+          referenceSelected = false;
           selectedPrimaryPath = collection.path;
           selectedSecondPath = "";
           collectionSelected = false;
@@ -829,6 +878,7 @@
     }, { passive: true });
 
     collectionButton?.addEventListener("click", () => {
+      referenceSelected = false;
       collectionSelected = true;
       selectedSecondPath = "";
       renderPrimary();
@@ -897,6 +947,12 @@
     });
     overlay.addEventListener("keydown", (event) => {
       if (event.key === "Escape") closeMoveToCollectionDialog();
+      if (event.key === "Enter" && referenceSelected) {
+        if (event.target?.closest?.("button, input, textarea, select")) return;
+        event.preventDefault();
+        saveToReference();
+        return;
+      }
       if (event.key === "Enter" && selectedSecondPath) {
         if (saveMode) {
           commitSave(selectedSecondPath);
@@ -926,7 +982,6 @@
     openMoveToCollectionDialog({
       postPath: post.folder_path,
       postObject: post,
-      itemKey: mediaItemKey(item),
     });
   }
 

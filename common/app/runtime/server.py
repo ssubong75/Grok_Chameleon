@@ -28159,28 +28159,47 @@ def stage_reference_thumbnail(root: Path, source: dict, item: dict, staged: Path
 
 
 def save_imagine_post_to_reference(payload: dict) -> dict:
-    """Keep Liked untouched; commit a complete local card, merging repeat saves by item ID."""
+    """Copy remote or local media to Reference without changing the source card."""
     root = library_root()
     if not root:
         raise RuntimeError("Library path is not set.")
     ensure_library_root(root)
     source = remote_imagine_payload_post(payload)
+    source_dir = None
     if not source:
-        raise RuntimeError("Select an Imagine Liked card.")
+        source = find_post(current_library_snapshot(root), str(payload.get("post_path") or ""))
+        if not source or source.get("area") not in {"created", "collection", "upload", "reference"}:
+            raise RuntimeError("Select a local or Imagine card.")
+        source_dir = safe_join(root, source["folder_path"])
+        if not source_dir.is_dir():
+            raise RuntimeError("Selected post folder was not found.")
     card_id = normalize_unicode_text(str(source.get("post_id") or source.get("folderName") or "")).strip()
     if not card_id or card_id in {".", ".."} or safe_name(card_id) != card_id or unquote(card_id) != card_id:
         raise RuntimeError("The card has no valid ID.")
     items = [dict(item) for item in source.get("items") or [] if isinstance(item, dict)]
+    move_source = payload.get("move_source") is True
+    selected_key = "" if move_source else str(payload.get("item_key") or "")
+    if selected_key:
+        items = [item for item in items if media_item_key(item) == selected_key]
+    if source_dir is not None:
+        # Local Build items may only have a filename, without an Imagine asset ID.
+        for item in items:
+            if not reference_item_key(item):
+                item["item_id"] = "local-" + hashlib.sha256(
+                    (source["folder_path"] + "/" + str(item.get("file") or media_item_key(item))).encode("utf-8")
+                ).hexdigest()
     if not items or any(not reference_item_key(item) for item in items):
         raise RuntimeError("The card has no complete media information.")
-    account = active_imagine_account(root, str(source.get("account_id") or ""))
-    if not account:
+    account = active_imagine_account(root, str(source.get("account_id") or "")) if source_dir is None else None
+    if source_dir is None and not account:
         raise RuntimeError("Select or capture the Imagine account for this card first.")
     reference_saved_at = now_iso()
     reference_root = root / REFERENCE_DIRECTORY
     target = find_reference_card_directory(reference_root, card_id)
     if target is None:
         target = unique_reference_storage_directory(reference_root, {"reference_saved_at": reference_saved_at})
+    if source_dir is not None and source_dir.resolve() == target.resolve():
+        raise RuntimeError("The card is already in Reference.")
     target.parent.mkdir(parents=True, exist_ok=True)
     cache = root / "cache"
     cache.mkdir(parents=True, exist_ok=True)
@@ -28209,9 +28228,17 @@ def save_imagine_post_to_reference(payload: dict) -> dict:
                     local_file = safe_join(target, str(previous["file"]))
                     if local_file.is_file() and local_file.stat().st_size > 0:
                         continue
-                if local_media_index is None:
-                    local_media_index = reference_local_media_index(root)
-                copied = reuse_reference_local_media(root, item, staged, local_media_index)
+                if source_dir is not None:
+                    copied = copy_media_item_to_directory(source_dir, item, staged)
+                    for field in ("thumbnail", "poster"):
+                        if item.get(field):
+                            name = copy_file_to_directory(source_dir, str(item[field]), staged)
+                            if name:
+                                copied[field] = name
+                else:
+                    if local_media_index is None:
+                        local_media_index = reference_local_media_index(root)
+                    copied = reuse_reference_local_media(root, item, staged, local_media_index)
                 if copied is None:
                     try:
                         copied = copy_imagine_remote_item_to_directory(root, item, staged, account, index)
@@ -28224,6 +28251,8 @@ def save_imagine_post_to_reference(payload: dict) -> dict:
                 else:
                     merged[previous_index] = copied
                 new_files.append(copied)
+            if unavailable and move_source:
+                raise RuntimeError("The complete card could not be saved; the source was not moved.")
             if unavailable:
                 available = [item for item in merged if reference_item_key(item) in seen and reference_item_key(item) not in unavailable]
                 if not available:
@@ -28267,6 +28296,10 @@ def save_imagine_post_to_reference(payload: dict) -> dict:
                 original = source_items.get(reference_item_key(item))
                 if not original or str(item.get("type") or "") != "video":
                     continue
+                if source_dir is not None:
+                    if item.get("thumbnail") and (staged / item["thumbnail"]).is_file():
+                        thumbnail_updates.append(item)
+                    continue
                 if item.get("thumbnail"):
                     thumbnail = safe_join(target, str(item["thumbnail"]))
                     if thumbnail.is_file() and media_container_validation(thumbnail, "image")[0]:
@@ -28278,7 +28311,7 @@ def save_imagine_post_to_reference(payload: dict) -> dict:
                     thumbnail_updates.append(item)
             metadata = {
                 **post_json_from_post(
-                    source, post_id=card_id, source="imagine", folder_path=f"{REFERENCE_DIRECTORY}/{target.name}",
+                    source, post_id=card_id, source=source.get("source") or "imagine", folder_path=f"{REFERENCE_DIRECTORY}/{target.name}",
                     collection=None, items=merged,
                     representative=representative_for_merged_items(merged),
                     favorite=False, build_favorite=False,
@@ -28302,12 +28335,18 @@ def save_imagine_post_to_reference(payload: dict) -> dict:
                         os.replace(staged_file, final_file)
                         installed.append(final_file)
                         item["file"] = final_file.name
-                    for item in thumbnail_updates:
-                        staged_file = staged / item["thumbnail"]
-                        final_file = unique_path(target / item["thumbnail"])
-                        os.replace(staged_file, final_file)
-                        installed.append(final_file)
-                        item["thumbnail"] = final_file.name
+                    sidecar_items = new_files if source_dir is not None else thumbnail_updates
+                    for item in sidecar_items:
+                        for field in (("thumbnail", "poster") if source_dir is not None else ("thumbnail",)):
+                            if not item.get(field):
+                                continue
+                            staged_file = staged / item[field]
+                            if not staged_file.is_file():
+                                continue
+                            final_file = unique_path(target / item[field])
+                            os.replace(staged_file, final_file)
+                            installed.append(final_file)
+                            item[field] = final_file.name
                     metadata["items"] = [serializable_media_item(item) for item in merged]
                     metadata["representative"] = existing.get("representative") or representative_for_merged_items(merged)
                     write_json(staged / "post.json", metadata)
@@ -28319,8 +28358,19 @@ def save_imagine_post_to_reference(payload: dict) -> dict:
         reference_path = f"{REFERENCE_DIRECTORY}/{target.name}"
         refresh_library_index_paths(root, [reference_path])
         post = post_from_folder(root, target, indexed_post_context(reference_path))
-        return {"ok": True, "post": post, "saved_count": len(new_files),
-                "separate_card": bool(unavailable), "unavailable_items": list(unavailable.values())}
+        result = {"ok": True, "post": post, "saved_count": len(new_files),
+                  "separate_card": bool(unavailable), "unavailable_items": list(unavailable.values())}
+        if move_source:
+            if source_dir is not None:
+                remove_build_previews_for_items(root, source_dir, source.get("items") or [])
+                remove_source_post_after_move(source_dir, source, [])
+                delete_library_index_paths(root, [source["folder_path"]], recursive=True)
+                result["snapshot"] = current_library_snapshot(root)
+                result["snapshot"]["selected_path"] = reference_path
+            else:
+                hide_imagine_source_moved_to_collection(root, account, source, items)
+            result["moved"] = True
+        return result
 
 
 def copy_imagine_remote_post_to_collection(payload: dict, item_only: bool = False) -> dict:
@@ -28351,11 +28401,14 @@ def copy_imagine_remote_post_to_collection(payload: dict, item_only: bool = Fals
             existing_dir, existing_post = existing
             existing_path = existing_dir.relative_to(root).as_posix()
             existing_items = existing_post.get("items") if isinstance(existing_post.get("items"), list) else []
+            if payload.get("move_source") is True:
+                hide_imagine_source_moved_to_collection(root, account, source_post, items)
             data = current_library_snapshot(root)
             data["selected_path"] = existing_path
             data["selected_item_id"] = media_item_key(existing_items[-1] if existing_items else {})
             data["selected_collection_path"] = collection_path
             data["selected_collection_post_path"] = target_parent_path or existing_path
+            data["moved"] = payload.get("move_source") is True
             return data
 
         # Name the folder after the asset id, not the title. An Imagine card's title is its
@@ -28403,11 +28456,14 @@ def copy_imagine_remote_post_to_collection(payload: dict, item_only: bool = Fals
             raise
 
         refresh_library_index_paths(root, [post_json["folder_path"]])
+        if payload.get("move_source") is True:
+            hide_imagine_source_moved_to_collection(root, account, source_post, items)
         data = current_library_snapshot(root)
         data["selected_path"] = post_json["folder_path"]
         data["selected_item_id"] = media_item_key(copied_items[-1] if copied_items else {})
         data["selected_collection_path"] = collection_path
         data["selected_collection_post_path"] = target_parent_path or post_json["folder_path"]
+        data["moved"] = payload.get("move_source") is True
         return data
 
 

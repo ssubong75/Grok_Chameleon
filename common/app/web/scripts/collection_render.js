@@ -423,19 +423,18 @@
   function renderCollectionFolders() {
     const firstList = document.querySelector(".collection_1st_card_list");
     if (!firstList) return;
-    if (!library_state.collections.length) {
-      library_state.selectedCollectionPath = "";
-      library_state.selectedCollectionPostPath = "";
-      firstList.replaceChildren(emptyLibraryNode("No category yet."));
-      renderCollectionPosts(null);
-      renderSecondMain(null);
-      return;
-    }
     if (!library_state.collections.some((collection) => collection.path === library_state.selectedCollectionPath)) {
       library_state.selectedCollectionPath = "";
       library_state.selectedCollectionPostPath = "";
     }
-    firstList.replaceChildren(...sortedCollections().map((collection) => {
+    const referenceCard = document.createElement("button");
+    referenceCard.className = "collection_1st_card";
+    referenceCard.type = "button";
+    referenceCard.innerHTML = '<span class="collection_folder_copy"><strong>Reference</strong></span>';
+    referenceCard.addEventListener("click", () => {
+      document.getElementById("reference_nav_btn")?.click();
+    });
+    firstList.replaceChildren(referenceCard, ...sortedCollections().map((collection) => {
       const card = document.createElement("button");
       card.className = `collection_1st_card${collection.path === library_state.selectedCollectionPath ? " active" : ""}`;
       card.type = "button";
