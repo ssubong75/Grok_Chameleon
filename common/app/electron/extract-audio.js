@@ -39,24 +39,24 @@ async function extractAudio(payload, deps) {
   let target;
   if (payload.provider === 'build') {
     if (!localPath) throw new Error('빌드 영상의 로컬 파일을 찾을 수 없습니다.');
-    target = path.join(path.dirname(localPath), uniqueStampedName(path.dirname(localPath), 'm4a'));
+    target = path.join(path.dirname(localPath), uniqueStampedName(path.dirname(localPath), 'wav'));
   } else {
     const selected = await deps.dialog.showSaveDialog(deps.window, {
-      title: '오디오 저장 위치', defaultPath: stampStem() + '.m4a',
-      filters: [{name: 'M4A 오디오', extensions: ['m4a']}],
+      title: '오디오 저장 위치', defaultPath: stampStem() + '.wav',
+      filters: [{name: 'WAV 오디오', extensions: ['wav']}],
       properties: ['createDirectory', 'showOverwriteConfirmation'],
     });
     if (selected.canceled || !selected.filePath) return {cancelled: true};
     target = selected.filePath;
-    if (!/\.m4a$/i.test(target)) target += '.m4a';
+    if (!/\.wav$/i.test(target)) target += '.wav';
     // Only replace the exact file confirmed in the native save dialog.
     if (target !== selected.filePath && fs.existsSync(target)) throw new Error('같은 이름의 오디오 파일이 이미 있습니다.');
   }
-  const temp = path.join(path.dirname(target), '.' + path.basename(target) + '.' + crypto.randomUUID() + '.m4a');
+  const temp = path.join(path.dirname(target), '.' + path.basename(target) + '.' + crypto.randomUUID() + '.wav');
   try {
     await new Promise((resolve, reject) => {
       execFile(deps.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-n',
-        '-i', input, ...editArgs, '-map', audioMap, '-vn', '-sn', '-dn', '-c:a', 'aac', '-profile:a', 'aac_low', '-ar', '48000', '-ac', '2', '-b:a', '128k', ...outputArgs, temp],
+        '-i', input, ...editArgs, '-map', audioMap, '-vn', '-sn', '-dn', '-c:a', 'pcm_f32le', '-ar', '48000', '-ac', '2', ...outputArgs, temp],
       {timeout: 600000, maxBuffer: 1024 * 1024, windowsHide: true}, (error, stdout, stderr) => {
         if (!error) return resolve();
         reject(new Error(/matches no streams|does not contain any stream/i.test(stderr)
