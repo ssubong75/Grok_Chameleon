@@ -83,29 +83,36 @@ test('a failed card in one Reference batch does not stop later cards', async () 
   assert.deepEqual(Array.from(h.state.posts, (post) => post.folder_path), ['레퍼런스/first', '레퍼런스/last']);
 });
 
-test('Liked card, bulk and detail entry points save whole cards; Imagine and Discover keep Collection routing', () => {
-  const h = harness();
-  const moved = [];
-  h.context.closeMoveToCollectionDialog = () => {};
-  h.context.moveDialogPost = () => card;
-  h.context.saveLikedCardsToReference = (posts) => { moved.push(posts); return Promise.resolve(); };
+test('Reference destination saves whole cards and only moves sources outside Liked', async () => {
   const code = read('collection_actions.js');
-  const start = code.indexOf('  function openMoveToCollectionDialog(');
-  const end = code.indexOf('    let selectedPrimaryPath', start);
-  vm.runInContext(code.slice(start, end) + '\n return "collection";\n}', h.context);
-  const run = h.context.openMoveToCollectionDialog;
-  run({ postObject: card });
-  run({ postObjects: [card, { ...card, folder_path: 'imagine_saved/second' }] });
-  h.screen.current_screen = 'i_detail';
-  run({ postObject: card, itemKey: 'one' });
-  assert.equal(moved.length, 3);
-  assert.equal(moved[1].length, 2);
-  assert.equal(moved[2][0].items.length, 2);
-  h.state.iMainView = 'imagine';
-  assert.equal(run({ postObject: card }), 'collection');
-  h.state.iMainView = 'liked';
-  h.screen.current_screen = 'i_discover_main';
-  assert.equal(run({ postObject: card }), 'collection');
+  const start = code.indexOf('    const saveToReference = async () => {');
+  const end = code.indexOf('    const renderSecondary = () => {', start);
+  assert.ok(start >= 0 && end > start);
+  for (const [screen, view, expectedMove] of [
+    ['i_main', 'liked', false], ['i_detail', 'liked', false],
+    ['i_main', 'imagine', true], ['i_discover_main', 'liked', true],
+  ]) {
+    const h = harness();
+    h.screen.current_screen = screen;
+    h.state.iMainView = view;
+    const sources = [card, { ...card, folder_path: 'imagine_saved/second' }];
+    const calls = [];
+    let closed = 0;
+    Object.assign(h.context, {
+      sourcePosts: sources, moveToCollectionRequestPending: false,
+      saveLikedCardsToReference: async (posts, options) => calls.push({ posts, options }),
+      closeMoveToCollectionDialog: () => { closed++; },
+      showErrorPanel: () => { throw new Error('Unexpected save error'); },
+    });
+    vm.runInContext(code.slice(start, end) + '\n globalThis.runReferenceSave = saveToReference;', h.context);
+    assert.equal(calls.length, 0);
+    await h.context.runReferenceSave();
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].posts.length, 2);
+    assert.equal(calls[0].posts[0].items.length, 2);
+    assert.equal(calls[0].options.moveSource, expectedMove);
+    assert.equal(closed, 1);
+  }
 });
 
 test('Reference main and its local detail use Build and local media', () => {
