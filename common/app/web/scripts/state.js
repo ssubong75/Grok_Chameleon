@@ -168,6 +168,7 @@ document.documentElement.classList.toggle("platform-macos", isMacRenderer);
     indexedUploadLoaded: false,
     searchQuery: "",
     selectedCollectionPath: "",
+    selectedCollectionGroupPath: "",
     selectedCollectionPostPath: "",
     collectionActionLevel: "first",
     collectionView: "2nd_folders",

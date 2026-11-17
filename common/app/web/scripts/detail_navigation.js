@@ -77,7 +77,7 @@ function detailPostSequence(detailType = detailTypeForScreen()) {
   }
   if (target.screenId === "collection_main") {
     const collection = library_state.collections.find((item) => item.path === library_state.selectedCollectionPath);
-    if (collection?.posts?.length) return uniquePostsByPath(collectionDirectPosts(collection));
+    if (collection?.posts?.length) return uniquePostsByPath(collectionPostsWithSlots(collection));
     return uniquePostsByPath(library_state.posts.filter((post) => post.area === "collection"));
   }
   if (target.screenId === "i_discover_main") return uniquePostsByPath(library_state.imagineDiscoverPosts || []);

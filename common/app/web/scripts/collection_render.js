@@ -4,6 +4,8 @@
   let collectionSecondMainStablePosts = [];
   let collectionFolderGridStableScope = "";
   let collectionFolderGridStablePosts = [];
+  let collectionDefaultGroupCategory = "";
+  let collectionDefaultGroupSelected = false;
 
   function selectedCollectionPost() {
     if (!library_state.selectedCollectionPostPath) return null;
@@ -144,6 +146,14 @@
   function maybeLoadMoreCollectionFolders() {
     const grid = document.querySelector(".collection_2nd_card_grid");
     const collection = library_state.collections.find((item) => item.path === library_state.selectedCollectionPath);
+    const groupPath = library_state.selectedCollectionGroupPath;
+    if (grid && collection && groupPath) {
+      const group = collectionDirectPosts(collection).find((item) => item.folder_path === groupPath);
+      if (group?._indexed_children_has_more && !group._indexed_children_loading && grid.scrollHeight - grid.scrollTop - grid.clientHeight <= 180) {
+        loadIndexedCollectionPostContents(groupPath, { append: true }).then(() => renderCollectionFolders()).catch((error) => console.warn(error));
+      }
+      return;
+    }
     if (
       !grid
       || !collection?.indexed_has_more
@@ -230,10 +240,13 @@
 
   function collectionPostsWithSlots(collection) {
     if (!collection) return [];
-    const draft = library_state.collectionDraftLayout?.collectionPath === collection.path
+    const layoutPath = library_state.selectedCollectionGroupPath || collection.path;
+    const draft = library_state.collectionDraftLayout?.collectionPath === layoutPath
       ? library_state.collectionDraftLayout.slots
       : null;
-    const posts = collectionDirectPosts(collection).map((post, index) => ({
+    const groupPath = library_state.selectedCollectionGroupPath;
+    const sourcePosts = groupPath ? collectionChildPosts(collection, groupPath) : collectionDirectPosts(collection).filter((post) => post.folder_role !== "collection_group");
+    const posts = sourcePosts.map((post, index) => ({
       ...post,
       order: Number.isFinite(Number(post.order)) ? Number(post.order) : index,
       grid_slot: draft && Object.hasOwn(draft, post.folder_path)
@@ -338,6 +351,60 @@
     }
   }
 
+  async function moveCollectionItemToGroup(postPath, collection, groupPath) {
+    if (collectionCategoryMovePending || !postPath || !collection) return;
+    const parentPath = String(postPath).split('/').slice(0, -1).join('/');
+    const destination = groupPath || collection.path;
+    if (parentPath === destination) return;
+    if (!library_state.apiReady) { setLibraryMessage("Move needs the local app launcher."); return; }
+    collectionCategoryMovePending = true;
+    try {
+      const data = await qApi("/api/collection/move-post", {
+        post_path: postPath, collection_path: collection.path, target_parent_path: groupPath || "",
+      });
+      applyLibrarySnapshot({ ...data, deleted_paths: [...(data.deleted_paths || []), postPath] });
+      library_state.selectedCollectionPath = collection.path;
+      library_state.selectedCollectionGroupPath = groupPath || "";
+      library_state.selectedCollectionPostPath = data.selected_path || "";
+      library_state.collectionActionLevel = "second";
+      collectionDefaultGroupCategory = collection.path;
+      collectionDefaultGroupSelected = !groupPath;
+      library_state.collectionDraftLayout = null;
+      collectionFolderGridStablePosts = [];
+      if (library_state.libraryIndexEnabled) {
+        await loadIndexedCollectionPosts(collection.path, { force: true });
+        if (groupPath) await loadIndexedCollectionPostContents(groupPath, { force: true });
+      }
+      renderCollectionFolders();
+      toast("Moved to group.");
+    } finally {
+      collectionCategoryMovePending = false;
+    }
+  }
+
+  function bindCollectionGroupDrop(button, collection, groupPath) {
+    button.addEventListener("dragover", (event) => {
+      if (!dataTransferHasType(event, "application/x-grok-q-collection-post")) return;
+      const source = library_state.draggingCollectionPostPath || "";
+      if (source && source.split('/').slice(0, -1).join('/') === (groupPath || collection.path)) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      button.classList.add("drop-target");
+    });
+    button.addEventListener("dragleave", (event) => {
+      if (!event.relatedTarget || !button.contains(event.relatedTarget)) button.classList.remove("drop-target");
+    });
+    button.addEventListener("drop", (event) => {
+      if (!dataTransferHasType(event, "application/x-grok-q-collection-post")) return;
+      event.preventDefault();
+      event.stopPropagation();
+      button.classList.remove("drop-target");
+      const postPath = event.dataTransfer.getData("application/x-grok-q-collection-post") || library_state.draggingCollectionPostPath;
+      library_state.draggingCollectionPostPath = "";
+      moveCollectionItemToGroup(postPath, collection, groupPath).catch((error) => showErrorPanel("Move failed", error?.message || "Move failed."));
+    });
+  }
+
   async function reorderCollectionPrimary(draggedPath, targetPath) {
     if (!draggedPath || !targetPath || draggedPath === targetPath) return;
     const collections = sortedCollections();
@@ -394,7 +461,7 @@
       ));
     library_state.collectionSort = mode;
     library_state.collectionDraftLayout = {
-      collectionPath: collection.path,
+      collectionPath: library_state.selectedCollectionGroupPath || collection.path,
       sortMode: mode,
       slots: Object.fromEntries(sorted.map((post, index) => [post.folder_path, index])),
     };
@@ -447,6 +514,7 @@
       card.addEventListener("click", () => {
         const nextPath = library_state.selectedCollectionPath === collection.path ? "" : collection.path;
         library_state.selectedCollectionPath = nextPath;
+        library_state.selectedCollectionGroupPath = "";
         library_state.selectedCollectionPostPath = "";
         library_state.collectionActionLevel = "first";
         library_state.collectionSort = nextPath ? collectionSortModeFor(nextPath) : "";
@@ -490,7 +558,59 @@
       });
       return card;
     }));
-    renderCollectionPosts(library_state.collections.find((collection) => collection.path === library_state.selectedCollectionPath));
+    const collection = library_state.collections.find((item) => item.path === library_state.selectedCollectionPath);
+    const groupList = document.querySelector(".collection_group_list");
+    if (collection?.indexed_loaded && collection.indexed_has_more && !collection.indexed_loading && typeof loadIndexedCollectionPosts === "function") {
+      loadIndexedCollectionPosts(collection.path, { append: true }).catch((error) => console.warn(error));
+    }
+    const categoryPath = collection?.path || "";
+    if (collectionDefaultGroupCategory !== categoryPath) {
+      collectionDefaultGroupCategory = categoryPath;
+      collectionDefaultGroupSelected = Boolean(categoryPath);
+      library_state.selectedCollectionGroupPath = "";
+    }
+    if (groupList) {
+      groupList.replaceChildren();
+      if (collection) {
+        const group = document.createElement("button");
+        group.type = "button";
+        group.className = `collection_1st_card${collectionDefaultGroupSelected && !library_state.selectedCollectionGroupPath ? " active" : ""}`;
+        group.innerHTML = '<span class="collection_folder_copy"><strong>Default</strong></span>';
+        group.addEventListener("click", () => {
+          collectionDefaultGroupSelected = true;
+          library_state.selectedCollectionGroupPath = "";
+          library_state.collectionActionLevel = "group";
+          library_state.selectedCollectionPostPath = "";
+          renderCollectionFolders();
+        });
+        bindCollectionGroupDrop(group, collection, "");
+        groupList.append(group);
+        for (const item of collectionDirectPosts(collection).filter((post) => post.folder_role === "collection_group")) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = `collection_1st_card${library_state.selectedCollectionGroupPath === item.folder_path ? " active" : ""}`;
+          const copy = document.createElement("span");
+          copy.className = "collection_folder_copy";
+          const title = document.createElement("strong");
+          title.textContent = readableName(item.folderName) || item.title || "Group";
+          copy.append(title);
+          button.append(copy);
+          button.addEventListener("click", () => {
+            collectionDefaultGroupSelected = false;
+            library_state.selectedCollectionGroupPath = item.folder_path;
+            library_state.selectedCollectionPostPath = "";
+            library_state.collectionActionLevel = "group";
+            if (library_state.libraryIndexEnabled && !item._indexed_children_loaded && typeof loadIndexedCollectionPostContents === "function") {
+              loadIndexedCollectionPostContents(item.folder_path).then(() => renderCollectionFolders()).catch((error) => console.warn(error));
+            }
+            renderCollectionFolders();
+          });
+          bindCollectionGroupDrop(button, collection, item.folder_path);
+          groupList.append(button);
+        }
+      }
+    }
+    renderCollectionPosts(collectionDefaultGroupSelected || library_state.selectedCollectionGroupPath ? collection : null);
   }
 
 
@@ -535,9 +655,16 @@
     document.querySelectorAll("[data-collection-sort]").forEach((button) => {
       button.classList.toggle("active", Boolean(collection) && button.dataset.collectionSort === collectionSortModeFor(collection.path));
     });
-    document.querySelector(".collection_title_btn")?.classList.toggle("active", library_state.collectionActionLevel !== "second");
+    document.querySelector(".collection_title_btn")?.classList.toggle("active", library_state.collectionActionLevel === "first");
+    document.querySelector(".collection_group_title_btn")?.classList.toggle("active", library_state.collectionActionLevel === "group");
     document.querySelector(".collection_item_title_btn")?.classList.toggle("active", library_state.collectionActionLevel === "second");
-    const scope = String(collection?.path || "");
+    const scope = String(library_state.selectedCollectionGroupPath || collection?.path || "");
+    if (collection && library_state.selectedCollectionGroupPath && library_state.libraryIndexEnabled) {
+      const group = collectionDirectPosts(collection).find((item) => item.folder_path === library_state.selectedCollectionGroupPath);
+      if (group && !group._indexed_children_loaded && !group._indexed_children_loading && typeof loadIndexedCollectionPostContents === "function") {
+        loadIndexedCollectionPostContents(group.folder_path).then(() => renderCollectionFolders()).catch((error) => console.warn(error));
+      }
+    }
     const sameScope = scope === collectionFolderGridStableScope;
     if (!sameScope) {
       collectionFolderGridStableScope = scope;

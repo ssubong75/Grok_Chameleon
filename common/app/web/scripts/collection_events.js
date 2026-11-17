@@ -24,6 +24,13 @@ document.querySelector(".collection_item_title_btn")?.addEventListener("click", 
   renderCollectionFolders();
 });
 
+document.querySelector(".collection_group_title_btn")?.addEventListener("click", () => {
+  if (!library_state.selectedCollectionPath) { setLibraryMessage("Select a category."); return; }
+  library_state.collectionActionLevel = "group";
+  library_state.selectedCollectionPostPath = "";
+  renderCollectionFolders();
+});
+
 document.querySelector(".collection_make_btn")?.addEventListener("click", () => {
   makeCollectionFolder();
 });

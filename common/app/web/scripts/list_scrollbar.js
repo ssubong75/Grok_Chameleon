@@ -80,8 +80,10 @@
       entry.top = top;
       entry.travel = bottom - top - HANDLE_HEIGHT;
       if (entry.max === 0 || entry.travel <= 0) { entry.rail.hidden = true; continue; }
-      entry.rail.hidden = false;
-      entry.rail.style.left = `${(rect.right + bounds.right - 1) / 2 - HANDLE_WIDTH / 2}px`;
+      const firstFolder = list.matches('.collection_1st_card_list');
+      const rightEdge = firstFolder ? list.closest('.collection_1st').getBoundingClientRect().right : bounds.right;
+      entry.rail.hidden = firstFolder || list.matches('.collection_2nd_card_grid');
+      entry.rail.style.left = `${(rect.right + rightEdge - 1) / 2 - HANDLE_WIDTH / 2}px`;
       entry.rail.style.top = `${top}px`;
       entry.rail.style.height = `${bottom - top}px`;
       entry.thumb.style.top = `${Math.max(0, Math.min(1, list.scrollTop / entry.max)) * entry.travel}px`;

@@ -62,12 +62,13 @@
 
 .collection_layout {
   display: grid;
-  grid-template-columns: minmax(205px, 0.85fr) minmax(0, 4fr);
+  grid-template-columns: minmax(205px, 0.85fr) minmax(205px, 0.85fr) minmax(0, 3fr);
   gap: 14px;
   min-height: 722px;
 }
 
 .collection_1st,
+.collection_group,
 .collection_2nd {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
@@ -78,6 +79,21 @@
   border-radius: 7px;
   background: #101214;
 }
+
+.collection_group_list {
+  display: grid;
+  grid-auto-rows: 50px;
+  align-content: start;
+  gap: 7px;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+
+.collection_group_list::-webkit-scrollbar { display: none; }
+.collection_group_list .collection_1st_card { cursor: pointer; }
+.collection_group_title_btn { border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.collection_group_title_btn.active { color: var(--accent); }
 
 .collection_1st_heading,
 .collection_2nd_heading {
@@ -101,6 +117,7 @@
 }
 
 .collection_title_btn,
+.collection_group_title_btn,
 .collection_item_title_btn {
   width: 100%;
   min-height: 28px;
@@ -349,7 +366,7 @@
 
 .collection_2nd_card_grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   grid-auto-rows: var(--g-2nd-row-height, 50px);
   gap: 7px;
   align-content: start;

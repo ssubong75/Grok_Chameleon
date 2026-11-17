@@ -89,12 +89,18 @@
 
   function clearCollectionSelection() {
     library_state.selectedCollectionPath = "";
+    library_state.selectedCollectionGroupPath = "";
     library_state.selectedCollectionPostPath = "";
     library_state.collectionActionLevel = "first";
   }
 
   function selectedCollectionActionTarget() {
     const post = selectedCollectionFolderPost();
+    if (library_state.collectionActionLevel === "group") {
+      const collection = selectedCollectionFolder();
+      const group = collectionDirectPosts(collection).find((item) => item.folder_path === library_state.selectedCollectionGroupPath && item.folder_role === "collection_group");
+      return { level: "group", path: group?.folder_path || "", name: group ? readableName(group.folderName) : "", collection };
+    }
     if (library_state.collectionActionLevel === "second") {
       const collection = (post
         ? library_state.collections.find((item) => post.folder_path.startsWith(`${item.path}/`))
@@ -987,6 +993,7 @@
 
   async function makeCollectionFolder() {
     const target = selectedCollectionActionTarget();
+    if (target.level === "group" && !target.collection) { setLibraryMessage("Select a category."); return; }
     const label = collectionKindLabel(target.level);
     const name = await collectionActionInput({
       title: `New ${label}`,
@@ -1001,11 +1008,21 @@
       }
       const data = await qApi("/api/collection/create", {
         name,
-        parent_path: target.level === "second" ? target.collection?.path || library_state.selectedCollectionPath : "",
+        parent_path: target.level === "group" ? target.collection.path : target.level === "second" ? (library_state.selectedCollectionGroupPath || target.collection?.path || library_state.selectedCollectionPath) : "",
+        folder_role: target.level === "group" ? "collection_group" : "",
       });
       applyLibrarySnapshot(data);
+      if (target.level === "group") {
+        collectionDefaultGroupCategory = library_state.selectedCollectionPath;
+        collectionDefaultGroupSelected = false;
+        library_state.selectedCollectionGroupPath = data.selected_collection_group_path || "";
+        library_state.collectionActionLevel = "group";
+        if (library_state.libraryIndexEnabled) await loadIndexedCollectionPosts(library_state.selectedCollectionPath, { force: true });
+        renderCollectionFolders();
+      }
       return;
     }
+    if (target.level === "group" || library_state.selectedCollectionGroupPath) { setLibraryMessage("Group folders need the local app launcher."); return; }
     if (!library_state.rootHandle) {
       await chooseLibraryPath();
       return;
@@ -1040,7 +1057,7 @@
   async function renameCollectionFolder() {
     const target = selectedCollectionActionTarget();
     if (!target.path) {
-      setLibraryMessage("Select a category or item.");
+      setLibraryMessage(target.level === "group" ? "Select a named group. Default cannot be renamed." : "Select a category or item.");
       return;
     }
     const label = collectionKindLabel(target.level);
@@ -1056,6 +1073,13 @@
         name,
       });
       applyLibrarySnapshot(data);
+      if (target.level === "group") {
+        library_state.selectedCollectionGroupPath = data.selected_collection_post_path || "";
+        library_state.selectedCollectionPostPath = "";
+        library_state.collectionActionLevel = "group";
+        if (library_state.libraryIndexEnabled) await loadIndexedCollectionPosts(library_state.selectedCollectionPath, { force: true });
+        renderCollectionFolders();
+      }
       return;
     }
     setLibraryMessage("Rename needs the local app launcher.");
@@ -1064,7 +1088,7 @@
   async function deleteCollectionFolder() {
     const target = selectedCollectionActionTarget();
     if (!target.path) {
-      setLibraryMessage("Select a category or item.");
+      setLibraryMessage(target.level === "group" ? "Select a named group. Default cannot be deleted." : "Select a category or item.");
       return;
     }
     const label = collectionKindLabel(target.level);
@@ -1078,6 +1102,13 @@
     if (library_state.apiReady) {
       const data = await qApi("/api/collection/delete", { target_path: target.path });
       applyLibrarySnapshot(data);
+      if (target.level === "group") {
+        library_state.selectedCollectionGroupPath = "";
+        collectionDefaultGroupSelected = true;
+        library_state.collectionActionLevel = "group";
+        if (library_state.libraryIndexEnabled) await loadIndexedCollectionPosts(library_state.selectedCollectionPath, { force: true });
+        renderCollectionFolders();
+      }
       return;
     }
     setLibraryMessage("Delete needs the local app launcher.");

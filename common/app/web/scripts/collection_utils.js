@@ -36,7 +36,7 @@ async function collectionActionConfirm({ title, message, confirmLabel = "Delete"
 }
 
 function collectionKindLabel(level) {
-  return level === "second" ? "Item" : "Category";
+  return level === "group" ? "Group" : level === "second" ? "Item" : "Category";
 }
 
 function collectionNameFromPath(path = "") {

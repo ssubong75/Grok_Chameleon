@@ -218,7 +218,7 @@ function beginCardButtonDragSelection(event, button) {
     const imagineMoveActions = cardSelectionUsesImagineMoveActions();
     if (selectionBar) selectionBar.hidden = count === 0;
     if (selectionCount) selectionCount.textContent = `Selected: ${count}`;
-    if (moveButton) moveButton.hidden = !["b_main", "b_t2i_view_main"].includes(currentScreen);
+    if (moveButton) moveButton.hidden = !["b_main", "b_t2i_view_main", "reference_main"].includes(currentScreen);
     if (mergeButton) {
       mergeButton.textContent = imagineMoveActions ? "Move" : "Merge";
       mergeButton.dataset.selectionAction = imagineMoveActions ? "move" : "merge";
@@ -355,12 +355,13 @@ function beginCardButtonDragSelection(event, button) {
   }
 
   async function moveSelectedBuildCardItems() {
-    if (!["b_main", "b_t2i_view_main"].includes(screen_state.current_screen)) return;
+    if (!["b_main", "b_t2i_view_main", "reference_main"].includes(screen_state.current_screen)) return;
+    const referenceScreen = screen_state.current_screen === "reference_main";
     const posts = selectedCardPosts().filter((post) => (
-      ["created", "upload", "collection"].includes(post?.area)
+      referenceScreen ? post?.area === "reference" : ["created", "upload", "collection"].includes(post?.area)
     ));
     if (!posts.length) {
-      showErrorPanel("Move unavailable", "Select one or more Build cards.");
+      showErrorPanel("Move unavailable", referenceScreen ? "Select one or more Reference cards." : "Select one or more Build cards.");
       return;
     }
     openMoveToCollectionDialog({

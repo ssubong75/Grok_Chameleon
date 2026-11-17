@@ -27172,8 +27172,13 @@ def create_collection(payload: dict) -> dict:
     if parent_path:
         parent = safe_join(root, parent_path)
         parent_parts = Path(parent_path).parts
-        if not parent.is_dir() or len(parent_parts) != 2 or parent_parts[0] != "collection":
+        if not parent.is_dir() or len(parent_parts) not in (2, 3) or parent_parts[0] != "collection":
             raise RuntimeError("Select a collection.")
+        if len(parent_parts) == 3 and read_json(parent / "post.json", {}).get("folder_role") != "collection_group":
+            raise RuntimeError("Select a group.")
+        is_group = payload.get("folder_role") == "collection_group"
+        if is_group and len(parent_parts) != 2:
+            raise RuntimeError("Select a category.")
         folder_name = unique_directory_name(parent, name)
         target = parent / folder_name
         target.mkdir(parents=True, exist_ok=False)
@@ -27181,6 +27186,7 @@ def create_collection(payload: dict) -> dict:
         write_json(target / "post.json", {
             "post_id": folder_name,
             "source": "local",
+            "folder_role": "collection_group" if is_group else "",
             "mode": "",
             "title": readable_name(folder_name),
             "prompt": "",
@@ -27193,8 +27199,10 @@ def create_collection(payload: dict) -> dict:
         })
         refresh_library_index_paths(root, [folder_path])
         data = current_library_snapshot(root)
-        data["selected_collection_path"] = parent_path
-        data["selected_collection_post_path"] = folder_path
+        data["selected_collection_path"] = "/".join(parent_parts[:2])
+        data["selected_collection_post_path"] = "" if is_group else folder_path
+        if is_group:
+            data["selected_collection_group_path"] = folder_path
         return data
     (root / "collection" / name).mkdir(parents=True, exist_ok=True)
     if library_index.ready(root):
@@ -27262,7 +27270,7 @@ def rename_collection_folder(payload: dict) -> dict:
         data["selected_collection_path"] = destination_path
         data["selected_collection_post_path"] = ""
     else:
-        data["selected_collection_path"] = destination.parent.relative_to(root).as_posix()
+        data["selected_collection_path"] = "/".join(parts[:2])
         data["selected_collection_post_path"] = destination_path
     return data
 
@@ -27322,7 +27330,7 @@ def delete_collection_folder(payload: dict) -> dict:
         scan_library(root)
     data = current_library_snapshot(root)
     if len(parts) > 2:
-        data["selected_collection_path"] = parent_path
+        data["selected_collection_path"] = "/".join(parts[:2])
         data["selected_collection_post_path"] = ""
     else:
         data["selected_collection_path"] = ""
@@ -28830,6 +28838,7 @@ def move_post_to_collection(payload: dict) -> dict:
         representative=representative_for_remaining_items(cleaned_items),
     )
     write_json(target_dir / "post.json", post_json)
+    refresh_collection_post_jsons(root, target_dir)
     delete_library_index_paths(root, [post.get("folder_path") or ""], recursive=True)
     refresh_library_index_paths(root, [post_json["folder_path"]], recursive=True)
     data = current_library_snapshot(root)
