@@ -294,7 +294,13 @@
               <div class="folder-panel-heading"><strong>Folder</strong></div>
               <div class="move-gallery-primary-list primary-folder-list"></div>
             </section>
-            <section class="move-gallery-secondary-panel secondary-folder-panel" aria-label="Second folders">
+            <section class="move-gallery-group-panel primary-folder-panel" aria-label="Group folders">
+            <div class="folder-panel-heading">
+              <button class="collection-heading-button move-gallery-group" type="button" aria-pressed="false">Group</button>
+            </div>
+            <div class="move-gallery-group-list primary-folder-list"></div>
+          </section>
+          <section class="move-gallery-secondary-panel secondary-folder-panel" aria-label="Second folders">
               <div class="folder-panel-heading"><strong>Item</strong></div>
               <div class="move-gallery-secondary-list secondary-folder-grid"></div>
             </section>
@@ -479,13 +485,18 @@
       || firstMoveCollectionPath();
     let selectedSecondPath = "";
     let collectionSelected = !selectedPrimaryPath;
+    // Group level inside the selected category: "" is the Default group (category root).
+    let selectedGroupPath = selectedPrimaryPath && selectedPrimaryPath === library_state.selectedCollectionPath
+      ? library_state.selectedCollectionGroupPath || ""
+      : "";
+    let groupSelected = false;
 
     const overlay = document.createElement("div");
     overlay.className = "move-gallery-overlay";
     overlay.innerHTML = `
       <section class="move-gallery-modal" role="dialog" aria-modal="true" aria-label="Move to Collection" tabindex="-1">
         <header>
-          <div><h3>Choose a Category / Item</h3></div>
+          <div><h3>Choose a Category / Group / Item</h3></div>
           <div class="move-gallery-actions">
             <button class="make-folder-button move-gallery-make" type="button"><span aria-hidden="true">+</span> Make</button>
             <button class="rename-folder-button move-gallery-rename" type="button"><span aria-hidden="true">=</span> Rename</button>
@@ -536,6 +547,8 @@
     const secondaryList = overlay.querySelector(".move-gallery-secondary-list");
     const collectionButton = overlay.querySelector(".move-gallery-collection");
     const itemButton = overlay.querySelector(".move-gallery-item");
+    const groupList = overlay.querySelector(".move-gallery-group-list");
+    const groupButton = overlay.querySelector(".move-gallery-group");
     const makeButton = overlay.querySelector(".move-gallery-make");
     const renameButton = overlay.querySelector(".move-gallery-rename");
     const deleteButton = overlay.querySelector(".move-gallery-delete");
@@ -554,23 +567,46 @@
         ? library_state.collectionDraftLayout.sortMode || ""
         : dialogSortModeFor(path)
     );
-    const dialogPosts = (collection) => typeof collectionPostsWithSlots === "function"
-      ? collectionPostsWithSlots(collection)
-      : (collection?.posts || []).map((post, index) => ({ ...post, grid_slot: index, order: index }));
+    const dialogGroups = (collection) => (typeof collectionDirectPosts === "function" ? collectionDirectPosts(collection) : [])
+      .filter((post) => post.folder_role === "collection_group");
+    const selectedGroupPost = () => dialogGroups(selectedCollection()).find((post) => post.folder_path === selectedGroupPath) || null;
+    const dialogPosts = (collection) => {
+      if (!collection) return [];
+      const draft = library_state.collectionDraftLayout?.collectionPath === collection.path
+        ? library_state.collectionDraftLayout.slots
+        : null;
+      const sourcePosts = selectedGroupPath
+        ? (typeof collectionChildPosts === "function" ? collectionChildPosts(collection, selectedGroupPath) : [])
+        : (typeof collectionDirectPosts === "function" ? collectionDirectPosts(collection) : (collection.posts || []))
+          .filter((post) => post.folder_role !== "collection_group");
+      const posts = sourcePosts.map((post, index) => ({
+        ...post,
+        order: Number.isFinite(Number(post.order)) ? Number(post.order) : index,
+        grid_slot: draft && Object.hasOwn(draft, post.folder_path)
+          ? Number(draft[post.folder_path])
+          : (Number.isFinite(Number(post.grid_slot)) ? Math.max(0, Math.floor(Number(post.grid_slot))) : index),
+      }));
+      return typeof normalizeCollectionSlotPosts === "function" ? normalizeCollectionSlotPosts(posts) : posts;
+    };
     const syncActions = () => {
       if (referenceSelected) {
-        for (const button of [itemButton, makeButton, renameButton, deleteButton, ...sortButtons, saveSortButton]) {
+        for (const button of [groupButton, itemButton, makeButton, renameButton, deleteButton, ...sortButtons, saveSortButton]) {
           if (button) button.disabled = true;
         }
         return;
       }
+      const itemLevel = !collectionSelected && !groupSelected;
       collectionButton?.classList.toggle("active", collectionSelected);
       collectionButton?.setAttribute("aria-pressed", collectionSelected ? "true" : "false");
-      itemButton?.classList.toggle("active", !collectionSelected);
-      itemButton?.setAttribute("aria-pressed", collectionSelected ? "false" : "true");
+      groupButton?.classList.toggle("active", groupSelected);
+      groupButton?.setAttribute("aria-pressed", groupSelected ? "true" : "false");
+      itemButton?.classList.toggle("active", itemLevel);
+      itemButton?.setAttribute("aria-pressed", itemLevel ? "true" : "false");
+      if (groupButton) groupButton.disabled = !selectedPrimaryPath;
       if (itemButton) itemButton.disabled = !selectedPrimaryPath;
       if (makeButton) makeButton.disabled = !collectionSelected && !selectedPrimaryPath;
-      const actionPath = collectionSelected ? selectedPrimaryPath : selectedSecondPath;
+      // Default group is the category root and cannot be renamed or deleted, same as the sidebar.
+      const actionPath = collectionSelected ? selectedPrimaryPath : groupSelected ? selectedGroupPath : selectedSecondPath;
       if (renameButton) renameButton.disabled = !actionPath;
       if (deleteButton) deleteButton.disabled = !actionPath;
       sortButtons.forEach((button) => {
@@ -713,6 +749,20 @@
         syncActions();
         return;
       }
+      const groupPost = selectedGroupPost();
+      if (selectedGroupPath && library_state.libraryIndexEnabled && groupPost && !groupPost._indexed_children_loaded
+        && typeof loadIndexedCollectionPostContents === "function") {
+        secondaryList.append(moveDialogEmptyNode("Loading . . ."));
+        if (!groupPost._dialog_loading) {
+          groupPost._dialog_loading = true;
+          loadIndexedCollectionPostContents(selectedGroupPath)
+            .then(renderSecondary)
+            .catch((error) => console.warn(error))
+            .finally(() => { groupPost._dialog_loading = false; });
+        }
+        syncActions();
+        return;
+      }
       if (!posts.length) {
         secondaryList.append(moveDialogEmptyNode("No items yet."));
         syncActions();
@@ -742,11 +792,14 @@
         card.addEventListener("click", () => {
           selectedSecondPath = post.folder_path;
           collectionSelected = false;
+          groupSelected = false;
+          renderGroups();
           renderSecondary();
         });
         card.addEventListener("dblclick", () => {
           selectedSecondPath = post.folder_path;
           collectionSelected = false;
+          groupSelected = false;
           if (saveMode) {
             commitSave(post.folder_path);
             return;
@@ -797,6 +850,49 @@
       };
       syncActions();
     };
+    const renderGroups = () => {
+      groupList.replaceChildren();
+      const collection = referenceSelected ? null : selectedCollection();
+      if (!collection) {
+        groupList.append(moveDialogEmptyNode("Select a category."));
+        return;
+      }
+      const groups = dialogGroups(collection);
+      if (selectedGroupPath && !groups.some((post) => post.folder_path === selectedGroupPath)) selectedGroupPath = "";
+      const entries = [{ path: "", name: "Default" }, ...groups.map((post) => ({
+        path: post.folder_path,
+        name: readableName(post.folderName) || post.title || "Group",
+      }))];
+      for (const entry of entries) {
+        const card = document.createElement("button");
+        card.className = `primary-folder-card${entry.path === selectedGroupPath ? " active" : ""}`;
+        card.type = "button";
+        card.dataset.groupPath = entry.path;
+        card.innerHTML = `${collectionFolderCardIconHtml()}<span class="folder-card-copy"><strong></strong></span>`;
+        card.querySelector("strong").textContent = entry.name;
+        card.addEventListener("click", () => {
+          selectedGroupPath = entry.path;
+          selectedSecondPath = "";
+          collectionSelected = false;
+          groupSelected = true;
+          renderGroups();
+          renderSecondary();
+        });
+        card.addEventListener("dblclick", () => {
+          selectedGroupPath = entry.path;
+          if (saveMode) return;
+          // Same as dropping onto a group in the sidebar: the group (or the category root for Default) becomes the parent.
+          moveToCollectionTarget({
+            sourcePost,
+            sourcePosts,
+            itemKey,
+            targetCollectionPath: selectedPrimaryPath,
+            targetPostPath: entry.path,
+          }).catch((error) => showErrorPanel("Move failed", error?.message || "Move failed."));
+        });
+        groupList.append(card);
+      }
+    };
     const renderPrimary = () => {
       primaryList.replaceChildren();
       if (allowReference) {
@@ -807,6 +903,8 @@
         card.addEventListener("click", () => {
           referenceSelected = true;
           selectedSecondPath = "";
+          selectedGroupPath = "";
+          groupSelected = false;
           renderPrimary();
           renderSecondary();
         });
@@ -833,7 +931,9 @@
           referenceSelected = false;
           selectedPrimaryPath = collection.path;
           selectedSecondPath = "";
+          selectedGroupPath = "";
           collectionSelected = false;
+          groupSelected = false;
           renderPrimary();
           renderSecondary();
         });
@@ -857,13 +957,17 @@
         });
         primaryList.append(card);
       }
+      renderGroups();
       syncActions();
     };
     const refreshAfterFolderAction = (data) => {
       applyLibrarySnapshot(data);
       selectedPrimaryPath = data?.selected_collection_path || selectedPrimaryPath || firstMoveCollectionPath();
       selectedSecondPath = data?.selected_collection_post_path || selectedSecondPath || "";
-      collectionSelected = !selectedSecondPath;
+      if (groupSelected && data && Object.hasOwn(data, "selected_collection_group_path")) {
+        selectedGroupPath = data.selected_collection_group_path || "";
+      }
+      collectionSelected = !groupSelected && !selectedSecondPath;
       renderPrimary();
       renderSecondary();
     };
@@ -883,8 +987,18 @@
         .catch((error) => console.warn(error));
     }, { passive: true });
 
+    groupButton?.addEventListener("click", () => {
+      if (!selectedPrimaryPath) return;
+      referenceSelected = false;
+      collectionSelected = false;
+      groupSelected = true;
+      selectedSecondPath = "";
+      renderPrimary();
+      renderSecondary();
+    });
     collectionButton?.addEventListener("click", () => {
       referenceSelected = false;
+      groupSelected = false;
       collectionSelected = true;
       selectedSecondPath = "";
       renderPrimary();
@@ -893,6 +1007,8 @@
     itemButton?.addEventListener("click", () => {
       if (!selectedPrimaryPath) return;
       collectionSelected = false;
+      groupSelected = false;
+      renderGroups();
       renderSecondary();
     });
     sortButtons.forEach((button) => {
@@ -905,24 +1021,28 @@
     });
     makeButton?.addEventListener("click", async () => {
       const folderName = await collectionActionInput({
-        title: collectionSelected ? "New Category" : "New Item",
+        title: collectionSelected ? "New Category" : groupSelected ? "New Group" : "New Item",
         value: "",
         confirmLabel: "Make",
       });
       if (!folderName) return;
+      // Same request the sidebar sends: groups are category children with folder_role collection_group,
+      // items go into the selected group (or the category root for Default).
       qApi("/api/collection/create", {
         name: folderName,
-        parent_path: collectionSelected ? "" : selectedPrimaryPath,
+        parent_path: collectionSelected ? "" : groupSelected ? selectedPrimaryPath : (selectedGroupPath || selectedPrimaryPath),
+        folder_role: groupSelected ? "collection_group" : "",
       }).then(refreshAfterFolderAction).catch((error) => showErrorPanel("Make failed", error?.message || "Make failed."));
     });
     renameButton?.addEventListener("click", async () => {
-      const targetPost = selectedSecondPost();
-      const targetPath = collectionSelected ? selectedPrimaryPath : selectedSecondPath;
+      const targetPost = groupSelected ? selectedGroupPost() : selectedSecondPost();
+      const targetPath = collectionSelected ? selectedPrimaryPath : groupSelected ? selectedGroupPath : selectedSecondPath;
+      if (!targetPath) return;
       const currentName = collectionSelected
         ? selectedCollection()?.name || ""
         : readableName(targetPost?.folderName) || targetPost?.title || "";
       const name = await collectionActionInput({
-        title: collectionSelected ? "Rename Category" : "Rename Item",
+        title: collectionSelected ? "Rename Category" : groupSelected ? "Rename Group" : "Rename Item",
         value: currentName,
         confirmLabel: "Rename",
       });
@@ -932,13 +1052,14 @@
         .catch((error) => showErrorPanel("Rename failed", error?.message || "Rename failed."));
     });
     deleteButton?.addEventListener("click", async () => {
-      const targetPath = collectionSelected ? selectedPrimaryPath : selectedSecondPath;
+      const targetPath = collectionSelected ? selectedPrimaryPath : groupSelected ? selectedGroupPath : selectedSecondPath;
       if (!targetPath) return;
+      const targetPost = groupSelected ? selectedGroupPost() : selectedSecondPost();
       const targetName = collectionSelected
         ? selectedCollection()?.name || collectionNameFromPath(targetPath)
-        : readableName(selectedSecondPost()?.folderName) || selectedSecondPost()?.title || collectionNameFromPath(targetPath);
+        : readableName(targetPost?.folderName) || targetPost?.title || collectionNameFromPath(targetPath);
       const ok = await collectionActionConfirm({
-        title: collectionSelected ? "Delete Category" : "Delete Item",
+        title: collectionSelected ? "Delete Category" : groupSelected ? "Delete Group" : "Delete Item",
         message: targetName,
         confirmLabel: "Delete",
         messageBox: true,
