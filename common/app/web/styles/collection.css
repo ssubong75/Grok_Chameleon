@@ -573,9 +573,18 @@
 
 .move-gallery-layout {
   display: grid;
-  grid-template-columns: minmax(205px, 0.85fr) minmax(180px, 0.75fr) minmax(0, 3.4fr);
+  grid-template-columns: minmax(205px, 0.85fr) minmax(0, 4fr);
   gap: 14px;
   min-height: 0;
+}
+
+/* Folder move dialog: the first item column is given to the Group panel. */
+.move-gallery-modal:not(.merge-destination-modal) .move-gallery-layout {
+  grid-template-columns: minmax(205px, 0.85fr) minmax(0, 0.8fr) minmax(0, 3.2fr);
+}
+
+.move-gallery-modal:not(.merge-destination-modal) .move-gallery-secondary-list.secondary-folder-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .move-gallery-primary-panel,

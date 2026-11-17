@@ -294,13 +294,7 @@
               <div class="folder-panel-heading"><strong>Folder</strong></div>
               <div class="move-gallery-primary-list primary-folder-list"></div>
             </section>
-            <section class="move-gallery-group-panel primary-folder-panel" aria-label="Group folders">
-            <div class="folder-panel-heading">
-              <button class="collection-heading-button move-gallery-group" type="button" aria-pressed="false">Group</button>
-            </div>
-            <div class="move-gallery-group-list primary-folder-list"></div>
-          </section>
-          <section class="move-gallery-secondary-panel secondary-folder-panel" aria-label="Second folders">
+            <section class="move-gallery-secondary-panel secondary-folder-panel" aria-label="Second folders">
               <div class="folder-panel-heading"><strong>Item</strong></div>
               <div class="move-gallery-secondary-list secondary-folder-grid"></div>
             </section>
@@ -509,6 +503,12 @@
               <button class="collection-heading-button move-gallery-collection" type="button" aria-pressed="false">Category</button>
             </div>
             <div class="move-gallery-primary-list primary-folder-list"></div>
+          </section>
+          <section class="move-gallery-group-panel primary-folder-panel" aria-label="Group folders">
+            <div class="folder-panel-heading">
+              <button class="collection-heading-button move-gallery-group" type="button" aria-pressed="false">Group</button>
+            </div>
+            <div class="move-gallery-group-list primary-folder-list"></div>
           </section>
           <section class="move-gallery-secondary-panel secondary-folder-panel" aria-label="Second folders">
             <div class="folder-panel-heading move-gallery-secondary-heading">
