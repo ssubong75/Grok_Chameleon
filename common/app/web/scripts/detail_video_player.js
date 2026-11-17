@@ -432,7 +432,7 @@
     const showControls = () => {
       player.classList.remove("controls-hidden");
       window.clearTimeout(points.hideTimer);
-      if (!video.paused) {
+      if (!video.paused || isExpanded()) {
         points.hideTimer = window.setTimeout(() => {
           player.classList.add("controls-hidden");
         }, 2700);

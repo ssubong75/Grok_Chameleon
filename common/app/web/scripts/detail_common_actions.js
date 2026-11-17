@@ -133,6 +133,22 @@ function moveSelectedDetailItemToCollection() {
 
 let detailFrameCaptureBusy = false;
 
+function captureDisplayedDetailFrame(video) {
+  if (!video.videoWidth || !video.videoHeight) throw new Error("The video frame dimensions are unavailable.");
+  const canvas = document.createElement("canvas");
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("Frame capture is unavailable.");
+  try {
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL("image/png");
+  } catch (error) {
+    if (error.name === "SecurityError") throw new Error("The video source does not allow frame capture.");
+    throw error;
+  }
+}
+
 async function captureSelectedDetailFrame() {
   if (detailFrameCaptureBusy) return;
   const screen = screen_state.current_screen;
@@ -174,10 +190,7 @@ async function captureSelectedDetailFrame() {
     }
     video.pause();
     const time = video.currentTime;
-    const url = video.currentSrc || video.src;
-    const native = window.grokChameleonNative;
-    if (!url || !native?.extractVideoFrame) throw new Error("원본 프레임을 추출하려면 앱을 다시 실행해 주세요.");
-    const image = await native.extractVideoFrame({url, time});
+    const image = captureDisplayedDetailFrame(video);
     if (!stillSelected() || currentDetailVideoElement() !== video) {
       throw new Error("The selected video changed. Please capture the frame again.");
     }
