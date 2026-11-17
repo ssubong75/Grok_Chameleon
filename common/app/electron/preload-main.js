@@ -19,6 +19,18 @@ contextBridge.exposeInMainWorld("grokChameleonNative", {
   extractVideoFrame(payload) {
     return ipcRenderer.invoke("grok-chameleon:extract-video-frame", payload || {});
   },
+  captureFullscreenVideo(payload) {
+    return ipcRenderer.invoke("grok-chameleon:capture-fullscreen-video", payload || {});
+  },
+  captureLog(message) {
+    return ipcRenderer.invoke("grok-chameleon:capture-log", String(message || ""));
+  },
+  isWindowFullscreen() {
+    return ipcRenderer.invoke("grok-chameleon:is-window-fullscreen");
+  },
+  leaveCaptureFullscreen() {
+    return ipcRenderer.invoke("grok-chameleon:leave-capture-fullscreen");
+  },
   previewVideoJoin(payload) {
     return ipcRenderer.invoke("grok-chameleon:preview-video-join", payload || {});
   },

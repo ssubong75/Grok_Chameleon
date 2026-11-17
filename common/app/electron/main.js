@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, session, dialog, screen, ipcMain, nativeImage, nativeTheme } = require("electron");
+const { app, BrowserWindow, Menu, session, dialog, screen, ipcMain, nativeImage, nativeTheme, systemPreferences } = require("electron");
 const { spawn, execFile, execFileSync } = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
@@ -4301,6 +4301,92 @@ ipcMain.handle("grok-chameleon:audio-peaks", async (event, payload = {}) => {
 ipcMain.handle("grok-chameleon:extract-video-frame", async (event, payload = {}) => {
   assertAppSender(event);
   return extractVideoFrame(payload, audioEditDeps());
+});
+ipcMain.handle("grok-chameleon:capture-log", async (event, message = "") => {
+  assertAppSender(event);
+  appendLog(`[frame-capture] ${String(message).slice(0, 2000)}`);
+  return true;
+});
+ipcMain.handle("grok-chameleon:is-window-fullscreen", async (event) => {
+  assertAppSender(event);
+  return Boolean(mainWindow && event.sender === mainWindow.webContents && mainWindow.isFullScreen());
+});
+ipcMain.handle("grok-chameleon:leave-capture-fullscreen", async (event) => {
+  assertAppSender(event);
+  if (!mainWindow || event.sender !== mainWindow.webContents) return false;
+  if (mainWindow.isFullScreen()) mainWindow.setFullScreen(false);
+  return true;
+});
+ipcMain.handle("grok-chameleon:capture-fullscreen-video", async (event, payload = {}) => {
+  assertAppSender(event);
+  if (!mainWindow || event.sender !== mainWindow.webContents) throw new Error("Invalid capture window.");
+  const values = [payload.x, payload.y, payload.width, payload.height].map(Number);
+  if (!values.every(Number.isFinite) || values[0] < 0 || values[1] < 0 || values[2] <= 0 || values[3] <= 0) throw new Error("Invalid capture area.");
+  const zoom = event.sender.getZoomFactor();
+  const rect = { x: Math.round(values[0] * zoom), y: Math.round(values[1] * zoom), width: Math.floor(values[2] * zoom), height: Math.floor(values[3] * zoom) };
+  const bounds = mainWindow.getContentBounds();
+  appendLog(`[frame-capture] main request payload=${JSON.stringify(payload)} zoom=${zoom} rect=${JSON.stringify(rect)} bounds=${JSON.stringify(bounds)} windowFullscreen=${mainWindow.isFullScreen()}`);
+  if (rect.width < 1 || rect.height < 1 || rect.x + rect.width > bounds.width + 1 || rect.y + rect.height > bounds.height + 1) throw new Error("Capture area is outside the window.");
+  if (process.platform === "win32") {
+    // Capture the real screen pixels with Windows' own GDI screen copy, matching what the user sees.
+    const physical = screen.dipToScreenRect(mainWindow, { x: bounds.x + rect.x, y: bounds.y + rect.y, width: rect.width, height: rect.height });
+    const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "grok-screen-frame-"));
+    const output = path.join(tempDir, "frame.png");
+    const script = [
+      "$ErrorActionPreference = 'Stop'",
+      "Add-Type -AssemblyName System.Drawing",
+      "Add-Type -Namespace GrokCapture -Name Dpi -MemberDefinition '[DllImport(\"user32.dll\")] public static extern bool SetProcessDPIAware();'",
+      "[void][GrokCapture.Dpi]::SetProcessDPIAware()",
+      "$x = [int]$env:GC_X; $y = [int]$env:GC_Y; $w = [int]$env:GC_W; $h = [int]$env:GC_H",
+      "$bmp = New-Object System.Drawing.Bitmap $w, $h",
+      "$g = [System.Drawing.Graphics]::FromImage($bmp)",
+      "$g.CopyFromScreen($x, $y, 0, 0, (New-Object System.Drawing.Size $w, $h))",
+      "$bmp.Save($env:GC_OUT, [System.Drawing.Imaging.ImageFormat]::Png)",
+      "$g.Dispose(); $bmp.Dispose()",
+    ].join("; ");
+    try {
+      appendLog(`[frame-capture] main windows CopyFromScreen physical=${JSON.stringify(physical)}`);
+      await new Promise((resolve, reject) => execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script], {
+        timeout: 15000,
+        windowsHide: true,
+        env: { ...process.env, GC_X: String(Math.round(physical.x)), GC_Y: String(Math.round(physical.y)), GC_W: String(Math.max(1, Math.round(physical.width))), GC_H: String(Math.max(1, Math.round(physical.height))), GC_OUT: output },
+      }, (error, stdout, stderr) => {
+        appendLog(`[frame-capture] main windows capture done error=${error ? error.message : "none"} stderr=${String(stderr || "").trim()}`);
+        error ? reject(error) : resolve();
+      }));
+      const bytes = await fs.promises.readFile(output);
+      appendLog(`[frame-capture] main png bytes=${bytes.length}`);
+      const image = nativeImage.createFromBuffer(bytes);
+      if (image.isEmpty()) throw new Error("Screen capture failed.");
+      return { image: `data:image/png;base64,${bytes.toString("base64")}`, width: image.getSize().width, height: image.getSize().height };
+    } finally {
+      await fs.promises.rm(tempDir, { recursive: true, force: true });
+    }
+  }
+  if (process.platform !== "darwin") {
+    const image = await event.sender.capturePage(rect);
+    if (image.isEmpty()) throw new Error("Screen capture failed.");
+    return { image: image.toDataURL(), width: image.getSize().width, height: image.getSize().height };
+  }
+  appendLog(`[frame-capture] main screenPermission=${systemPreferences.getMediaAccessStatus("screen")}`);
+  if (systemPreferences.getMediaAccessStatus("screen") !== "granted") throw new Error("macOS 화면 기록 권한이 필요합니다. 시스템 설정에서 Grok Chameleon에 화면 및 시스템 오디오 녹음 권한을 허용해 주세요.");
+  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "grok-screen-frame-"));
+  const output = path.join(tempDir, "frame.png");
+  try {
+    const screenRect = [bounds.x + rect.x, bounds.y + rect.y, rect.width, rect.height].join(",");
+    appendLog(`[frame-capture] main screencapture -R ${screenRect}`);
+    await new Promise((resolve, reject) => execFile("/usr/sbin/screencapture", ["-x", "-R", screenRect, output], { timeout: 15000 }, (error, stdout, stderr) => {
+      appendLog(`[frame-capture] main screencapture done error=${error ? error.message : "none"} stderr=${String(stderr || "").trim()}`);
+      error ? reject(error) : resolve();
+    }));
+    const bytes = await fs.promises.readFile(output);
+    appendLog(`[frame-capture] main png bytes=${bytes.length}`);
+    const image = nativeImage.createFromBuffer(bytes);
+    if (image.isEmpty()) throw new Error("Screen capture failed. Check Screen Recording permission.");
+    return { image: `data:image/png;base64,${bytes.toString("base64")}`, width: image.getSize().width, height: image.getSize().height };
+  } finally {
+    await fs.promises.rm(tempDir, { recursive: true, force: true });
+  }
 });
 ipcMain.handle("grok-chameleon:preview-video-join", async (event, payload = {}) => {
   assertAppSender(event);

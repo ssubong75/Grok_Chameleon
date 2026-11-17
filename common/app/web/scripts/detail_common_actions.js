@@ -133,23 +133,32 @@ function moveSelectedDetailItemToCollection() {
 
 let detailFrameCaptureBusy = false;
 
-function captureDisplayedDetailFrame(video) {
-  if (!video.videoWidth || !video.videoHeight) throw new Error("The video frame dimensions are unavailable.");
-  const canvas = document.createElement("canvas");
-  canvas.width = video.videoWidth;
-  canvas.height = video.videoHeight;
-  const context = canvas.getContext("2d");
-  if (!context) throw new Error("Frame capture is unavailable.");
-  try {
-    context.drawImage(video, 0, 0, canvas.width, canvas.height);
-    return canvas.toDataURL("image/png");
-  } catch (error) {
-    if (error.name === "SecurityError") throw new Error("The video source does not allow frame capture.");
-    throw error;
-  }
+function detailCaptureLog(message) {
+  window.grokChameleonNative?.captureLog?.(message)?.catch?.(() => {});
+}
+
+function detailWaitWindowSettled(isReady, timeoutMs = 4000, quietMs = 400) {
+  return new Promise((resolve) => {
+    const started = performance.now();
+    let lastResize = performance.now();
+    const onResize = () => { lastResize = performance.now(); };
+    window.addEventListener("resize", onResize);
+    const tick = () => {
+      const now = performance.now();
+      if ((isReady() && now - lastResize >= quietMs) || now - started >= timeoutMs) {
+        window.removeEventListener("resize", onResize);
+        detailCaptureLog(`settled ready=${isReady()} ms=${Math.round(now - started)} inner=${window.innerWidth}x${window.innerHeight} screen=${screen.width}x${screen.height}`);
+        resolve();
+        return;
+      }
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
 }
 
 async function captureSelectedDetailFrame() {
+  detailCaptureLog(`click busy=${detailFrameCaptureBusy} screen=${screen_state.current_screen}`);
   if (detailFrameCaptureBusy) return;
   const screen = screen_state.current_screen;
   if (!["i_detail", "b_detail"].includes(screen)) return;
@@ -164,10 +173,18 @@ async function captureSelectedDetailFrame() {
     && library_state.selectedPostPath === selectedPath
     && library_state.selectedDetailItemId === selectedId;
   const buttons = document.querySelectorAll(".i_detail_capture_frame, .b_detail_capture_frame");
+  const host = video.closest(".i_detail_media, .b_detail_media");
+  if (!host || !window.grokChameleonNative?.captureFullscreenVideo) throw new Error("Screen capture is unavailable. Restart the app.");
   detailFrameCaptureBusy = true;
   buttons.forEach((button) => { button.disabled = true; });
   try {
     video.pause();
+    host.classList.add("detail_screen_capture");
+    document.body.classList.add("detail_screen_capture_active");
+    if (document.fullscreenElement && document.fullscreenElement !== host) throw new Error("Another fullscreen view is open.");
+    if (document.fullscreenElement !== host) await host.requestFullscreen();
+    await detailWaitWindowSettled(() => window.innerWidth >= screen.width - 1
+      && window.innerHeight >= screen.height - 1, 1200, 300);
     // A scrub can still be decoding when the user clicks the capture button.
     if (video.seeking || video.readyState < 2) {
       await new Promise((resolve, reject) => {
@@ -190,7 +207,26 @@ async function captureSelectedDetailFrame() {
     }
     video.pause();
     const time = video.currentTime;
-    const image = captureDisplayedDetailFrame(video);
+    if (!video.videoWidth || !video.videoHeight) throw new Error("The video frame dimensions are unavailable.");
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    if (!stillSelected() || document.fullscreenElement !== host || currentDetailVideoElement() !== video) throw new Error("The selected video changed. Please capture the frame again.");
+    const rect = video.getBoundingClientRect();
+    const scale = Math.min(rect.width / video.videoWidth, rect.height / video.videoHeight);
+    const displayWidth = Math.min(rect.width, video.videoWidth * scale);
+    const displayHeight = Math.min(rect.height, video.videoHeight * scale);
+    const result = await window.grokChameleonNative.captureFullscreenVideo({
+      x: Math.max(0, rect.left + (rect.width - displayWidth) / 2),
+      y: Math.max(0, rect.top + (rect.height - displayHeight) / 2),
+      width: displayWidth,
+      height: displayHeight,
+    });
+    detailCaptureLog(`native result width=${result?.width} height=${result?.height} imageLength=${String(result?.image || "").length}`);
+    const { image, width, height } = result;
+    // Return to the normal detail layout before the snapshot re-renders the detail view.
+    host.classList.remove("detail_screen_capture");
+    document.body.classList.remove("detail_screen_capture_active");
+    if (document.fullscreenElement) await document.exitFullscreen().catch(() => {});
+    await detailWaitWindowSettled(() => !document.fullscreenElement);
     if (!stillSelected() || currentDetailVideoElement() !== video) {
       throw new Error("The selected video changed. Please capture the frame again.");
     }
@@ -244,8 +280,12 @@ async function captureSelectedDetailFrame() {
       }
       renderComposerAttachments();
     }
+    detailCaptureLog("save done");
     toast(imagine ? "Frame saved to uploads." : "Frame saved to this folder.");
   } finally {
+    host.classList.remove("detail_screen_capture");
+    document.body.classList.remove("detail_screen_capture_active");
+    if (document.fullscreenElement) await document.exitFullscreen().catch(() => {});
     detailFrameCaptureBusy = false;
     buttons.forEach((button) => { button.disabled = false; });
   }

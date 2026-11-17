@@ -345,6 +345,14 @@
   content: none;
 }
 
+.detail_screen_capture .video-controls,
+.detail_screen_capture .detail_thumb_nav,
+.detail_screen_capture .audio_edit,
+.detail_screen_capture .detail_job_badges {
+  visibility: hidden !important;
+  transition: none !important;
+}
+
 .i_detail_media .detail_placeholder_icon,
 .b_detail_media .detail_placeholder_icon {
   position: relative;
@@ -2578,4 +2586,12 @@ video.audio_edit_source_hidden {
 .i_detail_extract_audio[aria-pressed="true"],
 .b_detail_extract_audio[aria-pressed="true"] {
   color: var(--accent);
+}
+
+.detail_screen_capture_active .video-controls,
+.detail_screen_capture_active .detail_thumb_nav,
+.detail_screen_capture_active .detail_thumb_nav_btn {
+  visibility: hidden !important;
+  opacity: 0 !important;
+  transition: none !important;
 }
