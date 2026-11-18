@@ -367,13 +367,31 @@
           selectionLabel.classList.toggle("blocked", blocked);
         }
       };
-      const selectTarget = (nextTargetPath, collectionPath = "") => {
+      const selectTarget = (nextTargetPath, collectionPath = "", source = "") => {
         targetPath = nextTargetPath;
         activeCollectionPath = collectionPath;
-        renderPrimary();
-        renderGroups();
-        renderSecondary();
+        if (source !== "primary") renderPrimary();
+        else primaryList.querySelectorAll(".primary-folder-card").forEach((card) => {
+          const active = card.dataset.destinationPath === collectionPath;
+          card.classList.toggle("active", active);
+          card.setAttribute("aria-pressed", active ? "true" : "false");
+        });
+        if (source !== "group") renderGroups();
+        else groupList.querySelectorAll(".primary-folder-card").forEach((card) => {
+          const active = card.dataset.groupPath === activeGroupPath;
+          card.classList.toggle("active", active);
+          card.setAttribute("aria-pressed", active ? "true" : "false");
+        });
+        if (source !== "item") renderSecondary();
+        else secondaryList.querySelectorAll(".secondary-folder-card").forEach((card) => {
+          const active = card.dataset.destinationPath === targetPath;
+          card.classList.toggle("active", active);
+          card.setAttribute("aria-pressed", active ? "true" : "false");
+        });
         syncTarget();
+      };
+      const mergeDestination = (path) => {
+        if (path && !targetBlocked(path)) closeMergeDestinationDialog(path);
       };
       const folderCard = ({ path, label, active, disabled = false, primary = false }) => {
         const card = document.createElement("button");
@@ -395,10 +413,12 @@
             disabled: targetBlocked(collection.path),
             primary: true,
           });
+          card.dataset.destinationPath = collection.path;
           card.addEventListener("click", () => {
             activeGroupPath = "";
-            selectTarget(collection.path, collection.path);
+            selectTarget(collection.path, collection.path, "primary");
           });
+          card.addEventListener("dblclick", () => mergeDestination(collection.path));
           primaryList.append(card);
         }
       };
@@ -427,8 +447,9 @@
           card.dataset.groupPath = entry.path;
           card.addEventListener("click", () => {
             activeGroupPath = entry.path;
-            selectTarget(entry.target, collection.path);
+            selectTarget(entry.target, collection.path, "group");
           });
+          card.addEventListener("dblclick", () => mergeDestination(entry.target));
           groupList.append(card);
         }
       };
@@ -473,7 +494,9 @@
             disabled: blocked,
           });
           if (blocked) card.title = "A selected card cannot be its own destination.";
-          card.addEventListener("click", () => selectTarget(post.folder_path, collection.path));
+          card.dataset.destinationPath = post.folder_path;
+          card.addEventListener("click", () => selectTarget(post.folder_path, collection.path, "item"));
+          card.addEventListener("dblclick", () => mergeDestination(post.folder_path));
           secondaryList.append(card);
         }
       };
