@@ -36,13 +36,122 @@
   }
 
 
-  function secondMainPostsFor(post = selectedCollectionPost()) {
+  function itemSecondMainPosts(post) {
     if (!post) return [];
     const collection = library_state.collections.find((item) => String(post.folder_path || "").startsWith(`${item.path}/`));
     const childPosts = collectionChildPosts(collection, post.folder_path)
       .filter((item) => Array.isArray(item.items) && item.items.length);
     const selfPosts = Array.isArray(post.items) && post.items.length ? [post] : [];
     return [...selfPosts, ...childPosts].sort(comparePostsByRecentActivity);
+  }
+
+
+  // Double-clicking a category or group on the collection main screen shows the cards of every
+  // item below it. The scope stays set until an item is opened by itself.
+  function collectionSecondMainAggregate() {
+    const aggregate = library_state.collectionSecondMainAggregate;
+    if (!aggregate?.path) return null;
+    const collection = library_state.collections.find((item) => item.path === aggregate.collectionPath);
+    if (!collection) return null;
+    return { ...aggregate, collection };
+  }
+
+
+  function collectionAggregateItems(aggregate) {
+    if (!aggregate) return [];
+    const { collection } = aggregate;
+    if (aggregate.kind === "group") {
+      return collectionChildPosts(collection, aggregate.path).filter((post) => post.folder_role !== "collection_group");
+    }
+    const direct = collectionDirectPosts(collection);
+    if (aggregate.kind === "default") return direct.filter((post) => post.folder_role !== "collection_group");
+    const groups = direct.filter((post) => post.folder_role === "collection_group");
+    return [
+      ...direct.filter((post) => post.folder_role !== "collection_group"),
+      ...groups.flatMap((group) => collectionChildPosts(collection, group.folder_path)
+        .filter((post) => post.folder_role !== "collection_group")),
+    ];
+  }
+
+
+  function collectionAggregateParents(aggregate) {
+    if (!aggregate) return [];
+    if (aggregate.kind === "group") {
+      const group = (aggregate.collection.posts || []).find((post) => post.folder_path === aggregate.path);
+      return group ? [group] : [];
+    }
+    if (aggregate.kind === "default") return [];
+    return collectionDirectPosts(aggregate.collection).filter((post) => post.folder_role === "collection_group");
+  }
+
+
+  function collectionAggregatePosts(aggregate) {
+    const seen = new Set();
+    const posts = [];
+    for (const item of collectionAggregateItems(aggregate)) {
+      for (const post of itemSecondMainPosts(item)) {
+        const path = String(post.folder_path || "");
+        if (!path || seen.has(path)) continue;
+        seen.add(path);
+        posts.push(post);
+      }
+    }
+    return posts.sort(comparePostsByRecentActivity);
+  }
+
+
+  function rerenderCollectionAggregate(path) {
+    if (library_state.collectionSecondMainAggregate?.path !== path) return;
+    // Same path is used by the category and its Default group; either way the view re-reads state.
+    if (screen_state.current_screen === "2nd_main") renderSecondMain();
+  }
+
+
+  // Starts the indexed loads the aggregate view needs and reports whether any are still running.
+  function loadCollectionAggregateContents(aggregate) {
+    if (!library_state.libraryIndexEnabled) return false;
+    let loading = false;
+    const path = aggregate.path;
+    const { collection } = aggregate;
+    if (!collection.indexed_loaded || collection.indexed_loading) {
+      loading = true;
+      if (!collection.indexed_loading && typeof loadIndexedCollectionPosts === "function") {
+        loadIndexedCollectionPosts(collection.path).then(() => rerenderCollectionAggregate(path))
+          .catch((error) => console.warn(error));
+      }
+      return loading;
+    }
+    if (typeof loadIndexedCollectionPostContents !== "function") return false;
+    for (const parent of [...collectionAggregateParents(aggregate), ...collectionAggregateItems(aggregate)]) {
+      if (parent._indexed_children_loaded && !parent._indexed_children_loading) continue;
+      loading = true;
+      if (!parent._indexed_children_loading) {
+        loadIndexedCollectionPostContents(parent.folder_path).then(() => rerenderCollectionAggregate(path))
+          .catch((error) => console.warn(error));
+      }
+    }
+    return loading;
+  }
+
+
+  function openCollectionAggregate(collection, kind, path, titleText) {
+    library_state.collectionSecondMainAggregate = {
+      kind,
+      path,
+      collectionPath: collection.path,
+      title: titleText,
+    };
+    library_state.selectedCollectionPostPath = "";
+    replaceCurrentBrowserHistoryState();
+    renderSecondMain();
+    openScreen("2nd_main", "b_collection_nav_btn");
+  }
+
+
+  function secondMainPostsFor(post = selectedCollectionPost()) {
+    const aggregate = collectionSecondMainAggregate();
+    if (aggregate) return collectionAggregatePosts(aggregate);
+    return itemSecondMainPosts(post);
   }
 
 
@@ -74,6 +183,37 @@
     const title = document.querySelector(".second_main_header h2");
     const list = document.querySelector(".second_main_card_list");
     if (!list) return;
+
+    const aggregate = collectionSecondMainAggregate();
+    if (aggregate) {
+      const aggregateScope = `aggregate|${aggregate.kind}|${aggregate.path}`;
+      const aggregateSameScope = aggregateScope === collectionSecondMainStableScope;
+      if (!aggregateSameScope) {
+        collectionSecondMainStableScope = aggregateScope;
+        collectionSecondMainStablePosts = [];
+      }
+      list.dataset.collectionSecondMainScope = aggregateScope;
+      const aggregateLoading = loadCollectionAggregateContents(aggregate);
+      const currentAggregatePosts = collectionAggregatePosts(aggregate);
+      const aggregatePosts = aggregateLoading && aggregateSameScope
+        ? stableScopedCollectionPosts(collectionSecondMainStablePosts, currentAggregatePosts)
+        : currentAggregatePosts;
+      collectionSecondMainStablePosts = aggregatePosts;
+      list.setAttribute("aria-busy", String(aggregateLoading));
+      if (title) title.textContent = aggregate.title || "Item";
+      if (!aggregatePosts.length) {
+        collectionSecondMainStablePosts = [];
+        replaceSecondMainWithMessage(list, aggregateLoading ? "Loading . . ." : "No items.");
+        return;
+      }
+      renderVirtualCardList(COLLECTION_SECOND_MAIN_VIRTUAL_LIST_KEY, list, aggregatePosts.map((item) => virtualCardRenderSpecForPost(item, "collection_media_card", {
+        screenId: "2nd_main",
+        activeButtonId: "b_collection_nav_btn",
+      })), {
+        loading: aggregateLoading,
+      });
+      return;
+    }
 
     const selectedPath = String(library_state.selectedCollectionPostPath || "");
     const requestedPath = String(requestedPost?.folder_path || "");
@@ -128,6 +268,23 @@
 
   function maybeLoadMoreCollectionSecondMain() {
     const list = document.querySelector(".second_main_card_list");
+    const aggregate = collectionSecondMainAggregate();
+    if (aggregate) {
+      if (
+        !list
+        || virtualCardListRemaining(list) > virtualCardListPrefetchDistance(list, 2, 480)
+        || typeof loadIndexedCollectionPostContents !== "function"
+      ) {
+        return;
+      }
+      const parent = [...collectionAggregateParents(aggregate), ...collectionAggregateItems(aggregate)]
+        .find((item) => item._indexed_children_has_more && !item._indexed_children_loading);
+      if (!parent) return;
+      loadIndexedCollectionPostContents(parent.folder_path, { append: true })
+        .then(() => rerenderCollectionAggregate(aggregate.path))
+        .catch((error) => console.warn(error));
+      return;
+    }
     const post = selectedCollectionPost();
     if (
       !list
@@ -511,7 +668,20 @@
         <span class="collection_folder_copy"><strong></strong></span>
       `;
       card.querySelector("strong").textContent = collection.name;
-      card.addEventListener("click", () => {
+      card.addEventListener("click", (event) => {
+        // The cards are rebuilt on every click, so a double-click is read from the click count.
+        if (event.detail === 2) {
+          library_state.selectedCollectionPath = collection.path;
+          library_state.selectedCollectionGroupPath = "";
+          library_state.selectedCollectionPostPath = "";
+          library_state.collectionActionLevel = "first";
+          library_state.collectionSort = collectionSortModeFor(collection.path);
+          library_state.collectionDraftLayout = null;
+          library_state.collectionView = "2nd_folders";
+          renderCollectionFolders();
+          openCollectionAggregate(collection, "category", collection.path, collection.name);
+          return;
+        }
         const nextPath = library_state.selectedCollectionPath === collection.path ? "" : collection.path;
         library_state.selectedCollectionPath = nextPath;
         library_state.selectedCollectionGroupPath = "";
@@ -576,11 +746,16 @@
         group.type = "button";
         group.className = `collection_1st_card${collectionDefaultGroupSelected && !library_state.selectedCollectionGroupPath ? " active" : ""}`;
         group.innerHTML = '<span class="collection_folder_copy"><strong>Default</strong></span>';
-        group.addEventListener("click", () => {
+        group.addEventListener("click", (event) => {
           collectionDefaultGroupSelected = true;
           library_state.selectedCollectionGroupPath = "";
           library_state.collectionActionLevel = "group";
           library_state.selectedCollectionPostPath = "";
+          if (event.detail === 2) {
+            renderCollectionFolders();
+            openCollectionAggregate(collection, "default", collection.path, `${collection.name} / Default`);
+            return;
+          }
           renderCollectionFolders();
         });
         bindCollectionGroupDrop(group, collection, "");
@@ -595,11 +770,16 @@
           title.textContent = readableName(item.folderName) || item.title || "Group";
           copy.append(title);
           button.append(copy);
-          button.addEventListener("click", () => {
+          button.addEventListener("click", (event) => {
             collectionDefaultGroupSelected = false;
             library_state.selectedCollectionGroupPath = item.folder_path;
             library_state.selectedCollectionPostPath = "";
             library_state.collectionActionLevel = "group";
+            if (event.detail === 2) {
+              renderCollectionFolders();
+              openCollectionAggregate(collection, "group", item.folder_path, `${collection.name} / ${title.textContent}`);
+              return;
+            }
             if (library_state.libraryIndexEnabled && !item._indexed_children_loaded && typeof loadIndexedCollectionPostContents === "function") {
               loadIndexedCollectionPostContents(item.folder_path).then(() => renderCollectionFolders()).catch((error) => console.warn(error));
             }
@@ -770,6 +950,7 @@
             }
           });
           card.addEventListener("dblclick", () => {
+            library_state.collectionSecondMainAggregate = null;
             library_state.selectedCollectionPostPath = post.folder_path;
             library_state.collectionActionLevel = "second";
             replaceCurrentBrowserHistoryState();
@@ -781,6 +962,7 @@
             if (event.key !== "Enter" && event.key !== " ") return;
             if (event.target.closest("button")) return;
             event.preventDefault();
+            library_state.collectionSecondMainAggregate = null;
             library_state.selectedCollectionPostPath = post.folder_path;
             library_state.collectionActionLevel = "second";
             replaceCurrentBrowserHistoryState();

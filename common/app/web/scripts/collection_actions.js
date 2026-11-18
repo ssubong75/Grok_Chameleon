@@ -276,6 +276,8 @@
 
     let targetPath = "";
     let activeCollectionPath = "";
+    // "" is the Default group (category root).
+    let activeGroupPath = "";
     const targetBlocked = (path) => sourcePaths.some((sourcePath) => (
       path === sourcePath || path.startsWith(`${sourcePath}/`)
     ));
@@ -293,6 +295,10 @@
             <section class="move-gallery-primary-panel primary-folder-panel" aria-label="Main folders">
               <div class="folder-panel-heading"><strong>Folder</strong></div>
               <div class="move-gallery-primary-list primary-folder-list"></div>
+            </section>
+            <section class="move-gallery-group-panel primary-folder-panel" aria-label="Group folders">
+              <div class="folder-panel-heading"><strong>Group</strong></div>
+              <div class="move-gallery-group-list primary-folder-list"></div>
             </section>
             <section class="move-gallery-secondary-panel secondary-folder-panel" aria-label="Second folders">
               <div class="folder-panel-heading"><strong>Item</strong></div>
@@ -314,24 +320,40 @@
       const modal = overlay.querySelector(".merge-destination-modal");
       const primaryList = overlay.querySelector(".move-gallery-primary-list");
       const secondaryList = overlay.querySelector(".move-gallery-secondary-list");
+      const groupList = overlay.querySelector(".move-gallery-group-list");
       const selectionLabel = overlay.querySelector(".merge-destination-selection");
       const confirmButton = overlay.querySelector(".gallery-action-confirm");
 
       const collections = () => (
         typeof sortedCollections === "function" ? sortedCollections() : [...library_state.collections]
       );
-      const directPosts = (collection) => (
-        typeof collectionPostsWithSlots === "function"
-          ? collectionPostsWithSlots(collection)
-          : (collection?.posts || [])
-      );
+      const collectionGroups = (collection) => (typeof collectionDirectPosts === "function" ? collectionDirectPosts(collection) : [])
+        .filter((post) => post.folder_role === "collection_group");
+      const activeGroupPost = (collection) => collectionGroups(collection).find((post) => post.folder_path === activeGroupPath) || null;
+      const directPosts = (collection) => {
+        if (!collection) return [];
+        const sourcePosts = activeGroupPath
+          ? (typeof collectionChildPosts === "function" ? collectionChildPosts(collection, activeGroupPath) : [])
+          : (typeof collectionDirectPosts === "function" ? collectionDirectPosts(collection) : (collection.posts || []))
+            .filter((post) => post.folder_role !== "collection_group");
+        const posts = sourcePosts.map((post, index) => ({
+          ...post,
+          order: Number.isFinite(Number(post.order)) ? Number(post.order) : index,
+          grid_slot: Number.isFinite(Number(post.grid_slot)) ? Math.max(0, Math.floor(Number(post.grid_slot))) : index,
+        }));
+        return typeof normalizeCollectionSlotPosts === "function" ? normalizeCollectionSlotPosts(posts) : posts;
+      };
       const targetLabel = () => {
         const collection = library_state.collections.find((item) => item.path === activeCollectionPath);
         if (!collection) return "Choose a folder";
-        if (targetPath === collection.path) return collection.name || readableName(collection.id);
+        const collectionName = collection.name || readableName(collection.id);
+        const group = activeGroupPost(collection);
+        const groupName = group ? (readableName(group.folderName) || group.title || "Group") : "Default";
+        if (targetPath === collection.path) return `${collectionName} / Default`;
+        if (group && targetPath === group.folder_path) return `${collectionName} / ${groupName}`;
         const post = directPosts(collection).find((item) => item.folder_path === targetPath);
         const itemName = readableName(post?.folderName) || post?.title || "Item";
-        return `${collection.name || readableName(collection.id)} / ${itemName}`;
+        return `${collectionName} / ${groupName} / ${itemName}`;
       };
       const syncTarget = () => {
         const blocked = !targetPath || targetBlocked(targetPath);
@@ -349,6 +371,7 @@
         targetPath = nextTargetPath;
         activeCollectionPath = collectionPath;
         renderPrimary();
+        renderGroups();
         renderSecondary();
         syncTarget();
       };
@@ -373,9 +396,40 @@
             primary: true,
           });
           card.addEventListener("click", () => {
+            activeGroupPath = "";
             selectTarget(collection.path, collection.path);
           });
           primaryList.append(card);
+        }
+      };
+      const renderGroups = () => {
+        groupList.replaceChildren();
+        const collection = library_state.collections.find((item) => item.path === activeCollectionPath);
+        if (!collection) {
+          groupList.append(moveDialogEmptyNode("Select a folder."));
+          return;
+        }
+        const groups = collectionGroups(collection);
+        if (activeGroupPath && !groups.some((post) => post.folder_path === activeGroupPath)) activeGroupPath = "";
+        const entries = [{ path: "", target: collection.path, name: "Default" }, ...groups.map((post) => ({
+          path: post.folder_path,
+          target: post.folder_path,
+          name: readableName(post.folderName) || post.title || "Group",
+        }))];
+        for (const entry of entries) {
+          const card = folderCard({
+            path: entry.target,
+            label: entry.name,
+            active: entry.path === activeGroupPath,
+            disabled: targetBlocked(entry.target),
+            primary: true,
+          });
+          card.dataset.groupPath = entry.path;
+          card.addEventListener("click", () => {
+            activeGroupPath = entry.path;
+            selectTarget(entry.target, collection.path);
+          });
+          groupList.append(card);
         }
       };
       const renderSecondary = () => {
@@ -388,7 +442,20 @@
         if (library_state.libraryIndexEnabled && !collection.indexed_loaded) {
           secondaryList.append(moveDialogEmptyNode("Loading . . ."));
           if (!collection.indexed_loading && typeof loadIndexedCollectionPosts === "function") {
-            loadIndexedCollectionPosts(collection.path).then(renderSecondary).catch((error) => console.warn(error));
+            loadIndexedCollectionPosts(collection.path).then(() => { renderGroups(); renderSecondary(); }).catch((error) => console.warn(error));
+          }
+          return;
+        }
+        const groupPost = activeGroupPost(collection);
+        if (activeGroupPath && library_state.libraryIndexEnabled && groupPost && !groupPost._indexed_children_loaded
+          && typeof loadIndexedCollectionPostContents === "function") {
+          secondaryList.append(moveDialogEmptyNode("Loading . . ."));
+          if (!groupPost._dialog_loading) {
+            groupPost._dialog_loading = true;
+            loadIndexedCollectionPostContents(activeGroupPath)
+              .then(renderSecondary)
+              .catch((error) => console.warn(error))
+              .finally(() => { groupPost._dialog_loading = false; });
           }
           return;
         }
@@ -443,6 +510,7 @@
       });
 
       renderPrimary();
+      renderGroups();
       renderSecondary();
       syncTarget();
       window.setTimeout(() => modal?.focus({ preventScroll: true }), 0);
