@@ -13,6 +13,7 @@
     "composer_options.js",
     "composer_provider.js",
     "detail_media.js",
+    "detail_external_display.js",
     "b_detail_media.js",
     "i_detail_media.js",
     "detail_video_player.js",

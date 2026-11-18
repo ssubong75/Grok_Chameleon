@@ -4298,6 +4298,78 @@ ipcMain.handle("grok-chameleon:audio-peaks", async (event, payload = {}) => {
   assertAppSender(event);
   return audioPeaks(payload, audioEditDeps());
 });
+let externalMediaWindow = null;
+let externalMediaState = null;
+let externalMediaDragTimer = null;
+
+ipcMain.handle("grok-chameleon:external-media-open", async (event, payload = {}) => {
+  assertAppSender(event);
+  if (!mainWindow || event.sender !== mainWindow.webContents) return false;
+  const point = screen.getCursorScreenPoint();
+  const url = String(payload.url || "");
+  if (!["image", "video"].includes(payload.type) || !/^(https?:|blob:|data:)/i.test(url)) return false;
+  if (externalMediaWindow && !externalMediaWindow.isDestroyed()) {
+    const previous = externalMediaWindow;
+    externalMediaWindow = null;
+    previous.close();
+  }
+  externalMediaState = { type: payload.type, url, time: Number(payload.time) || 0, paused: !!payload.paused, rate: Number(payload.rate) || 1 };
+  const win = new BrowserWindow({
+    x: point.x + 12, y: point.y + 12, width: 320, height: 180, frame: false, show: false, focusable: false, alwaysOnTop: true, backgroundColor: "#000000",
+    webPreferences: { preload: path.join(__dirname, "preload-external-media.js"), contextIsolation: true, nodeIntegration: false, autoplayPolicy: "no-user-gesture-required", backgroundThrottling: false },
+  });
+  externalMediaWindow = win;
+  win.setIgnoreMouseEvents(true);
+  if (externalMediaDragTimer) clearInterval(externalMediaDragTimer);
+  externalMediaDragTimer = setInterval(() => {
+    if (win.isDestroyed()) return;
+    const cursor = screen.getCursorScreenPoint();
+    win.setPosition(cursor.x + 12, cursor.y + 12, false);
+  }, 30);
+  win.webContents.on("did-finish-load", () => {
+    if (!win.isDestroyed()) win.webContents.send("external-media:state", externalMediaState);
+  });
+  win.on("closed", () => {
+    if (externalMediaWindow !== win) return;
+    externalMediaWindow = null;
+    externalMediaState = null;
+    if (externalMediaDragTimer) clearInterval(externalMediaDragTimer);
+    externalMediaDragTimer = null;
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("grok-chameleon:external-media-closed");
+  });
+  await win.loadURL(`${SERVER_BASE}/external-media.html`);
+  if (!win.isDestroyed()) win.showInactive();
+  return !win.isDestroyed();
+});
+ipcMain.handle("grok-chameleon:external-media-finish-drag", (event, point = {}) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents || !externalMediaWindow || externalMediaWindow.isDestroyed()) return false;
+  if (externalMediaDragTimer) clearInterval(externalMediaDragTimer);
+  externalMediaDragTimer = null;
+  const win = externalMediaWindow;
+  const cursor = Number.isFinite(point.x) && Number.isFinite(point.y) ? { x: Math.round(point.x), y: Math.round(point.y) } : screen.getCursorScreenPoint();
+  const target = screen.getDisplayNearestPoint(cursor);
+  const source = screen.getDisplayMatching(mainWindow.getBounds());
+  if (!target || target.id === source.id) { win.close(); return false; }
+  win.setIgnoreMouseEvents(false);
+  win.setFocusable(true);
+  win.setAlwaysOnTop(false);
+  win.setBounds(target.bounds, false);
+  win.show();
+  win.setFullScreen(true);
+  return true;
+});
+ipcMain.on("grok-chameleon:external-media-update", (event, payload = {}) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents || !externalMediaWindow || externalMediaWindow.isDestroyed()) return;
+  externalMediaState = { ...externalMediaState, time: Number(payload.time) || 0, paused: !!payload.paused, rate: Number(payload.rate) || 1 };
+  externalMediaWindow.webContents.send("external-media:state", externalMediaState);
+});
+ipcMain.on("grok-chameleon:external-media-close", (event) => {
+  if (mainWindow && event.sender === mainWindow.webContents && externalMediaWindow && !externalMediaWindow.isDestroyed()) externalMediaWindow.close();
+});
+ipcMain.on("external-media:close", (event) => {
+  if (externalMediaWindow && !externalMediaWindow.isDestroyed() && event.sender === externalMediaWindow.webContents) externalMediaWindow.close();
+});
+
 ipcMain.handle("grok-chameleon:extract-video-frame", async (event, payload = {}) => {
   assertAppSender(event);
   return extractVideoFrame(payload, audioEditDeps());

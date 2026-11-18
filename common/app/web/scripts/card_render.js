@@ -455,17 +455,19 @@ function virtualCardListViewport(list) {
 }
 
 function virtualCardLayoutMetrics(state, list) {
+  const columns = virtualCardGridColumnCount(list);
   const layoutKey = [
     list.clientWidth || 0,
     window.innerWidth || 0,
     window.innerHeight || 0,
+    columns,
     virtualCardListUsesDocumentScroll() ? "document" : "list",
   ].join(":");
   if (state.layoutMetrics?.key === layoutKey) return state.layoutMetrics;
   const styles = getComputedStyle(list);
   state.layoutMetrics = {
     key: layoutKey,
-    columns: virtualCardGridColumnCount(list),
+    columns,
     rowHeight: virtualCardGridRowHeight(list),
     gap: Number.parseFloat(styles.rowGap) || 0,
   };

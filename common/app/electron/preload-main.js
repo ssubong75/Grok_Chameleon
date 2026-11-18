@@ -1,6 +1,23 @@
 const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
 contextBridge.exposeInMainWorld("grokChameleonNative", {
+  openExternalMedia(payload) {
+    return ipcRenderer.invoke("grok-chameleon:external-media-open", payload);
+  },
+  finishExternalMediaDrag(point) {
+    return ipcRenderer.invoke("grok-chameleon:external-media-finish-drag", point);
+  },
+  updateExternalMedia(payload) {
+    ipcRenderer.send("grok-chameleon:external-media-update", payload);
+  },
+  closeExternalMedia() {
+    ipcRenderer.send("grok-chameleon:external-media-close");
+  },
+  onExternalMediaClosed(callback) {
+    const listener = () => callback();
+    ipcRenderer.on("grok-chameleon:external-media-closed", listener);
+    return () => ipcRenderer.removeListener("grok-chameleon:external-media-closed", listener);
+  },
   activateImagineAccount(payload) {
     return ipcRenderer.invoke("grok-chameleon:activate-imagine-account", payload || {});
   },
