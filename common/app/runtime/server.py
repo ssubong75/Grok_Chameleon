@@ -28551,7 +28551,7 @@ def merged_post_source(posts: list[dict]) -> str:
     return "build"
 
 
-def merge_source_files(source_dir: Path, post: dict) -> list[Path]:
+def merge_registered_file_names(source_dir: Path, post: dict) -> set[str]:
     allowed = {"post.json", ".DS_Store"}
     for item in post.get("items") or []:
         name = str(item.get("file") or "")
@@ -28560,6 +28560,40 @@ def merge_source_files(source_dir: Path, post: dict) -> list[Path]:
                 raise RuntimeError("Merge stopped: nested media paths must be kept.")
             allowed.add(name)
     allowed.update(thumbnail_file_names(source_dir, post))
+    return allowed
+
+
+def merge_extra_files(source_dir: Path, post: dict) -> list[Path]:
+    """Files in a card folder that post.json does not list (wav, m4a, mp3 and others).
+
+    They are carried into the merged folder so removing the source folder never loses them.
+    """
+    allowed = merge_registered_file_names(source_dir, post)
+    extras = []
+    for entry in sorted(source_dir.iterdir(), key=lambda path: path.name):
+        if entry.is_symlink() or not entry.is_file():
+            raise RuntimeError("Merge stopped: a selected folder contains subfolders or links. Original folders were kept.")
+        if entry.name not in allowed and not is_apple_metadata_file_name(entry.name):
+            extras.append(entry)
+    return extras
+
+
+def copy_merge_extra_file(source: Path, target_dir: Path) -> Path:
+    stem, suffix = source.stem, source.suffix
+    if not stem:
+        stem, suffix = source.name, ""
+    target = target_dir / source.name
+    index = 1
+    while target.exists() or target.name == "post.json":
+        target = target_dir / f"{stem}_{index}{suffix}"
+        index += 1
+    shutil.copy2(source, target)
+    return target
+
+
+def merge_source_files(source_dir: Path, post: dict, extra_names: set[str] | None = None) -> list[Path]:
+    allowed = merge_registered_file_names(source_dir, post)
+    allowed.update(extra_names or set())
     entries = list(source_dir.iterdir())
     for entry in entries:
         if entry.is_symlink() or not entry.is_file():
@@ -28569,10 +28603,10 @@ def merge_source_files(source_dir: Path, post: dict) -> list[Path]:
     return entries
 
 
-def remove_merged_source_directory(source_dir: Path, post: dict) -> bool:
+def remove_merged_source_directory(source_dir: Path, post: dict, extra_names: set[str] | None = None) -> bool:
     # Never recursively remove a card folder: newly added children must survive.
     try:
-        entries = merge_source_files(source_dir, post)
+        entries = merge_source_files(source_dir, post, extra_names)
     except (RuntimeError, OSError):
         return False
     try:
@@ -28602,6 +28636,7 @@ def merge_selected_posts(payload: dict) -> dict:
 
     snapshot = current_library_snapshot(root)
     posts = []
+    extra_names_by_path: dict[str, set[str]] = {}
     for path in post_paths:
         post = find_post(snapshot, path)
         if not post:
@@ -28619,7 +28654,7 @@ def merge_selected_posts(payload: dict) -> dict:
         post = post_from_folder(root, post_dir, context) if context else None
         if not post:
             raise RuntimeError("Selected post could not be read from disk.")
-        merge_source_files(post_dir, post)
+        extra_names_by_path[post_dir.resolve().as_posix()] = {entry.name for entry in merge_extra_files(post_dir, post)}
         posts.append(post)
 
     target_parent, collection_id = merge_target_parent(root, payload)
@@ -28669,6 +28704,14 @@ def merge_selected_posts(payload: dict) -> dict:
                         copied_item[key] = item_id_map[copied_item[key]]
                 if isinstance(copied_item.get("reference_item_ids"), list):
                     copied_item["reference_item_ids"] = [item_id_map.get(key, key) for key in copied_item["reference_item_ids"]]
+            # Unlisted files (wav, m4a, mp3 and others) move with the merge instead of stopping it.
+            for extra_name in sorted(extra_names_by_path.get(source_dir.resolve().as_posix(), set())):
+                import filecmp
+                source_file = source_dir / extra_name
+                copied_file = copy_merge_extra_file(source_file, temp_dir)
+                if not copied_file.is_file() or not filecmp.cmp(source_file, copied_file, shallow=False):
+                    raise RuntimeError("Merge copy verification failed; original cards were kept.")
+                verified_copies.append((source_file, copied_file))
         if not merged_items:
             raise RuntimeError("Selected cards have no media to merge.")
 
@@ -28702,7 +28745,7 @@ def merge_selected_posts(payload: dict) -> dict:
             if not filecmp.cmp(source_file, copied_file, shallow=False):
                 raise RuntimeError("Merge source changed; original cards were kept.")
         for post, source_dir in zip(posts, source_dirs):
-            merge_source_files(source_dir, post)
+            merge_source_files(source_dir, post, extra_names_by_path.get(source_dir.resolve().as_posix()))
         temp_dir.rename(final_dir)
     except Exception:
         if temp_dir.exists():
@@ -28718,7 +28761,11 @@ def merge_selected_posts(payload: dict) -> dict:
             )
             if source_post:
                 remove_build_previews_for_items(root, source_dir, source_post.get("items") or [])
-            if not remove_merged_source_directory(source_dir, source_post or {}):
+            if not remove_merged_source_directory(
+                source_dir,
+                source_post or {},
+                extra_names_by_path.get(source_dir.resolve().as_posix()),
+            ):
                 cleanup_deferred.append(source_dir.relative_to(root).as_posix())
 
     delete_library_index_paths(root, post_paths, recursive=True)
