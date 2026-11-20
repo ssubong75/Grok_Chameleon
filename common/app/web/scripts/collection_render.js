@@ -116,7 +116,9 @@
     if (!collection.indexed_loaded || collection.indexed_loading) {
       loading = true;
       if (!collection.indexed_loading && typeof loadIndexedCollectionPosts === "function") {
-        loadIndexedCollectionPosts(collection.path).then(() => rerenderCollectionAggregate(path))
+        loadIndexedCollectionPosts(collection.path).then(() => {
+          if (collection.indexed_loaded) rerenderCollectionAggregate(path);
+        })
           .catch((error) => console.warn(error));
       }
       return loading;
@@ -126,7 +128,9 @@
       if (parent._indexed_children_loaded && !parent._indexed_children_loading) continue;
       loading = true;
       if (!parent._indexed_children_loading) {
-        loadIndexedCollectionPostContents(parent.folder_path).then(() => rerenderCollectionAggregate(path))
+        loadIndexedCollectionPostContents(parent.folder_path).then((loaded) => {
+          if (loaded) rerenderCollectionAggregate(path);
+        })
           .catch((error) => console.warn(error));
       }
     }
@@ -842,7 +846,9 @@
     if (collection && library_state.selectedCollectionGroupPath && library_state.libraryIndexEnabled) {
       const group = collectionDirectPosts(collection).find((item) => item.folder_path === library_state.selectedCollectionGroupPath);
       if (group && !group._indexed_children_loaded && !group._indexed_children_loading && typeof loadIndexedCollectionPostContents === "function") {
-        loadIndexedCollectionPostContents(group.folder_path).then(() => renderCollectionFolders()).catch((error) => console.warn(error));
+        loadIndexedCollectionPostContents(group.folder_path).then((loaded) => {
+          if (loaded) renderCollectionFolders();
+        }).catch((error) => console.warn(error));
       }
     }
     const sameScope = scope === collectionFolderGridStableScope;

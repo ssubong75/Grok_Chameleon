@@ -690,6 +690,13 @@ document.documentElement.classList.toggle("platform-macos", isMacRenderer);
       } else if (data.index_rebuilt) {
         // A rebuild changes the index revision, not the identity of every visible card.
         // Keep the last complete view on screen while each active scope revalidates.
+        for (const post of library_state.posts || []) {
+          if (!("_indexed_children_loaded" in post)) continue;
+          post._indexed_children_loaded = false;
+          post._indexed_children_loading = false;
+          post._indexed_children_offset = 0;
+          post._indexed_children_has_more = Number(post._indexed_children_total || 0) > 0;
+        }
         library_state.indexedBuildOffset = 0;
         library_state.indexedBuildHasMore = library_state.indexedBuildTotal > 0;
         library_state.indexedBuildLoading = false;

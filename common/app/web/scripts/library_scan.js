@@ -863,7 +863,16 @@
       if (epoch !== indexedLibraryRequestEpoch()) return null;
       const parent = indexedPostForPath(normalizedPath) || loadedParent;
       if (!parent) return null;
-      if (!force && !append && parent._indexed_children_loaded) return parent;
+      if (!force && !append && parent._indexed_children_loaded) {
+        setIndexedChildPagingState(normalizedPath, {
+          _indexed_children_loaded: true,
+          _indexed_children_loading: false,
+          _indexed_children_total: parent._indexed_children_total,
+          _indexed_children_offset: parent._indexed_children_offset,
+          _indexed_children_has_more: parent._indexed_children_has_more,
+        });
+        return parent;
+      }
       if (append && (!parent._indexed_children_has_more || parent._indexed_children_loading)) return parent;
       const reset = force || !append;
       const requestOffset = reset ? 0 : Number(parent._indexed_children_offset || 0);
