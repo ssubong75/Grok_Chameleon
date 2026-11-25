@@ -1644,6 +1644,31 @@ function installEditableContextMenu(win) {
   });
 }
 
+function mainWindowZoomPath() {
+  return path.join(app.getPath("userData"), "ui-zoom.json");
+}
+
+function savedMainWindowZoom() {
+  const factor = Number(readPortableJson(mainWindowZoomPath()).factor);
+  if (Number.isFinite(factor) && factor >= 0.8 && factor <= 1.6) return factor;
+  const display = mainWindow && !mainWindow.isDestroyed()
+    ? screen.getDisplayMatching(mainWindow.getBounds())
+    : screen.getPrimaryDisplay();
+  const width = display?.size?.width || 0;
+  return width >= 2800 ? Math.min(1.6, Math.round((width / 2300) * 10) / 10) : 1;
+}
+
+function setMainWindowZoom(factor) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const next = Math.round(Math.min(1.6, Math.max(0.8, factor)) * 100) / 100;
+  mainWindow.webContents.setZoomFactor(next);
+  try {
+    atomicWritePortableJson(mainWindowZoomPath(), { factor: next });
+  } catch (error) {
+    console.error("Unable to save UI zoom:", error);
+  }
+}
+
 function installMenu() {
   const isMac = process.platform === "darwin";
   const template = [
@@ -1680,9 +1705,9 @@ function installMenu() {
         { role: "forceReload" },
         { role: "toggleDevTools" },
         { type: "separator" },
-        { role: "resetZoom" },
-        { role: "zoomIn" },
-        { role: "zoomOut" },
+        { label: "Actual Size", accelerator: "CommandOrControl+0", click: () => setMainWindowZoom(1) },
+        { label: "Zoom In", accelerator: "CommandOrControl+Plus", click: () => setMainWindowZoom(mainWindow.webContents.getZoomFactor() + 0.1) },
+        { label: "Zoom Out", accelerator: "CommandOrControl+-", click: () => setMainWindowZoom(mainWindow.webContents.getZoomFactor() - 0.1) },
         { type: "separator" },
         { role: "togglefullscreen" },
       ],
@@ -1718,7 +1743,7 @@ function createMainWindow() {
   });
   installEditableContextMenu(mainWindow);
   mainWindow.webContents.once("did-finish-load", () => {
-    mainWindow.webContents.setZoomLevel(0);
+    mainWindow.webContents.setZoomFactor(savedMainWindowZoom());
   });
   mainWindow.maximize();
   mainWindow.loadURL(`${SERVER_BASE}/?launch=${Date.now()}`);

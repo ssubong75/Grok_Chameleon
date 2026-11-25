@@ -788,7 +788,9 @@ html.landscape_six_card_grid .workspace .card_list {
   position: relative;
   display: grid;
   gap: 12px;
-  width: min(760px, 100%);
+  width: min(1100px, max(760px, 70vw), 100%);
+  max-height: calc(100dvh - 48px);
+  overflow-y: auto;
   padding: 18px;
   border: 1px solid var(--line);
   border-radius: 18px;
@@ -830,7 +832,7 @@ html.landscape_six_card_grid .workspace .card_list {
 .prompt_save_split {
   display: grid;
   grid-template-rows: minmax(190px, 1fr) auto minmax(190px, 1fr);
-  min-height: 420px;
+  height: clamp(420px, 50dvh, 900px);
   padding: 10px 10px;
   overflow: hidden;
   border: 1px solid var(--line);
